@@ -1,0 +1,160 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inject admin panel
+        run: |
+          mkdir -p admin
+          cat > admin/index.html << 'ADMIN_EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <title>Survey Admin — Decap CMS</title>
+            <script src="https://unpkg.com/decap-cms@^3.0.0/dist/decap-cms.js"></script>
+          </head>
+          <body></body>
+          </html>
+          ADMIN_EOF
+
+          cat > admin/config.yml << 'CONFIG_EOF'
+          backend:
+            name: github
+            repo: hungchun0201/agentic-ai-survey
+            branch: master
+            auth_type: pkce
+            app_id: ${{ vars.CMS_APP_ID }}
+
+          publish_mode: editorial_workflow
+          media_folder: "static/images"
+          public_folder: "/images"
+
+          collections:
+            - name: "papers"
+              label: "Papers"
+              label_singular: "Paper"
+              folder: "content/papers"
+              create: true
+              delete: true
+              extension: "json"
+              format: "json"
+              slug: "{{slug}}"
+              identifier_field: "slug"
+              summary: "{{title}} — {{venue}}"
+              sortable_fields: ["title", "venue", "section"]
+              view_groups:
+                - label: Section
+                  field: section
+                - label: Agentic
+                  field: agentic
+              view_filters:
+                - label: "Agentic ✓"
+                  field: agentic
+                  pattern: "yes"
+                - label: "Has Repo"
+                  field: has_repo
+                  pattern: true
+              fields:
+                - { label: "Slug", name: "slug", widget: "string", hint: "URL path, e.g. my-paper" }
+                - { label: "Title", name: "title", widget: "string" }
+                - { label: "Venue", name: "venue", widget: "string", hint: "e.g. OSDI'24" }
+                - { label: "arXiv ID", name: "arxiv", widget: "string", required: false }
+                - label: "Section"
+                  name: "section"
+                  widget: "select"
+                  options:
+                    - { label: "S1 — Workload Characterization", value: "s1" }
+                    - { label: "S2 — PD Disaggregation", value: "s2" }
+                    - { label: "S3 — KV Cache Management", value: "s3" }
+                    - { label: "S4 — KV Cache TTL & Retention", value: "s4" }
+                    - { label: "S5 — Scheduling & Routing", value: "s5" }
+                    - { label: "S6 — Learning-based Cache", value: "s6" }
+                    - { label: "S7 — Adjacent Areas", value: "s7" }
+                - label: "Agentic-Aware"
+                  name: "agentic"
+                  widget: "select"
+                  options:
+                    - { label: "Yes", value: "yes" }
+                    - { label: "Partial", value: "partial" }
+                    - { label: "No", value: "no" }
+                - { label: "PD Disaggregation", name: "pd_disagg", widget: "boolean", default: false }
+                - { label: "Distributed", name: "distributed", widget: "boolean", default: false }
+                - { label: "Has Repo", name: "has_repo", widget: "boolean", default: false }
+                - { label: "Repo URL", name: "repo_url", widget: "string", required: false }
+                - label: "Best Paper"
+                  name: "best_paper"
+                  widget: "select"
+                  required: false
+                  options:
+                    - { label: "None", value: "" }
+                    - { label: "★ Best Paper", value: "best" }
+                    - { label: "★HM Honorable Mention", value: "hm" }
+                    - { label: "Nominee", value: "nominee" }
+                - { label: "Summary (Chinese)", name: "summary_zh", widget: "text" }
+                - { label: "Summary (English)", name: "summary_en", widget: "text" }
+                - { label: "Has Detail Page", name: "has_detail_page", widget: "boolean", default: false }
+
+            - name: "sections"
+              label: "Sections"
+              files:
+                - label: "Section Definitions"
+                  name: "sections"
+                  file: "data/sections.json"
+                  fields:
+                    - label: "Sections"
+                      name: "sections"
+                      widget: "list"
+                      fields:
+                        - { label: "ID", name: "id", widget: "string" }
+                        - { label: "Title (ZH)", name: "title_zh", widget: "string" }
+                        - { label: "Title (EN)", name: "title_en", widget: "string" }
+                        - { label: "Intro (ZH)", name: "intro_zh", widget: "text" }
+                        - { label: "Intro (EN)", name: "intro_en", widget: "text" }
+                        - { label: "Color", name: "color", widget: "string" }
+          CONFIG_EOF
+
+      - name: Rebuild papers index
+        run: |
+          python3 << 'PYEOF'
+          import json, os, glob
+          papers = []
+          for f in sorted(glob.glob('content/papers/*.json')):
+              if '_index.json' in f: continue
+              with open(f) as fh:
+                  p = json.load(fh)
+                  p['has_detail_page'] = os.path.exists(f"papers/{p.get('slug','')}/index.html")
+                  papers.append(p)
+          os.makedirs('data', exist_ok=True)
+          with open('data/papers-index.json', 'w') as fh:
+              json.dump(papers, fh, ensure_ascii=False, indent=2)
+          print(f"Built index: {len(papers)} papers")
+          PYEOF
+
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - id: deployment
+        uses: actions/deploy-pages@v4
