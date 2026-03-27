@@ -1,1369 +1,1279 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Continuum: Multi-Turn LLM Agent Scheduling with KV Cache TTL - Technical Analysis</title>
+<title>vLLM-Continuum 實作邏輯完整解析</title>
 <style>
 :root {
+  --primary: #e94560;
   --dark: #16213e;
   --mid: #0f3460;
-  --primary: #e94560;
-  --accent: #533483;
-  --light: #f8f9fa;
-  --text: #e0e0e0;
-  --text-dark: #2d2d2d;
-  --card-bg: #ffffff;
-  --code-bg: #1e1e2e;
+  --amber: #f5a623;
+  --gray: #a8a8a8;
+  --green: #2ecc71;
+  --bg: #f8f9fa;
   --border: #e0e0e0;
-  --success: #27ae60;
-  --warn: #f39c12;
-  --info: #3498db;
-  --danger: #e74c3c;
+  --code-bg: #1e1e2e;
+  --code-fg: #cdd6f4;
 }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif; color:#333; line-height:1.7; background:var(--bg); }
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* Hero */
+.hero { background:linear-gradient(135deg, var(--dark), var(--mid)); color:#fff; padding:70px 20px 50px; text-align:center; }
+.hero h1 { font-size:2.4rem; margin-bottom:10px; }
+.hero .sub { font-size:1.1rem; opacity:.85; max-width:680px; margin:0 auto 16px; }
+.hero .badges { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+.hero .badge { background:rgba(255,255,255,.15); border:1px solid rgba(255,255,255,.3); padding:4px 14px; border-radius:18px; font-size:.83rem; }
 
-body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: #f4f5f7;
-  color: var(--text-dark);
-  line-height: 1.7;
-}
+/* Nav */
+nav.toc { position:sticky; top:0; z-index:100; background:#fff; border-bottom:1px solid var(--border); padding:10px 0; box-shadow:0 2px 6px rgba(0,0,0,.06); }
+nav.toc .inner { max-width:1400px; margin:0 auto; padding:0 20px; display:flex; gap:6px; overflow-x:auto; }
+nav.toc a { white-space:nowrap; color:var(--mid); text-decoration:none; padding:5px 12px; border-radius:6px; font-size:.83rem; font-weight:500; }
+nav.toc a:hover { background:#eef1f7; }
 
-/* Hero Section */
-.hero {
-  background: linear-gradient(135deg, var(--dark) 0%, var(--mid) 50%, var(--accent) 100%);
-  color: var(--text);
-  padding: 80px 40px 60px;
-  text-align: center;
-  position: relative;
-  overflow: hidden;
-}
-.hero::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
-  background: radial-gradient(circle at 30% 70%, rgba(233,69,96,0.08) 0%, transparent 50%),
-              radial-gradient(circle at 70% 30%, rgba(83,52,131,0.08) 0%, transparent 50%);
-  animation: drift 20s linear infinite;
-}
-@keyframes drift { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+/* Container */
+.container { max-width:1400px; margin:0 auto; padding:0 24px; }
 
-.hero h1 {
-  font-size: 2.4em;
-  font-weight: 700;
-  margin-bottom: 12px;
-  position: relative;
-  z-index: 1;
-  max-width: 900px;
-  margin-left: auto;
-  margin-right: auto;
-}
-.hero .subtitle {
-  font-size: 1.15em;
-  opacity: 0.85;
-  margin-bottom: 24px;
-  position: relative;
-  z-index: 1;
-}
-.badge-row {
-  display: flex;
-  gap: 12px;
-  justify-content: center;
-  flex-wrap: wrap;
-  position: relative;
-  z-index: 1;
-}
-.badge {
-  display: inline-block;
-  padding: 6px 16px;
-  border-radius: 20px;
-  font-size: 0.85em;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-}
-.badge-arxiv { background: var(--primary); color: #fff; }
-.badge-venue { background: var(--accent); color: #fff; }
-.badge-year { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.3); }
-.badge-impl { background: var(--success); color: #fff; }
-.badge a { color: #fff; text-decoration: none; }
+/* Section */
+section { padding:50px 0; border-bottom:1px solid var(--border); }
+section:last-of-type { border-bottom:none; }
+h2 { font-size:1.7rem; color:var(--dark); margin-bottom:6px; }
+h3 { font-size:1.2rem; color:var(--mid); margin:28px 0 10px; }
+h4 { font-size:1rem; color:#444; margin:18px 0 6px; }
+p, li { max-width:900px; }
 
-/* Sticky Nav */
-.nav-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: var(--dark);
-  padding: 0 20px;
-  display: flex;
-  justify-content: center;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
-}
-.nav-sticky a {
-  color: #ccc;
-  text-decoration: none;
-  padding: 14px 18px;
-  font-size: 0.88em;
-  font-weight: 500;
-  transition: color 0.2s, border-bottom 0.2s;
-  border-bottom: 2px solid transparent;
-  white-space: nowrap;
-}
-.nav-sticky a:hover {
-  color: #fff;
-  border-bottom: 2px solid var(--primary);
-}
+/* Code */
+pre { background:var(--code-bg); color:var(--code-fg); padding:16px 20px; border-radius:10px; overflow-x:auto; font-size:.84rem; line-height:1.6; margin:12px 0; }
+code { font-family:"JetBrains Mono","Fira Code","SF Mono",Consolas,monospace; }
+p code, li code, td code { background:#eef1f7; padding:2px 6px; border-radius:4px; font-size:.87em; color:var(--mid); }
+.kw { color:#cba6f7; }  /* keyword */
+.fn { color:#89b4fa; }  /* function */
+.cm { color:#6c7086; }  /* comment */
+.st { color:#a6e3a1; }  /* string */
+.nu { color:#fab387; }  /* number */
 
-/* Main Content */
-.container {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 30px 20px;
-}
-
-section {
-  margin-bottom: 48px;
-}
-
-h2 {
-  font-size: 1.7em;
-  color: var(--dark);
-  margin-bottom: 20px;
-  padding-bottom: 10px;
-  border-bottom: 3px solid var(--primary);
-  display: inline-block;
-}
-
-h3 {
-  font-size: 1.25em;
-  color: var(--mid);
-  margin: 24px 0 12px;
-}
-
-p { margin-bottom: 14px; }
+/* Table */
+table { width:100%; border-collapse:collapse; margin:12px 0; font-size:.88rem; }
+th,td { border:1px solid var(--border); padding:9px 13px; text-align:left; }
+th { background:var(--dark); color:#fff; font-weight:600; }
+tr:nth-child(even) { background:#f4f6fa; }
 
 /* Cards */
-.card {
-  background: var(--card-bg);
-  border-radius: 10px;
-  padding: 24px 28px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-  border-left: 5px solid var(--info);
-}
-.card.primary { border-left-color: var(--primary); }
-.card.success { border-left-color: var(--success); }
-.card.warn { border-left-color: var(--warn); }
-.card.accent { border-left-color: var(--accent); }
-.card.danger { border-left-color: var(--danger); }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:18px; margin:18px 0; }
+.card { background:#fff; border:1px solid var(--border); border-radius:10px; padding:20px; box-shadow:0 2px 5px rgba(0,0,0,.04); }
+.card.hl { border-left:4px solid var(--primary); }
+.card h4 { margin-top:0; color:var(--dark); }
 
-.card h3 { margin-top: 0; }
+/* Flow */
+.flow { display:flex; gap:0; margin:24px 0; overflow-x:auto; padding-bottom:8px; }
+.flow .step { flex:1; min-width:170px; text-align:center; position:relative; }
+.flow .step .c { width:48px; height:48px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto 8px; font-weight:700; font-size:1rem; color:#fff; }
+.flow .step:nth-child(1) .c { background:var(--mid); }
+.flow .step:nth-child(2) .c { background:var(--primary); }
+.flow .step:nth-child(3) .c { background:var(--amber); color:var(--dark); }
+.flow .step:nth-child(4) .c { background:var(--green); }
+.flow .step .lbl { font-weight:600; font-size:.9rem; }
+.flow .step .desc { font-size:.8rem; color:#666; margin-top:3px; }
+.flow .step::after { content:''; position:absolute; top:24px; right:-16px; width:32px; height:2px; background:var(--gray); }
+.flow .step:last-child::after { display:none; }
 
-/* Callouts */
-.callout {
-  padding: 16px 20px;
-  border-radius: 8px;
-  margin: 18px 0;
-  font-size: 0.95em;
-}
-.callout-note {
-  background: #e8f4fd;
-  border-left: 4px solid var(--info);
-  color: #1a5276;
-}
-.callout-warn {
-  background: #fef9e7;
-  border-left: 4px solid var(--warn);
-  color: #7d6608;
-}
-.callout-info {
-  background: #eaf7ef;
-  border-left: 4px solid var(--success);
-  color: #1e6b3e;
-}
-.callout-danger {
-  background: #fdedec;
-  border-left: 4px solid var(--danger);
-  color: #922b21;
-}
+/* Diagram */
+.diagram { background:#fff; border:1px solid var(--border); border-radius:10px; padding:24px; margin:18px 0; overflow-x:auto; }
 
-/* Code Blocks */
-pre {
-  background: var(--code-bg);
-  color: #cdd6f4;
-  padding: 20px 24px;
-  border-radius: 8px;
-  overflow-x: auto;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 0.88em;
-  line-height: 1.6;
-  margin: 14px 0 18px;
-}
-code {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 0.9em;
-}
-p code, li code, td code {
-  background: #eef1f7;
-  padding: 2px 7px;
-  border-radius: 4px;
-  color: var(--mid);
-}
-.kw { color: #cba6f7; }  /* keywords - purple */
-.fn { color: #89b4fa; }  /* functions - blue */
-.cm { color: #6c7086; }  /* comments - gray */
-.st { color: #a6e3a1; }  /* strings - green */
-.nu { color: #fab387; }  /* numbers - orange */
-.op { color: #89dceb; }  /* operators - cyan */
-.ty { color: #f9e2af; }  /* types - yellow */
-.bi { color: #f38ba8; }  /* builtins - pink */
+/* Notes */
+.note { background:#fff9e6; border-left:4px solid var(--amber); padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; font-size:.88rem; }
+.warn { background:#ffe6e6; border-left:4px solid var(--primary); padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; font-size:.88rem; }
 
-/* Tables */
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 16px 0 24px;
-  font-size: 0.92em;
-}
-th {
-  background: var(--dark);
-  color: #fff;
-  padding: 12px 16px;
-  text-align: left;
-  font-weight: 600;
-}
-td {
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--border);
-}
-tr:nth-child(even) { background: #f8f9fa; }
-tr:hover { background: #eef1f7; }
+/* Lists */
+ul,ol { margin:8px 0 8px 22px; }
+li { margin-bottom:5px; }
 
-/* Diagram Styles */
-.diagram-container {
-  background: #f8f9fb;
-  border-radius: 12px;
-  padding: 32px 24px;
-  margin: 20px 0 28px;
-  border: 1px solid #e0e4eb;
-  overflow-x: auto;
-}
-.diagram-title {
-  text-align: center;
-  font-weight: 700;
-  font-size: 1.05em;
-  color: var(--dark);
-  margin-bottom: 24px;
-}
-
-/* Block Diagram Shared Styles */
-.block {
-  border-radius: 8px;
-  padding: 14px 18px;
-  font-size: 0.85em;
-  font-weight: 600;
-  text-align: center;
-  color: #fff;
-  position: relative;
-}
-.block-dark { background: var(--dark); }
-.block-mid { background: var(--mid); }
-.block-primary { background: var(--primary); }
-.block-accent { background: var(--accent); }
-.block-success { background: var(--success); }
-.block-info { background: var(--info); }
-.block-warn { background: var(--warn); color: var(--text-dark); }
-.block-light {
-  background: #fff;
-  color: var(--text-dark);
-  border: 2px solid #d0d5dd;
-}
-
-.block-sm {
-  padding: 8px 12px;
-  font-size: 0.78em;
-  border-radius: 6px;
-}
-
-/* Arrows */
-.arrow-down {
-  text-align: center;
-  font-size: 1.6em;
-  color: #888;
-  line-height: 1.2;
-  margin: 6px 0;
-}
-.arrow-right {
-  display: flex;
-  align-items: center;
-  color: #888;
-  font-size: 1.6em;
-  margin: 0 8px;
-}
-.arrow-label {
-  font-size: 0.7em;
-  color: #666;
-  text-align: center;
-  font-weight: 500;
-  margin: 2px 0;
-}
-
-/* Flow Layouts */
-.flow-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 10px 0;
-}
-.flow-col {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-
-/* Specific architecture diagram */
-.arch-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  max-width: 880px;
-  margin: 0 auto;
-}
-.arch-layer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  flex-wrap: wrap;
-}
-.arch-box {
-  border-radius: 10px;
-  padding: 16px 22px;
-  font-size: 0.88em;
-  text-align: center;
-  min-width: 140px;
-}
-.arch-box .sub {
-  font-size: 0.8em;
-  opacity: 0.8;
-  font-weight: 400;
-  display: block;
-  margin-top: 4px;
-}
-
-/* File tree */
-.file-tree {
-  background: var(--code-bg);
-  color: #cdd6f4;
-  padding: 20px 24px;
-  border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.84em;
-  line-height: 1.9;
-}
-.file-tree .dir { color: #89b4fa; }
-.file-tree .file { color: #a6e3a1; }
-.file-tree .note { color: #6c7086; font-style: italic; }
-
-/* TTL diagram specifics */
-.ttl-timeline {
-  display: flex;
-  align-items: stretch;
-  margin: 24px 0;
-  border-radius: 8px;
-  overflow: hidden;
-  height: 52px;
-  border: 2px solid #d0d5dd;
-}
-.ttl-segment {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.78em;
-  font-weight: 600;
-  color: #fff;
-  padding: 0 12px;
-  white-space: nowrap;
-}
-
-/* Comparison checkmarks */
-.check { color: var(--success); font-weight: bold; }
-.cross { color: var(--danger); font-weight: bold; }
-.partial { color: var(--warn); font-weight: bold; }
-
-/* Grid layout for side-by-side */
-.grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-@media (max-width: 768px) {
-  .grid-2 { grid-template-columns: 1fr; }
-  .hero h1 { font-size: 1.6em; }
-  .nav-sticky { flex-wrap: wrap; }
-  .nav-sticky a { padding: 10px 12px; font-size: 0.82em; }
-}
-
-.metric-box {
-  background: #fff;
-  border-radius: 10px;
-  padding: 20px;
-  text-align: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}
-.metric-box .value {
-  font-size: 2em;
-  font-weight: 700;
-  color: var(--primary);
-}
-.metric-box .label {
-  font-size: 0.88em;
-  color: #666;
-  margin-top: 4px;
-}
-
-/* Decision box for TTL */
-.decision-diamond {
-  width: 120px;
-  height: 120px;
-  background: var(--warn);
-  transform: rotate(45deg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 20px auto;
-  border-radius: 8px;
-}
-.decision-diamond span {
-  transform: rotate(-45deg);
-  font-size: 0.75em;
-  font-weight: 700;
-  color: var(--text-dark);
-  text-align: center;
-}
+footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
 </style>
 </head>
 <body>
 
-<!-- ============================================ -->
-<!-- HERO SECTION                                 -->
-<!-- ============================================ -->
 <div class="hero">
-  <h1>Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live</h1>
-  <p class="subtitle">A KV cache-aware scheduling framework that uses predicted tool-call durations to decide whether to retain or evict cached state during agent pauses</p>
-  <div class="badge-row">
-    <span class="badge badge-arxiv"><a href="https://arxiv.org/abs/2511.02230" target="_blank">arXiv:2511.02230</a></span>
-    <span class="badge badge-venue">Systems / ML Serving</span>
-    <span class="badge badge-year">2025</span>
-    <span class="badge badge-impl">Built on vLLM</span>
+  <h1>vLLM-Continuum</h1>
+  <p class="sub">Agentic LLM Workloads 的 KV Cache 排程策略實作<br><strong>— 純 Continuum 實作邏輯完整解析 —</strong></p>
+  <div class="badges">
+    <span class="badge">arXiv:2511.02230</span>
+    <span class="badge">vLLM v1 Scheduler</span>
+    <span class="badge">Tool Call CDF</span>
+    <span class="badge">KV Cache Pin/TTL</span>
   </div>
 </div>
 
-<!-- ============================================ -->
-<!-- STICKY NAVIGATION                            -->
-<!-- ============================================ -->
-<nav class="nav-sticky">
-  <a href="#overview">Overview</a>
-  <a href="#architecture">Architecture</a>
-  <a href="#repo">Repo Analysis</a>
-  <a href="#mechanisms">Core Mechanisms</a>
-  <a href="#results">Results</a>
-  <a href="#claims">Claims vs Code</a>
-  <a href="#reproduce">Reproduce</a>
+<nav class="toc">
+  <div class="inner">
+    <a href="#problem">問題背景</a>
+    <a href="#overview">策略概覽</a>
+    <a href="#classes">核心類別</a>
+    <a href="#toolcall-parse">Tool Call 解析</a>
+    <a href="#cdf">CDF 時間估計</a>
+    <a href="#pin-ttl">Pin / TTL 機制</a>
+    <a href="#queue">排程佇列</a>
+    <a href="#eviction">Eviction 邏輯</a>
+    <a href="#lifecycle">Request 生命週期</a>
+    <a href="#recorder">Trace 記錄</a>
+    <a href="#agent">mini-swe-agent 介面</a>
+    <a href="#experiment">論文實驗</a>
+    <a href="#repo-experiment">Repo 實驗</a>
+    <a href="#paper-vs-repo">論文 vs Repo</a>
+    <a href="#analysis">分析方法</a>
+  </div>
 </nav>
 
 <div class="container">
 
-<!-- ============================================ -->
-<!-- SECTION 1: OVERVIEW                          -->
-<!-- ============================================ -->
-<section id="overview">
-  <h2>Paper Overview</h2>
+<!-- ====== 1. PROBLEM ====== -->
+<section id="problem">
+  <h2>1. 問題背景</h2>
+  <p>
+    傳統 LLM serving（如 chatbot）是一問一答：request 進來 → 生成 tokens → 結束 → 釋放 KV cache。
+    但 <strong>Agentic workloads</strong>（如 SWE-bench coding agent）是多輪的：
+  </p>
+  <pre><code><span class="cm">// 一個 Agent job 的生命週期</span>
+[LLM 推理] → 輸出 bash 指令 → [<span class="st">Agent 執行 tool call</span>] → 結果回傳 → [LLM 推理] → ... (重複 N 輪)</code></pre>
+  <p>
+    在 Agent 執行 tool call 的期間（可能幾毫秒到幾十秒），LLM 沒在用這個 job 的 KV cache，
+    但如果釋放了，下一輪就要重新 prefill（浪費 GPU 時間）。如果不釋放，又佔住寶貴的 VRAM。
+  </p>
 
-  <div class="card primary">
-    <h3>The Problem</h3>
-    <p>Multi-turn LLM agents (e.g., coding assistants running SWE-Bench tasks) alternate between generating text and executing tool calls (shell commands, API calls). During tool execution, the agent's KV cache sits idle on GPU memory. In high-concurrency settings, this creates a fundamental tension:</p>
-    <ul>
-      <li><strong>Keep the KV cache pinned:</strong> the next turn avoids expensive prefill recomputation, but GPU memory is wasted while the tool runs.</li>
-      <li><strong>Evict the KV cache:</strong> GPU memory is freed for other requests, but the returning request must re-prefill all its context.</li>
-    </ul>
-    <p>Standard FCFS scheduling in vLLM is unaware of this multi-turn structure. The paper reports that <strong>58.2% of end-to-end latency</strong> in baseline vLLM comes from scheduling bubbles -- idle time caused by requests waiting in queue while KV cache is locked by paused agents.</p>
-  </div>
-
-  <div class="card success">
-    <h3>Key Contributions</h3>
-    <ol>
-      <li><strong>KV Cache TTL (Time-to-Live):</strong> A mechanism that assigns an expiration timer to each pinned KV cache. If the tool call returns before the TTL expires, the cache is reused; otherwise it is evicted to free memory.</li>
-      <li><strong>Tool-call duration prediction:</strong> Uses historical inter-request intervals (per-command averages) to estimate how long each tool call will take, enabling informed TTL decisions.</li>
-      <li><strong>Program-level FCFS scheduling:</strong> A <code>ContinuumRequestQueue</code> that groups requests by <code>job_id</code> and applies job-level first-come-first-served ordering, prioritizing pinned requests whose cache is still warm.</li>
-      <li><strong>Cost-benefit eviction logic:</strong> Compares predicted tool-call duration against a threshold to decide whether retaining the cache (saving prefill) is worth the memory occupation cost.</li>
-    </ol>
-  </div>
-
-  <div class="card accent">
-    <h3>Evaluation Summary</h3>
-    <p>The system is evaluated on <strong>SWE-Bench Verified (500 instances)</strong> and <strong>BFCL traces</strong> using <strong>Llama-3.1 8B and 70B</strong> models on H100 GPUs. Key claim: Continuum achieves a <strong>2.16x improvement</strong> in average job completion time over baseline vLLM FCFS scheduling for 500 concurrent SWE-Bench jobs with Llama-3.1-70B on 4 H100s.</p>
-  </div>
+  <h3>核心問題</h3>
+  <p><strong>Tool call 執行期間，要不要保留 KV cache？保留多久？</strong></p>
+  <ul>
+    <li>保留（pin）：下一輪 re-enter 時零 prefill，但佔 VRAM</li>
+    <li>釋放（free）：VRAM 給其他 request，但下一輪要重新 prefill（代價高）</li>
+  </ul>
+  <p>Continuum 的做法：<strong>根據 tool call 的歷史執行時間，動態決定 pin 的時間長度（TTL）。</strong></p>
 </section>
 
-<!-- ============================================ -->
-<!-- SECTION 2: SYSTEM ARCHITECTURE               -->
-<!-- ============================================ -->
-<section id="architecture">
-  <h2>System Architecture</h2>
+<!-- ====== 2. OVERVIEW ====== -->
+<section id="overview">
+  <h2>2. Continuum 策略概覽</h2>
+  <p>
+    Continuum 在 vLLM 的 v1 scheduler 中新增了 <code>SchedulingPolicy.CONTINUUM</code>，
+    核心邏輯分為三個部分：
+  </p>
 
-  <p>Continuum extends vLLM's V1 scheduler with three new components: a tool-call estimator, a pin/unpin manager for KV cache, and a program-level request queue. The following diagram illustrates the end-to-end flow.</p>
-
-  <div class="diagram-container">
-    <div class="diagram-title">Continuum System Architecture</div>
-    <div class="arch-grid">
-
-      <!-- Layer 1: Agent Client -->
-      <div class="arch-layer">
-        <div class="arch-box block-dark" style="min-width:340px;">
-          Agent Client (mini-swe-agent)
-          <span class="sub">Sends job_id, is_last_step via extra_body in OpenAI API</span>
-        </div>
-      </div>
-
-      <div class="arrow-down">&#9660;</div>
-      <div class="arrow-label">OpenAI-compatible API (POST /v1/chat/completions)</div>
-
-      <!-- Layer 2: vLLM API Layer -->
-      <div class="arch-layer">
-        <div class="arch-box block-mid" style="min-width:340px;">
-          vLLM Entrypoints
-          <span class="sub">protocol.py: Extracts job_id, is_last_step into SamplingParams.extra_args</span>
-        </div>
-      </div>
-
-      <div class="arrow-down">&#9660;</div>
-      <div class="arrow-label">EngineCoreRequest with extra metadata</div>
-
-      <!-- Layer 3: Scheduler Core -->
-      <div style="background:#e8ecf4; border-radius:12px; padding:24px; border:2px solid #c5cee0;">
-        <div style="text-align:center; font-weight:700; color:var(--dark); margin-bottom:16px; font-size:1.05em;">Scheduler (scheduler.py) -- Continuum Extensions</div>
-        <div class="arch-layer" style="gap:16px;">
-          <div class="arch-box block-primary" style="min-width:200px;">
-            ToolCallEstimator
-            <span class="sub">Predicts tool duration from history; decides TTL</span>
-          </div>
-          <div class="arch-box block-accent" style="min-width:200px;">
-            ContinuumRequestQueue
-            <span class="sub">Job-level FCFS; pinned priority</span>
-          </div>
-          <div class="arch-box block-success" style="min-width:200px;">
-            Pin/Unpin Manager
-            <span class="sub">pinned_requests list; TTL expiry via unpin_requests_regular()</span>
-          </div>
-        </div>
-        <div style="margin-top:16px;">
-          <div class="arch-layer" style="gap:16px;">
-            <div class="arch-box block-info" style="min-width:180px;">
-              Continuum_Recorder
-              <span class="sub">Logs timestamps for analysis</span>
-            </div>
-            <div class="arch-box block-warn" style="min-width:180px;">
-              ToolCallParser
-              <span class="sub">Extracts bash commands from LLM output</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="arrow-down">&#9660;</div>
-
-      <!-- Layer 4: KV Cache -->
-      <div class="arch-layer">
-        <div class="arch-box block-dark" style="min-width:240px;">
-          KVCacheManager
-          <span class="sub">allocate_slots() / free() / get_computed_blocks()</span>
-        </div>
-        <div class="arch-box block-mid" style="min-width:240px;">
-          LMCache Connector (optional)
-          <span class="sub">CPU offloading via KVConnectorBase_V1</span>
-        </div>
-      </div>
-
-      <div class="arrow-down">&#9660;</div>
-
-      <!-- Layer 5: GPU -->
-      <div class="arch-layer">
-        <div class="arch-box block-primary" style="min-width:420px; background: linear-gradient(90deg, var(--primary), var(--accent));">
-          GPU Workers (H100 x N, Tensor Parallel)
-          <span class="sub">Model execution with cached / recomputed KV states</span>
-        </div>
-      </div>
-
+  <div class="cards">
+    <div class="card hl">
+      <h4>A. Tool Call 偵測</h4>
+      <p>LLM 生成完 tokens 後，解析輸出中的 bash code block，萃取出 tool name（如 <code>ls</code>、<code>git</code>、<code>pytest</code>）。</p>
+      <p><code>ToolCallParser.parse()</code></p>
+    </div>
+    <div class="card hl">
+      <h4>B. 執行時間估計（CDF）</h4>
+      <p>維護每個 tool name 的歷史執行時間，計算移動平均。與固定閾值（2.0s）比較，決定要不要 pin。</p>
+      <p><code>ToolCallEstimator.set_up_pin()</code></p>
+    </div>
+    <div class="card hl">
+      <h4>C. KV Cache Pin / 排程</h4>
+      <p>被 pin 的 request 佔住 VRAM，優先被排入下一輪。TTL 到期後自動 unpin + free。</p>
+      <p><code>Scheduler.pin_request()</code><br><code>ContinuumRequestQueue.peek_request()</code></p>
     </div>
   </div>
 
-  <div class="callout callout-note">
-    <strong>Key insight:</strong> The entire Continuum mechanism is confined to the scheduler layer. No changes are needed in the model executor, attention kernels, or GPU workers. This makes it a relatively lightweight modification to vLLM.
+  <h3>Policy 定義</h3>
+  <p>檔案：<code>vllm/v1/core/sched/request_queue.py:18-22</code></p>
+  <pre><code><span class="kw">class</span> <span class="fn">SchedulingPolicy</span>(Enum):
+    FCFS = <span class="st">"fcfs"</span>         <span class="cm"># 標準先進先出（baseline）</span>
+    PRIORITY = <span class="st">"priority"</span>  <span class="cm"># 優先級排程</span>
+    CONTINUUM = <span class="st">"continuum"</span> <span class="cm"># Continuum: tool-aware KV cache pin</span></code></pre>
+  <p>啟動方式：<code>vllm serve MODEL --scheduling-policy continuum</code></p>
+  <div class="note">
+    <strong>前置知識：</strong>如果你不熟悉 vLLM 的推理流程和 KV Cache 管理機制，
+    建議先看 <a href="vllm-inference-and-kvcache.html">vLLM v1 Inference &amp; KV Cache Management</a>。
   </div>
 </section>
 
-<!-- ============================================ -->
-<!-- SECTION 3: REPO IMPLEMENTATION ANALYSIS      -->
-<!-- ============================================ -->
-<section id="repo">
-  <h2>Repo Implementation Analysis</h2>
-
-  <h3>Repository Structure</h3>
-  <p>The implementation is a fork of vLLM (V1 engine) with Continuum-specific modifications concentrated in a small set of files.</p>
-
-  <div class="file-tree">
-    <span class="dir">vllm-continuum/</span><br>
-    &nbsp;&nbsp;<span class="dir">vllm/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/core/sched/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">scheduler.py</span> <span class="note"># Main scheduler -- pin/unpin, preemption, TTL logic</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">request_queue.py</span> <span class="note"># ContinuumRequestQueue -- job-level FCFS</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/core/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">estimate_with_func.py</span> <span class="note"># ToolCallEstimator, ToolCallParser, Continuum_Recorder</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">request.py</span> <span class="note"># Request class -- added job_id, last_func_call, is_last_step, this_func_call</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">config/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">scheduler.py</span> <span class="note"># SchedulerPolicy: "continuum" added as third option</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">entrypoints/openai/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">protocol.py</span> <span class="note"># ChatCompletionRequest -- job_id, is_last_step fields</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">sampling_params.py</span> <span class="note"># extra_args dict for passing metadata</span><br>
-    &nbsp;&nbsp;<span class="dir">mini-swe-agent/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">src/minisweagent/models/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">vllm_model.py</span> <span class="note"># VllmModel -- sends job_id, is_last_step via extra_body</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">src/minisweagent/agents/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">default.py</span> <span class="note"># DefaultAgent -- agentic loop with step_limit, job_timeout</span><br>
-    &nbsp;&nbsp;<span class="dir">continuum_exp/</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">analyze.py</span> <span class="note"># Post-hoc analysis of scheduler_timestamps</span><br>
-    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">tool_traces.json</span> <span class="note"># Recorded tool-call traces</span><br>
-  </div>
-
-  <h3>Key Classes and Their Roles</h3>
+<!-- ====== 3. CLASSES ====== -->
+<section id="classes">
+  <h2>3. 核心類別總覽</h2>
+  <p>所有 Continuum-specific 的程式碼集中在兩個檔案：</p>
 
   <table>
-    <thead>
-      <tr>
-        <th>Class</th>
-        <th>File</th>
-        <th>Purpose</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><code>ContinuumRequestQueue</code></td>
-        <td>request_queue.py</td>
-        <td>Implements job-level FCFS with pinned-request priority. Extends <code>deque</code> and tracks <code>job_id_first_entry_time</code></td>
-      </tr>
-      <tr>
-        <td><code>ToolCallEstimator</code></td>
-        <td>estimate_with_func.py</td>
-        <td>Maintains per-command execution time history. Computes running average. Decides pin duration via <code>set_up_pin()</code></td>
-      </tr>
-      <tr>
-        <td><code>ToolCallParser</code></td>
-        <td>estimate_with_func.py</td>
-        <td>Extracts bash command names from LLM output via regex matching on markdown code blocks</td>
-      </tr>
-      <tr>
-        <td><code>Continuum_Recorder</code></td>
-        <td>estimate_with_func.py</td>
-        <td>Timestamps all scheduler events (arrival, departure, pin, unpin, eviction) for post-hoc analysis</td>
-      </tr>
-      <tr>
-        <td><code>Scheduler</code></td>
-        <td>scheduler.py</td>
-        <td>Extended with <code>pinned_requests</code> list, TTL-based unpin logic, Continuum preemption, and tool-call estimator integration</td>
-      </tr>
-      <tr>
-        <td><code>Request</code></td>
-        <td>request.py</td>
-        <td>Extended with <code>job_id</code>, <code>last_func_call</code>, <code>is_last_step</code>, <code>this_func_call</code> fields</td>
-      </tr>
-      <tr>
-        <td><code>VllmModel</code></td>
-        <td>vllm_model.py</td>
-        <td>Client-side model wrapper that injects <code>job_id</code> and <code>is_last_step</code> into <code>extra_body</code></td>
-      </tr>
-    </tbody>
+    <tr><th>類別</th><th>檔案</th><th>職責</th></tr>
+    <tr>
+      <td><code>Continuum_Recorder</code></td>
+      <td><code>estimate_with_func.py:12-62</code></td>
+      <td>記錄排程事件時間戳，匯出 <code>scheduler_timestamps</code></td>
+    </tr>
+    <tr>
+      <td><code>ToolCallParser</code></td>
+      <td><code>estimate_with_func.py:64-92</code></td>
+      <td>從 LLM 輸出解析 bash code block，萃取 tool name</td>
+    </tr>
+    <tr>
+      <td><code>ToolCallEstimator</code></td>
+      <td><code>estimate_with_func.py:94-206</code></td>
+      <td>維護 tool 執行時間 CDF、決定 pin duration</td>
+    </tr>
+    <tr>
+      <td><code>ContinuumRequestQueue</code></td>
+      <td><code>request_queue.py:220-339</code></td>
+      <td>Continuum 專用排程佇列：pinned 優先 + job-level FCFS</td>
+    </tr>
+    <tr>
+      <td><code>Scheduler</code> (modified)</td>
+      <td><code>scheduler.py</code></td>
+      <td>在 <code>_free_blocks()</code>、<code>schedule()</code> 等方法加入 Continuum 分支</td>
+    </tr>
   </table>
+
+  <p>以下四個路徑都在 <code>vllm/v1/core/</code> 下：</p>
+  <pre><code>vllm/v1/core/
+├── estimate_with_func.py   <span class="cm"># Continuum_Recorder + ToolCallParser + ToolCallEstimator</span>
+├── sched/
+│   ├── scheduler.py        <span class="cm"># 主排程器（加入 CONTINUUM 分支）</span>
+│   └── request_queue.py    <span class="cm"># ContinuumRequestQueue</span></code></pre>
 </section>
 
-<!-- ============================================ -->
-<!-- SECTION 4: CORE MECHANISMS                   -->
-<!-- ============================================ -->
-<section id="mechanisms">
-  <h2>Core Mechanisms</h2>
+<!-- ====== 4. TOOL CALL PARSE ====== -->
+<section id="toolcall-parse">
+  <h2>4. Tool Call 解析</h2>
+  <p>檔案：<code>estimate_with_func.py:64-92</code></p>
 
-  <!-- 4.1 TTL Computation -->
-  <h3>4.1 TTL Computation and Pin/Unpin Logic</h3>
+  <h3>4.1 解析流程</h3>
+  <p>
+    當 LLM 輸出 tokens 結束後，<code>ToolCallEstimator.request_finished()</code> 被呼叫。
+    它做三件事：
+  </p>
+  <ol>
+    <li><strong>Detokenize</strong>：<code>tokenizer.decode(request.output_token_ids)</code> → 純文字</li>
+    <li><strong>Parse</strong>：<code>ToolCallParser.parse(output_text)</code> → 用正則萃取 tool name</li>
+    <li><strong>Record</strong>：存入 <code>job_to_history[job_id]</code></li>
+  </ol>
 
-  <div class="card primary">
-    <h3>How TTL Works in the Code</h3>
-    <p>When a request finishes generating, the scheduler calls <code>_free_blocks()</code>. If the scheduling policy is Continuum and the request is <strong>not</strong> on its last step, the estimator is consulted to determine a pin duration. If the predicted tool-call time is short (below the threshold), the KV cache is pinned for a fixed TTL window.</p>
+  <h3>4.2 ToolCallParser 實作</h3>
+  <pre><code><span class="kw">class</span> <span class="fn">ToolCallParser</span>:
+    <span class="kw">def</span> <span class="fn">parse</span>(self, text: str) -> Optional[str]:
+        <span class="cm"># 用 mini-swe-agent 相同的 regex 解析 bash code block</span>
+        actions = re.findall(<span class="st">r"```bash\s*\n(.*?)\n```"</span>, text, re.DOTALL)
+
+        <span class="kw">if</span> len(actions) == <span class="nu">1</span>:
+            bash_action = actions[<span class="nu">0</span>].strip()
+            words = bash_action.split()
+            <span class="kw">if</span> words:
+                <span class="kw">return</span> words[<span class="nu">0</span>]  <span class="cm"># 回傳第一個 word = tool name</span>
+
+        <span class="kw">return</span> None</code></pre>
+
+  <h4>範例</h4>
+  <table>
+    <tr><th>LLM 輸出</th><th>解析結果</th></tr>
+    <tr><td><code>```bash\ngit status\n```</code></td><td><code>"git"</code></td></tr>
+    <tr><td><code>```bash\nfind . -name "*.py" | head -20\n```</code></td><td><code>"find"</code></td></tr>
+    <tr><td><code>```bash\npytest tests/ -x -v\n```</code></td><td><code>"pytest"</code></td></tr>
+    <tr><td>(沒有 bash block)</td><td><code>None</code></td></tr>
+  </table>
+
+  <div class="note">
+    <strong>限制：</strong>只萃取 tool name（第一個 word），不看完整指令和引數。
+    同一個 tool name（如 <code>grep</code>）的不同用法（快速的 <code>grep pattern file</code> vs 慢速的 <code>grep -rn pattern /</code>）
+    會被視為同一種工具，共用同一個平均執行時間。
   </div>
 
-  <pre><span class="cm"># scheduler.py -- _free_blocks() [lines 1349-1370]</span>
-<span class="kw">def</span> <span class="fn">_free_blocks</span>(<span class="ty">self</span>, request: Request):
-    <span class="kw">assert</span> request.is_finished()
-    <span class="cm"># First, unpin any existing pin for this job_id</span>
-    <span class="kw">for</span> req, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
-        <span class="kw">if</span> req.job_id == request.job_id:
-            <span class="ty">self</span>.<span class="fn">unpin_request</span>(req, end_time)
+  <h3>4.3 完整的 request_finished() 流程</h3>
+  <pre><code><span class="cm"># estimate_with_func.py:177-205</span>
+<span class="kw">def</span> <span class="fn">request_finished</span>(self, request: Request) -> None:
+    this_func_call = None
 
-    <span class="cm"># Continuum TTL decision</span>
-    <span class="kw">if</span> <span class="ty">self</span>.policy == SchedulingPolicy.CONTINUUM <span class="kw">and not</span> request.is_last_step:
-        length_of_pin = <span class="ty">self</span>.tool_call_estimator.<span class="fn">set_up_pin</span>(request)
-        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:  <span class="cm"># Floating point guard</span>
-            <span class="ty">self</span>.<span class="fn">pin_request</span>(request, length_of_pin)
-            <span class="kw">del</span> <span class="ty">self</span>.requests[request.request_id]
-            <span class="kw">return</span>
+    <span class="kw">if</span> self.tokenizer <span class="kw">is not</span> None <span class="kw">and</span> len(request.output_token_ids) > <span class="nu">0</span>:
+        <span class="cm"># 1. Detokenize</span>
+        output_text = self.tokenizer.decode(
+            request.output_token_ids, skip_special_tokens=True
+        )
+        <span class="cm"># 2. Parse tool call</span>
+        this_func_call = self.parser.parse(output_text)
 
-    <span class="ty">self</span>.kv_cache_manager.<span class="fn">free</span>(request)
-    <span class="kw">del</span> <span class="ty">self</span>.requests[request.request_id]</pre>
+    <span class="cm"># 3. 存入 request 和 history</span>
+    request.this_func_call = this_func_call
+    self.job_to_history[request.job_id].append({
+        <span class="st">"departure_time"</span>: time.time(),
+        <span class="st">"func_call"</span>: request.this_func_call
+    })</code></pre>
+</section>
 
-  <p>The <code>set_up_pin()</code> method in <code>ToolCallEstimator</code> implements the cost-benefit decision:</p>
+<!-- ====== 5. CDF ====== -->
+<section id="cdf">
+  <h2>5. CDF 時間估計</h2>
+  <p>檔案：<code>estimate_with_func.py:94-159</code></p>
 
-  <pre><span class="cm"># estimate_with_func.py [lines 150-159]</span>
-FIXED_THRESHOLD_CONTINUUM = <span class="nu">2.0</span>  <span class="cm"># seconds</span>
+  <h3>5.1 資料結構</h3>
+  <pre><code><span class="kw">class</span> <span class="fn">ToolCallEstimator</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, ...):
+        <span class="cm"># tool name → 平均執行時間（秒）</span>
+        self.func_call_to_exec_time: dict[str, float] = {}
 
-<span class="kw">def</span> <span class="fn">set_up_pin</span>(<span class="ty">self</span>, request: Request) -> <span class="ty">float</span>:
-    <span class="kw">if</span> request.this_func_call <span class="kw">is</span> <span class="kw">None</span>:
-        <span class="kw">return</span> <span class="nu">0</span>
+        <span class="cm"># tool name → 所有歷史執行時間樣本</span>
+        self.record_func_call_to_exec_time: dict[str, list[float]] = {}
 
-    this_func_call_exec_time = <span class="ty">self</span>.<span class="fn">get_func_call_exec_time</span>(
-        request.this_func_call) <span class="kw">or</span> <span class="nu">0.0</span>
+        <span class="cm"># job_id → 事件序列 [{arrival_time, departure_time, func_call}, ...]</span>
+        self.job_to_history: dict[str, list[dict]] = {}</code></pre>
+
+  <h3>5.2 執行時間更新</h3>
+  <p>當一個 job 的 tool call 執行完、重新進入 scheduler 時：</p>
+  <pre><code><span class="cm"># estimate_with_func.py:136-147</span>
+<span class="kw">def</span> <span class="fn">update_func_call_exec_time</span>(self, job_id: str) -> None:
+    <span class="cm"># 從 history 中取得上一次的 departure_time 和 func_call</span>
+    last_departure_time = self.job_to_history[job_id][-<span class="nu">1</span>][<span class="st">"departure_time"</span>]
+    func = self.job_to_history[job_id][-<span class="nu">1</span>][<span class="st">"func_call"</span>]
+
+    <span class="cm"># exec_time = 現在時間 - 上次 departure</span>
+    exec_time = time.time() - last_departure_time
+
+    <span class="cm"># 累積到歷史樣本</span>
+    self.record_func_call_to_exec_time[func].append(exec_time)
+
+    <span class="cm"># 更新移動平均</span>
+    self.func_call_to_exec_time[func] = (
+        sum(self.record_func_call_to_exec_time[func])
+        / len(self.record_func_call_to_exec_time[func])
+    )</code></pre>
+
+  <div class="diagram">
+    <h4 style="text-align:center; margin-bottom:10px;">exec_time 計算時序圖</h4>
+    <pre style="background:#fff; color:#333; font-size:.82rem; line-height:1.8"><code>
+  ── LLM 推理 ──┐                         ┌── LLM 推理 ──
+                 │                         │
+           departure_time             arrival_time (重新進入)
+                 │                         │
+                 └──── tool call 執行 ─────┘
+                 │←─── exec_time = now - departure_time ───→│
+    </code></pre>
+  </div>
+
+  <h3>5.3 Pin 決策</h3>
+  <p>固定閾值：<code>FIXED_THRESHOLD_CONTINUUM = 2.0</code> 秒</p>
+  <pre><code><span class="cm"># estimate_with_func.py:150-159</span>
+<span class="kw">def</span> <span class="fn">set_up_pin</span>(self, request: Request) -> float:
+    <span class="kw">if</span> request.this_func_call <span class="kw">is</span> None:
+        <span class="kw">return</span> <span class="nu">0</span>  <span class="cm"># 沒偵測到 tool call → 不 pin</span>
+
+    this_func_call_exec_time = self.get_func_call_exec_time(request.this_func_call) <span class="kw">or</span> <span class="nu">0.0</span>
 
     <span class="kw">if</span> this_func_call_exec_time > FIXED_THRESHOLD_CONTINUUM:
-        <span class="kw">return</span> <span class="nu">0</span>          <span class="cm"># Tool too slow -- don't pin, evict cache</span>
+        <span class="kw">return</span> <span class="nu">0</span>     <span class="cm"># 預估執行時間 > 2s → 不 pin（太慢，不值得佔 VRAM）</span>
 
-    <span class="kw">return</span> FIXED_THRESHOLD_CONTINUUM  <span class="cm"># Pin for the threshold duration</span></pre>
+    <span class="kw">return</span> FIXED_THRESHOLD_CONTINUUM  <span class="cm"># 預估 ≤ 2s → pin 2 秒</span></code></pre>
 
-  <div class="diagram-container">
-    <div class="diagram-title">TTL Decision Flow</div>
-    <div class="flow-col">
-      <div class="block block-mid" style="min-width:280px;">Request finishes generating</div>
-      <div class="arrow-down">&#9660;</div>
+  <h4>Pin 決策邏輯表</h4>
+  <table>
+    <tr><th>條件</th><th>回傳</th><th>效果</th></tr>
+    <tr>
+      <td><code>this_func_call is None</code></td>
+      <td><code>0</code></td>
+      <td>沒偵測到 tool call → 立即 free KV cache</td>
+    </tr>
+    <tr>
+      <td>歷史平均 exec_time <strong>&gt; 2.0s</strong></td>
+      <td><code>0</code></td>
+      <td>Tool 太慢 → 立即 free KV cache</td>
+    </tr>
+    <tr>
+      <td>歷史平均 exec_time <strong>&le; 2.0s</strong></td>
+      <td><code>2.0</code></td>
+      <td>Tool 夠快 → pin KV cache 2 秒</td>
+    </tr>
+    <tr>
+      <td>第一次見到此 tool（無歷史）</td>
+      <td><code>2.0</code></td>
+      <td>預設 exec_time = 0 → <strong>pin 2 秒</strong>（樂觀策略）</td>
+    </tr>
+  </table>
 
-      <div style="display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; justify-content:center;">
-        <div class="flow-col">
-          <div class="block block-warn block-sm" style="min-width:120px; padding:12px;">is_last_step?</div>
-          <div style="display:flex; gap:40px;">
-            <div class="flow-col">
-              <div class="arrow-label">Yes</div>
-              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
-              <div class="block block-danger block-sm">Evict KV cache</div>
-            </div>
-            <div class="flow-col">
-              <div class="arrow-label">No</div>
-              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
-              <div class="block block-info block-sm" style="min-width:160px;">Check func_call exists</div>
-              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
-              <div class="block block-warn block-sm" style="min-width:180px; padding:12px;">exec_time &gt; 2.0s?</div>
-              <div style="display:flex; gap:40px;">
-                <div class="flow-col">
-                  <div class="arrow-label">Yes (slow tool)</div>
-                  <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
-                  <div class="block block-danger block-sm">Evict KV cache</div>
-                </div>
-                <div class="flow-col">
-                  <div class="arrow-label">No (fast tool)</div>
-                  <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
-                  <div class="block block-success block-sm" style="min-width:160px;">Pin for 2.0s TTL</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+  <div class="note">
+    <strong>論文原意：</strong>Continuum 論文使用 CDF（累積分佈函數）來決定 TTL。
+    但 vllm-continuum 的實作簡化為：平均值 vs 固定閾值 2.0 秒。
+    Pin 的時間也是固定的 2.0 秒，而非根據 CDF 動態計算。
   </div>
+</section>
 
-  <!-- 4.2 TTL Expiry -->
-  <h3>4.2 TTL Expiry and Regular Unpinning</h3>
+<!-- ====== 6. PIN / TTL ====== -->
+<section id="pin-ttl">
+  <h2>6. Pin / TTL 機制</h2>
+  <p>檔案：<code>scheduler.py:237-262</code></p>
 
-  <p>At the start of every scheduling step, <code>unpin_requests_regular()</code> checks the wall-clock time against each pinned request's expiry. If the TTL has elapsed and the job has not yet returned to the waiting queue, the cache is freed.</p>
+  <h3>6.1 Pin</h3>
+  <pre><code><span class="cm"># scheduler.py:237-239</span>
+<span class="kw">def</span> <span class="fn">pin_request</span>(self, request: Request, length_of_pin: float) -> None:
+    self.continuum_recorder.request_pinned(request)           <span class="cm"># 記錄事件</span>
+    self.pinned_requests.append((request, time.time() + length_of_pin))  <span class="cm"># 存入 list</span></code></pre>
+  <p>
+    <code>pinned_requests</code> 是 <code>list[Tuple[Request, float]]</code>，
+    每個 tuple 是 <code>(request, end_time)</code>。<br>
+    Pin 之後，request 的 KV cache blocks <strong>不會被 free</strong>，佔住 VRAM 直到 TTL 到期。
+  </p>
 
-  <pre><span class="cm"># scheduler.py [lines 248-256]</span>
-<span class="kw">def</span> <span class="fn">unpin_requests_regular</span>(<span class="ty">self</span>) -> <span class="kw">None</span>:
-    waiting_job_ids = [req.job_id <span class="kw">for</span> req <span class="kw">in</span> <span class="ty">self</span>.waiting]
+  <h3>6.2 TTL 自動到期 (Unpin)</h3>
+  <pre><code><span class="cm"># scheduler.py:248-256</span>
+<span class="kw">def</span> <span class="fn">unpin_requests_regular</span>(self) -> None:
+    <span class="cm"># 在每次排程步驟開始時呼叫</span>
+    waiting_job_ids = [req.job_id <span class="kw">for</span> req <span class="kw">in</span> self.waiting]
 
-    <span class="kw">for</span> request, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
-        <span class="cm"># Unpin if: (1) job not back in waiting AND (2) TTL expired</span>
-        <span class="kw">if</span> request.job_id <span class="kw">not in</span> waiting_job_ids <span class="kw">and</span> time.<span class="fn">time</span>() >= end_time:
-            <span class="ty">self</span>.<span class="fn">unpin_request</span>(request, end_time)</pre>
+    <span class="kw">for</span> request, end_time <span class="kw">in</span> self.pinned_requests:
+        <span class="kw">if</span> request.job_id <span class="kw">not in</span> waiting_job_ids <span class="kw">and</span> time.time() >= end_time:
+            self.<span class="fn">unpin_request</span>(request, end_time)</code></pre>
 
-  <div class="diagram-container">
-    <div class="diagram-title">KV Cache Lifecycle During a Multi-Turn Interaction</div>
-    <div class="ttl-timeline">
-      <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N)</div>
-      <div class="ttl-segment" style="flex:1.5; background:var(--success);">Pinned (TTL)</div>
-      <div class="ttl-segment" style="flex:0.5; background:var(--warn); color:var(--text-dark); border-left:3px dashed #888;">Tool returns</div>
-      <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N+1)</div>
-    </div>
-    <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#666; padding:0 4px;">
-      <span>Request departs</span>
-      <span>Cache held on GPU</span>
-      <span>Cache hit -- skip prefill</span>
-      <span>Continue from cached state</span>
-    </div>
+  <h4>Unpin 的兩個條件（必須同時滿足）：</h4>
+  <ol>
+    <li><code>request.job_id not in waiting_job_ids</code> — job 還沒回來（tool 還在執行）</li>
+    <li><code>time.time() >= end_time</code> — TTL 已到期</li>
+  </ol>
+  <p>如果 job 已經回到 waiting queue，就不 unpin（因為馬上要排程用它的 cache）。</p>
 
-    <div style="margin-top:24px;">
-      <div style="font-weight:600; font-size:0.9em; margin-bottom:8px; color:var(--dark);">Contrast: When TTL expires before tool returns</div>
-      <div class="ttl-timeline">
-        <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N)</div>
-        <div class="ttl-segment" style="flex:1.5; background:var(--success);">Pinned (TTL)</div>
-        <div class="ttl-segment" style="flex:1; background:var(--danger);">Evicted</div>
-        <div class="ttl-segment" style="flex:0.5; background:var(--warn); color:var(--text-dark); border-left:3px dashed #888;">Tool returns</div>
-        <div class="ttl-segment" style="flex:2; background:#888;">Full Re-Prefill</div>
-      </div>
-      <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#666; padding:0 4px;">
-        <span>Request departs</span>
-        <span>Cache held</span>
-        <span>TTL expired, freed</span>
-        <span>Cache miss</span>
-        <span>Must recompute KV</span>
-      </div>
-    </div>
+  <h3>6.3 Unpin 實作</h3>
+  <pre><code><span class="cm"># scheduler.py:241-244</span>
+<span class="kw">def</span> <span class="fn">unpin_request</span>(self, request: Request, end_time: float) -> None:
+    self.pinned_requests.remove((request, end_time))   <span class="cm"># 從 list 移除</span>
+    self.continuum_recorder.request_unpinned(request)   <span class="cm"># 記錄事件</span>
+    self.kv_cache_manager.free(request)                 <span class="cm"># 真正釋放 KV blocks</span></code></pre>
+
+  <h3>6.4 _free_blocks() — Pin 的觸發點</h3>
+  <p>當 request 完成 decode（生成完 tokens）後：</p>
+  <pre><code><span class="cm"># scheduler.py:1349-1370</span>
+<span class="kw">def</span> <span class="fn">_free_blocks</span>(self, request: Request):
+    <span class="cm"># 先清理：如果這個 job_id 之前有 pin，先 unpin</span>
+    <span class="kw">for</span> req, end_time <span class="kw">in</span> self.pinned_requests:
+        <span class="kw">if</span> req.job_id == request.job_id:
+            self.unpin_request(req, end_time)
+
+    <span class="cm"># Continuum 策略 + 不是最後一步 → 考慮 pin</span>
+    <span class="kw">if</span> self.policy == SchedulingPolicy.CONTINUUM <span class="kw">and not</span> request.is_last_step:
+        length_of_pin = self.tool_call_estimator.set_up_pin(request)
+
+        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:   <span class="cm"># 浮點誤差保護</span>
+            self.pin_request(request, length_of_pin)
+            <span class="kw">del</span> self.requests[request.request_id]
+            <span class="kw">return</span>           <span class="cm"># PIN — 不 free KV blocks</span>
+
+    <span class="cm"># 不 pin 的情況 → 正常釋放</span>
+    self.kv_cache_manager.free(request)
+    <span class="kw">del</span> self.requests[request.request_id]</code></pre>
+
+  <div class="warn">
+    <strong>is_last_step 很重要：</strong>如果 Agent 標記這是最後一步（job 完成了），
+    就不 pin。否則會永遠佔住 VRAM，因為不會再有下一輪 request 來 re-enter。
   </div>
+</section>
 
-  <!-- 4.3 Tool-Call Duration Prediction -->
-  <h3>4.3 Tool-Call Duration Prediction</h3>
+<!-- ====== 7. QUEUE ====== -->
+<section id="queue">
+  <h2>7. ContinuumRequestQueue 排程佇列</h2>
+  <p>檔案：<code>request_queue.py:220-339</code></p>
+  <p>
+    Continuum 不使用標準的 FCFS 佇列，而是用 <code>ContinuumRequestQueue</code>。
+    排程優先級：<strong>Pinned 的 job 優先 → 否則 job-level FCFS</strong>。
+  </p>
 
-  <div class="card accent">
-    <h3>How Prediction Works</h3>
-    <p>The <code>ToolCallEstimator</code> maintains a dictionary mapping command names (e.g., <code>"ls"</code>, <code>"git"</code>, <code>"python"</code>) to their observed execution times. When a request returns from a tool call, the estimator updates the running average for that command.</p>
-  </div>
+  <h3>7.1 peek_request() — 核心排程邏輯</h3>
+  <pre><code><span class="cm"># request_queue.py:241-273</span>
+<span class="kw">def</span> <span class="fn">peek_request</span>(self, pinned_requests, kv_cache_manager, connector) -> Request:
+    pinned_job_ids = {req.job_id <span class="kw">for</span> req, _ <span class="kw">in</span> pinned_requests}
 
-  <pre><span class="cm"># estimate_with_func.py [lines 136-147]</span>
-<span class="kw">def</span> <span class="fn">update_func_call_exec_time</span>(<span class="ty">self</span>, job_id: <span class="ty">str</span>) -> <span class="kw">None</span>:
-    last_departure_time = <span class="ty">self</span>.job_to_history[job_id][<span class="nu">-1</span>][<span class="st">"departure_time"</span>]
-    func = <span class="ty">self</span>.job_to_history[job_id][<span class="nu">-1</span>][<span class="st">"func_call"</span>]
-    exec_time = time.<span class="fn">time</span>() - last_departure_time
-
-    <span class="kw">if</span> func <span class="kw">not in</span> <span class="ty">self</span>.record_func_call_to_exec_time:
-        <span class="ty">self</span>.record_func_call_to_exec_time[func] = [exec_time]
-    <span class="kw">else</span>:
-        <span class="ty">self</span>.record_func_call_to_exec_time[func].<span class="fn">append</span>(exec_time)
-    <span class="cm"># Running average across all observed executions of this command</span>
-    <span class="ty">self</span>.func_call_to_exec_time[func] = (
-        <span class="bi">sum</span>(<span class="ty">self</span>.record_func_call_to_exec_time[func]) /
-        <span class="bi">len</span>(<span class="ty">self</span>.record_func_call_to_exec_time[func])
-    )</pre>
-
-  <p>The <code>ToolCallParser</code> extracts the tool name from LLM output using regex on markdown bash code blocks -- the same format used by mini-swe-agent:</p>
-
-  <pre><span class="cm"># estimate_with_func.py [lines 73-92]</span>
-<span class="kw">class</span> <span class="ty">ToolCallParser</span>:
-    <span class="kw">def</span> <span class="fn">parse</span>(<span class="ty">self</span>, text: <span class="ty">str</span>) -> Optional[<span class="ty">str</span>]:
-        <span class="cm"># Same regex as mini-swe-agent</span>
-        actions = re.<span class="fn">findall</span>(<span class="st">r"```bash\s*\n(.*?)\n```"</span>, text, re.DOTALL)
-        <span class="kw">if</span> <span class="bi">len</span>(actions) == <span class="nu">1</span>:
-            bash_action = actions[<span class="nu">0</span>].<span class="fn">strip</span>()
-            words = bash_action.<span class="fn">split</span>()
-            <span class="kw">if</span> words:
-                <span class="kw">return</span> words[<span class="nu">0</span>]  <span class="cm"># e.g., "ls", "git", "find"</span>
-        <span class="kw">return</span> <span class="kw">None</span></pre>
-
-  <!-- 4.4 Program-Level FCFS Scheduling -->
-  <h3>4.4 Program-Level FCFS Scheduling</h3>
-
-  <div class="card success">
-    <h3>ContinuumRequestQueue Design</h3>
-    <p>Unlike standard FCFS (which orders by individual request arrival time), the Continuum queue orders by <strong>job-level first entry time</strong>. Each <code>job_id</code> (representing an agent session) is assigned the timestamp of its first request, and all subsequent turns from that job inherit that priority. Additionally, jobs whose KV cache is currently pinned are given scheduling priority.</p>
-  </div>
-
-  <pre><span class="cm"># request_queue.py -- ContinuumRequestQueue.peek_request() [lines 241-273]</span>
-<span class="kw">def</span> <span class="fn">peek_request</span>(<span class="ty">self</span>, pinned_requests, kv_cache_manager, connector):
-    <span class="kw">if not</span> <span class="ty">self</span>:
-        <span class="kw">raise</span> <span class="ty">IndexError</span>(<span class="st">"peek from an empty queue"</span>)
-
-    pinned_request_job_id_set = {req.job_id <span class="kw">for</span> req, _ <span class="kw">in</span> pinned_requests}
-
-    <span class="cm"># Phase 1: Prioritize requests with pinned KV cache (warm cache)</span>
-    earliest_request = <span class="kw">None</span>
-    earliest_entry_time = <span class="bi">float</span>(<span class="st">'inf'</span>)
-    <span class="kw">for</span> request <span class="kw">in</span> <span class="ty">self</span>:
-        <span class="kw">if</span> request.job_id <span class="kw">in</span> pinned_request_job_id_set:
-            job_entry_time = <span class="ty">self</span>.job_id_first_entry_time.<span class="fn">get</span>(
-                request.job_id, request.arrival_time)
+    <span class="cm"># === 優先級 1: Pinned request（KV cache 還在 VRAM 中）===</span>
+    earliest_request = None
+    earliest_entry_time = float(<span class="st">'inf'</span>)
+    <span class="kw">for</span> request <span class="kw">in</span> self:
+        <span class="kw">if</span> request.job_id <span class="kw">in</span> pinned_job_ids:
+            job_entry_time = self.job_id_first_entry_time.get(request.job_id)
             <span class="kw">if</span> job_entry_time < earliest_entry_time:
                 earliest_entry_time = job_entry_time
                 earliest_request = request
-    <span class="kw">if</span> earliest_request <span class="kw">is not</span> <span class="kw">None</span>:
-        <span class="kw">return</span> earliest_request    <span class="cm"># Use warm cache -- avoid re-prefill</span>
+    <span class="kw">if</span> earliest_request <span class="kw">is not</span> None:
+        <span class="kw">return</span> earliest_request   <span class="cm"># 有 pinned job → 優先排</span>
 
-    <span class="cm"># Phase 2: Fall back to job-level FCFS</span>
-    <span class="kw">for</span> request <span class="kw">in</span> <span class="ty">self</span>:
-        job_entry_time = <span class="ty">self</span>.job_id_first_entry_time.<span class="fn">get</span>(
-            request.job_id, request.arrival_time)
+    <span class="cm"># === 優先級 2: Job-level FCFS ===</span>
+    <span class="cm"># 選 job_id_first_entry_time 最早的 request</span>
+    earliest_request = None
+    earliest_entry_time = float(<span class="st">'inf'</span>)
+    <span class="kw">for</span> request <span class="kw">in</span> self:
+        job_entry_time = self.job_id_first_entry_time.get(request.job_id)
         <span class="kw">if</span> job_entry_time < earliest_entry_time:
             earliest_entry_time = job_entry_time
             earliest_request = request
-    <span class="kw">return</span> earliest_request</pre>
+    <span class="kw">return</span> earliest_request</code></pre>
 
-  <div class="diagram-container">
-    <div class="diagram-title">ContinuumRequestQueue Scheduling Priority</div>
-    <div class="flow-col" style="gap:12px;">
-      <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; justify-content:center;">
-        <div class="flow-col" style="gap:8px;">
-          <div class="block block-success" style="min-width:260px;">
-            Priority 1: Pinned Requests
-            <div style="font-size:0.8em; font-weight:400; margin-top:4px;">KV cache still warm on GPU</div>
-          </div>
-          <div style="font-size:0.75em; color:#666;">Among pinned: earliest job_id_first_entry_time wins</div>
-        </div>
-        <div class="arrow-right" style="font-size:1em; color:#aaa;">then &#9654;</div>
-        <div class="flow-col" style="gap:8px;">
-          <div class="block block-info" style="min-width:260px;">
-            Priority 2: Job-level FCFS
-            <div style="font-size:0.8em; font-weight:400; margin-top:4px;">No pinned cache available</div>
-          </div>
-          <div style="font-size:0.75em; color:#666;">Earliest job_id_first_entry_time wins</div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <h4>為什麼要 job-level FCFS？</h4>
+  <p>
+    一個 job 會多次進出 scheduler（每輪 tool call 後 re-enter）。
+    如果用 request-level FCFS，新進來的 request 會排在很後面，對老 job 不公平。
+    <strong>Job-level FCFS 按 job 第一次進入的時間排序</strong>，確保長期公平性。
+  </p>
 
-  <!-- 4.5 Preemption -->
-  <h3>4.5 Continuum-Aware Preemption</h3>
+  <h3>7.2 add_request()</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">add_request</span>(self, request: Request) -> None:
+    <span class="cm"># 記錄每個 job_id 第一次出現的時間</span>
+    <span class="kw">if</span> request.job_id <span class="kw">not in</span> self.job_id_first_entry_time:
+        self.job_id_first_entry_time[request.job_id] = request.arrival_time
+    self.append(request)</code></pre>
+</section>
 
-  <p>When the scheduler cannot allocate KV cache blocks for a new token, it must preempt a running request. The Continuum policy avoids preempting requests that are on their last step (about to finish), preferring to evict the most recently arrived job:</p>
+<!-- ====== 8. EVICTION ====== -->
+<section id="eviction">
+  <h2>8. Eviction（搶佔）邏輯</h2>
+  <p>檔案：<code>scheduler.py:195-234, 359-407</code></p>
+  <p>
+    當要排程的新 request 需要 KV blocks 但 VRAM 不夠時，必須 evict（搶佔）一個現有 request。
+  </p>
 
-  <pre><span class="cm"># scheduler.py [lines 195-234]</span>
-<span class="kw">def</span> <span class="fn">pop_running_request_based_on_last_step</span>(<span class="ty">self</span>, request):
-    <span class="kw">if</span> <span class="bi">len</span>(<span class="ty">self</span>.running) <= <span class="nu">1</span>:
-        <span class="cm"># If only one running req, try to reclaim from pinned_requests</span>
-        <span class="cm"># (evict the pin with the latest end_time)</span>
-        latest_pin_end_request = <span class="kw">None</span>
-        latest_pin_end_time = -<span class="bi">float</span>(<span class="st">'inf'</span>)
-        <span class="kw">for</span> req, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
-            <span class="kw">if</span> end_time > latest_pin_end_time:
-                latest_pin_end_time = end_time
-                latest_pin_end_request = req
-        <span class="kw">if</span> latest_pin_end_request <span class="kw">is not</span> <span class="kw">None</span>:
-            <span class="ty">self</span>.pinned_requests.<span class="fn">remove</span>((latest_pin_end_request, latest_pin_end_time))
-            <span class="kw">return</span> latest_pin_end_request, <span class="kw">True</span>  <span class="cm"># is_unpin=True</span>
+  <h3>8.1 觸發條件</h3>
+  <pre><code><span class="cm"># scheduler.py:359</span>
+new_blocks = self.kv_cache_manager.allocate_slots(request, num_new_tokens, ...)
+<span class="kw">if</span> new_blocks <span class="kw">is</span> None:
+    <span class="cm"># 無法分配 → 需要 evict</span></code></pre>
 
-    <span class="cm"># Prefer to evict non-last-step requests with latest entry time</span>
-    latest_request = <span class="kw">None</span>
-    latest_entry_time = -<span class="bi">float</span>(<span class="st">'inf'</span>)
-    <span class="kw">for</span> req <span class="kw">in</span> <span class="ty">self</span>.running:
-        job_entry_time = <span class="ty">self</span>.running_job_id_first_entry_time.<span class="fn">get</span>(req.job_id)
-        <span class="kw">if</span> job_entry_time > latest_entry_time <span class="kw">and not</span> req.is_last_step:
-            latest_entry_time = job_entry_time
+  <h3>8.2 Eviction 優先級</h3>
+  <pre><code><span class="cm"># scheduler.py:195-234</span>
+<span class="kw">def</span> <span class="fn">pop_running_request_based_on_last_step</span>(self, request) -> (Request, bool):
+
+    <span class="cm"># 情況 A: 只有 1 個 running request → 只能從 pinned list 搶</span>
+    <span class="kw">if</span> len(self.running) <= <span class="nu">1</span>:
+        <span class="cm"># 選 pin end_time 最晚的（保留最久的，最不緊急）</span>
+        <span class="kw">return</span> (latest_pin_end_request, True)  <span class="cm"># True = is_unpin</span>
+
+    <span class="cm"># 情況 B: 多個 running → 選非 last_step 且 entry_time 最晚的</span>
+    <span class="kw">for</span> req <span class="kw">in</span> self.running:
+        <span class="kw">if not</span> req.is_last_step <span class="kw">and</span> job_entry_time > latest:
             latest_request = req
-    <span class="cm">...</span></pre>
+    <span class="kw">if</span> latest_request:
+        <span class="kw">return</span> (latest_request, False)
 
-  <!-- 4.6 Client Integration -->
-  <h3>4.6 Client-Side Integration (mini-swe-agent)</h3>
+    <span class="cm"># 情況 C: 全部都是 last_step → 只能選最晚的</span>
+    <span class="kw">return</span> (latest_request, False)</code></pre>
 
-  <p>The <code>VllmModel</code> client passes Continuum metadata through the OpenAI-compatible API's <code>extra_body</code> parameter:</p>
+  <h4>Eviction 優先級摘要</h4>
+  <table>
+    <tr><th>優先級</th><th>被 evict 的對象</th><th>原因</th></tr>
+    <tr>
+      <td>1 (最先被 evict)</td>
+      <td>Running 中 <code>is_last_step=False</code> 且 entry_time 最晚</td>
+      <td>不是最後一步 = 後面還有 tool call，可以之後重來</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Running 中 entry_time 最晚（不管 is_last_step）</td>
+      <td>最後手段</td>
+    </tr>
+    <tr>
+      <td>3 (只有 1 running)</td>
+      <td>Pinned list 中 end_time 最晚的</td>
+      <td>從 pin 搶回 VRAM</td>
+    </tr>
+  </table>
 
-  <pre><span class="cm"># mini-swe-agent/src/minisweagent/models/vllm_model.py [lines 124-142]</span>
-<span class="cm"># Calculate is_last_step based on step_limit</span>
-is_last_step = <span class="kw">False</span>
-<span class="kw">if</span> <span class="ty">self</span>.config.step_limit > <span class="nu">0</span>:
-    is_last_step = (<span class="ty">self</span>.n_calls + <span class="nu">1</span>) >= <span class="ty">self</span>.config.step_limit
+  <h3>8.3 被 Evict 之後</h3>
+  <pre><code><span class="cm"># scheduler.py:391-403</span>
+self.kv_cache_manager.free(preempted_req)      <span class="cm"># 釋放 KV blocks</span>
+self.encoder_cache_manager.free(preempted_req)
 
-<span class="cm"># Prepare extra_body with Continuum-specific parameters</span>
+<span class="kw">if</span> is_unpin:
+    <span class="kw">pass</span>  <span class="cm"># 從 pinned 搶的 → 不放回 waiting（job 在外面執行 tool call）</span>
+<span class="kw">else</span>:
+    preempted_req.status = RequestStatus.PREEMPTED
+    preempted_req.num_computed_tokens = <span class="nu">0</span>    <span class="cm"># 清零 → 下次要重新 prefill</span>
+    self.waiting.prepend_request(preempted_req) <span class="cm"># 放回 waiting 佇列最前面</span></code></pre>
+</section>
+
+<!-- ====== 9. LIFECYCLE ====== -->
+<section id="lifecycle">
+  <h2>9. Request 完整生命週期</h2>
+
+  <div class="diagram">
+    <pre style="background:#fff; color:#333; font-size:.82rem; line-height:2"><code>
+ ┌────────────────────────────────────────────────────────────────────┐
+ │  mini-swe-agent 送出 API request (含 job_id, is_last_step)       │
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  <span class="fn">Scheduler.add_request()</span>                                        │
+ │  ├─ ToolCallEstimator.request_arrives()                         │
+ │  │   └─ 如果是舊 job → update_func_call_exec_time() 更新 CDF   │
+ │  ├─ Continuum_Recorder.request_arrives()  → 記錄 arrival_time   │
+ │  └─ waiting.add_request()                                       │
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  <span class="fn">Scheduler.schedule()</span> — 每個 step 呼叫                          │
+ │  ├─ unpin_requests_regular()  → 清理 TTL 到期的 pin             │
+ │  ├─ ContinuumRequestQueue.peek_request()                        │
+ │  │   ├─ 有 pinned job 在 waiting → <strong>優先排它</strong>                  │
+ │  │   └─ 沒有 → job-level FCFS                                   │
+ │  ├─ allocate_slots() → 嘗試分配 KV blocks                      │
+ │  │   └─ 失敗 → evict (pop_running_request_based_on_last_step)   │
+ │  └─ running.append(request)                                     │
+ │      └─ Recorder.request_waiting_to_running(prompt_len, hit_len)│
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  Prefill + Decode（GPU 上執行 LLM 推理）                         │
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  <span class="fn">Scheduler._free_request()</span>                                      │
+ │  ├─ ToolCallEstimator.request_finished()                        │
+ │  │   └─ detokenize → parse tool call → 記錄 departure + func   │
+ │  ├─ Continuum_Recorder.request_finished() → 記錄 departure_time │
+ │  └─ <span class="fn">_free_blocks()</span>:                                            │
+ │      ├─ 先 unpin 同 job_id 的舊 pin                             │
+ │      ├─ is_last_step? → free 直接釋放                           │
+ │      ├─ set_up_pin(request):                                    │
+ │      │   ├─ no func_call → free                                 │
+ │      │   ├─ avg_exec_time > 2s → free                           │
+ │      │   └─ avg_exec_time ≤ 2s → <span class="fn">pin_request(req, 2.0)</span>         │
+ │      └─ pin → KV cache 保留在 VRAM，等待 job re-enter           │
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │  Agent 在 sandbox 中執行 tool call                               │
+ │  （ls? 0.1s / pytest? 15s / pip install? 30s）                  │
+ └──────────────────────────┬─────────────────────────────────────────┘
+                            ▼
+                   ┌────────┴────────┐
+                   │  job re-enter   │  → 回到 add_request()，開始下一輪
+                   │  OR             │
+                   │  TTL 到期 unpin │  → KV cache 被 free
+                   └─────────────────┘
+    </code></pre>
+  </div>
+</section>
+
+<!-- ====== 10. RECORDER ====== -->
+<section id="recorder">
+  <h2>10. Trace 記錄（Continuum_Recorder）</h2>
+  <p>檔案：<code>estimate_with_func.py:12-62</code></p>
+  <p>
+    <code>Continuum_Recorder</code> 在 request 生命週期的每個關鍵點插入時間戳，
+    最後匯出成 JSON 檔案供離線分析。
+  </p>
+
+  <h3>10.1 記錄的事件</h3>
+  <table>
+    <tr><th>方法</th><th>記錄的 key</th><th>觸發時機</th></tr>
+    <tr><td><code>request_arrives()</code></td><td><code>Request_arrival_time</code></td><td>Job 進入 scheduler</td></tr>
+    <tr><td><code>request_finished()</code></td><td><code>Request_departure_time</code></td><td>LLM 生成完畢</td></tr>
+    <tr><td><code>request_pinned()</code></td><td><code>pinned_time</code></td><td>KV cache 被 pin</td></tr>
+    <tr><td><code>request_unpinned()</code></td><td><code>unpinned_time</code></td><td>KV cache 被 unpin</td></tr>
+    <tr><td><code>request_waiting_to_running()</code></td><td><code>waiting_to_running</code> + <code>prompt_length</code> + <code>hit_length</code></td><td>從 waiting 進入 running</td></tr>
+    <tr><td><code>request_evicted_to_running()</code></td><td><code>evicted_to_running</code> + <code>prompt_length</code> + <code>hit_length</code></td><td>被 preempt 後重新排程</td></tr>
+    <tr><td><code>request_evicted_from_running_queue()</code></td><td><code>Request_evicted_from_running_queue_time</code></td><td>被搶佔</td></tr>
+  </table>
+
+  <h3>10.2 匯出</h3>
+  <pre><code><span class="cm"># estimate_with_func.py:18-31</span>
+<span class="kw">def</span> <span class="fn">print_history</span>(self):
+    output_dir = os.environ.get(<span class="st">"RUN_OUTPUT_DIR"</span>, <span class="st">"./continuum_exp"</span>)
+    os.makedirs(output_dir, exist_ok=True)
+
+    <span class="cm"># Atomic write（先寫 .tmp 再 rename，防 partial read）</span>
+    final_path = os.path.join(output_dir, <span class="st">"scheduler_timestamps"</span>)
+    tmp_path = final_path + <span class="st">".tmp"</span>
+    <span class="kw">with</span> open(tmp_path, <span class="st">"w"</span>) <span class="kw">as</span> f:
+        json.dump(self.job_id_to_history, f, indent=<span class="nu">2</span>)
+    os.replace(tmp_path, final_path)</code></pre>
+
+  <h4>輸出格式：<code>scheduler_timestamps</code> (JSON)</h4>
+  <pre><code>{
+  <span class="st">"job_1"</span>: [
+    {<span class="st">"Request_arrival_time"</span>: <span class="nu">1711234567.89</span>},
+    {<span class="st">"waiting_to_running"</span>: <span class="nu">1711234568.12</span>, <span class="st">"prompt_length"</span>: <span class="nu">4096</span>, <span class="st">"hit_length"</span>: <span class="nu">3800</span>},
+    {<span class="st">"Request_departure_time"</span>: <span class="nu">1711234575.00</span>},
+    {<span class="st">"pinned_time"</span>: <span class="nu">1711234575.01</span>},
+    {<span class="st">"Request_arrival_time"</span>: <span class="nu">1711234575.30</span>},  <span class="cm">// tool call 完成，重新進入</span>
+    {<span class="st">"waiting_to_running"</span>: <span class="nu">1711234575.31</span>, <span class="st">"prompt_length"</span>: <span class="nu">4352</span>, <span class="st">"hit_length"</span>: <span class="nu">4096</span>},
+    <span class="cm">// hit_length=4096 表示 KV cache 命中，只需 prefill 256 個新 token</span>
+    ...
+  ],
+  <span class="st">"job_2"</span>: [...]
+}</code></pre>
+</section>
+
+<!-- ====== 11. AGENT ====== -->
+<section id="agent">
+  <h2>11. mini-swe-agent 介面</h2>
+  <p>檔案：<code>mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141</code></p>
+  <p>
+    Agent 透過 OpenAI-compatible API 與 vLLM server 溝通，
+    在 <code>extra_body</code> 中傳遞 Continuum 專用參數：
+  </p>
+
+  <pre><code><span class="cm"># vllm_model.py:124-141</span>
+<span class="cm"># 計算 is_last_step</span>
+is_last_step = False
+<span class="kw">if</span> self.config.step_limit > <span class="nu">0</span>:
+    is_last_step = (self.n_calls + <span class="nu">1</span>) >= self.config.step_limit
+
+<span class="cm"># 帶 Continuum 專用參數</span>
 extra_body = {
-    <span class="st">"ignore_eos"</span>: <span class="kw">False</span>,
-    <span class="st">"job_id"</span>: <span class="bi">str</span>(job_id_value),
-    <span class="st">"is_last_step"</span>: is_last_step
+    <span class="st">"ignore_eos"</span>: False,
+    <span class="st">"job_id"</span>: str(job_id_value),       <span class="cm"># SWE-bench instance ID</span>
+    <span class="st">"is_last_step"</span>: is_last_step        <span class="cm"># 是否是最後一輪</span>
 }
 
-<span class="kw">return</span> <span class="ty">self</span>.client.chat.completions.<span class="fn">create</span>(
-    model=<span class="ty">self</span>.config.model_name,
+<span class="kw">return</span> self.client.chat.completions.create(
+    model=self.config.model_name,
     messages=messages,
     extra_body=extra_body,
-    **filtered_params
-)</pre>
+)</code></pre>
 
-  <div class="callout callout-info">
-    <strong>Data flow:</strong> <code>extra_body</code> fields propagate through: <code>ChatCompletionRequest</code> (protocol.py) &#8594; <code>SamplingParams.extra_args</code> &#8594; <code>Request.from_engine_core_request()</code> &#8594; <code>Request.job_id</code> / <code>Request.is_last_step</code>. The scheduler then uses these fields for TTL and queue ordering decisions.
-  </div>
-</section>
-
-<!-- ============================================ -->
-<!-- SECTION 5: PERFORMANCE RESULTS               -->
-<!-- ============================================ -->
-<section id="results">
-  <h2>Performance Results</h2>
-
-  <h3>SWE-Bench Verified (500 Jobs, Llama-3.1-70B, 4x H100)</h3>
-
-  <p>The repository includes actual benchmark results comparing Continuum scheduling against baseline vLLM FCFS for 500 SWE-Bench jobs.</p>
-
-  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:20px 0;">
-    <div class="metric-box">
-      <div class="value">2.16x</div>
-      <div class="label">Avg Job Duration Speedup</div>
-    </div>
-    <div class="metric-box">
-      <div class="value">215.5s</div>
-      <div class="label">Continuum Avg Duration</div>
-    </div>
-    <div class="metric-box">
-      <div class="value">465.2s</div>
-      <div class="label">vLLM FCFS Avg Duration</div>
-    </div>
-    <div class="metric-box">
-      <div class="value" style="font-size:1.5em;">1.61x</div>
-      <div class="label">Total Time Speedup</div>
-    </div>
-  </div>
-
+  <h4>參數說明</h4>
   <table>
-    <thead>
-      <tr>
-        <th>Metric</th>
-        <th>vLLM FCFS (baseline)</th>
-        <th>Continuum</th>
-        <th>Improvement</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Number of Jobs</td>
-        <td>500</td>
-        <td>500</td>
-        <td>--</td>
-      </tr>
-      <tr>
-        <td>Average Job Duration</td>
-        <td>465.2s</td>
-        <td>215.5s</td>
-        <td><strong>2.16x faster</strong></td>
-      </tr>
-      <tr>
-        <td>Median Job Duration</td>
-        <td>420.4s</td>
-        <td>180.7s</td>
-        <td><strong>2.33x faster</strong></td>
-      </tr>
-      <tr>
-        <td>P95 Job Duration</td>
-        <td>928.5s</td>
-        <td>492.3s</td>
-        <td><strong>1.89x faster</strong></td>
-      </tr>
-      <tr>
-        <td>P99 Job Duration</td>
-        <td>952.9s</td>
-        <td>926.5s</td>
-        <td>1.03x faster</td>
-      </tr>
-      <tr>
-        <td>Total Makespan</td>
-        <td>3782.5s</td>
-        <td>2345.8s</td>
-        <td><strong>1.61x faster</strong></td>
-      </tr>
-      <tr>
-        <td>Min Job Duration</td>
-        <td>24.5s</td>
-        <td>29.7s</td>
-        <td>0.82x (slightly slower)</td>
-      </tr>
-      <tr>
-        <td>Max Job Duration</td>
-        <td>1178.1s</td>
-        <td>972.5s</td>
-        <td>1.21x faster</td>
-      </tr>
-    </tbody>
+    <tr><th>參數</th><th>類型</th><th>用途</th></tr>
+    <tr>
+      <td><code>job_id</code></td>
+      <td>str</td>
+      <td>識別同一個 SWE-bench instance 的多輪 request，讓 scheduler 知道是同一個 job</td>
+    </tr>
+    <tr>
+      <td><code>is_last_step</code></td>
+      <td>bool</td>
+      <td>Agent 告訴 server「這是最後一輪」→ scheduler 不 pin（因為不會再有下一輪）</td>
+    </tr>
   </table>
 
-  <div class="callout callout-note">
-    <strong>Note on P99 and Min Duration:</strong> The P99 improvement is minimal (1.03x), suggesting that a small fraction of very long jobs see limited benefit. The minimum duration is actually slightly slower for Continuum (29.7s vs 24.5s), likely due to overhead from the TTL tracking and job-level queue management for short jobs that finish quickly regardless.
+  <h3>實驗自動化</h3>
+  <p>檔案：<code>mini-swe-agent/run_experiments.py</code></p>
+  <pre><code>SCHEDULING_POLICIES = [<span class="st">"fcfs"</span>, <span class="st">"continuum"</span>]
+JPS_VALUES = [<span class="nu">0.05</span>, <span class="nu">0.1</span>, <span class="nu">0.15</span>, <span class="nu">0.2</span>, <span class="nu">0.25</span>, <span class="nu">0.3</span>, <span class="nu">0.5</span>, <span class="nu">0.7</span>, <span class="nu">0.9</span>]
+MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
+
+<span class="cm"># 對每個 policy × JPS 組合：</span>
+<span class="cm"># 1. 啟動 2 個 vllm server (GPU 0-3 + GPU 4-7, TP=4)</span>
+<span class="cm"># 2. 啟動 router (load balancer) → port 8100</span>
+<span class="cm"># 3. 跑 mini-extra swebench --use-jps --jps X</span>
+<span class="cm"># 4. 關閉 → 匯出 traces</span></code></pre>
+</section>
+
+<!-- ====== 12. PAPER EXPERIMENT ====== -->
+<section id="experiment">
+  <h2>12. 論文實驗設計（arXiv:2511.02230 Section 6）</h2>
+
+  <h3>12.1 硬體與模型</h3>
+  <table>
+    <tr><th>配置名稱</th><th>GPU</th><th>模型</th><th>TP</th><th>來源</th></tr>
+    <tr><td>Llama 8B (1xA100)</td><td>A100-SXM 80GB</td><td>Llama-3.1-8B-Instruct</td><td>1</td><td>Runpod</td></tr>
+    <tr><td>Llama 8B (1xB200)</td><td>B200</td><td>Llama-3.1-8B-Instruct</td><td>1</td><td>On-prem</td></tr>
+    <tr><td>Llama 70B (4xB200)</td><td>B200 x4</td><td>Llama-3.1-70B-Instruct</td><td>4</td><td>On-prem</td></tr>
+    <tr><td>Real SWE-Agent (H100)</td><td>H100 (Tensormesh)</td><td>不明</td><td>不明</td><td>Tensormesh 內部 testbed</td></tr>
+  </table>
+
+  <h3>12.2 Datasets</h3>
+  <table>
+    <tr><th>Dataset</th><th>說明</th><th>Trace 來源</th></tr>
+    <tr>
+      <td><strong>SWE-Bench</strong></td>
+      <td>用 mini-swe-agent 跑 SWE-Bench coding tasks</td>
+      <td>GPT-5 生成 trace，Poisson arrival</td>
+    </tr>
+    <tr>
+      <td><strong>BFCL V4</strong></td>
+      <td>Berkeley Function Calling Leaderboard (Web Search category)</td>
+      <td>GPT-5 生成 trace，workload 縮放 0.4x 以 fit 128k context</td>
+    </tr>
+  </table>
+  <div class="note">
+    <strong>注意：</strong>論文的 trace 是用 <strong>GPT-5</strong> 生成的（「for the better model capabilities to ensure that the workflow generated are mostly correct」）。
+    但 Repo 中並沒有 trace replay 機制 — 詳見 <a href="#trace-discussion">Section 12.A</a>。
   </div>
 
-  <h3>Paper-Level Claims (from arXiv:2511.02230)</h3>
+  <div class="diagram" id="trace-discussion" style="border-left:4px solid var(--mid);">
+    <h4>12.A — 深入討論：Trace 是怎麼生成和使用的？</h4>
 
-  <div class="card primary">
-    <h3>Key Claims in the Paper</h3>
+    <h4 style="margin-top:16px;">Step 1：用 GPT-5 收集 Trace</h4>
+    <p>
+      論文 Section 3.1：「We collect and analyze 100 traces from mini-swe-agent running SWE-Bench and 100 traces from BFCL V4, both running <strong>GPT-5</strong> as the base model.」
+    </p>
+    <p>流程是：</p>
+    <pre style="background:var(--code-bg); color:var(--code-fg)"><code>mini-swe-agent (GPT-5 as backend)
+  → LLM 推理 → 輸出 bash command → <strong>真的在 Docker sandbox 裡執行</strong> → tool output 回傳
+  → LLM 推理 → ... 重複 ~10 輪
+  → 記錄每一輪的 (prompt, response, tool_call, tool_output, exec_time)</code></pre>
+    <p>
+      這些 trace 記錄了 GPT-5 作為 coding agent 的<strong>完整對話歷史</strong>，
+      包括每一輪的 prompt token 數、output token 數、tool call 指令、和 tool 執行時間。
+    </p>
+
+    <h4>Step 2：用 Llama 在這些 Trace 上做 Evaluation？</h4>
+    <p>
+      論文 Section 6.1：「For results other than the real SWE-bench experiments in Figure 11, we evaluate on two <strong>collected workloads</strong> running GPT-5 and using poisson distribution for the arrival pattern.」
+    </p>
+    <p>
+      <strong>但 Repo 中沒有 trace replay 機制。</strong>
+      查看 <code>mini-swe-agent</code> 的程式碼，agent 的執行流程是：
+    </p>
+    <pre style="background:var(--code-bg); color:var(--code-fg)"><code><span class="cm"># agents/default.py — 真實的 agent loop，不是 replay</span>
+<span class="kw">def</span> <span class="fn">run</span>(self, task):
+    self.add_message(<span class="st">"system"</span>, system_prompt)
+    self.add_message(<span class="st">"user"</span>, task)
+    <span class="kw">while</span> True:
+        self.step()   <span class="cm"># → query() → execute_action()</span>
+
+<span class="kw">def</span> <span class="fn">step</span>(self):
+    response = self.query()              <span class="cm"># 1. 送 prompt 給 LLM → 拿到 response</span>
+    action = self.parse_action(response) <span class="cm"># 2. 從 response 解析 bash command</span>
+    output = self.env.execute(action)    <span class="cm"># 3. <strong>真的在 Docker 裡執行</strong></span>
+    self.add_message(<span class="st">"user"</span>, output)      <span class="cm"># 4. tool output 加回 context</span></code></pre>
+    <p>
+      <code>self.env.execute(action)</code> 是<strong>真的在 Docker/bubblewrap sandbox 裡跑 bash 指令</strong>，
+      不是模擬。沒有任何 code path 可以「載入 GPT-5 trace 然後跳過 LLM 推理」。
+    </p>
+
+    <h4>兩種可能的實驗方式（論文沒有明確說明）</h4>
+    <table>
+      <tr><th>可能性</th><th>做法</th><th>問題</th></tr>
+      <tr>
+        <td><strong>A. Llama 跑真的 Agent</strong></td>
+        <td>
+          用 Llama 作為 LLM backend 真正跑 SWE-bench。<br>
+          GPT-5 trace 只用於分析工作負載特性（Table 1, Fig 3, 5）。<br>
+          Llama 自己生成 response、自己的 output token 數。
+        </td>
+        <td>
+          Llama-8B 的 coding 能力遠不如 GPT-5，會產出完全不同的 tool call sequence。<br>
+          論文 Footnote 2 也承認「Base small models often fail to accomplish the task」。<br>
+          但<strong>對 scheduling 實驗而言可能不影響</strong>：
+          scheduler 只看 token 數和 tool exec time，不看程式碼正確性。
+        </td>
+      </tr>
+      <tr>
+        <td><strong>B. 用 GPT-5 trace 驅動 replay</strong></td>
+        <td>
+          把 GPT-5 的對話歷史餵給 Llama，控制 prompt 長度和 turn 數。<br>
+          可能用某種方式固定 Llama 的 output token 數（如 <code>max_tokens</code>）。
+        </td>
+        <td>
+          <strong>Repo 中沒有這個機制。</strong>沒有 trace loader、沒有 replay mode。<br>
+          如果存在，可能在未開源的內部工具中。
+        </td>
+      </tr>
+    </table>
+
+    <h4>output token 數的問題</h4>
+    <p>
+      如果是方式 A（Llama 跑真的 agent），output token 數完全由 Llama 決定。
+      同一個 SWE-bench instance：
+    </p>
     <ul>
-      <li><strong>58.2% of end-to-end delay</strong> in baseline vLLM comes from scheduling bubbles during tool-call pauses.</li>
-      <li>Continuum <strong>eliminates scheduling bubbles</strong> by retaining KV cache during predicted-short tool calls.</li>
-      <li><strong>Program-level FCFS</strong> ensures fairness across multi-turn agent sessions rather than individual requests.</li>
-      <li>The approach is <strong>complementary to CPU offloading</strong> (tested with LMCache connector).</li>
-      <li>Evaluated on SWE-Bench Verified and BFCL traces with Llama-3.1 8B and 70B.</li>
+      <li>GPT-5 可能一次輸出 200 tokens（精準的 patch + 解釋）</li>
+      <li>Llama-8B 可能輸出 50 tokens（錯誤的嘗試）或 500 tokens（冗長的 debug 過程）</li>
     </ul>
+    <p>
+      這意味著論文 Table 1 的統計（Token Per Program: 70,126 ± 19,732）是 GPT-5 的數據，
+      不一定代表 Llama 實驗時的真實 token 數。
+    </p>
+    <p>
+      如果是方式 B（replay），則需要解決：
+    </p>
+    <ul>
+      <li><strong>Prompt 長度</strong>：可以控制 — 直接餵 GPT-5 trace 中的對話歷史給 Llama</li>
+      <li><strong>Output token 數</strong>：難以精確控制 — <code>max_tokens</code> 只能設上限，不能保證 Llama 剛好生成跟 GPT-5 一樣多的 tokens</li>
+      <li><strong>Tool call 內容</strong>：如果 Llama 生成不同的 bash command → tool exec time 不同 → 整個後續 flow 發散</li>
+    </ul>
+
+    <h4>結論</h4>
+    <p>
+      <strong>論文沒有明確說明 Fig 8-10 的實驗中 Llama 到底是不是在 replay GPT-5 trace。</strong>
+      Repo 中只有真實 agent loop（方式 A），沒有 replay 機制（方式 B）。
+      最可能的情況是：
+    </p>
+    <ul>
+      <li>Fig 8-10（emulated）：用 Llama 跑真實 SWE-bench agent，GPT-5 trace 只用於 workload 特性分析</li>
+      <li>Fig 11（real）：在 Tensormesh 上跑真實 SWE-agent（可能用更強的模型）</li>
+      <li>Llama 跑出來的 token 數、tool call 序列跟 GPT-5 不同，但論文用 Table 1 的 GPT-5 統計來描述 workload 特性</li>
+    </ul>
+    <p>
+      這是一個<strong>方法論上值得質疑的點</strong>：如果 workload 統計來自 GPT-5 但實驗跑的是 Llama，
+      那 Table 1 的數據不代表實際實驗的工作負載。
+    </p>
   </div>
-</section>
 
-<!-- ============================================ -->
-<!-- SECTION 6: CLAIMS VS IMPLEMENTATION          -->
-<!-- ============================================ -->
-<section id="claims">
-  <h2>Paper Claims vs Implementation</h2>
-
+  <h3>12.3 Baselines（6 個）</h3>
   <table>
-    <thead>
-      <tr>
-        <th>Paper Claim</th>
-        <th>Status</th>
-        <th>Code Evidence</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>KV Cache TTL mechanism</td>
-        <td><span class="partial">PARTIAL</span></td>
-        <td>Implemented but uses a <strong>fixed threshold</strong> (2.0s) rather than a dynamic cost-benefit model. The paper describes modeling the tradeoff between prefill cost and memory occupation cost; the code uses a simple comparison against <code>FIXED_THRESHOLD_CONTINUUM</code>.</td>
-      </tr>
-      <tr>
-        <td>Tool-call duration prediction from historical data</td>
-        <td><span class="check">YES</span></td>
-        <td><code>ToolCallEstimator</code> maintains per-command running averages in <code>func_call_to_exec_time</code>. Updated via <code>update_func_call_exec_time()</code> on each request return.</td>
-      </tr>
-      <tr>
-        <td>Program-level FCFS scheduling</td>
-        <td><span class="check">YES</span></td>
-        <td><code>ContinuumRequestQueue</code> tracks <code>job_id_first_entry_time</code> and orders by job-level arrival rather than per-request arrival.</td>
-      </tr>
-      <tr>
-        <td>Pinned request priority in scheduling</td>
-        <td><span class="check">YES</span></td>
-        <td><code>peek_request()</code> first checks <code>pinned_request_job_id_set</code> before falling back to job-level FCFS.</td>
-      </tr>
-      <tr>
-        <td>Cost-benefit eviction model</td>
-        <td><span class="cross">SIMPLIFIED</span></td>
-        <td>The paper describes a formal cost-benefit model comparing <code>C_prefill</code> (reload cost) vs <code>C_memory</code> (GPU occupation cost). The code uses a simple threshold: if <code>exec_time > 2.0s</code>, evict; otherwise pin for 2.0s. The README itself notes: "without the estimation in the paper."</td>
-      </tr>
-      <tr>
-        <td>Preemption avoids last-step requests</td>
-        <td><span class="check">YES</span></td>
-        <td><code>pop_running_request_based_on_last_step()</code> explicitly checks <code>req.is_last_step</code> to avoid preempting nearly-finished jobs.</td>
-      </tr>
-      <tr>
-        <td>SWE-Bench evaluation</td>
-        <td><span class="check">YES</span></td>
-        <td>Full mini-swe-agent integration with <code>VllmModel</code>, experiment scripts, and stored results for 500 jobs.</td>
-      </tr>
-      <tr>
-        <td>CPU offloading integration</td>
-        <td><span class="check">YES</span></td>
-        <td>LMCache connector support via <code>--kv-transfer-config</code>. Scheduler handles <code>connector</code> for external KV cache tokens.</td>
-      </tr>
-      <tr>
-        <td>Eliminates 58.2% scheduling bubbles</td>
-        <td><span class="partial">PLAUSIBLE</span></td>
-        <td>The 2.16x average speedup on 500 jobs is consistent with this claim. The <code>Continuum_Recorder</code> logs all timestamps needed to verify this, but the repo does not include a script that calculates bubble percentage directly.</td>
-      </tr>
-      <tr>
-        <td>ToolCallParser extracts function names</td>
-        <td><span class="check">YES</span></td>
-        <td>Uses identical regex as mini-swe-agent: <code>r"```bash\s*\n(.*?)\n```"</code>. Extracts first word as command name.</td>
-      </tr>
-    </tbody>
+    <tr><th>Baseline</th><th>版本</th><th>說明</th><th>Repo 中有實作？</th></tr>
+    <tr>
+      <td><strong>Vanilla vLLM</strong></td>
+      <td>0.10.2</td>
+      <td>標準 FCFS + end-of-turn eviction，chunked-prefill chunk size 2048</td>
+      <td><span style="color:var(--green)">有</span> (<code>--scheduling-policy fcfs</code>)</td>
+    </tr>
+    <tr>
+      <td><strong>CPU DRAM offloading</strong></td>
+      <td>vLLM 0.10.2 + LMCache 0.3.7</td>
+      <td>KV cache offload 到 CPU DRAM（A100: 100GB, B200/H100: 200GB/GPU）</td>
+      <td><span style="color:var(--amber)">部分</span> (vLLM 內建 LMCache connector，但沒有獨立測試腳本)</td>
+    </tr>
+    <tr>
+      <td><strong>Autellix / Autellix+</strong></td>
+      <td>PLAS 演算法 on vLLM</td>
+      <td>Program-Level Attained Service：按累積 service time 排序。Autellix+ 加上 LMCache CPU offloading</td>
+      <td><span style="color:var(--primary)">沒有</span></td>
+    </tr>
+    <tr>
+      <td><strong>InferCept</strong></td>
+      <td>preserve/swap/evict on vLLM + LMCache</td>
+      <td>靜態 KV cache retain：tool call 時無條件 preserve KV cache</td>
+      <td><span style="color:var(--primary)">沒有</span></td>
+    </tr>
+    <tr>
+      <td><strong>SGLang</strong></td>
+      <td>0.5.5.post3</td>
+      <td>Native cache-aware routing</td>
+      <td><span style="color:var(--amber)">部分</span> (有 client class <code>sglang_model.py</code>，但沒有測試腳本)</td>
+    </tr>
+    <tr>
+      <td><strong>Dynamo</strong></td>
+      <td>0.7.0.post1</td>
+      <td><a href="https://github.com/ai-dynamo/dynamo">ai-dynamo/dynamo</a> — NVIDIA 的分散式推理框架，1P1D PD Disaggregation</td>
+      <td><span style="color:var(--primary)">沒有</span></td>
+    </tr>
   </table>
 
-  <div class="callout callout-warn">
-    <strong>Key Gap: Simplified TTL Model.</strong> The README explicitly states: "This repository contains a modified version of vLLM with Continuum-style scheduling support <strong>(without the estimation in the paper)</strong>." The sophisticated cost-benefit optimization described in the paper (which models prefill token cost, memory pressure, and request queue depth) is replaced by a simple fixed-threshold check. This is a significant simplification -- the core algorithmic contribution of the paper is only partially implemented.
+  <div class="warn">
+    <strong>Repo 裡只能跑 vLLM (FCFS) vs Continuum 的對比。</strong>
+    Autellix、InferCept 是論文作者自己在 vLLM 上重新實作的，但沒有開源。
+    SGLang 和 Dynamo 是直接用官方版本跑，但測試腳本沒有保留在 repo 中。
   </div>
 
-  <div class="callout callout-info">
-    <strong>Despite the simplification,</strong> the approach still achieves strong results. The fixed 2.0-second threshold appears to work well for SWE-Bench traces where most tool calls (shell commands) are fast. The per-command averaging is present and functional, suggesting the estimation infrastructure is ready for a more sophisticated model.
-  </div>
-
-  <h3>Implementation Maturity Assessment</h3>
-
-  <div class="grid-2">
-    <div class="card success">
-      <h3>Strengths</h3>
-      <ul>
-        <li>Clean integration into vLLM V1 scheduler architecture</li>
-        <li>All metadata plumbed end-to-end from client to scheduler</li>
-        <li>Full experiment pipeline (agent, server, analysis)</li>
-        <li>Real benchmark results for 500 SWE-Bench jobs</li>
-        <li>Comprehensive event recording for analysis</li>
-        <li>CPU offloading support via LMCache</li>
-      </ul>
-    </div>
-    <div class="card warn">
-      <h3>Limitations</h3>
-      <ul>
-        <li>Fixed 2.0s TTL threshold (paper's cost-benefit model not implemented)</li>
-        <li>Multiple TODO comments indicating work-in-progress</li>
-        <li>Linear scan over pinned_requests (O(n) per scheduling step)</li>
-        <li>ToolCallParser only handles bash code blocks (SWE-Bench specific)</li>
-        <li>No automated test suite for Continuum-specific logic</li>
-        <li>Some debug print statements left in protocol.py</li>
-      </ul>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================ -->
-<!-- SECTION 7: REPRODUCE                         -->
-<!-- ============================================ -->
-<section id="reproduce">
-  <h2>How to Reproduce</h2>
-
-  <h3>Step 1: Environment Setup</h3>
-
-  <pre><span class="cm"># Clone the repository</span>
-git clone &lt;repo-url&gt; vllm-continuum
-<span class="kw">cd</span> vllm-continuum
-
-<span class="cm"># Create virtual environment and install</span>
-uv venv
-<span class="kw">source</span> .venv/bin/activate
-uv pip install -e .
-
-<span class="cm"># Install mini-swe-agent</span>
-<span class="kw">cd</span> mini-swe-agent
-uv pip install -e .
-uv pip install datasets
-<span class="kw">cd</span> ..
-
-<span class="cm"># Install additional dependencies</span>
-uv pip install lmcache hf_transfer
-
-<span class="cm"># Login to Hugging Face for model access</span>
-hf auth login</pre>
-
-  <h3>Step 2: Start vLLM Server with Continuum Scheduling</h3>
-
-  <pre><span class="cm"># Without CPU offload</span>
-vllm serve meta-llama/Llama-3.1-70B-Instruct \
-  --scheduling-policy continuum \
-  --tensor-parallel-size <span class="nu">4</span> \
-  --port <span class="nu">8100</span>
-
-<span class="cm"># With CPU offload (LMCache)</span>
-LMCACHE_MAX_LOCAL_CPU_SIZE=<span class="nu">200</span> \
-vllm serve meta-llama/Llama-3.1-70B-Instruct \
-  --kv-transfer-config <span class="st">'{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'</span> \
-  --scheduling-policy continuum \
-  --tensor-parallel-size <span class="nu">4</span> \
-  --port <span class="nu">8100</span></pre>
-
-  <h3>Step 3: Run SWE-Bench Evaluation</h3>
-
-  <pre><span class="cm"># Clear previous output</span>
-rm -rf ./swebench_output
-
-<span class="cm"># Fixed concurrency mode (64 concurrent workers)</span>
-mini-extra swebench \
-  --model-class vllm \
-  --model meta-llama/Llama-3.1-70B-Instruct \
-  --port <span class="nu">8100</span> \
-  --subset verified \
-  --split test \
-  --workers <span class="nu">64</span> \
-  --output ./swebench_output
-
-<span class="cm"># OR: Poisson arrival mode (1 job/second)</span>
-mini-extra swebench \
-  --model-class vllm \
-  --model meta-llama/Llama-3.1-70B-Instruct \
-  --port <span class="nu">8100</span> \
-  --subset verified \
-  --split test \
-  --use-jps --jps <span class="nu">1.0</span> \
-  --output ./swebench_output</pre>
-
-  <h3>Step 4: Analyze Results</h3>
-
-  <pre><span class="cm"># Stop the vLLM server first (Ctrl+C), then:</span>
-python continuum_exp/analyze.py \
-  --input-dir ./swebench_output \
-  --output-dir ./continuum_exp/result
-
-<span class="cm"># For pass-rate evaluation (requires sb-cli setup)</span>
-sb-cli submit swe-bench_verified test \
-  --predictions_path swebench_output/preds.json \
-  --run_id my_continuum_run</pre>
-
-  <h3>Step 5: Compare Against Baseline</h3>
-
-  <pre><span class="cm"># Start vLLM in standard FCFS mode</span>
-vllm serve meta-llama/Llama-3.1-70B-Instruct \
-  --tensor-parallel-size <span class="nu">4</span> \
-  --port <span class="nu">8100</span>
-
-<span class="cm"># Run the same SWE-Bench evaluation with --workers 64</span>
-<span class="cm"># Compare scheduler_timestamps from both runs using analyze.py</span></pre>
-
-  <div class="callout callout-warn">
-    <strong>Hardware Requirements:</strong> The default setup requires <strong>4x H100 GPUs</strong> for Llama-3.1-70B with tensor parallelism. For Llama-3.1-8B, a single GPU may suffice but mini-swe-agent may produce lower-quality patches.
-  </div>
-
-  <h3>Key Configuration Parameters</h3>
-
+  <h3>12.4 論文實驗矩陣</h3>
   <table>
-    <thead>
-      <tr>
-        <th>Parameter</th>
-        <th>Description</th>
-        <th>Default</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><code>--scheduling-policy</code></td>
-        <td>Scheduling mode: <code>fcfs</code>, <code>priority</code>, or <code>continuum</code></td>
-        <td><code>fcfs</code></td>
-      </tr>
-      <tr>
-        <td><code>--tensor-parallel-size</code></td>
-        <td>Number of GPUs for tensor parallelism</td>
-        <td><code>1</code></td>
-      </tr>
-      <tr>
-        <td><code>FIXED_THRESHOLD_CONTINUUM</code></td>
-        <td>TTL threshold in seconds (hardcoded in estimate_with_func.py)</td>
-        <td><code>2.0</code></td>
-      </tr>
-      <tr>
-        <td><code>--workers</code></td>
-        <td>Fixed number of concurrent SWE-Bench jobs</td>
-        <td><code>64</code></td>
-      </tr>
-      <tr>
-        <td><code>--jps</code></td>
-        <td>Jobs per second for Poisson arrival mode</td>
-        <td><code>1.0</code></td>
-      </tr>
-      <tr>
-        <td><code>step_limit</code></td>
-        <td>Max agentic turns per job (for is_last_step calculation)</td>
-        <td><code>0</code> (unlimited)</td>
-      </tr>
-      <tr>
-        <td><code>job_timeout</code></td>
-        <td>Maximum wall-clock time per agent job</td>
-        <td><code>900s</code></td>
-      </tr>
-      <tr>
-        <td><code>LMCACHE_MAX_LOCAL_CPU_SIZE</code></td>
-        <td>CPU memory in GB for KV cache offloading</td>
-        <td>Not set (disabled)</td>
-      </tr>
-    </tbody>
+    <tr><th>Figure</th><th>實驗</th><th>比較的 Baselines</th><th>硬體</th><th>Offloading</th></tr>
+    <tr>
+      <td><strong>Fig 8</strong></td>
+      <td>End-to-end（無 offload）</td>
+      <td>vLLM vs <strong>Continuum</strong> vs Autellix</td>
+      <td>70B/4xB200, 8B/1xB200, 8B/1xA100</td>
+      <td>關閉</td>
+    </tr>
+    <tr>
+      <td><strong>Fig 9</strong></td>
+      <td>End-to-end（有 DRAM offload）</td>
+      <td>vLLM vs <strong>Continuum</strong> vs Autellix+ vs InferCept</td>
+      <td>同上</td>
+      <td>LMCache CPU offload</td>
+    </tr>
+    <tr>
+      <td><strong>Fig 10</strong></td>
+      <td>P90 / P95 尾延遲</td>
+      <td>vLLM vs <strong>Continuum</strong> vs Autellix+ vs InferCept</td>
+      <td>8B/1xB200</td>
+      <td>LMCache CPU offload</td>
+    </tr>
+    <tr>
+      <td><strong>Fig 11</strong></td>
+      <td>真實 SWE-Agent 分散式部署</td>
+      <td><strong>Continuum</strong> vs SGLang vs Dynamo</td>
+      <td>Tensormesh H100</td>
+      <td>不明</td>
+    </tr>
   </table>
 
-  <div class="callout callout-note">
-    <strong>Tuning the TTL threshold:</strong> The fixed threshold of 2.0 seconds is suitable for SWE-Bench traces where most tool calls are fast shell commands. For workloads with different tool-call distributions (e.g., API calls with network latency), you may want to modify <code>FIXED_THRESHOLD_CONTINUUM</code> in <code>vllm/v1/core/estimate_with_func.py</code>. As the README notes, "You can use this as a base-repo to tune KV cache pin logic on different workloads."
+  <h4>Fig 8-10：Emulated workload（Poisson trace replay）</h4>
+  <ul>
+    <li>X 軸：Jobs Per Second (JPS) — Poisson 到達率</li>
+    <li>Y 軸：Average Job Duration (seconds)</li>
+    <li>每個 Dataset (SWE-Bench / BFCL) × 每個硬體配置一張子圖</li>
+    <li>Trace 是預先用 GPT-5 收集的，Llama 模型只負責 serving</li>
+  </ul>
+
+  <h4>Fig 11：Real SWE-Agent（500 tasks on Tensormesh）</h4>
+  <ul>
+    <li>在 Tensormesh 內部 H100 testbed 上跑真實 SWE-bench Verified（500 tasks）</li>
+    <li>加了 job distributor 做 Poisson 分配</li>
+    <li>Session-aware routing</li>
+    <li>左圖：Average delay vs JPS（Continuum vs SGLang vs Dynamo）</li>
+    <li>右圖：SWE-bench pass rate（Continuum 實際 pass rate 更高，因為 baseline 會被 15min timeout preempt）</li>
+  </ul>
+
+  <h3>12.5 論文的關鍵數據</h3>
+  <div class="cards">
+    <div class="card hl">
+      <h4>延遲改善</h4>
+      <p>Continuum 比 vanilla vLLM 減少延遲 <strong>1.12x ~ 3.66x</strong></p>
+      <p>比 Autellix/InferCept 也有顯著改善</p>
+    </div>
+    <div class="card hl">
+      <h4>吞吐量改善</h4>
+      <p>提升吞吐量 <strong>1.10x ~ 3.22x</strong></p>
+    </div>
+    <div class="card hl">
+      <h4>真實 SWE-Agent</h4>
+      <p>在 Tensormesh testbed 上延遲減少 <strong>最多 8.18x</strong></p>
+      <p>Pass rate 比 baseline 高（baseline 會被 15min timeout kill）</p>
+    </div>
   </div>
 </section>
 
-</div> <!-- /container -->
+<!-- ====== 13. REPO EXPERIMENT ====== -->
+<section id="repo-experiment">
+  <h2>13. Repo 中可執行的實驗流程</h2>
+  <p>
+    論文有 6 個 baselines，但 <strong>repo 中只能跑 FCFS vs Continuum</strong>。
+    以下是 repo 中實際存在的實驗程式碼。
+  </p>
 
-<!-- Footer -->
-<div style="background:var(--dark); color:#888; text-align:center; padding:24px; font-size:0.85em;">
-  Technical analysis of arXiv:2511.02230. Repository: vllm-continuum (vLLM fork with Continuum scheduling).
-  <br>Analysis based on source code inspection and included benchmark results.
+  <h3>13.1 自動化腳本：<code>run_experiments.py</code></h3>
+  <pre><code><span class="cm"># mini-swe-agent/run_experiments.py</span>
+SCHEDULING_POLICIES = [<span class="st">"fcfs"</span>, <span class="st">"continuum"</span>]   <span class="cm"># 只有這兩個</span>
+JPS_VALUES = [<span class="nu">0.05</span>, <span class="nu">0.1</span>, <span class="nu">0.15</span>, <span class="nu">0.2</span>, <span class="nu">0.25</span>, <span class="nu">0.3</span>, <span class="nu">0.5</span>, <span class="nu">0.7</span>, <span class="nu">0.9</span>]
+MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
+PORT_1 = <span class="nu">8001</span>
+PORT_2 = <span class="nu">8002</span>
+ROUTER_PORT = <span class="nu">8100</span></code></pre>
+
+  <h4>流程</h4>
+  <div class="flow">
+    <div class="step">
+      <div class="c">1</div>
+      <div class="lbl">2x vLLM</div>
+      <div class="desc">GPU 0-3 + GPU 4-7, TP=4</div>
+    </div>
+    <div class="step">
+      <div class="c">2</div>
+      <div class="lbl">Router</div>
+      <div class="desc">Load balancer → :8100</div>
+    </div>
+    <div class="step">
+      <div class="c">3</div>
+      <div class="lbl">SWE-bench</div>
+      <div class="desc">mini-extra swebench --use-jps</div>
+    </div>
+    <div class="step">
+      <div class="c">4</div>
+      <div class="lbl">SIGTERM</div>
+      <div class="desc">kill → trace 匯出</div>
+    </div>
+  </div>
+
+  <pre><code><span class="cm"># 完整流程（run_experiments.py 內部做的事）:</span>
+
+<span class="cm"># 1. 啟動 2 個 vLLM server（同一 policy）</span>
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve $MODEL \
+    --scheduling-policy $POLICY --port 8001 --tensor-parallel-size 4 &
+CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve $MODEL \
+    --scheduling-policy $POLICY --port 8002 --tensor-parallel-size 4 &
+
+<span class="cm"># 2. 啟動 router（load balancer）</span>
+python continuum_exp/router.py --port 8100 --backends 8001,8002 &
+
+<span class="cm"># 3. 跑 SWE-bench workload（Poisson arrival）</span>
+mini-extra swebench \
+    --model-class vllm --model $MODEL --port 8100 \
+    --subset verified --split test \
+    --use-jps --jps $JPS \
+    --output $OUTPUT_DIR/swebench_output
+
+<span class="cm"># 4. 關閉 → 觸發 trace 匯出</span>
+kill -TERM $SERVER_PID_1 $SERVER_PID_2
+<span class="cm"># → $RUN_OUTPUT_DIR/scheduler_timestamps</span>
+
+<span class="cm"># 5. 分析</span>
+python continuum_exp/analyze.py --input-dir $OUTPUT_DIR</code></pre>
+
+  <div class="warn">
+    <strong>必須用 SIGTERM！</strong> <code>kill -9</code> 會跳過 shutdown hook，<code>scheduler_timestamps</code> 不會被寫入。
+  </div>
+
+  <h3>13.2 手動跑單一實驗</h3>
+  <pre><code><span class="cm"># 啟動 server</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+    --scheduling-policy continuum \
+    --port 8001 \
+    --tensor-parallel-size 4
+
+<span class="cm"># 跑 workload（另一個 terminal）</span>
+mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
+    --subset verified --split test --workers 4
+
+<span class="cm"># 或 Poisson arrival</span>
+mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
+    --subset verified --split test --workers 64 --use-jps --jps 0.1</code></pre>
+
+  <h3>13.3 SGLang client（有 code 但沒有完整流程）</h3>
+  <pre><code><span class="cm"># mini-swe-agent/src/minisweagent/models/sglang_model.py</span>
+<span class="cm"># 有一個 SglangModel class 可以連 SGLang server</span>
+<span class="cm"># 但 run_experiments.py 不會啟動 SGLang server</span>
+<span class="cm"># 如果要測 SGLang，需要：</span>
+<span class="cm">#   1. 自己安裝 + 啟動 sglang serve</span>
+<span class="cm">#   2. mini-extra swebench --model-class sglang --port 30000</span></code></pre>
+
+  <h3>13.4 輸出結構</h3>
+  <pre><code>$RUN_OUTPUT_DIR/
+├── scheduler_timestamps      <span class="cm"># 排程事件 JSON（Continuum_Recorder 匯出）</span>
+├── swebench_output/          <span class="cm"># Agent predictions</span>
+│   ├── predictions.json
+│   └── logs/
+└── results.json              <span class="cm"># analyze.py 的 JCT 統計</span></code></pre>
+</section>
+
+<!-- ====== 14. PAPER vs REPO ====== -->
+<section id="paper-vs-repo">
+  <h2>14. 論文 vs Repo：落差分析</h2>
+
+  <h3>14.1 演算法落差</h3>
+  <table>
+    <tr><th>論文描述</th><th>Repo 實作</th><th>落差</th></tr>
+    <tr>
+      <td>CDF：用 empirical CDF <code>P(τ,f) = Σ𝟙[t≤τ] / |S[f]|</code> 估計 tool call 完成機率</td>
+      <td>只有簡單平均 <code>avg(samples)</code></td>
+      <td>CDF 沒有實作</td>
+    </tr>
+    <tr>
+      <td>Cost Model：<code>τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)</code></td>
+      <td>固定閾值 <code>if avg > 2.0s → free, else pin 2.0s</code></td>
+      <td>Cost model 沒有實作</td>
+    </tr>
+    <tr>
+      <td>Benefit = CacheMissCost + OutofOrderCost</td>
+      <td>沒有 benefit 計算</td>
+      <td>沒有實作</td>
+    </tr>
+    <tr>
+      <td>Cost = <code>MemUsage(r)/M × τ</code></td>
+      <td>沒有 cost 計算</td>
+      <td>沒有實作</td>
+    </tr>
+    <tr>
+      <td>Memoryfulness factor η = -Corr(k, N-k)</td>
+      <td>沒有</td>
+      <td>沒有實作</td>
+    </tr>
+    <tr>
+      <td>動態 TTL：每個 request 根據 tool call + cost model 算出不同的 τ*</td>
+      <td>全部 pin 固定 2.0 秒</td>
+      <td>嚴重簡化</td>
+    </tr>
+    <tr>
+      <td>Cold-start：<code>|S[f]| ≤ K</code> 時用全局 CDF，再退到 T_default</td>
+      <td>第一次見到的 tool → exec_time=0 → 直接 pin 2s（樂觀策略）</td>
+      <td>不同的 cold-start 策略</td>
+    </tr>
+    <tr>
+      <td>Offline profile：prefill vs context length 擬合二次曲線，測 GPU-CPU bandwidth</td>
+      <td>沒有 offline profiling 程式碼</td>
+      <td>缺失</td>
+    </tr>
+  </table>
+
+  <h3>14.2 實驗重現落差</h3>
+  <table>
+    <tr><th>論文實驗</th><th>能用 Repo 重現？</th><th>缺什麼</th></tr>
+    <tr>
+      <td>Fig 8：vLLM vs Continuum vs Autellix（無 offload）</td>
+      <td><span style="color:var(--amber)">部分</span></td>
+      <td>Autellix (PLAS) 沒有開源</td>
+    </tr>
+    <tr>
+      <td>Fig 9：vLLM vs Continuum vs Autellix+ vs InferCept（有 offload）</td>
+      <td><span style="color:var(--primary)">不能</span></td>
+      <td>Autellix+、InferCept 都沒有開源；LMCache 整合沒有測試腳本</td>
+    </tr>
+    <tr>
+      <td>Fig 10：P90/P95 尾延遲</td>
+      <td><span style="color:var(--primary)">不能</span></td>
+      <td>同上</td>
+    </tr>
+    <tr>
+      <td>Fig 11：Real SWE-Agent（Continuum vs SGLang vs Dynamo）</td>
+      <td><span style="color:var(--primary)">不能</span></td>
+      <td>需要 Tensormesh H100 testbed + Dynamo 0.7.0.post1 部署 + job distributor + session-aware router（全部沒開源）</td>
+    </tr>
+    <tr>
+      <td>vLLM (FCFS) vs Continuum 對比</td>
+      <td><span style="color:var(--green)">可以</span></td>
+      <td><code>run_experiments.py</code> 可直接跑</td>
+    </tr>
+    <tr>
+      <td>Table 1：SWE-Bench / BFCL trace 統計</td>
+      <td><span style="color:var(--primary)">不能</span></td>
+      <td>GPT-5 生成的 trace 資料沒有附在 repo 中</td>
+    </tr>
+  </table>
+
+  <h3>14.3 Code 品質指標</h3>
+  <table>
+    <tr><th>面向</th><th>狀態</th><th>說明</th></tr>
+    <tr><td>TODO / NOTE (Hanchen)</td><td>15+ 個</td><td>大量未完成的標記散布在 scheduler.py</td></tr>
+    <tr><td>Unit tests</td><td>0 個</td><td>Continuum-specific 的測試完全沒有</td></tr>
+    <tr><td>Debug print</td><td>多處</td><td>被註解掉的 <code>#print(...)</code> 留在 code 裡</td></tr>
+    <tr><td>CDF 演算法</td><td>未實作</td><td>只有移動平均 + 固定閾值</td></tr>
+    <tr><td>C++/CUDA 修改</td><td>0 個</td><td>191 個 CUDA 檔案零修改，只改 Python scheduler</td></tr>
+    <tr><td>vLLM 版本</td><td>0.10.2 fork</td><td>沒有保留上游 git history（initial commit 直接包含整個 vLLM）</td></tr>
+  </table>
+</section>
+
+<!-- ====== 15. ANALYSIS ====== -->
+<section id="analysis">
+  <h2>15. 分析方法</h2>
+  <p>檔案：<code>continuum_exp/analyze.py</code></p>
+
+  <h3>15.1 JCT 計算</h3>
+  <pre><code><span class="cm"># 每個 job 的 JCT:</span>
+JCT = max(departure_times) - min(arrival_times)  <span class="cm"># 含所有輪次</span>
+
+<span class="cm"># 全局 wall time:</span>
+wall_time = max(所有 job 的 departure) - min(所有 job 的 arrival)</code></pre>
+
+  <h3>15.2 統計指標</h3>
+  <table>
+    <tr><th>指標</th><th>計算方式</th></tr>
+    <tr><td><code>num_jobs</code></td><td>有完整 arrival + departure 的 job 數量</td></tr>
+    <tr><td><code>average_duration</code></td><td>所有 JCT 的算術平均</td></tr>
+    <tr><td><code>median_duration</code></td><td>P50</td></tr>
+    <tr><td><code>percentile_95</code></td><td>P95（線性內插）</td></tr>
+    <tr><td><code>percentile_99</code></td><td>P99（線性內插）</td></tr>
+    <tr><td><code>min_duration</code> / <code>max_duration</code></td><td>最快 / 最慢的 job</td></tr>
+    <tr><td><code>total_duration</code></td><td>全局 wall time</td></tr>
+  </table>
+
+  <h3>15.3 可衍生的 Cache 指標</h3>
+  <p>從 <code>scheduler_timestamps</code> 的 <code>waiting_to_running</code> 事件中可算出：</p>
+  <table>
+    <tr><th>指標</th><th>計算</th><th>意義</th></tr>
+    <tr>
+      <td>Cache Hit Ratio</td>
+      <td><code>hit_length / prompt_length</code></td>
+      <td>KV cache 命中率（pin 成功 → hit_length ≈ prompt_length）</td>
+    </tr>
+    <tr>
+      <td>Prefill Savings</td>
+      <td><code>1 - (prompt_length - hit_length) / prompt_length</code></td>
+      <td>節省了多少 prefill 計算</td>
+    </tr>
+    <tr>
+      <td>Queue Wait Time</td>
+      <td><code>waiting_to_running - Request_arrival_time</code></td>
+      <td>在佇列中等了多久</td>
+    </tr>
+    <tr>
+      <td>Pin Duration</td>
+      <td><code>unpinned_time - pinned_time</code></td>
+      <td>KV cache 被 pin 了多久</td>
+    </tr>
+  </table>
+
+  <h3>15.4 使用方式</h3>
+  <pre><code>python continuum_exp/analyze.py --input-dir ./path/to/run_output
+
+<span class="cm"># 輸出範例：</span>
+<span class="cm"># === Job Duration Statistics ===</span>
+<span class="cm"># Number of jobs: 20</span>
+<span class="cm"># Average duration: 342.50 seconds</span>
+<span class="cm"># Median duration: 318.20 seconds</span>
+<span class="cm"># 95th percentile: 567.80 seconds</span>
+<span class="cm"># 99th percentile: 612.40 seconds</span></code></pre>
+</section>
+
 </div>
+
+<footer>
+  <p>vLLM-Continuum (arXiv:2511.02230) — 純 Continuum 實作邏輯解析</p>
+  <p>原始碼：<code>github.com/Hanchenli/vllm-continuum</code></p>
+  <p>Generated 2026-03-26</p>
+</footer>
 
 </body>
 </html>
