@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CacheGen: KV Cache Compression and Streaming for Fast LLM Serving</title>
+<style>
+  :root {
+    --bg-dark: #0f1117;
+    --bg-card: #1a1d2e;
+    --bg-card-alt: #1e2235;
+    --bg-code: #151826;
+    --text-primary: #e8eaf0;
+    --text-secondary: #9ca3b8;
+    --text-muted: #6b7394;
+    --accent-blue: #4f8ff7;
+    --accent-cyan: #22d3ee;
+    --accent-green: #34d399;
+    --accent-purple: #a78bfa;
+    --accent-orange: #fb923c;
+    --accent-red: #f87171;
+    --accent-pink: #f472b6;
+    --accent-yellow: #facc15;
+    --border-subtle: #2a2d42;
+    --border-accent: #3b3f5c;
+    --gradient-hero: linear-gradient(135deg, #0f172a 0%, #1e1b4b 40%, #312e81 70%, #1e3a5f 100%);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+
+  /* Sticky Navigation */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(15, 17, 23, 0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0.6rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.8rem;
+    overflow-x: auto;
+  }
+  nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.82rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: color 0.2s;
+  }
+  nav a:hover { color: var(--accent-cyan); }
+  nav .nav-brand {
+    color: var(--accent-blue);
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-right: auto;
+  }
+
+  /* Hero */
+  .hero {
+    background: var(--gradient-hero);
+    padding: 5rem 2rem 4rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -30%;
+    width: 160%;
+    height: 200%;
+    background: radial-gradient(ellipse at 30% 50%, rgba(79, 143, 247, 0.08) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 30%, rgba(167, 139, 250, 0.06) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.6rem;
+    font-weight: 800;
+    max-width: 900px;
+    margin: 0 auto 1.2rem;
+    background: linear-gradient(135deg, #e8eaf0, var(--accent-cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.25;
+  }
+  .hero-badges {
+    display: flex;
+    gap: 0.8rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 1.4rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.3rem 0.9rem;
+    border-radius: 20px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .badge-venue { background: rgba(79, 143, 247, 0.2); color: var(--accent-blue); border: 1px solid rgba(79, 143, 247, 0.3); }
+  .badge-arxiv { background: rgba(34, 211, 238, 0.15); color: var(--accent-cyan); border: 1px solid rgba(34, 211, 238, 0.3); }
+  .badge-topic { background: rgba(167, 139, 250, 0.15); color: var(--accent-purple); border: 1px solid rgba(167, 139, 250, 0.3); }
+  .hero p.subtitle {
+    color: var(--text-secondary);
+    font-size: 1.05rem;
+    max-width: 750px;
+    margin: 0 auto 1.6rem;
+  }
+  .hero-authors {
+    color: var(--text-muted);
+    font-size: 0.88rem;
+  }
+  .hero-authors strong { color: var(--text-secondary); }
+
+  /* Container */
+  .container {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+  }
+
+  /* Section */
+  section {
+    padding: 3.5rem 0;
+  }
+  section h2 {
+    font-size: 1.7rem;
+    font-weight: 700;
+    margin-bottom: 1.4rem;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  section h2 .sec-num {
+    background: var(--accent-blue);
+    color: #fff;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 1.6rem;
+    margin-bottom: 1.4rem;
+  }
+  .card h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin-bottom: 0.8rem;
+    color: var(--accent-cyan);
+  }
+  .card p, .card li {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+  }
+  .card ul { padding-left: 1.4rem; }
+  .card li { margin-bottom: 0.35rem; }
+
+  /* Metric cards */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin: 1.2rem 0;
+  }
+  .metric-card {
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 1.2rem;
+    text-align: center;
+  }
+  .metric-card .metric-value {
+    font-size: 2rem;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+  .metric-card .metric-label {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* Code blocks */
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    overflow-x: auto;
+    margin: 0.8rem 0;
+    font-size: 0.82rem;
+    line-height: 1.65;
+  }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+  pre code { color: var(--text-secondary); }
+  .kw { color: var(--accent-purple); }
+  .fn { color: var(--accent-blue); }
+  .str { color: var(--accent-green); }
+  .cm { color: var(--text-muted); font-style: italic; }
+  .num { color: var(--accent-orange); }
+  .type { color: var(--accent-cyan); }
+  .op { color: var(--accent-pink); }
+  .var { color: #e8eaf0; }
+  code.inline {
+    background: rgba(79, 143, 247, 0.1);
+    color: var(--accent-blue);
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.88rem;
+  }
+  thead th {
+    background: linear-gradient(135deg, #1e2235, #252848);
+    color: var(--accent-cyan);
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 2px solid var(--accent-blue);
+  }
+  tbody td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+  }
+  tbody tr:hover { background: rgba(79, 143, 247, 0.04); }
+
+  /* Callouts */
+  .callout {
+    border-radius: 10px;
+    padding: 1.1rem 1.4rem;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+    display: flex;
+    gap: 0.8rem;
+    align-items: flex-start;
+  }
+  .callout-icon {
+    font-size: 1.2rem;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+  }
+  .callout-blue { background: rgba(79, 143, 247, 0.1); border-left: 4px solid var(--accent-blue); color: var(--text-secondary); }
+  .callout-green { background: rgba(52, 211, 153, 0.1); border-left: 4px solid var(--accent-green); color: var(--text-secondary); }
+  .callout-orange { background: rgba(251, 146, 60, 0.1); border-left: 4px solid var(--accent-orange); color: var(--text-secondary); }
+  .callout-purple { background: rgba(167, 139, 250, 0.1); border-left: 4px solid var(--accent-purple); color: var(--text-secondary); }
+  .callout-red { background: rgba(248, 113, 113, 0.1); border-left: 4px solid var(--accent-red); color: var(--text-secondary); }
+  .callout strong { color: var(--text-primary); }
+
+  /* Diagram styles */
+  .diagram-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 14px;
+    padding: 2rem;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+  .diagram-title {
+    text-align: center;
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--accent-cyan);
+    margin-bottom: 1.6rem;
+    letter-spacing: 0.02em;
+  }
+
+  /* Pipeline diagram */
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    justify-content: center;
+    flex-wrap: nowrap;
+    min-width: 700px;
+  }
+  .pipe-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    flex: 0 0 auto;
+    position: relative;
+  }
+  .pipe-box {
+    padding: 0.7rem 1rem;
+    border-radius: 10px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    min-width: 110px;
+    border: 2px solid;
+    position: relative;
+    z-index: 1;
+  }
+  .pipe-sublabel {
+    font-size: 0.68rem;
+    font-weight: 400;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+    max-width: 120px;
+  }
+  .pipe-arrow {
+    display: flex;
+    align-items: center;
+    padding: 0 0.25rem;
+    align-self: center;
+  }
+  .pipe-arrow svg {
+    width: 36px;
+    height: 16px;
+  }
+  .pipe-arrow-label {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    position: absolute;
+    top: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  .box-blue { background: rgba(79, 143, 247, 0.15); border-color: var(--accent-blue); color: var(--accent-blue); }
+  .box-cyan { background: rgba(34, 211, 238, 0.12); border-color: var(--accent-cyan); color: var(--accent-cyan); }
+  .box-green { background: rgba(52, 211, 153, 0.12); border-color: var(--accent-green); color: var(--accent-green); }
+  .box-purple { background: rgba(167, 139, 250, 0.12); border-color: var(--accent-purple); color: var(--accent-purple); }
+  .box-orange { background: rgba(251, 146, 60, 0.12); border-color: var(--accent-orange); color: var(--accent-orange); }
+  .box-red { background: rgba(248, 113, 113, 0.12); border-color: var(--accent-red); color: var(--accent-red); }
+  .box-pink { background: rgba(244, 114, 182, 0.12); border-color: var(--accent-pink); color: var(--accent-pink); }
+
+  /* Vertical stack diagram */
+  .vstack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+  .vstack .v-arrow {
+    width: 2px;
+    height: 20px;
+    background: var(--border-accent);
+    position: relative;
+  }
+  .vstack .v-arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -4px;
+    left: -4px;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--border-accent);
+  }
+
+  /* Horizontal flow with branches */
+  .flow-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 0.8rem 0;
+    flex-wrap: nowrap;
+    min-width: fit-content;
+  }
+  .flow-box {
+    padding: 0.6rem 1rem;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border: 2px solid;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .h-arrow {
+    width: 30px;
+    height: 2px;
+    background: var(--border-accent);
+    position: relative;
+    flex-shrink: 0;
+  }
+  .h-arrow::after {
+    content: '';
+    position: absolute;
+    right: -4px;
+    top: -4px;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 6px solid var(--border-accent);
+  }
+
+  /* Layer config diagram */
+  .layer-bar {
+    display: flex;
+    border-radius: 8px;
+    overflow: hidden;
+    height: 36px;
+    margin: 0.4rem 0;
+  }
+  .layer-segment {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #fff;
+    padding: 0 0.5rem;
+    white-space: nowrap;
+  }
+  .layer-label-row {
+    display: flex;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-bottom: 0.2rem;
+  }
+  .layer-label-row span { padding: 0 0.5rem; }
+
+  /* Two column layout */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.2rem;
+  }
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 1.8rem; }
+    .pipeline { min-width: auto; flex-wrap: wrap; justify-content: center; }
+  }
+
+  /* Gap marker */
+  .gap-marker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.3rem;
+  }
+  .gap-line {
+    width: 80px;
+    height: 1px;
+    background: var(--border-accent);
+  }
+
+  /* Match table styling */
+  .match-yes { color: var(--accent-green); font-weight: 600; }
+  .match-partial { color: var(--accent-orange); font-weight: 600; }
+  .match-no { color: var(--accent-red); font-weight: 600; }
+
+  /* File tree */
+  .file-tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    line-height: 1.8;
+    color: var(--text-secondary);
+    background: var(--bg-code);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 1rem 1.4rem;
+  }
+  .file-tree .dir { color: var(--accent-blue); font-weight: 600; }
+  .file-tree .file { color: var(--text-secondary); }
+  .file-tree .key-file { color: var(--accent-cyan); font-weight: 600; }
+  .file-tree .comment { color: var(--text-muted); font-style: italic; }
+
+  footer {
+    text-align: center;
+    padding: 2.5rem 1rem;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav>
+  <span class="nav-brand">CacheGen Analysis</span>
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#codec">Custom Codec</a>
+  <a href="#repo">Repository</a>
+  <a href="#performance">Performance</a>
+  <a href="#adaptation">Adaptation</a>
+  <a href="#agents">Agent Relevance</a>
+  <a href="#comparison">Paper vs Code</a>
+</nav>
+
+<!-- Hero Section -->
+<header class="hero">
+  <div class="container">
+    <div class="hero-badges">
+      <span class="badge badge-venue">SIGCOMM '24</span>
+      <span class="badge badge-arxiv">arXiv:2310.07240</span>
+      <span class="badge badge-topic">KV Cache Compression</span>
+    </div>
+    <h1>CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving</h1>
+    <p class="subtitle">
+      A custom codec that exploits distributional properties of KV cache tensors to achieve 3.5&ndash;4.3x compression,
+      enabling network-efficient streaming of long-context LLM state with 3.2&ndash;3.7x lower time-to-first-token.
+    </p>
+    <p class="hero-authors">
+      <strong>Yuhan Liu</strong>, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Kuntai Du,<br>
+      Junchen Jiang &mdash; University of Chicago
+    </p>
+  </div>
+</header>
+
+<main class="container">
+
+<!-- Section 1: Overview -->
+<section id="overview">
+  <h2><span class="sec-num">1</span> Overview</h2>
+
+  <div class="card">
+    <h3>The Problem: KV Cache Transfer is the Bottleneck</h3>
+    <p>
+      Modern LLM deployments reuse KV caches to avoid redundant prefill computation for repeated or shared contexts.
+      However, KV caches are enormous &mdash; a single 4K-token context on a 7B-parameter model produces roughly
+      <strong>1.6 GB</strong> of KV state. Transferring this across the network (from a cache store to a GPU worker)
+      or even loading it from local storage dominates the time-to-first-token (TTFT).
+    </p>
+    <p style="margin-top: 0.6rem;">
+      <strong>CacheGen</strong> addresses this by designing a custom compression codec specifically for KV cache tensors,
+      achieving high compression ratios that generic codecs (gzip, zstd) cannot match, because it exploits the
+      particular statistical structure of attention key and value tensors.
+    </p>
+  </div>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-value" style="color: var(--accent-cyan);">3.5&ndash;4.3x</div>
+      <div class="metric-label">Compression Ratio</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="color: var(--accent-green);">3.2&ndash;3.7x</div>
+      <div class="metric-label">TTFT Reduction</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="color: var(--accent-purple);">&lt;0.5%</div>
+      <div class="metric-label">Quality Degradation</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="color: var(--accent-orange);">GPU</div>
+      <div class="metric-label">CUDA-Accelerated Codec</div>
+    </div>
+  </div>
+
+  <div class="callout callout-blue">
+    <span class="callout-icon">&#9432;</span>
+    <div>
+      <strong>Key Insight:</strong> KV cache tensors have channel-wise distributional regularity &mdash; within each
+      attention head channel, values across tokens follow a roughly consistent distribution. CacheGen builds per-channel
+      CDFs and uses arithmetic coding to compress each channel's token sequence near its entropy limit.
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Architecture -->
+<section id="architecture">
+  <h2><span class="sec-num">2</span> System Architecture</h2>
+
+  <div class="diagram-container">
+    <div class="diagram-title">CacheGen End-to-End Pipeline</div>
+    <div class="pipeline">
+      <div class="pipe-stage">
+        <div class="pipe-box box-blue">KV Cache<br>Tensor</div>
+        <div class="pipe-sublabel">[layers, 2, tokens, heads, head_dim]</div>
+      </div>
+      <div class="pipe-arrow">
+        <svg viewBox="0 0 36 16"><line x1="0" y1="8" x2="30" y2="8" stroke="#3b3f5c" stroke-width="2"/><polygon points="30,4 36,8 30,12" fill="#3b3f5c"/></svg>
+      </div>
+      <div class="pipe-stage">
+        <div class="pipe-box box-cyan">Split K/V<br>+ Reshape</div>
+        <div class="pipe-sublabel">Merge heads into channels</div>
+      </div>
+      <div class="pipe-arrow">
+        <svg viewBox="0 0 36 16"><line x1="0" y1="8" x2="30" y2="8" stroke="#3b3f5c" stroke-width="2"/><polygon points="30,4 36,8 30,12" fill="#3b3f5c"/></svg>
+      </div>
+      <div class="pipe-stage">
+        <div class="pipe-box box-green">Layer-Aware<br>Quantization</div>
+        <div class="pipe-sublabel">Variable bins per layer group</div>
+      </div>
+      <div class="pipe-arrow">
+        <svg viewBox="0 0 36 16"><line x1="0" y1="8" x2="30" y2="8" stroke="#3b3f5c" stroke-width="2"/><polygon points="30,4 36,8 30,12" fill="#3b3f5c"/></svg>
+      </div>
+      <div class="pipe-stage">
+        <div class="pipe-box box-purple">CDF<br>Estimation</div>
+        <div class="pipe-sublabel">Per-channel histogram</div>
+      </div>
+      <div class="pipe-arrow">
+        <svg viewBox="0 0 36 16"><line x1="0" y1="8" x2="30" y2="8" stroke="#3b3f5c" stroke-width="2"/><polygon points="30,4 36,8 30,12" fill="#3b3f5c"/></svg>
+      </div>
+      <div class="pipe-stage">
+        <div class="pipe-box box-orange">Arithmetic<br>Encoder</div>
+        <div class="pipe-sublabel">GPU torchac_cuda</div>
+      </div>
+      <div class="pipe-arrow">
+        <svg viewBox="0 0 36 16"><line x1="0" y1="8" x2="30" y2="8" stroke="#3b3f5c" stroke-width="2"/><polygon points="30,4 36,8 30,12" fill="#3b3f5c"/></svg>
+      </div>
+      <div class="pipe-stage">
+        <div class="pipe-box box-red">Compressed<br>Bitstream</div>
+        <div class="pipe-sublabel">Compact bytes + metadata</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>Encoding Path</h3>
+      <ol style="padding-left: 1.4rem;">
+        <li><strong>Split &amp; Reshape:</strong> The KV tensor of shape
+            <code class="inline">[layers, 2, tokens, heads, head_dim]</code> is split into K and V,
+            each reshaped to <code class="inline">[layers, tokens, channels]</code> where <code class="inline">channels = heads * head_dim</code>.</li>
+        <li><strong>Layer-Aware Quantization:</strong> Each layer group is quantized with a different number of bins
+            (e.g., 32 for early layers, 16 for later layers) via symmetric min-max quantization.</li>
+        <li><strong>CDF Computation:</strong> Per-channel histograms are computed across tokens and converted into
+            cumulative distribution functions for the arithmetic coder.</li>
+        <li><strong>Arithmetic Encoding:</strong> A custom CUDA kernel (<code class="inline">torchac_cuda</code>)
+            encodes each channel's token sequence into a compact bitstream using the per-channel CDF.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Decoding Path</h3>
+      <ol style="padding-left: 1.4rem;">
+        <li><strong>Deserialize:</strong> The byte payload is unpickled to recover the CDF, data chunks,
+            and max tensors for dequantization.</li>
+        <li><strong>Arithmetic Decoding:</strong> The CUDA kernel <code class="inline">decode_fast_prefsum</code>
+            decodes each channel's bitstream back into quantized integer tokens.</li>
+        <li><strong>Dequantize:</strong> The quantized integers are scaled back to floating point using the
+            stored per-token max values: <code class="inline">x = (q - C) / C * max</code>.</li>
+        <li><strong>Reshape &amp; Stack:</strong> K and V are stacked back into the original tensor format,
+            cast to the model's precision (fp16 or bf16).</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- Detailed flow diagram: Encoder internals -->
+  <div class="diagram-container">
+    <div class="diagram-title">Encoder Internal Flow (encode_function)</div>
+    <div class="vstack">
+      <div class="flow-row">
+        <div class="flow-box box-blue">Input KV Tensor<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">[layers, 2, tokens, heads, head_dim]</span></div>
+      </div>
+      <div class="vstack"><div class="v-arrow"></div></div>
+      <div class="flow-row">
+        <div class="flow-box box-cyan" style="min-width:130px;">_split_kv()</div>
+      </div>
+      <div style="display:flex;gap:2rem;justify-content:center;margin-top:0.3rem;">
+        <div class="vstack"><div class="v-arrow"></div><div class="flow-box box-green">K Tensor<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">[layers, tokens, channels]</span></div></div>
+        <div class="vstack"><div class="v-arrow"></div><div class="flow-box box-green">V Tensor<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">[layers, tokens, channels]</span></div></div>
+      </div>
+      <div style="display:flex;gap:2rem;justify-content:center;">
+        <div class="vstack"><div class="v-arrow"></div><div class="flow-box box-purple" style="font-size:0.72rem;">torch_quant_vectorized(key_bins)</div></div>
+        <div class="vstack"><div class="v-arrow"></div><div class="flow-box box-purple" style="font-size:0.72rem;">torch_quant_vectorized(val_bins)</div></div>
+      </div>
+      <div class="vstack" style="margin-top:0.3rem;"><div class="v-arrow"></div></div>
+      <div class="flow-row">
+        <div class="flow-box box-orange">Concat + CDF Computation<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">torchac_cuda.calculate_cdf()</span></div>
+      </div>
+      <div class="vstack"><div class="v-arrow"></div></div>
+      <div class="flow-row">
+        <div class="flow-box box-red">Chunk Loop: encode_ntokens()<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">256 tokens/sub-chunk via CUDA kernel</span></div>
+      </div>
+      <div class="vstack"><div class="v-arrow"></div></div>
+      <div class="flow-row">
+        <div class="flow-box box-pink">CacheGenGPUEncoderOutput<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">data_chunks + CDF + max_tensors</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Custom Codec -->
+<section id="codec">
+  <h2><span class="sec-num">3</span> Custom Codec Design</h2>
+
+  <div class="card">
+    <h3>Why Not Standard Compression?</h3>
+    <p>
+      Generic compressors like gzip or zstd treat KV cache bytes as unstructured data and achieve only
+      ~1.1&ndash;1.3x compression. CacheGen exploits two key observations about KV cache tensors:
+    </p>
+    <ul style="margin-top: 0.6rem;">
+      <li><strong>Channel-wise distributional regularity:</strong> Within a given channel (attention head dimension),
+          values across token positions follow a characteristic distribution. This means a per-channel CDF
+          yields tight arithmetic coding.</li>
+      <li><strong>Layer-dependent sensitivity:</strong> Early transformer layers are more sensitive to quantization
+          error than later layers. CacheGen assigns more quantization bins to early layers and fewer to later ones.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Layer-Aware Quantization Scheme</h3>
+    <p>Different layers are quantized with different precision levels. For Longchat-7B (32 layers):</p>
+
+    <!-- Visual layer bar for Keys -->
+    <p style="margin-top: 1rem; font-size: 0.82rem; font-weight: 600; color: var(--accent-blue);">Key Tensors:</p>
+    <div class="layer-bar" style="margin-top: 0.3rem;">
+      <div class="layer-segment" style="flex: 10; background: linear-gradient(90deg, #4f8ff7, #3b7ae0);">Layers 0&ndash;9: 32 bins</div>
+      <div class="layer-segment" style="flex: 10; background: linear-gradient(90deg, #a78bfa, #8b6fe0);">Layers 10&ndash;19: 16 bins</div>
+      <div class="layer-segment" style="flex: 12; background: linear-gradient(90deg, #6366f1, #4f46e5);">Layers 20&ndash;31: 16 bins</div>
+    </div>
+
+    <p style="margin-top: 1rem; font-size: 0.82rem; font-weight: 600; color: var(--accent-green);">Value Tensors:</p>
+    <div class="layer-bar" style="margin-top: 0.3rem;">
+      <div class="layer-segment" style="flex: 2; background: linear-gradient(90deg, #34d399, #10b981);">0&ndash;1: 32 bins</div>
+      <div class="layer-segment" style="flex: 30; background: linear-gradient(90deg, #22d3ee, #06b6d4);">Layers 2&ndash;31: 16 bins</div>
+    </div>
+
+    <p style="margin-top: 1rem; font-size: 0.82rem; color: var(--text-muted);">
+      For the 70B model (80 layers), early layers (0&ndash;19) use 32 bins for keys; layers 20&ndash;39 use 32 bins;
+      and layers 40&ndash;79 use 16 bins.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Quantization: Symmetric Min-Max</h3>
+    <p>Each token row is independently scaled:</p>
+    <pre><code><span class="kw">def</span> <span class="fn">torch_quant_vectorized</span>(<span class="var">bins</span>: <span class="type">Tensor</span>, <span class="var">input_groups</span>: <span class="type">Tensor</span>):
+    <span class="cm">"""bins: [nlayers], input_groups: [nlayers, ntokens, nchannels]"""</span>
+    MAX = (bins // <span class="num">2</span> - <span class="num">1</span>)[:, <span class="num">None</span>, <span class="num">None</span>]           <span class="cm"># [nlayers, 1, 1]</span>
+    max1 = torch.<span class="fn">amax</span>(torch.<span class="fn">abs</span>(input_groups), dim=<span class="num">-1</span>, keepdim=<span class="num">True</span>)
+    factor = MAX / max1                                <span class="cm"># per-token scale</span>
+    xq = torch.<span class="fn">round</span>(input_groups <span class="op">*</span> factor <span class="op">+</span> MAX).<span class="fn">to</span>(torch.int8)
+    <span class="kw">return</span> xq, max1</code></pre>
+    <p style="margin-top: 0.5rem;">
+      The <code class="inline">max1</code> tensor (one float per token per layer) is stored as side information
+      for dequantization. The shift by <code class="inline">+MAX</code> maps values to <code class="inline">[0, 2*MAX]</code>
+      for non-negative integer symbols suitable for arithmetic coding.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Arithmetic Coding with Per-Channel CDFs</h3>
+    <p>
+      After quantization, a CDF is computed per channel across all tokens. This CDF captures how
+      frequently each quantization bin appears in that channel, enabling arithmetic coding to compress
+      near the entropy bound.
+    </p>
+    <pre><code><span class="cm">// CUDA kernel (torchac_cuda) exposes:</span>
+torchac_cuda.<span class="fn">calculate_cdf</span>(quantized_tensor, max_bins)     <span class="cm">// -> CDF on GPU</span>
+torchac_cuda.<span class="fn">encode_fast_new</span>(cdf, encode_input, buffer, lengths)
+torchac_cuda.<span class="fn">decode_fast_prefsum</span>(cdf, bytes_tensor, prefix_sums, output)</code></pre>
+    <p style="margin-top: 0.5rem;">
+      All operations run entirely on GPU. The <code class="inline">encode_fast_new</code> kernel processes all
+      layers and channels in parallel, writing compressed bytes into a pre-allocated output buffer.
+      The <code class="inline">collect_bytes</code> function then compacts the variable-length outputs into a
+      single contiguous byte tensor.
+    </p>
+  </div>
+
+  <div class="callout callout-green">
+    <span class="callout-icon">&#10003;</span>
+    <div>
+      <strong>Sub-chunk Processing:</strong> Each chunk is further divided into sub-chunks of
+      <code class="inline">CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256</code> tokens. This bounds GPU memory
+      usage for the output buffer and enables streaming encode/decode of arbitrarily long sequences.
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Repository Structure -->
+<section id="repo">
+  <h2><span class="sec-num">4</span> Repository Implementation</h2>
+
+  <div class="card">
+    <h3>Source Layout</h3>
+    <div class="file-tree">
+<span class="dir">cachegen/repo/</span>
+  <span class="key-file">cachegen.py</span>             <span class="comment"># Main encode+decode+inference driver</span>
+  <span class="key-file">run_adaptation.py</span>       <span class="comment"># Adaptive streaming with SLO-aware config selection</span>
+  <span class="file">run_cachegen.py</span>          <span class="comment"># Encode-only pipeline runner</span>
+  <span class="file">run_quantization_baseline.py</span> <span class="comment"># Baseline: quantize-only (no entropy coding)</span>
+  <span class="file">run_vanilla.py</span>           <span class="comment"># Baseline: full prefill (no caching)</span>
+  <span class="dir">src/</span>
+    <span class="key-file">cachegen_interface.py</span> <span class="comment"># CacheGenEngine class: chunk_kv() / decode_kv()</span>
+    <span class="file">attention_monkey_patch.py</span> <span class="comment"># LLaMA KV-reuse attention modification</span>
+    <span class="key-file">utils.py</span>              <span class="comment"># torch_quant, tensor_to_tuple, config_selection</span>
+  <span class="dir">LMCache/lmcache/</span>
+    <span class="file">cache_engine.py</span>        <span class="comment"># LMCacheEngine: chunk-based store/retrieve</span>
+    <span class="file">config.py</span>              <span class="comment"># LMCacheEngineConfig, LMCacheEngineMetadata</span>
+    <span class="dir">storage_backend/serde/</span>
+      <span class="key-file">cachegen_encoder.py</span> <span class="comment"># CacheGenSerializer: encode_function()</span>
+      <span class="key-file">cachegen_decoder.py</span> <span class="comment"># CacheGenDeserializer: decode_function_gpu()</span>
+      <span class="key-file">cachegen_basics.py</span>  <span class="comment"># CacheGenConfig, data classes, constants</span>
+      <span class="file">serde.py</span>             <span class="comment"># Abstract Serializer/Deserializer interfaces</span>
+    <span class="dir">connector/</span>
+      <span class="file">redis_connector.py</span>  <span class="comment"># Redis backend for remote KV cache store</span>
+    <span class="file">remote_backend.py</span>     <span class="comment"># Network-aware put/get with pipelining</span>
+  <span class="dir">third_party/torchac_cuda/</span>
+    <span class="key-file">torchac_kernel_enc_new.cu</span>  <span class="comment"># CUDA arithmetic encoder kernel</span>
+    <span class="key-file">torchac_kernel_dec_new.cu</span>  <span class="comment"># CUDA arithmetic decoder kernel</span>
+    <span class="file">cal_cdf.cu</span>                 <span class="comment"># CUDA CDF calculation kernel</span>
+    <span class="file">main.cpp</span>                   <span class="comment"># Pybind11 module definition</span>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>CacheGenSerializer (Encoder)</h3>
+      <pre><code><span class="kw">class</span> <span class="type">CacheGenSerializer</span>(<span class="type">Serializer</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, config, metadata):
+        self.cachegen_config = \
+            <span class="type">CacheGenConfig</span>.<span class="fn">from_model_name</span>(
+                metadata.model_name)
+        self.key_bins = self.<span class="fn">make_key_bins</span>(...)
+        self.value_bins = self.<span class="fn">make_value_bins</span>(...)
+
+    <span class="kw">def</span> <span class="fn">to_bytes</span>(self, tensor) -> <span class="type">bytes</span>:
+        <span class="cm"># Permute if huggingface format</span>
+        output = <span class="fn">encode_function</span>(
+            tensor.<span class="fn">cuda</span>(),
+            self.cachegen_config,
+            self.key_bins,
+            self.value_bins,
+            ntokens)
+        <span class="kw">return</span> output.<span class="fn">to_bytes</span>()</code></pre>
+    </div>
+    <div class="card">
+      <h3>CacheGenDeserializer (Decoder)</h3>
+      <pre><code><span class="kw">class</span> <span class="type">CacheGenDeserializer</span>(<span class="type">Deserializer</span>):
+    <span class="kw">def</span> <span class="fn">from_bytes</span>(self, bs) -> <span class="type">Tensor</span>:
+        enc_out = <span class="type">CacheGenGPUEncoderOutput</span> \
+            .<span class="fn">from_bytes</span>(bs)
+        key, value = <span class="fn">decode_function_gpu</span>(
+            enc_out.cdf,
+            enc_out.data_chunks,
+            layers_in_key, ntokens,
+            self.<span class="fn">get_output_buffer</span>(...))
+        <span class="cm"># Dequantize with stored max tensors</span>
+        key = <span class="fn">do_dequantize</span>(key,
+            self.key_bins, enc_out.max_tensors_key)
+        value = <span class="fn">do_dequantize</span>(value,
+            self.value_bins, enc_out.max_tensors_value)
+        <span class="cm"># Reshape and return</span>
+        <span class="kw">return</span> blob.<span class="fn">permute</span>(...)</code></pre>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>CacheGenConfig: Model-Specific Quantization Parameters</h3>
+    <pre><code><span class="kw">class</span> <span class="type">CacheGenConfig</span>:
+    key_first_layers: <span class="type">int</span>      <span class="cm"># Layers using highest bin count for keys</span>
+    key_second_layers: <span class="type">int</span>     <span class="cm"># Cumulative layer cutoff for medium bins</span>
+    key_third_layers: <span class="type">int</span>      <span class="cm"># Total layers (lowest bins for remainder)</span>
+    key_first_bins: <span class="type">int</span>        <span class="cm"># e.g., 32</span>
+    key_second_bins: <span class="type">int</span>       <span class="cm"># e.g., 16</span>
+    key_third_bins: <span class="type">int</span>        <span class="cm"># e.g., 16</span>
+    value_first_layers: <span class="type">int</span>    <span class="cm"># Layers using higher bins for values</span>
+    value_first_bins: <span class="type">int</span>      <span class="cm"># e.g., 32</span>
+    value_second_bins: <span class="type">int</span>     <span class="cm"># e.g., 16</span>
+
+<span class="cm"># Example: Longchat-7B (32 layers)</span>
+<span class="type">CacheGenConfig</span>(
+    key_first_layers=<span class="num">10</span>,  key_second_layers=<span class="num">20</span>,  key_third_layers=<span class="num">32</span>,
+    key_first_bins=<span class="num">32</span>,    key_second_bins=<span class="num">16</span>,    key_third_bins=<span class="num">16</span>,
+    value_first_layers=<span class="num">2</span>, value_first_bins=<span class="num">32</span>,   value_second_bins=<span class="num">16</span>
+)</code></pre>
+  </div>
+
+  <div class="card">
+    <h3>CacheGenEngine: High-Level Chunk Interface</h3>
+    <pre><code><span class="kw">class</span> <span class="type">CacheGenEngine</span>:
+    <span class="kw">def</span> <span class="fn">chunk_kv</span>(self, kv, doc_id, chunk_size=<span class="num">1024</span>, encoded_dir=<span class="num">None</span>):
+        <span class="cm">"""Split KV into chunks, encode each independently."""</span>
+        <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(nchunks):
+            chunk = kv[:, :, :, i*chunk_size:(i+<span class="num">1</span>)*chunk_size]
+            serializer = <span class="type">CacheGenSerializer</span>(config, meta)
+            encoded = serializer.<span class="fn">to_bytes</span>(chunk)
+            torch.<span class="fn">save</span>(torch.<span class="fn">frombuffer</span>(encoded, dtype=torch.uint8), path)
+
+    <span class="kw">def</span> <span class="fn">decode_kv</span>(self, encoded_dir, doc_id, chunk_size):
+        <span class="cm">"""Decode each chunk and concatenate."""</span>
+        <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(self.nchunks):
+            chunk = deserializer.<span class="fn">from_bytes</span>(raw_bytes)
+            decoded_kv.<span class="fn">append</span>(chunk)
+        <span class="kw">return</span> torch.<span class="fn">cat</span>(decoded_kv, dim=<span class="num">-2</span>)</code></pre>
+  </div>
+</section>
+
+<!-- Section 5: Performance -->
+<section id="performance">
+  <h2><span class="sec-num">5</span> Performance Analysis</h2>
+
+  <div class="card">
+    <h3>Compression Ratios</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Method</th>
+          <th>Compression Ratio</th>
+          <th>Quality (F1/Acc)</th>
+          <th>TTFT Reduction</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Longchat-7B (32 layers)</td>
+          <td>CacheGen</td>
+          <td style="color: var(--accent-cyan); font-weight: 600;">3.5&ndash;4.3x</td>
+          <td style="color: var(--accent-green);">&lt;0.5% drop</td>
+          <td>3.2x</td>
+        </tr>
+        <tr>
+          <td>LongAlpaca-70B (80 layers)</td>
+          <td>CacheGen</td>
+          <td style="color: var(--accent-cyan); font-weight: 600;">3.5&ndash;4.3x</td>
+          <td style="color: var(--accent-green);">&lt;0.5% drop</td>
+          <td>3.7x</td>
+        </tr>
+        <tr>
+          <td>Mistral-7B</td>
+          <td>CacheGen (Level 2)</td>
+          <td style="color: var(--accent-cyan); font-weight: 600;">~3.5x</td>
+          <td style="color: var(--accent-green);">Negligible drop</td>
+          <td>~3.2x</td>
+        </tr>
+        <tr>
+          <td>Any</td>
+          <td>Quantize-only (baseline)</td>
+          <td style="color: var(--text-muted);">2x (int8 from fp16)</td>
+          <td style="color: var(--accent-green);">~0% drop</td>
+          <td>~2x</td>
+        </tr>
+        <tr>
+          <td>Any</td>
+          <td>gzip / zstd</td>
+          <td style="color: var(--text-muted);">1.1&ndash;1.3x</td>
+          <td>Lossless</td>
+          <td>~1.1x</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-purple">
+    <span class="callout-icon">&#9734;</span>
+    <div>
+      <strong>Where does the compression come from?</strong> Quantizing from fp16 to ~4&ndash;5 bit integers provides
+      a base ~3x reduction. Arithmetic coding then compresses the quantized symbols below their raw bit width,
+      as the non-uniform per-channel distribution provides additional entropy reduction. Combined, this yields
+      3.5&ndash;4.3x total compression.
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>TTFT Breakdown</h3>
+    <p>Time-to-first-token consists of: <strong>network transfer</strong> + <strong>decode time</strong>.
+       CacheGen reduces both:</p>
+    <ul>
+      <li><strong>Transfer:</strong> 3.5&ndash;4.3x smaller payload directly reduces transfer time</li>
+      <li><strong>Decode:</strong> GPU-accelerated arithmetic decoding adds only ~20&ndash;50ms overhead,
+          far less than the network time saved</li>
+      <li><strong>Net effect:</strong> 3.2&ndash;3.7x TTFT improvement at realistic network bandwidths (1&ndash;10 Gbps)</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Accuracy on Benchmark Tasks</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Dataset</th>
+          <th>Task</th>
+          <th>Metric</th>
+          <th>Vanilla (No Compression)</th>
+          <th>CacheGen</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>LongChat</td>
+          <td>Long-range topic retrieval</td>
+          <td>GPT-judged accuracy</td>
+          <td>Baseline</td>
+          <td style="color: var(--accent-green);">&lt;1% drop</td>
+        </tr>
+        <tr>
+          <td>NarrativeQA</td>
+          <td>Long-doc reading comprehension</td>
+          <td>F1 score</td>
+          <td>Baseline</td>
+          <td style="color: var(--accent-green);">&lt;0.5% drop</td>
+        </tr>
+        <tr>
+          <td>TriviaQA</td>
+          <td>Open-domain QA</td>
+          <td>F1 score</td>
+          <td>Baseline</td>
+          <td style="color: var(--accent-green);">&lt;0.5% drop</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- Section 6: Adaptive Streaming -->
+<section id="adaptation">
+  <h2><span class="sec-num">6</span> Adaptive Streaming</h2>
+
+  <div class="card">
+    <h3>Bandwidth-Adaptive Quality Selection</h3>
+    <p>
+      CacheGen introduces an <strong>adaptive streaming</strong> mechanism inspired by video adaptive bitrate (ABR)
+      streaming. Each chunk of the KV cache can be encoded at multiple quality levels (quantization levels 1&ndash;3).
+      At runtime, the streamer selects the highest quality level that fits within the per-chunk time budget
+      based on current network bandwidth.
+    </p>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Adaptive Config Selection Per Chunk</div>
+    <div style="display:flex; gap:1rem; justify-content:center; flex-wrap:wrap; align-items:flex-end;">
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-green), #065f46); width:60px; height:100px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Q3</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 0<br>High BW</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-orange), #92400e); width:60px; height:70px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Q2</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 1<br>Med BW</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-red), #7f1d1d); width:60px; height:40px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Q1</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 2<br>Low BW</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-green), #065f46); width:60px; height:100px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Q3</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 3<br>High BW</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-purple), #4c1d95); width:60px; height:55px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Prefill</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 4<br>Very Low</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="background: linear-gradient(180deg, var(--accent-orange), #92400e); width:60px; height:70px; border-radius:8px 8px 0 0; display:flex; align-items:flex-end; justify-content:center; padding-bottom:8px;">
+          <span style="color:#fff;font-size:0.7rem;font-weight:700;">Q2</span>
+        </div>
+        <div style="font-size:0.68rem;color:var(--text-muted);margin-top:4px;">Chunk 5<br>Med BW</div>
+      </div>
+    </div>
+    <p style="text-align:center;margin-top:1rem;font-size:0.78rem;color:var(--text-muted);">
+      Bar height represents quality level. When bandwidth is too low for even Q1, the system falls back to local GPU prefill.
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Config Selection Algorithm</h3>
+    <pre><code><span class="kw">def</span> <span class="fn">config_selection</span>(all_bws, chunk_delay, args, length, doc_id):
+    num_chunks = <span class="fn">round</span>(length / args.chunk_size)
+    ttft = <span class="num">0</span>
+    configs = []
+    <span class="kw">for</span> chunk_id <span class="kw">in</span> <span class="fn">range</span>(num_chunks):
+        bw = all_bws[chunk_id]
+        <span class="kw">for</span> quant_level <span class="kw">in</span> [<span class="num">3</span>, <span class="num">2</span>, <span class="num">1</span>]:    <span class="cm"># Try highest quality first</span>
+            bytestream = <span class="fn">load</span>(f<span class="str">"{doc_id}_{chunk_id}_{quant_level}.pkl"</span>)
+            transfer_time = <span class="fn">len</span>(bytestream) / <span class="num">1e9</span> * <span class="num">8</span> / bw
+            <span class="kw">if</span> transfer_time < args.slo / num_chunks:
+                ttft += transfer_time
+                configs.<span class="fn">append</span>(quant_level)
+                <span class="kw">break</span>
+        <span class="kw">else</span>:
+            ttft += chunk_delay    <span class="cm"># Fallback to local prefill</span>
+            configs.<span class="fn">append</span>(<span class="num">0</span>)
+    <span class="kw">return</span> ttft, configs</code></pre>
+    <p style="margin-top: 0.5rem;">
+      The algorithm greedily tries the highest quality (most bins, larger payload) and degrades only if
+      the transfer time for a chunk would exceed <code class="inline">SLO / num_chunks</code>.
+      Level 0 means the chunk is computed locally via prefill rather than transferred.
+    </p>
+  </div>
+
+  <div class="callout callout-orange">
+    <span class="callout-icon">&#9888;</span>
+    <div>
+      <strong>Mistral-7B Multi-Level Encoding:</strong> The implementation supports three quantization levels
+      for Mistral-7B, each with different bin configurations. Level 1 uses 12&ndash;16 bins (aggressive compression),
+      Level 2 uses 16&ndash;32 bins (balanced), and Level 3 uses 32 bins everywhere (highest quality).
+      These are pre-encoded and stored on disk, then selected per-chunk at serving time.
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Agent Relevance -->
+<section id="agents">
+  <h2><span class="sec-num">7</span> Relevance to Agentic AI Systems</h2>
+
+  <div class="card">
+    <h3>Why CacheGen Matters for Agents</h3>
+    <p>
+      Agentic AI systems involve multi-step reasoning where an LLM agent accumulates context across
+      tool calls, observations, and reasoning chains. This accumulated context translates to a growing
+      KV cache that must be preserved across inference steps, potentially across machines.
+    </p>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Agent Context Transfer Scenario</div>
+    <div style="display:flex; align-items:center; justify-content:center; gap:0; flex-wrap:nowrap; min-width:600px;">
+      <div style="text-align:center;">
+        <div class="flow-box box-blue" style="min-width:120px;">GPU Worker A<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">Agent step N<br>KV cache: 8GB</span></div>
+      </div>
+      <div class="h-arrow" style="width:20px;"></div>
+      <div style="text-align:center;">
+        <div class="flow-box box-green" style="min-width:120px;">CacheGen<br>Encoder<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">Compress to ~2GB</span></div>
+      </div>
+      <div class="h-arrow" style="width:20px;"></div>
+      <div style="text-align:center;position:relative;">
+        <div class="flow-box box-orange" style="min-width:130px;">Network<br>Transfer<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">4x faster</span></div>
+      </div>
+      <div class="h-arrow" style="width:20px;"></div>
+      <div style="text-align:center;">
+        <div class="flow-box box-green" style="min-width:120px;">CacheGen<br>Decoder<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">Decompress on GPU</span></div>
+      </div>
+      <div class="h-arrow" style="width:20px;"></div>
+      <div style="text-align:center;">
+        <div class="flow-box box-purple" style="min-width:120px;">GPU Worker B<br><span style="font-size:0.65rem;font-weight:400;color:var(--text-muted)">Agent step N+1<br>Continue inference</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>Distributed Agent Scenarios</h3>
+      <ul>
+        <li><strong>Load balancing:</strong> Agent requests can be routed to any available GPU.
+            CacheGen enables fast migration of accumulated KV state between workers.</li>
+        <li><strong>Disaggregated prefill/decode:</strong> Prefill and decode stages can run on
+            different machines. CacheGen compresses the KV cache produced by the prefill node
+            for fast transfer to the decode node.</li>
+        <li><strong>Multi-agent collaboration:</strong> Agents sharing a common context document
+            can store the compressed KV cache centrally (e.g., Redis) and retrieve it on demand.</li>
+        <li><strong>Checkpointing:</strong> Long-running agent sessions can checkpoint their KV cache
+            to disk in compressed form for later resumption.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Integration with LMCache</h3>
+      <p>
+        CacheGen is integrated into the <strong>LMCache</strong> framework, which provides a
+        chunk-based cache engine with pluggable backends (local, Redis, hybrid). The integration
+        enables transparent KV cache compression:
+      </p>
+      <ul style="margin-top: 0.5rem;">
+        <li><code class="inline">remote_serde: "cachegen"</code> in config activates CacheGen
+            compression for all network transfers</li>
+        <li>The pipelined backend (<code class="inline">LMCPipelinedRemoteBackend</code>) overlaps
+            network fetch and decompression across chunks</li>
+        <li>Chunk hashing enables deduplication: shared context prefixes
+            are stored once and served to multiple agents</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout callout-blue">
+    <span class="callout-icon">&#9432;</span>
+    <div>
+      <strong>Pipelined Network + Decode:</strong> The <code class="inline">LMCPipelinedRemoteBackend</code>
+      runs separate threads for network fetching and CacheGen deserialization, allowing chunk N+1 to be
+      downloaded while chunk N is being decoded. This further reduces TTFT for multi-chunk agent contexts.
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: Paper vs Implementation -->
+<section id="comparison">
+  <h2><span class="sec-num">8</span> Paper vs Implementation Comparison</h2>
+
+  <div class="card">
+    <h3>Feature-by-Feature Alignment</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Paper Claim / Feature</th>
+          <th>Implementation Status</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Custom arithmetic codec for KV cache</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td>CUDA kernels in <code class="inline">torchac_cuda</code> with pybind11 binding. Encode, decode, and CDF computation all run on GPU.</td>
+        </tr>
+        <tr>
+          <td>Per-channel CDF computation</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">calculate_cdf()</code> in both Python (one-hot + cumsum) and CUDA kernel versions.</td>
+        </tr>
+        <tr>
+          <td>Layer-aware quantization (variable bins)</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">CacheGenConfig</code> defines 3 key layer groups and 2 value layer groups with configurable bin counts.</td>
+        </tr>
+        <tr>
+          <td>Chunk-based encoding/decoding</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">CacheGenEngine.chunk_kv()</code> splits KV into independent chunks. Sub-chunking at 256 tokens internally.</td>
+        </tr>
+        <tr>
+          <td>Adaptive streaming (ABR-style)</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">config_selection()</code> in <code class="inline">run_adaptation.py</code> implements greedy quality selection per chunk based on bandwidth traces.</td>
+        </tr>
+        <tr>
+          <td>Multiple quality levels per chunk</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td>Three quantization levels for Mistral-7B: levels 1, 2, 3 with increasing bin counts. Pre-encoded and selected at serving time.</td>
+        </tr>
+        <tr>
+          <td>3.5&ndash;4.3x compression ratio</td>
+          <td class="match-partial">Claimed, Not Independently Verifiable</td>
+          <td>No pre-computed reference outputs in repo. Requires A40 GPU + model weights + datasets to reproduce.</td>
+        </tr>
+        <tr>
+          <td>Negligible quality loss (&lt;0.5%)</td>
+          <td class="match-partial">Evaluation Code Present</td>
+          <td>F1 scoring for NQA/TQA and GPT-judged accuracy for LongChat are implemented. Requires OpenAI API key for LongChat evaluation.</td>
+        </tr>
+        <tr>
+          <td>Network-aware pipelining</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">LMCPipelinedRemoteBackend</code> with separate network and deserialize worker threads.</td>
+        </tr>
+        <tr>
+          <td>Redis-based remote KV store</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td><code class="inline">redis_connector.py</code> and <code class="inline">lm_connector.py</code> provide pluggable storage backends.</td>
+        </tr>
+        <tr>
+          <td>Support for vLLM format</td>
+          <td class="match-yes">Fully Implemented</td>
+          <td>Decoder handles both <code class="inline">"huggingface"</code> and <code class="inline">"vllm"</code> tensor formats with different permutations and dtypes.</td>
+        </tr>
+        <tr>
+          <td>70B model support (multi-GPU)</td>
+          <td class="match-yes">Present</td>
+          <td>Config for LongAlpaca-70B with 80 layers. Scripts assume 4x A40 GPUs with 8-bit loading.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>Strengths of the Implementation</h3>
+      <ul>
+        <li><strong>End-to-end GPU pipeline:</strong> CDF computation, arithmetic coding, and quantization
+            all execute on GPU via custom CUDA kernels, avoiding CPU-GPU transfer overhead.</li>
+        <li><strong>Clean serialization interface:</strong> The <code class="inline">Serializer</code> /
+            <code class="inline">Deserializer</code> abstraction allows easy swapping between CacheGen and
+            plain torch serialization.</li>
+        <li><strong>Production-grade integration:</strong> Embedded in LMCache with Redis backends,
+            chunk hashing, pipelined retrieval, and debug wrappers.</li>
+        <li><strong>Multi-model support:</strong> Pre-configured for Longchat-7B, Mistral-7B (with 3 quality levels),
+            and LongAlpaca-70B.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Gaps and Limitations</h3>
+      <ul>
+        <li><strong>Model coverage:</strong> <code class="inline">from_model_name()</code> only supports a fixed set
+            of models. Adding new architectures requires manual calibration of layer group boundaries and bin counts.</li>
+        <li><strong>No automated calibration:</strong> The paper discusses finding optimal bin configurations,
+            but the code hardcodes them. No automated search or profiling tool is included.</li>
+        <li><strong>Pickle-based serialization:</strong> The <code class="inline">to_bytes()</code> method uses Python
+            pickle, which has known security and portability issues. A format like protobuf or flatbuffers would be
+            more robust for production use.</li>
+        <li><strong>Hardcoded sub-chunk size:</strong> <code class="inline">CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK = 256</code>
+            is a fixed constant; the paper discusses this as a tunable parameter but the code does not expose it.</li>
+        <li><strong>No streaming decode demo:</strong> While the pipelined backend exists, there is no end-to-end
+            script demonstrating real-time adaptive streaming over a network link.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout callout-red">
+    <span class="callout-icon">&#9888;</span>
+    <div>
+      <strong>Reproducibility Note:</strong> Running the artifact evaluation requires specific hardware
+      (A40 GPUs), model weights (Mistral-7B, LongAlpaca-70B), datasets (LongChat, NarrativeQA, TriviaQA),
+      and an OpenAI API key for LongChat accuracy evaluation. The scripts in <code class="inline">scripts/</code>
+      and instructions in <code class="inline">sigcomm_ae.md</code> provide the necessary commands.
+    </div>
+  </div>
+</section>
+
+<!-- Summary Section -->
+<section id="summary">
+  <h2><span class="sec-num">9</span> Technical Summary</h2>
+
+  <div class="card">
+    <h3>Core Contribution</h3>
+    <p>
+      CacheGen demonstrates that KV cache tensors are not arbitrary floating-point data &mdash; they have
+      exploitable structure. By building per-channel CDFs from quantized attention states and applying
+      GPU-accelerated arithmetic coding, the system achieves compression ratios that are
+      <strong>3&ndash;4x better than generic compressors</strong> while maintaining near-lossless quality.
+    </p>
+    <p style="margin-top: 0.6rem;">
+      The adaptive streaming mechanism adds a practical networking dimension: by pre-encoding chunks at
+      multiple quality levels and selecting at serving time based on available bandwidth, CacheGen ensures
+      the time-to-first-token SLO is met even under variable network conditions &mdash; a design that directly
+      mirrors video ABR streaming but applied to LLM attention state.
+    </p>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">CacheGen vs Baselines: Conceptual Compression Landscape</div>
+    <div style="display: flex; align-items: flex-end; justify-content: center; gap: 2rem; flex-wrap: wrap; padding: 1rem 0;">
+      <div style="text-align: center;">
+        <div style="width: 80px; height: 40px; background: linear-gradient(180deg, #6b7394, #3b3f5c); border-radius: 6px 6px 0 0; display:flex; align-items:center; justify-content:center;">
+          <span style="color:#e8eaf0;font-size:0.72rem;font-weight:700;">1.2x</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;">gzip/zstd</div>
+      </div>
+      <div style="text-align: center;">
+        <div style="width: 80px; height: 80px; background: linear-gradient(180deg, var(--accent-orange), #92400e); border-radius: 6px 6px 0 0; display:flex; align-items:center; justify-content:center;">
+          <span style="color:#fff;font-size:0.72rem;font-weight:700;">2.0x</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;">Quantize<br>Only (int8)</div>
+      </div>
+      <div style="text-align: center;">
+        <div style="width: 80px; height: 120px; background: linear-gradient(180deg, var(--accent-blue), #1e40af); border-radius: 6px 6px 0 0; display:flex; align-items:center; justify-content:center;">
+          <span style="color:#fff;font-size:0.72rem;font-weight:700;">3.0x</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;">Quantize +<br>Huffman</div>
+      </div>
+      <div style="text-align: center; position: relative;">
+        <div style="width: 80px; height: 170px; background: linear-gradient(180deg, var(--accent-cyan), #0e7490); border-radius: 6px 6px 0 0; display:flex; align-items:center; justify-content:center;">
+          <span style="color:#fff;font-size:0.72rem;font-weight:700;">3.5&ndash;4.3x</span>
+        </div>
+        <div style="font-size:0.72rem;color:var(--accent-cyan);margin-top:4px;font-weight:600;">CacheGen</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Key Design Decisions</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Decision</th>
+          <th>Rationale</th>
+          <th>Trade-off</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Per-channel CDF (not per-layer or global)</td>
+          <td>Each head dimension has distinct value distribution</td>
+          <td>Small CDF overhead (stored per chunk) but much better compression</td>
+        </tr>
+        <tr>
+          <td>Layer-aware variable quantization</td>
+          <td>Early layers more sensitive to approximation error</td>
+          <td>Slightly lower compression for early layers, but preserves quality</td>
+        </tr>
+        <tr>
+          <td>Chunk-based independence</td>
+          <td>Enables parallel encode/decode and adaptive streaming</td>
+          <td>Cannot exploit inter-chunk correlations</td>
+        </tr>
+        <tr>
+          <td>GPU arithmetic coding</td>
+          <td>Avoids CPU-GPU transfer bottleneck during decode</td>
+          <td>Custom CUDA code, harder to maintain</td>
+        </tr>
+        <tr>
+          <td>Sub-chunk of 256 tokens</td>
+          <td>Bounds GPU buffer memory for arithmetic coder</td>
+          <td>Fixed constant; may not be optimal for all models</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>Technical analysis of CacheGen (arXiv:2310.07240, SIGCOMM '24) &mdash; Generated from source code and paper review</p>
+  <p style="margin-top:0.3rem;">Repository: <a href="https://github.com/LMCache/LMCache" style="color:var(--accent-blue);text-decoration:none;">github.com/LMCache/LMCache</a></p>
+</footer>
+
+</body>
+</html>

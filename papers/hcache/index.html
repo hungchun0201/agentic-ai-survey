@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HCache - Fast State Restoration in LLM Serving</title>
+<style>
+  :root {
+    --bg-primary: #0a0d14;
+    --bg-secondary: #0f1420;
+    --bg-card: #151b2c;
+    --bg-code: #1e1e2e;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-blue: #89b4fa;
+    --accent-green: #a6e3a1;
+    --accent-mauve: #cba6f7;
+    --accent-peach: #fab387;
+    --accent-red: #f38ba8;
+    --accent-teal: #94e2d5;
+    --accent-yellow: #f9e2af;
+    --border-color: #1e2d44;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(10,13,20,0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0.6rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  nav .logo {
+    color: var(--accent-red);
+    font-weight: 700;
+    font-size: 1rem;
+    margin-right: 0.5rem;
+  }
+  nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  nav a:hover {
+    color: var(--accent-red);
+    border-bottom-color: var(--accent-red);
+  }
+  .hero {
+    background: linear-gradient(135deg, #16213e, #0f3460);
+    padding: 4.5rem 2rem 3.5rem;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 30% 20%, rgba(243,139,168,0.1) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 80%, rgba(250,179,135,0.08) 0%, transparent 55%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.3rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #f38ba8, #fab387, #f9e2af);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.6rem;
+    max-width: 56rem;
+    margin-left: auto;
+    margin-right: auto;
+    position: relative;
+  }
+  .hero .venue {
+    color: var(--accent-teal);
+    font-weight: 600;
+    font-size: 1rem;
+    margin-bottom: 0.3rem;
+    position: relative;
+  }
+  .hero .authors {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    max-width: 48rem;
+    margin: 0 auto 1rem;
+    position: relative;
+  }
+  .hero .arxiv {
+    display: inline-block;
+    background: rgba(243,139,168,0.15);
+    color: var(--accent-red);
+    padding: 0.4rem 1.2rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    border: 1px solid rgba(243,139,168,0.3);
+    position: relative;
+  }
+  .hero .tags {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+    position: relative;
+  }
+  .hero .tag {
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .section {
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 3rem 2rem;
+  }
+  .section h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border-color);
+  }
+  .section h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+  p { margin-bottom: 0.8rem; }
+  .card {
+    background: var(--bg-card);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin-bottom: 1.2rem;
+    border: 1px solid var(--border-color);
+  }
+  .card-blue { border-left: 4px solid var(--accent-blue); }
+  .card-green { border-left: 4px solid var(--accent-green); }
+  .card-mauve { border-left: 4px solid var(--accent-mauve); }
+  .card-peach { border-left: 4px solid var(--accent-peach); }
+  .card-teal { border-left: 4px solid var(--accent-teal); }
+  .card-red { border-left: 4px solid var(--accent-red); }
+  .card-yellow { border-left: 4px solid var(--accent-yellow); }
+  .card h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+  }
+  .code-block {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border-radius: 8px;
+    padding: 1.2rem;
+    margin: 1rem 0;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    font-size: 0.82rem;
+    overflow-x: auto;
+    line-height: 1.6;
+    border: 1px solid #313244;
+  }
+  .kw { color: #cba6f7; }
+  .fn { color: #89b4fa; }
+  .cm { color: #6c7086; }
+  .st { color: #a6e3a1; }
+  .nu { color: #fab387; }
+  table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.85rem; }
+  th { background:#16213e; color:#fff; padding:0.7rem 0.8rem; text-align:left; font-weight:600; }
+  td { padding:0.55rem 0.8rem; border-bottom:1px solid var(--border-color); }
+  tr:hover { background:rgba(137,180,250,0.05); }
+  .note { background:rgba(166,227,161,0.08); border-left:4px solid var(--accent-green); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .warn { background:rgba(249,226,175,0.08); border-left:4px solid var(--accent-yellow); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .info { background:rgba(137,180,250,0.08); border-left:4px solid var(--accent-blue); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .grid-2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:1.2rem; }
+  .arch-diagram { background:var(--bg-secondary); border-radius:12px; padding:2rem; margin:1.5rem 0; border:1px solid var(--border-color); }
+  .arch-row { display:flex; align-items:center; justify-content:center; gap:1rem; margin:1rem 0; flex-wrap:wrap; }
+  .arch-box { padding:0.7rem 1.2rem; border-radius:8px; font-size:0.82rem; font-weight:600; text-align:center; min-width:110px; }
+  .arch-arrow-down { width:2px; height:28px; background:var(--text-muted); margin:0 auto; position:relative; }
+  .arch-arrow-down::after { content:''; position:absolute; bottom:-1px; left:-4px; border:5px solid transparent; border-top:6px solid var(--text-muted); }
+  .arch-arrow-right { width:30px; height:2px; background:var(--text-muted); position:relative; display:inline-block; }
+  .arch-arrow-right::after { content:''; position:absolute; right:-1px; top:-4px; border:5px solid transparent; border-left:6px solid var(--text-muted); }
+  .metric-strip { display:flex; gap:1rem; flex-wrap:wrap; margin:1.5rem 0; justify-content:center; }
+  .metric-box { background:var(--bg-card); border-radius:10px; padding:1.2rem 1.5rem; text-align:center; border:1px solid var(--border-color); min-width:140px; flex:1; }
+  .metric-box .val { font-size:1.8rem; font-weight:800; } .metric-box .lbl { font-size:0.78rem; color:var(--text-secondary); margin-top:0.2rem; }
+  ul, ol { padding-left:1.3rem; margin:0.5rem 0 0.8rem; }
+  li { margin-bottom:0.3rem; }
+  .formula { background:var(--bg-card); border-radius:8px; padding:0.8rem 1.2rem; margin:0.8rem 0; font-family:'Cascadia Code','Fira Code',monospace; font-size:0.85rem; text-align:center; border:1px solid var(--border-color); overflow-x:auto; }
+  @media (max-width:768px) { .hero h1 { font-size:1.6rem; } .section { padding:2rem 1rem; } .grid-2 { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">HCache</span>
+  <a href="#overview">Overview</a>
+  <a href="#background">Background</a>
+  <a href="#core-idea">Core Idea</a>
+  <a href="#cost-analysis">Cost Analysis</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#scheduler">Scheduler</a>
+  <a href="#storage">Storage</a>
+  <a href="#implementation">Implementation</a>
+  <a href="#results">Results</a>
+  <a href="#sensitivity">Sensitivity</a>
+  <a href="#significance">Significance</a>
+</nav>
+
+<div class="hero">
+  <div class="venue">EuroSys 2025</div>
+  <h1>HCache: Fast State Restoration in LLM Serving</h1>
+  <p class="authors">Shiwei Gao, Youmin Chen, Jiwu Shu &mdash; Tsinghua University</p>
+  <a class="arxiv" href="https://arxiv.org/abs/2410.05004" target="_blank">arXiv:2410.05004</a>
+  <div class="tags">
+    <span class="tag" style="background:rgba(243,139,168,0.15);color:var(--accent-red);">Hidden State Caching</span>
+    <span class="tag" style="background:rgba(250,179,135,0.15);color:var(--accent-peach);">Bubble-Free Scheduling</span>
+    <span class="tag" style="background:rgba(166,227,161,0.15);color:var(--accent-green);">1.93x TTFT vs KV Offload</span>
+    <span class="tag" style="background:rgba(137,180,250,0.15);color:var(--accent-blue);">5.73x vs Recomputation</span>
+    <span class="tag" style="background:rgba(148,226,213,0.15);color:var(--accent-teal);">Lossless / Zero Accuracy Loss</span>
+  </div>
+</div>
+
+<!-- ======================== OVERVIEW ======================== -->
+<div class="section" id="overview">
+  <h2>Overview</h2>
+  <div class="card card-red">
+    <h3>The State Restoration Bottleneck in Stateful LLM Serving</h3>
+    <p>Modern LLM applications are increasingly <strong>stateful</strong>: multi-round conversations, RAG pipelines, and code assistants all depend on historical context. In these settings, the KV cache from prior interactions must be restored when a conversation resumes. Analysis of ShareGPT4 and L-Eval traces shows that a single A100-40GB GPU can keep only 7-20 multi-round conversations or 1-3 long contexts in GPU memory simultaneously.</p>
+    <p>When KV caches are evicted (which happens frequently), they must be restored. The two existing approaches are both expensive:</p>
+    <ul>
+      <li><strong>Token recomputation:</strong> Re-executes the full prefill phase from original tokens. This requires full attention + FFN computation, making it 20-26x slower than ideal TTFT.</li>
+      <li><strong>KV offloading:</strong> Stores KV cache on host storage and transfers it back via PCIe. The KV cache is large (10^5x larger than tokens), making transfers 6.5-13x slower than ideal.</li>
+    </ul>
+    <p>Both approaches occupy extreme ends of the compute-IO spectrum: recomputation uses only GPU compute, KV offloading uses only IO bandwidth. Neither leverages both resources simultaneously.</p>
+  </div>
+  <div class="card card-peach">
+    <h3>HCache: A Third Approach</h3>
+    <p>HCache introduces a fundamentally new state representation for LLM serving: <strong>caching intermediate activations (hidden states)</strong> instead of KV tensors or original tokens. Hidden states are the inputs to each transformer layer, from which KV pairs can be reconstructed via a single GEMM projection. This approach is:</p>
+    <ul>
+      <li><strong>2x smaller</strong> than KV cache (one tensor vs K+V pair per layer)</li>
+      <li><strong>6x faster</strong> to recompute KV from hidden states than from tokens (skips attention and FFN)</li>
+      <li><strong>Pipelineable:</strong> IO transmission and computation can overlap concurrently</li>
+      <li><strong>Lossless:</strong> Zero accuracy degradation since K = W_k * H and V = W_v * H are exact</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ======================== BACKGROUND ======================== -->
+<div class="section" id="background">
+  <h2>Background: Stateful LLM Applications</h2>
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>Multi-Round Conversations</h3>
+      <p>In ChatGPT-style interactions (ShareGPT4 trace analysis), the average input per round is 66.8 tokens and the average output is 358.8 tokens. While individual rounds are short, history accumulates: the CDF of conversation history shows that 50% of conversations exceed 2.5K tokens. Each round that resumes a conversation requires restoring the full KV cache of all prior rounds.</p>
+    </div>
+    <div class="card card-green">
+      <h3>Long-Context Applications</h3>
+      <p>RAG applications and document Q&A (L-Eval traces) involve context lengths averaging 16,340 tokens, with individual subtasks like Paper Assistant extending to 10,603 tokens. These contexts may be reused hours apart. The KV cache for a 7B model at 16K tokens is ~2GB, too large for persistent GPU residency but frequently needed.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== CORE IDEA ======================== -->
+<div class="section" id="core-idea">
+  <h2>Core Idea: Caching Hidden States</h2>
+
+  <div class="arch-diagram">
+    <div style="text-align:center;font-size:0.95rem;font-weight:700;color:var(--accent-red);margin-bottom:1.2rem;">Transformer Layer: Where Hidden States Live</div>
+    <div style="display:flex;justify-content:center;gap:0.5rem;flex-wrap:wrap;align-items:stretch;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:0.4rem;min-width:160px;">
+        <div class="arch-box" style="background:rgba(243,139,168,0.15);color:var(--accent-red);border:1px solid rgba(243,139,168,0.3);width:100%;font-size:0.75rem;">Hidden State H_i (Layer Input)</div>
+        <div class="arch-arrow-down"></div>
+        <div style="display:flex;gap:0.4rem;width:100%;justify-content:center;">
+          <div style="flex:1;padding:0.4rem;background:rgba(137,180,250,0.1);border-radius:6px;font-size:0.65rem;text-align:center;color:var(--accent-blue);border:1px solid rgba(137,180,250,0.15);">
+            QKV Proj<br>
+            <span style="font-size:0.58rem;">K = W_k * H</span><br>
+            <span style="font-size:0.58rem;">V = W_v * H</span>
+          </div>
+          <div style="flex:1;padding:0.4rem;background:rgba(250,179,135,0.1);border-radius:6px;font-size:0.65rem;text-align:center;color:var(--accent-peach);border:1px solid rgba(250,179,135,0.15);">
+            Attention<br>
+            <span style="font-size:0.58rem;">O(N^2 * D)</span>
+          </div>
+        </div>
+        <div class="arch-arrow-down"></div>
+        <div class="arch-box" style="background:rgba(203,166,247,0.12);color:var(--accent-mauve);border:1px solid rgba(203,166,247,0.2);width:100%;font-size:0.7rem;">FFN (FC1 + FC2)</div>
+        <div class="arch-arrow-down"></div>
+        <div class="arch-box" style="background:rgba(166,227,161,0.15);color:var(--accent-green);border:1px solid rgba(166,227,161,0.3);width:100%;font-size:0.75rem;">Hidden State H_{i+1} (Next Layer)</div>
+      </div>
+      <div style="display:flex;align-items:center;padding:0 1rem;">
+        <div style="display:flex;flex-direction:column;gap:0.5rem;padding:1rem;background:rgba(243,139,168,0.05);border-radius:8px;border:1px dashed rgba(243,139,168,0.2);">
+          <div style="font-size:0.8rem;font-weight:700;color:var(--accent-red);">HCache Insight</div>
+          <div style="font-size:0.72rem;color:var(--text-primary);">Store H_i (the hidden state) instead of K,V</div>
+          <div style="font-size:0.68rem;color:var(--text-secondary);">Restore: K = W_k * H, V = W_v * H</div>
+          <div style="font-size:0.68rem;color:var(--text-secondary);">Cost: 4 * N * D^2 FLOPs (GEMM only)</div>
+          <div style="font-size:0.68rem;color:var(--accent-green);">vs Recompute: 24 * N * D^2 + N^2 * D</div>
+          <div style="font-size:0.68rem;color:var(--accent-green);">Speedup lower bound: 6x</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card card-red">
+    <h3>Why Hidden States Are Better</h3>
+    <p>The key insight is that the hidden state H_i at each layer is the <strong>minimal sufficient representation</strong> from which KV pairs can be exactly reconstructed. Compared to the two existing approaches:</p>
+    <ul>
+      <li><strong>vs KV Offloading:</strong> Hidden states are exactly half the size of KV cache (one tensor vs K+V), halving IO transmission time. Additionally, the GEMM to recompute KV from H overlaps with IO.</li>
+      <li><strong>vs Token Recomputation:</strong> Recomputing KV from hidden states requires only the QKV projection (a single GEMM per layer), skipping the expensive attention (O(N^2*D)) and FFN (16*N*D^2) modules entirely. The theoretical speedup is at least 6x.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ======================== COST ANALYSIS ======================== -->
+<div class="section" id="cost-analysis">
+  <h2>Theoretical Cost Analysis</h2>
+
+  <div class="grid-2">
+    <div class="card card-peach">
+      <h3>IO Transmission Cost</h3>
+      <div class="formula">IO_hidden = (N_seq * D_hidden) / BW</div>
+      <div class="formula">IO_KV = (2 * N_seq * D_hidden) / BW</div>
+      <p>Hidden states are exactly 2x smaller than KV cache. For Llama2-7B: D_hidden = 4096, each token's hidden state is 8KB (BF16), while KV cache per token is 16KB. The IO savings apply to every layer.</p>
+    </div>
+    <div class="card card-mauve">
+      <h3>Computation Cost</h3>
+      <div class="formula">C_hidden = (4 * N_seq * D_hidden^2) / FLOPS</div>
+      <div class="formula">C_recompute = (24 * N_seq * D_hidden^2 + N_seq^2 * D_hidden) / FLOPS</div>
+      <p>The relative speedup of HCache vs recomputation: (24*N*D^2 + N^2*D) / (4*N*D^2) = 6 + N/(4*D). For sequences longer than 4K tokens with D=4096, HCache is >7x faster computationally.</p>
+    </div>
+  </div>
+
+  <div class="card card-teal">
+    <h3>Pipelined End-to-End Restoration Time</h3>
+    <p>HCache overlaps IO transmission with computation: while hidden states for layer L_{n+1} are being transmitted from storage, the KV cache for layer L_n is being computed from its already-loaded hidden states. The end-to-end restoration time is therefore:</p>
+    <div class="formula">T_hidden = max(IO_hidden, C_hidden)</div>
+    <p>This is strictly better than both KV offloading (T_kv = IO_KV, no computation overlap) and recomputation (T_rec = C_attn + C_ffn, no IO utilization). HCache uses both IO and compute simultaneously.</p>
+  </div>
+
+  <h3>Per-Token Storage Cost Comparison</h3>
+  <table>
+    <thead><tr><th>Model</th><th>HCache Schedule</th><th>HCache Storage</th><th>KV Offload Storage</th><th>Savings</th></tr></thead>
+    <tbody>
+      <tr><td>Llama2-7B</td><td>31 H + 1 KV</td><td>132 KiB/token</td><td>256 KiB/token</td><td style="color:var(--accent-green);font-weight:700;">1.94x</td></tr>
+      <tr><td>Llama2-13B</td><td>36 H + 4 KV</td><td>210 KiB/token</td><td>400 KiB/token</td><td style="color:var(--accent-green);font-weight:700;">1.90x</td></tr>
+      <tr><td>OPT-30B</td><td>40 H + 8 RE</td><td>280 KiB/token</td><td>672 KiB/token</td><td style="color:var(--accent-green);font-weight:700;">2.40x</td></tr>
+    </tbody>
+  </table>
+  <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.3rem;">H = hidden state layers, KV = KV offloaded layers, RE = recomputed layers. The schedule is determined by the bubble-free scheduler.</div>
+</div>
+
+<!-- ======================== ARCHITECTURE ======================== -->
+<div class="section" id="architecture">
+  <h2>System Architecture</h2>
+
+  <div class="arch-diagram">
+    <div style="text-align:center;font-size:0.95rem;font-weight:700;color:var(--accent-red);margin-bottom:1.2rem;">HCache System Overview</div>
+    <div style="display:flex;gap:1.5rem;justify-content:center;flex-wrap:wrap;align-items:stretch;">
+      <!-- GPU Side -->
+      <div style="flex:1;min-width:240px;padding:1.2rem;background:rgba(137,180,250,0.05);border-radius:10px;border:1px solid rgba(137,180,250,0.2);">
+        <div style="font-size:0.82rem;font-weight:700;color:var(--accent-blue);margin-bottom:0.8rem;text-align:center;">GPU</div>
+        <div style="display:flex;flex-direction:column;gap:0.5rem;">
+          <div class="arch-box" style="background:rgba(250,179,135,0.12);color:var(--accent-peach);border:1px solid rgba(250,179,135,0.2);font-size:0.72rem;">LLM Engine (DeepSpeed-MII)</div>
+          <div style="display:flex;gap:0.4rem;">
+            <div style="flex:1;padding:0.4rem;background:rgba(243,139,168,0.1);border-radius:6px;font-size:0.65rem;text-align:center;color:var(--accent-red);border:1px solid rgba(243,139,168,0.15);">KV Cache<br>(PagedAttention)</div>
+            <div style="flex:1;padding:0.4rem;background:rgba(203,166,247,0.1);border-radius:6px;font-size:0.65rem;text-align:center;color:var(--accent-mauve);border:1px solid rgba(203,166,247,0.15);">Temp Buffer<br>(Hidden States)</div>
+          </div>
+          <div class="arch-box" style="background:rgba(148,226,213,0.12);color:var(--accent-teal);border:1px solid rgba(148,226,213,0.2);font-size:0.72rem;">Restoration Scheduler<br><span style="font-size:0.6rem;">L_H layers (HCache) + L_O layers (KV/recompute)</span></div>
+        </div>
+      </div>
+      <!-- Connection -->
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.3rem;">
+        <div style="font-size:0.65rem;color:var(--accent-yellow);">cudaMemcpy</div>
+        <div style="width:60px;height:2px;background:var(--accent-yellow);"></div>
+        <div style="font-size:0.65rem;color:var(--accent-green);">GPUDirect / SPDK</div>
+        <div style="width:60px;height:2px;background:var(--accent-green);"></div>
+      </div>
+      <!-- Host Side -->
+      <div style="flex:1;min-width:240px;padding:1.2rem;background:rgba(166,227,161,0.05);border-radius:10px;border:1px solid rgba(166,227,161,0.2);">
+        <div style="font-size:0.82rem;font-weight:700;color:var(--accent-green);margin-bottom:0.8rem;text-align:center;">Host Storage</div>
+        <div style="display:flex;flex-direction:column;gap:0.5rem;">
+          <div class="arch-box" style="background:rgba(166,227,161,0.12);color:var(--accent-green);border:1px solid rgba(166,227,161,0.2);font-size:0.72rem;">Storage Manager<br><span style="font-size:0.6rem;">Chunk-based layout (64-token chunks)</span></div>
+          <div style="display:flex;gap:0.4rem;">
+            <div style="flex:1;padding:0.4rem;background:rgba(166,227,161,0.08);border-radius:6px;font-size:0.62rem;text-align:center;color:var(--accent-green);border:1px solid rgba(166,227,161,0.12);">SSD 1</div>
+            <div style="flex:1;padding:0.4rem;background:rgba(166,227,161,0.08);border-radius:6px;font-size:0.62rem;text-align:center;color:var(--accent-green);border:1px solid rgba(166,227,161,0.12);">SSD 2</div>
+            <div style="flex:1;padding:0.4rem;background:rgba(166,227,161,0.08);border-radius:6px;font-size:0.62rem;text-align:center;color:var(--accent-green);border:1px solid rgba(166,227,161,0.12);">SSD 3</div>
+            <div style="flex:1;padding:0.4rem;background:rgba(166,227,161,0.08);border-radius:6px;font-size:0.62rem;text-align:center;color:var(--accent-green);border:1px solid rgba(166,227,161,0.12);">SSD 4</div>
+          </div>
+          <div style="font-size:0.62rem;color:var(--text-muted);text-align:center;">Round-robin chunk distribution</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== SCHEDULER ======================== -->
+<div class="section" id="scheduler">
+  <h2>Bubble-Free Restoration Scheduler</h2>
+
+  <div class="card card-teal">
+    <h3>The Pipeline Bubble Problem</h3>
+    <p>HCache's pipelined restoration (IO for layer N+1 overlapping with compute for layer N) does not always produce perfectly balanced stages. If computation is much faster than IO (or vice versa), pipeline bubbles waste resources. The bubble-free scheduler solves this by partitioning model layers into two groups:</p>
+    <ul>
+      <li><strong>L_H layers:</strong> Restored using HCache (hidden states loaded + KV recomputed)</li>
+      <li><strong>L_O layers:</strong> Restored using a complementary method (KV offloading or token recomputation)</li>
+    </ul>
+    <p>The partition is chosen to eliminate bubbles: the slower resource on HCache layers is balanced by using the complementary method on L_O layers.</p>
+  </div>
+
+  <div class="card card-mauve">
+    <h3>State Partition Algorithm</h3>
+    <p>Given hardware profiling results (IO_H for hidden state transmission, IO_KV for KV cache transmission, C_Token for token recompute, C_H for hidden-to-KV compute), the optimal partition is:</p>
+    <div class="formula">If C_H > IO_H: &nbsp; L_H = ceil(N_Layer * IO_KV / (IO_KV + C_H - IO_H))</div>
+    <div class="formula">If C_H &le; IO_H: &nbsp; L_H = ceil(N_Layer * C_Token / (C_Token + IO_H - C_H))</div>
+    <div class="formula">L_O = N_Layer - L_H</div>
+    <p>This ensures computation and transmission finish almost simultaneously, eliminating pipeline bubbles. The paper uses <strong>layer-wise partition</strong> over token-wise partition because cuBLAS GEMM kernels are well-optimized for standard matrix sizes, and token-wise partitions create irregular matrices that degrade cuBLAS performance.</p>
+  </div>
+
+  <div class="arch-diagram">
+    <div style="text-align:center;font-size:0.85rem;font-weight:700;color:var(--accent-teal);margin-bottom:1rem;">Pipelined Restoration Timeline</div>
+    <div style="display:flex;flex-direction:column;gap:0.4rem;">
+      <div style="display:flex;gap:0.3rem;align-items:center;">
+        <div style="width:80px;font-size:0.7rem;color:var(--text-muted);text-align:right;padding-right:0.5rem;">IO (SSD):</div>
+        <div style="flex:1;display:flex;gap:2px;">
+          <div style="flex:1;padding:0.3rem;background:rgba(166,227,161,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-green);">Load H(L1)</div>
+          <div style="flex:1;padding:0.3rem;background:rgba(166,227,161,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-green);">Load H(L2)</div>
+          <div style="flex:1;padding:0.3rem;background:rgba(166,227,161,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-green);">Load H(L3)</div>
+          <div style="flex:1;padding:0.3rem;background:rgba(137,180,250,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-blue);">Load KV(L4)</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:0.3rem;align-items:center;">
+        <div style="width:80px;font-size:0.7rem;color:var(--text-muted);text-align:right;padding-right:0.5rem;">GPU:</div>
+        <div style="flex:1;display:flex;gap:2px;">
+          <div style="flex:0.3;"></div>
+          <div style="flex:1;padding:0.3rem;background:rgba(243,139,168,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-red);">GEMM(L1)</div>
+          <div style="flex:1;padding:0.3rem;background:rgba(243,139,168,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-red);">GEMM(L2)</div>
+          <div style="flex:1;padding:0.3rem;background:rgba(243,139,168,0.2);border-radius:4px;font-size:0.6rem;text-align:center;color:var(--accent-red);">GEMM(L3)</div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:0.68rem;color:var(--text-secondary);margin-top:0.5rem;">L1-L3: HCache (IO + compute pipelined). L4: KV offload (fills compute bubble). Zero idle time.</div>
+  </div>
+</div>
+
+<!-- ======================== STORAGE ======================== -->
+<div class="section" id="storage">
+  <h2>Storage Management</h2>
+
+  <div class="grid-2">
+    <div class="card card-green">
+      <h3>Chunk-Based Storage Format</h3>
+      <p>Hidden states for each layer are split into fixed-size <strong>64-token chunks</strong>. Chunks from the same layer are colocated in contiguous blocks, maximizing sequential read bandwidth. Chunks are distributed <strong>round-robin</strong> across multiple SSDs to aggregate read bandwidth (e.g., 4x PM9A3 SSDs = ~28 GB/s aggregate read).</p>
+      <p>This format is optimized for restoration (token-before-layer order), not generation (layer-before-token order), which is why a two-stage saving strategy is needed.</p>
+    </div>
+    <div class="card card-peach">
+      <h3>Two-Stage State Saving</h3>
+      <p>Saving hidden states during inference happens off the critical path:</p>
+      <ol>
+        <li><strong>Stage 1 (GPU):</strong> A single <code>cudaMemcpy</code> snapshots the entire batch's hidden states from GPU to host memory. This frees the GPU buffer for the next layer immediately.</li>
+        <li><strong>Stage 2 (CPU):</strong> A background daemon running on 8 CPU threads reorganizes the hidden states into chunk format and flushes them to SSDs. Small writes are accumulated into large sequential writes that SSDs favor.</li>
+      </ol>
+      <p>No stalling occurs during state saving. For Llama2-13B, prefilling 1,024 tokens at one layer generates ~10MB of hidden states in 3ms, well below PCIe bandwidth constraints.</p>
+    </div>
+  </div>
+
+  <div class="card card-blue">
+    <h3>GPUDirect Storage for Restoration</h3>
+    <p>For restoration, HCache uses <strong>SPDK</strong> and <strong>GDRCopy</strong> to realize GPUDirect Storage: NVMe read commands target the GPU's BAR (Base Address Register) space directly, achieving P2P copies from SSD to GPU memory without host memory bounce buffers. This eliminates redundant memory copies and minimizes latency.</p>
+    <p><strong>Multi-GPU support:</strong> With tensor parallelism, each GPU reads disjoint shards (split by token) of hidden states concurrently, aggregating read bandwidth across all GPUs. GPUs then perform an all-gather via NVLink to reconstruct the full hidden state for their partition of layers.</p>
+  </div>
+</div>
+
+<!-- ======================== IMPLEMENTATION ======================== -->
+<div class="section" id="implementation">
+  <h2>Implementation</h2>
+
+  <div class="card card-teal">
+    <h3>System Details</h3>
+    <p>HCache is implemented in <strong>5,731 lines</strong> of CUDA, C++, and Python, built on DeepSpeed-MII v0.2.0 with SplitFuse scheduling. Key implementation choices:</p>
+    <ul>
+      <li><strong>cuBLAS:</strong> Used for projecting hidden states to KV cache (H * W_k, H * W_v). Batch sizes are rounded to cuBLAS-optimized sizes.</li>
+      <li><strong>Custom CUDA kernel:</strong> Applies RoPE positional embeddings to recomputed keys and copies results to KV cache.</li>
+      <li><strong>Pipelined streams:</strong> Two dedicated CUDA streams -- one for upstream state transmission, one for downstream state saving. cudaEvent coordinates ordering between streams.</li>
+      <li><strong>Request scheduling:</strong> Extends continuous batching with a restoration phase. Evicted requests first undergo bubble-free restoration, then proceed to standard prefill + decode.</li>
+    </ul>
+  </div>
+
+  <div class="code-block">
+<span class="cm">// HCache restoration pipeline (pseudocode)</span>
+<span class="kw">for</span> layer <span class="kw">in</span> <span class="fn">range</span>(L_H):                          <span class="cm"># HCache layers</span>
+    <span class="fn">async_load</span>(hidden[layer+<span class="nu">1</span>], gpu_buf, stream=io) <span class="cm"># SSD -> GPU via SPDK</span>
+    <span class="fn">sync</span>(io)                                     <span class="cm"># wait for hidden[layer]</span>
+    K[layer] = <span class="fn">cublas_gemm</span>(W_k[layer], hidden[layer], stream=compute)
+    V[layer] = <span class="fn">cublas_gemm</span>(W_v[layer], hidden[layer], stream=compute)
+    <span class="fn">apply_rope_kernel</span>(K[layer], positions)       <span class="cm"># custom CUDA kernel</span>
+
+<span class="kw">for</span> layer <span class="kw">in</span> <span class="fn">range</span>(L_H, N_layer):                 <span class="cm"># complementary method</span>
+    <span class="fn">kv_offload_restore</span>(layer)                    <span class="cm"># or token recompute</span>
+  </div>
+</div>
+
+<!-- ======================== RESULTS ======================== -->
+<div class="section" id="results">
+  <h2>Experimental Results</h2>
+
+  <div class="metric-strip">
+    <div class="metric-box"><div class="val" style="color:var(--accent-red);">1.93x</div><div class="lbl">Max TTFT Speedup vs KV Offload</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-peach);">5.73x</div><div class="lbl">Max TTFT Speedup vs Recompute</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-green);">2.4x</div><div class="lbl">Storage Cost Reduction</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-blue);">~4%</div><div class="lbl">Max TBT Overhead</div></div>
+  </div>
+
+  <h3>Multi-Round Conversation (ShareGPT4 Trace)</h3>
+  <table>
+    <thead><tr><th>Method</th><th>TTFT (7B)</th><th>TTFT (13B)</th><th>TTFT (30B)</th><th>TBT Overhead</th><th>Storage/Token</th></tr></thead>
+    <tbody>
+      <tr><td>Recomputation (DeepSpeed-MII)</td><td>1.0x (baseline)</td><td>1.0x</td><td>1.0x</td><td>0%</td><td>0 KiB</td></tr>
+      <tr><td>KV Offload (AttentionStore)</td><td>0.38x</td><td>0.35x</td><td>0.50x</td><td>0%</td><td>256-672 KiB</td></tr>
+      <tr><td style="color:var(--accent-red);font-weight:700;">HCache</td><td style="color:var(--accent-green);font-weight:700;">0.17x</td><td style="color:var(--accent-green);font-weight:700;">0.18x</td><td style="color:var(--accent-green);font-weight:700;">0.26x</td><td>~4%</td><td style="color:var(--accent-green);font-weight:700;">132-280 KiB</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Long-Context Applications (L-Eval Trace)</h3>
+  <table>
+    <thead><tr><th>Subtask</th><th>Avg Context</th><th>HCache vs KV Offload</th><th>HCache vs Recompute</th></tr></thead>
+    <tbody>
+      <tr><td>Paper Assistant</td><td>10,603 tokens</td><td style="color:var(--accent-green);font-weight:700;">1.62x faster</td><td style="color:var(--accent-green);font-weight:700;">2.66x faster</td></tr>
+      <tr><td>GSM-100</td><td>5,451 tokens</td><td style="color:var(--accent-green);font-weight:700;">1.85x faster</td><td style="color:var(--accent-green);font-weight:700;">4.32x faster</td></tr>
+      <tr><td>QuALITY</td><td>7,053 tokens</td><td style="color:var(--accent-green);font-weight:700;">1.93x faster</td><td style="color:var(--accent-green);font-weight:700;">5.73x faster</td></tr>
+      <tr><td>Mixed (200 requests)</td><td>varied</td><td style="color:var(--accent-green);font-weight:700;">1.62-1.93x</td><td style="color:var(--accent-green);font-weight:700;">2.66-5.73x</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Scalability:</strong> HCache's advantage grows with context length. The restoration speed scales linearly with history length (both hidden state size and GEMM cost are proportional to N_seq). In contrast, recomputation's quadratic attention complexity causes its TTFT to grow super-linearly, making HCache increasingly superior for longer contexts.
+  </div>
+</div>
+
+<!-- ======================== SENSITIVITY ======================== -->
+<div class="section" id="sensitivity">
+  <h2>Sensitivity Analysis</h2>
+
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>Varying GPU Platforms</h3>
+      <p>HCache was tested across A100, A30, RTX 4090, L20, and H800 GPUs with DRAM as storage backend:</p>
+      <ul>
+        <li><strong>vs KV Offload:</strong> 1.33-1.81x speedup across all GPUs</li>
+        <li><strong>vs Recomputation:</strong> 5.04-9.05x speedup</li>
+      </ul>
+      <p>Platforms with low compute power (A30) are least friendly to HCache since the GEMM recomputation takes longer. Even so, HCache still achieves 1.33x over KV offload on A30.</p>
+    </div>
+    <div class="card card-green">
+      <h3>Varying Storage Bandwidth</h3>
+      <p>With 1-4 PM9A3 SSDs (6.9 GB/s each), HCache delivers 1.7-2.6x over KV offload and 2.3-6.1x over recomputation. With fewer disks, IO can become the bottleneck, but the bubble-free scheduler automatically allocates more layers to token recomputation or KV offload to compensate.</p>
+    </div>
+  </div>
+
+  <div class="card card-peach">
+    <h3>Varying Sequence Length</h3>
+    <p>From 1K to 16K tokens on A100 with 4 SSDs:</p>
+    <ul>
+      <li><strong>Token recomputation</strong> degrades by 28% (7B model) due to quadratic attention scaling</li>
+      <li><strong>KV offload</strong> scales linearly (proportional to N_seq)</li>
+      <li><strong>HCache</strong> also scales linearly (both hidden state size and GEMM cost are O(N_seq))</li>
+    </ul>
+    <p>The speedup of HCache over recomputation therefore increases with sequence length, making it especially valuable for long-context applications.</p>
+  </div>
+</div>
+
+<!-- ======================== SIGNIFICANCE ======================== -->
+<div class="section" id="significance">
+  <h2>Significance and Limitations</h2>
+
+  <div class="grid-2">
+    <div class="card card-red">
+      <h3>Novel State Representation</h3>
+      <p>HCache introduces a third approach to LLM state management beyond the existing binary choice of "store KV" or "recompute from tokens." By caching hidden states, it simultaneously reduces both computation (6x fewer FLOPs) and IO bandwidth (2x less data), exploiting a previously unused sweet spot in the compute-IO design space.</p>
+    </div>
+    <div class="card card-green">
+      <h3>Broad Compatibility</h3>
+      <p>Works with any MHA-based LLM without model modifications. Supports over 20,000 HuggingFace models including Llama2, Phi2, Gemma, and Qwen1.5. The approach is completely lossless with zero accuracy degradation -- a critical advantage over lossy compression methods.</p>
+    </div>
+    <div class="card card-blue">
+      <h3>Production-Ready Systems Design</h3>
+      <p>5,731 lines of CUDA/C++/Python built on DeepSpeed-MII. Features include GPUDirect Storage via SPDK+GDRCopy, cuBLAS-optimized batch GEMM, pipelined state transmission with cudaEvent synchronization, and continuous batching integration with SplitFuse scheduling.</p>
+    </div>
+    <div class="card card-peach">
+      <h3>Complementary to Other Techniques</h3>
+      <p>HCache is orthogonal to GPU-resident KV cache reuse (PromptCache, SGLang), KV compression (quantization, token dropping), and MQA/GQA architectures. These techniques can be combined with HCache for additional speedups on the cache-miss path.</p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong>Limitations:</strong> (1) HCache's advantage diminishes on platforms where IO speed far exceeds compute (e.g., H800 with 64 GB/s DRAM bandwidth), though it remains at least 1.15x faster than KV offloading even in high-skewness workloads. (2) Saving hidden states during the generation phase incurs ~4% TBT overhead due to cudaMemcpy. (3) For MQA/GQA architectures where the KV cache is already compressed (fewer KV heads), the 2x size advantage of hidden states over KV is reduced. (4) The current implementation targets single-node multi-GPU setups; distributed cross-node scenarios require WAN-aware optimizations.
+  </div>
+</div>
+
+<!-- ======================== ABLATION ======================== -->
+<div class="section" id="ablation">
+  <h2>Ablation Studies</h2>
+
+  <div class="grid-2">
+    <div class="card card-red">
+      <h3>Bubble-Free Scheduler Impact</h3>
+      <p>Three variants were compared under three hardware settings (IO-sufficient A30+7B+4SSD, compute-sufficient A100+7B+1SSD, balanced A100+13B+4SSD):</p>
+      <ul>
+        <li><strong>HCache-O:</strong> Uses hidden states only, no complementary methods. Incurs pipeline bubbles on resource-skewed platforms.</li>
+        <li><strong>Naive Hybrid:</strong> Uses bubble-free scheduler to mix token recomputation and KV offload without hidden states. Outperforms individual methods by 1.28-1.42x.</li>
+        <li><strong>HCache (full):</strong> Combines hidden states with the bubble-free scheduler for complementary methods. Consistently outperforms Naive Hybrid by 1.35-1.64x in IO-sufficient settings and 1.45-2.66x overall vs KV offload.</li>
+      </ul>
+      <p>The bubble-free scheduler is critical on resource-skewed platforms. Without it, HCache-O is 13% slower than KV offload in IO-sufficient settings because recomputation bubbles waste IO resources.</p>
+    </div>
+    <div class="card card-peach">
+      <h3>State Partition Methods</h3>
+      <p>Comparing layer-wise vs token-wise partition for the 13B model with 1024-token history on A100+1SSD:</p>
+      <ul>
+        <li><strong>Token-wise (naive):</strong> 12% slower than layer-wise due to irregular cuBLAS matrix sizes</li>
+        <li><strong>Token-wise + round-up:</strong> 7% slower -- rounding to nearest optimized cuBLAS size helps but unbalanced compute/transmission persists</li>
+        <li><strong>Layer-wise:</strong> Optimal. All tokens recomputed together at each layer, forming standard matrix sizes well-optimized by cuBLAS</li>
+      </ul>
+      <p>Layer-wise partition produces a schedule using hidden states for 31 layers and KV offload for 1 layer (7B model), or 36 hidden + 4 KV (13B model).</p>
+    </div>
+  </div>
+
+  <div class="card card-green">
+    <h3>Two-Stage State Saving Evaluation</h3>
+    <p>Comparing HCache's two-stage saving (cudaMemcpy to host + background daemon to SSD) with DirectIO (saving hidden states directly to SSD from GPU):</p>
+    <ul>
+      <li>At small batch sizes (&le;5), DirectIO and HCache have similar TBT since IO time is less than decode time</li>
+      <li>At batch size 16, DirectIO's TBT is 34% higher for the 7B model because one batch's hidden states cannot be flushed to SSD before the next layer's decode begins</li>
+      <li>HCache's two-stage approach avoids this bottleneck: cudaMemcpy to host DRAM is fast and fixed-cost, while the background daemon handles the slower SSD writes off the critical path</li>
+    </ul>
+    <p>No stalling occurred during hidden state snapshots in any experiment. For Llama2-13B, prefilling 1,024 tokens generates ~10MB of hidden states per layer in ~3ms, well below PCIe bandwidth constraints.</p>
+  </div>
+</div>
+
+<!-- ======================== RELATED WORK ======================== -->
+<div class="section" id="related">
+  <h2>Related Work and Context</h2>
+
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>Stateful LLM Optimizations</h3>
+      <p><strong>GPU KV Reuse:</strong> PromptCache, SGLang, and ChunkAttention cache and reuse KV on GPU for shared prefixes across requests. These optimize the GPU cache hit path and are complementary to HCache, which optimizes the cache miss path (restoration from storage).</p>
+      <p><strong>Tiered KV Storage:</strong> AttentionStore, RAGCache, Pensieve, and APIServe maintain KV caches across GPU, DRAM, and SSD tiers. HCache differs by storing hidden states instead of KV cache, which is fundamentally smaller and enables faster restoration through GEMM-only recomputation.</p>
+      <p><strong>Offline Inference:</strong> FlexGen offloads both KV cache and output activations for batched inference. HCache exploits hidden states specifically for online serving with restoration latency as the primary goal.</p>
+    </div>
+    <div class="card card-mauve">
+      <h3>LLM State Compression</h3>
+      <p><strong>Quantization:</strong> GPTQ, SmoothQuant, KIVI, and Atom compress KV caches from 16-bit to 4-bit or lower. These methods reduce hidden state size as well, and can be combined with HCache for even smaller storage footprint.</p>
+      <p><strong>Token Dropping:</strong> H2O, SnapKV, and Gist Tokens drop less-important tokens from KV cache. These reduce the number of tokens that need to be stored and can be integrated into HCache to reduce both transmission and computation overhead.</p>
+      <p><strong>MQA/GQA:</strong> These architecture modifications reduce the KV cache by using fewer key-value heads. HCache can currently support all MHA-based LLMs using the standard attention mechanism. Adapting to MQA/GQA models where KV is already compressed would change the hidden-to-KV size ratio but the core approach remains valid.</p>
+    </div>
+  </div>
+
+  <div class="card card-teal">
+    <h3>GPU KV Reusing with HCache</h3>
+    <p>In production systems, GPU KV cache reuse (keeping frequently accessed KV caches on GPU) and HCache (restoring evicted KV caches from storage) are complementary. Using the L-Eval dataset with Zipfian skewness workloads:</p>
+    <ul>
+      <li>With uniform arrivals (alpha=1.0), cache hit ratio is ~15% and HCache is 1.67x faster than KV offloading</li>
+      <li>At skewness alpha=2.0, cache hit ratio rises to 94%, reducing restoration frequency. HCache still outperforms KV offloading by 1.15x and recomputation by 1.98x</li>
+    </ul>
+    <p>Even with high cache hit rates, HCache provides value for the remaining cache misses, which tend to involve the longest and most expensive contexts.</p>
+  </div>
+</div>
+
+<!-- ======================== HARDWARE REQUIREMENTS ======================== -->
+<div class="section" id="hardware">
+  <h2>Hardware Configurations</h2>
+
+  <div class="card card-peach">
+    <h3>Default Testbed</h3>
+    <p>Server with 4x A100-40G SXM4 GPUs, 2x AMD EPYC 7642 CPUs, 256G DDR4 memory, and 4x Samsung PM9A3 4TB enterprise SSDs. For multi-GPU models (OPT-30B), tensor parallelism across 4 GPUs with NVLink all-gather for hidden state reconstruction.</p>
+  </div>
+
+  <table>
+    <thead><tr><th>GPU</th><th>HBM Size</th><th>FP16 FLOPS</th><th>Transmission Speed</th><th>Best Use Case</th></tr></thead>
+    <tbody>
+      <tr><td>A100</td><td>40G</td><td>312T</td><td>32 GB/s</td><td>Balanced (default testbed)</td></tr>
+      <tr><td>A30</td><td>24G</td><td>165T</td><td>32 GB/s</td><td>IO-sufficient (low compute)</td></tr>
+      <tr><td>RTX 4090</td><td>24G</td><td>330T</td><td>32 GB/s</td><td>Compute-heavy consumer</td></tr>
+      <tr><td>L20</td><td>48G</td><td>120T</td><td>32 GB/s</td><td>Memory-rich, compute-limited</td></tr>
+      <tr><td>H800</td><td>80G</td><td>990T</td><td>64 GB/s</td><td>Highest-end datacenter</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info">
+    <strong>Minimum viable configuration:</strong> HCache requires at least one NVMe SSD for hidden state storage. A single SSD provides ~6.9 GB/s read bandwidth, sufficient for 7B models. For 13B+ models, 2-4 SSDs are recommended to saturate PCIe bandwidth. Alternatively, host DRAM can be used as the storage backend with even higher bandwidth, though with limited capacity.
+  </div>
+</div>
+
+</body>
+</html>

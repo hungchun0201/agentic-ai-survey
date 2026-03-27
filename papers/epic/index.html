@@ -1,0 +1,1670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EPIC: Efficient Position-Independent Caching for Serving LLMs - Technical Analysis</title>
+<style>
+  :root {
+    --bg-dark: #0f1117;
+    --bg-card: #1a1d2e;
+    --bg-card-alt: #1e2235;
+    --bg-code: #151822;
+    --accent-cyan: #00d4ff;
+    --accent-orange: #ff8c42;
+    --accent-green: #22d68c;
+    --accent-purple: #a78bfa;
+    --accent-pink: #f472b6;
+    --accent-yellow: #fbbf24;
+    --accent-red: #ef4444;
+    --accent-blue: #3b82f6;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --border: #2d3148;
+    --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    --gradient-compile: linear-gradient(135deg, #00b4d8, #0077b6);
+    --gradient-link: linear-gradient(135deg, #ff6b6b, #ee5a24);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+
+  /* Sticky Navigation */
+  .sticky-nav {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background: rgba(15, 17, 23, 0.92);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 0;
+  }
+  .sticky-nav .nav-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 2rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sticky-nav .nav-inner::-webkit-scrollbar { display: none; }
+  .nav-brand {
+    font-weight: 800;
+    font-size: 1rem;
+    color: var(--accent-cyan);
+    white-space: nowrap;
+    margin-right: 1rem;
+    letter-spacing: 1px;
+  }
+  .sticky-nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.82rem;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .sticky-nav a:hover {
+    color: var(--accent-cyan);
+    background: rgba(0, 212, 255, 0.08);
+  }
+
+  /* Hero Section */
+  .hero {
+    background: linear-gradient(170deg, #0d1321 0%, #1a1040 35%, #0f2040 65%, #0a1a2e 100%);
+    padding: 5rem 2rem 4rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(ellipse at 30% 50%, rgba(0, 212, 255, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 70% 50%, rgba(167, 139, 250, 0.06) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .hero-content { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; }
+  .venue-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: #1a1d2e;
+    padding: 0.3rem 1.2rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    margin-bottom: 1.5rem;
+    text-transform: uppercase;
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    line-height: 1.2;
+    margin-bottom: 0.5rem;
+  }
+  .hero h1 .epic-highlight {
+    background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero .subtitle {
+    font-size: 1.25rem;
+    color: var(--text-secondary);
+    margin-bottom: 1.5rem;
+  }
+  .hero-meta {
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    flex-wrap: wrap;
+    margin-top: 1.5rem;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+  }
+  .hero-meta span {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .hero-meta .meta-label { color: var(--accent-cyan); font-weight: 600; }
+
+  /* Main Container */
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+
+  /* Section */
+  section { padding: 3.5rem 0; }
+  .section-header {
+    margin-bottom: 2rem;
+  }
+  .section-header h2 {
+    font-size: 1.8rem;
+    font-weight: 700;
+    margin-bottom: 0.3rem;
+  }
+  .section-header h2 .num {
+    color: var(--accent-cyan);
+    margin-right: 0.5rem;
+    font-weight: 800;
+  }
+  .section-header .section-rule {
+    width: 60px;
+    height: 3px;
+    background: var(--gradient-1);
+    border-radius: 2px;
+    margin-top: 0.5rem;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.8rem;
+    margin-bottom: 1.5rem;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: rgba(0, 212, 255, 0.25); }
+  .card h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 0.8rem;
+    color: var(--text-primary);
+  }
+  .card p { color: var(--text-secondary); }
+
+  /* Grid layouts */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5rem; }
+  @media (max-width: 768px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 1.8rem; }
+  }
+
+  /* Stat cards */
+  .stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 2.4rem;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 0.3rem;
+  }
+  .stat-card .stat-label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  /* Code blocks */
+  .code-block {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    margin: 1rem 0;
+    position: relative;
+  }
+  .code-block .code-label {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.8rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    background: rgba(0,0,0,0.4);
+    padding: 0.15rem 0.6rem;
+    border-radius: 4px;
+    font-family: 'Segoe UI', sans-serif;
+  }
+  .code-block code { color: var(--text-primary); }
+  .kw { color: #c792ea; }
+  .fn { color: #82aaff; }
+  .str { color: #c3e88d; }
+  .cm { color: #546e7a; font-style: italic; }
+  .num { color: #f78c6c; }
+  .op { color: #89ddff; }
+  .var { color: #f07178; }
+  .type { color: #ffcb6b; }
+
+  /* Callouts */
+  .callout {
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin: 1.2rem 0;
+    border-left: 4px solid;
+    font-size: 0.92rem;
+  }
+  .callout-insight {
+    background: rgba(0, 212, 255, 0.06);
+    border-color: var(--accent-cyan);
+  }
+  .callout-insight .callout-title { color: var(--accent-cyan); }
+  .callout-warning {
+    background: rgba(251, 191, 36, 0.06);
+    border-color: var(--accent-yellow);
+  }
+  .callout-warning .callout-title { color: var(--accent-yellow); }
+  .callout-success {
+    background: rgba(34, 214, 140, 0.06);
+    border-color: var(--accent-green);
+  }
+  .callout-success .callout-title { color: var(--accent-green); }
+  .callout-title {
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-bottom: 0.3rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .callout p { color: var(--text-secondary); margin: 0; }
+
+  /* Tables */
+  .table-wrap {
+    overflow-x: auto;
+    margin: 1rem 0;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+  thead { background: var(--bg-card-alt); }
+  th {
+    padding: 0.8rem 1rem;
+    text-align: left;
+    font-weight: 700;
+    color: var(--accent-cyan);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  td {
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(0, 212, 255, 0.03); }
+  .highlight-cell { color: var(--accent-green); font-weight: 700; }
+
+  /* DIAGRAM STYLES */
+  .diagram-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 2rem;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+  .diagram-title {
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 1.5rem;
+  }
+
+  /* Compile-Link Pipeline Diagram */
+  .pipeline-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    align-items: center;
+  }
+  .pipeline-phase {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .phase-label {
+    font-weight: 800;
+    font-size: 0.85rem;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    min-width: 80px;
+    text-align: center;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .label-compile {
+    background: linear-gradient(135deg, #0077b6, #00b4d8);
+    color: white;
+  }
+  .label-link {
+    background: linear-gradient(135deg, #e63946, #ff6b6b);
+    color: white;
+  }
+  .label-store {
+    background: linear-gradient(135deg, #6c5ce7, #a78bfa);
+    color: white;
+  }
+  .chunk-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .chunk-token {
+    background: linear-gradient(135deg, #1e3a5f, #2a4a7f);
+    border: 2px solid #3b82f6;
+    border-radius: 8px;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #93c5fd;
+    white-space: nowrap;
+    position: relative;
+  }
+  .chunk-token.doc { border-color: #3b82f6; background: linear-gradient(135deg, #1e3a5f, #2a4a7f); color: #93c5fd; }
+  .chunk-token.sys { border-color: #22d68c; background: linear-gradient(135deg, #0f3d2c, #1a5c3e); color: #6ee7b7; }
+  .chunk-token.query { border-color: #f59e0b; background: linear-gradient(135deg, #4a3310, #6b4c1e); color: #fcd34d; }
+  .chunk-token.recomp {
+    border-color: #ef4444;
+    background: linear-gradient(135deg, #4a1010, #6b1e1e);
+    color: #fca5a5;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+  }
+  .chunk-token.cached {
+    border-color: #06b6d4;
+    background: linear-gradient(135deg, #0e3440, #164e63);
+    color: #67e8f9;
+  }
+  .arrow-right {
+    font-size: 1.5rem;
+    color: var(--text-muted);
+    font-weight: 300;
+  }
+  .arrow-down {
+    font-size: 1.5rem;
+    color: var(--text-muted);
+    text-align: center;
+    font-weight: 300;
+  }
+  .kv-cache-box {
+    background: linear-gradient(135deg, #1a1040, #2d1b69);
+    border: 2px solid #a78bfa;
+    border-radius: 10px;
+    padding: 0.7rem 1.2rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #c4b5fd;
+    text-align: center;
+  }
+  .llm-box {
+    background: linear-gradient(135deg, #1c2333, #2a3550);
+    border: 2px solid #64748b;
+    border-radius: 10px;
+    padding: 0.7rem 1.2rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #cbd5e1;
+    text-align: center;
+  }
+
+  /* Architecture diagram */
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 0.5rem;
+    align-items: center;
+    justify-items: center;
+  }
+  .arch-block {
+    border-radius: 10px;
+    padding: 1rem 1.3rem;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.82rem;
+    min-width: 140px;
+    line-height: 1.4;
+  }
+  .arch-arrow {
+    font-size: 1.6rem;
+    color: var(--text-muted);
+  }
+
+  /* Attention Sink diagram */
+  .sink-diagram {
+    display: flex;
+    gap: 0.3rem;
+    align-items: flex-end;
+    justify-content: center;
+    margin: 1rem 0;
+    height: 120px;
+  }
+  .sink-bar {
+    width: 20px;
+    border-radius: 4px 4px 0 0;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .sink-bar .sink-label {
+    position: absolute;
+    bottom: -22px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* Tag badges */
+  .tag {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 5px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+  }
+  .tag-compile { background: rgba(0, 180, 216, 0.15); color: #00b4d8; }
+  .tag-link { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+  .tag-modified { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+  .tag-new { background: rgba(34, 214, 140, 0.15); color: #22d68c; }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    padding: 2rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    margin-top: 2rem;
+  }
+
+  /* Flow boxes for architecture */
+  .flow-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin: 0.8rem 0;
+  }
+  .flow-box {
+    border-radius: 9px;
+    padding: 0.6rem 1.1rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .flow-arrow { color: var(--text-muted); font-size: 1.2rem; }
+
+  /* Comparison row */
+  .comparison-row {
+    display: flex;
+    gap: 1rem;
+    align-items: stretch;
+    margin: 1rem 0;
+  }
+  .comparison-col {
+    flex: 1;
+    background: var(--bg-card-alt);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    border: 1px solid var(--border);
+  }
+  .comparison-col h4 {
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+  }
+  .comparison-col p, .comparison-col ul {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+  }
+  .comparison-col ul { padding-left: 1.2rem; }
+  .comparison-col li { margin-bottom: 0.3rem; }
+
+  @media (max-width: 768px) {
+    .comparison-row { flex-direction: column; }
+    .arch-grid { grid-template-columns: 1fr; gap: 0.8rem; }
+    .arch-arrow { transform: rotate(90deg); }
+  }
+
+  /* Algorithm step boxes */
+  .algo-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    margin: 1rem 0;
+  }
+  .algo-step {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+  .step-num {
+    min-width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+  }
+  .step-content {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    padding-top: 0.25rem;
+    line-height: 1.6;
+  }
+  .step-content strong { color: var(--text-primary); }
+
+  /* Recomputation visual */
+  .recomp-visual {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    margin: 0.5rem 0;
+    flex-wrap: wrap;
+  }
+  .rv-token {
+    width: 22px;
+    height: 28px;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.55rem;
+    font-weight: 700;
+    color: rgba(255,255,255,0.7);
+    flex-shrink: 0;
+  }
+  .rv-sep {
+    width: 3px;
+    height: 28px;
+    background: var(--text-muted);
+    border-radius: 2px;
+    margin: 0 2px;
+    flex-shrink: 0;
+  }
+
+  /* Inline code */
+  code.inline {
+    background: rgba(0, 212, 255, 0.08);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.84rem;
+    color: var(--accent-cyan);
+  }
+
+  /* File tree */
+  .file-tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.8;
+    padding: 1rem 0;
+  }
+  .file-tree .dir { color: var(--accent-blue); font-weight: 600; }
+  .file-tree .file-mod { color: var(--accent-yellow); }
+  .file-tree .file-new { color: var(--accent-green); }
+  .file-tree .indent { margin-left: 1.5rem; }
+</style>
+</head>
+<body>
+
+<!-- Sticky Navigation -->
+<nav class="sticky-nav">
+  <div class="nav-inner">
+    <span class="nav-brand">EPIC</span>
+    <a href="#overview">Overview</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#algorithm">Algorithm</a>
+    <a href="#repo-analysis">Repo Analysis</a>
+    <a href="#core-concepts">Core Concepts</a>
+    <a href="#performance">Performance</a>
+    <a href="#agent-relevance">Agent Relevance</a>
+    <a href="#paper-vs-impl">Paper vs Impl</a>
+  </div>
+</nav>
+
+<!-- Hero Section -->
+<header class="hero">
+  <div class="hero-content">
+    <div class="venue-badge">ICML 2025</div>
+    <h1><span class="epic-highlight">EPIC</span>: Efficient Position-Independent<br>Caching for Serving Large Language Models</h1>
+    <p class="subtitle">Formalizing Position-Independent Caching with a Compile-Link framework and the LegoLink algorithm</p>
+    <div class="hero-meta">
+      <span><span class="meta-label">arXiv:</span> 2410.15332</span>
+      <span><span class="meta-label">Authors:</span> Hu, Huang, Wang, Wang, Hu, Zhang, Feng, Chen, Shan, Xie</span>
+      <span><span class="meta-label">Code:</span> github.com/DerekHJH/epic</span>
+      <span><span class="meta-label">Base:</span> vLLM 0.7.0 Fork</span>
+    </div>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- ====== OVERVIEW ====== -->
+  <section id="overview">
+    <div class="section-header">
+      <h2><span class="num">01</span>Overview: Position-Independent Caching</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="card">
+      <p>Modern LLM serving relies on <strong>Context Caching (CC)</strong> to avoid redundant prefill computation. Existing <strong>prefix-based caching</strong> (vLLM, SGLang, Gemini) reuses KV vectors only when requests share an <em>exact prefix match</em>. This breaks down in RAG, multi-document QA, and few-shot learning where identical document chunks appear but are preceded by different prefixes.</p>
+      <br>
+      <p><strong>Position-Independent Caching (PIC)</strong> enables modular reuse of cached KV vectors regardless of what precedes them. EPIC formalizes PIC via a two-step framework inspired by classical software compilation: first <strong>compile</strong> chunks independently, then <strong>link</strong> them together with selective recomputation to restore accuracy. The core algorithm, <strong>LegoLink</strong>, recomputes only the first <em>k</em> tokens of each chunk boundary, achieving up to <strong>8x TTFT reduction</strong> and <strong>7x throughput improvement</strong>.</p>
+    </div>
+
+    <div class="grid-3">
+      <div class="stat-card">
+        <div class="stat-value" style="color: var(--accent-cyan);">8x</div>
+        <div class="stat-label">TTFT Reduction<br>(vs. CacheBlend-15)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color: var(--accent-green);">7x</div>
+        <div class="stat-label">Throughput Gain<br>(async multi-user)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color: var(--accent-purple);">~2K</div>
+        <div class="stat-label">Lines of Python<br>over vLLM 0.7.0</div>
+      </div>
+    </div>
+
+    <!-- Compile-Link Analogy Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title">The Compile-Link Analogy: Position-Independent Code vs. Position-Independent Cache</div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1rem;">
+        <!-- Left: traditional PIC (code) -->
+        <div style="text-align: center;">
+          <div style="font-weight: 700; font-size: 0.9rem; color: var(--accent-cyan); margin-bottom: 1rem;">(a) Position-Independent Code</div>
+          <div class="flow-row">
+            <div class="flow-box" style="background: linear-gradient(135deg, #1e3a5f, #2a4a7f); border: 2px solid #3b82f6; color: #93c5fd;">
+              Source Files<br><span style="font-size:0.7rem; opacity:0.8;">C1.c, C2.c, C3.c</span>
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #0e3440, #164e63); border: 2px solid #06b6d4; color: #67e8f9;">
+              Compiler
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #1a1040, #2d1b69); border: 2px solid #a78bfa; color: #c4b5fd;">
+              PIC (Object Code)<br><span style="font-size:0.7rem; opacity:0.8;">Relocatable .o files</span>
+            </div>
+          </div>
+          <div style="color: var(--text-muted); font-size: 0.8rem; margin: 0.5rem 0;">+</div>
+          <div class="flow-row">
+            <div class="flow-box" style="background: linear-gradient(135deg, #3a1a1a, #5c2626); border: 2px solid #ef4444; color: #fca5a5;">
+              User Source
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #3d2e0f, #5c4a1e); border: 2px solid #f59e0b; color: #fcd34d;">
+              Compiler &amp; Linker
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #0f3d2c, #1a5c3e); border: 2px solid #22d68c; color: #6ee7b7;">
+              Executable
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: PIC (cache) -->
+        <div style="text-align: center;">
+          <div style="font-weight: 700; font-size: 0.9rem; color: var(--accent-orange); margin-bottom: 1rem;">(b) Position-Independent Cache</div>
+          <div class="flow-row">
+            <div class="flow-box" style="background: linear-gradient(135deg, #1e3a5f, #2a4a7f); border: 2px solid #3b82f6; color: #93c5fd;">
+              Immutable Chunks<br><span style="font-size:0.7rem; opacity:0.8;">Docs, Examples</span>
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #0e3440, #164e63); border: 2px solid #06b6d4; color: #67e8f9;">
+              LLM (Prefill)
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #1a1040, #2d1b69); border: 2px solid #a78bfa; color: #c4b5fd;">
+              PIC (KV Cache)<br><span style="font-size:0.7rem; opacity:0.8;">Stored per chunk</span>
+            </div>
+          </div>
+          <div style="color: var(--text-muted); font-size: 0.8rem; margin: 0.5rem 0;">+</div>
+          <div class="flow-row">
+            <div class="flow-box" style="background: linear-gradient(135deg, #3a1a1a, #5c2626); border: 2px solid #ef4444; color: #fca5a5;">
+              Mutable Query
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #3d2e0f, #5c4a1e); border: 2px solid #f59e0b; color: #fcd34d;">
+              KVLink (LegoLink)
+            </div>
+            <span class="flow-arrow">&rarr;</span>
+            <div class="flow-box" style="background: linear-gradient(135deg, #0f3d2c, #1a5c3e); border: 2px solid #22d68c; color: #6ee7b7;">
+              Prefill-stage KV
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-title">Key Insight</div>
+      <p>Just as position-independent code can be loaded at any memory address, position-independent KV caches can be concatenated in any order -- enabling modular, order-agnostic reuse of precomputed context. The "linking" step resolves cross-chunk attention discrepancies analogous to symbol resolution in a linker.</p>
+    </div>
+  </section>
+
+  <!-- ====== ARCHITECTURE ====== -->
+  <section id="architecture">
+    <div class="section-header">
+      <h2><span class="num">02</span>System Architecture</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <!-- Full Architecture Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title">EPIC Serving System Architecture</div>
+
+      <div style="display: grid; grid-template-columns: 220px 1fr; gap: 2rem; align-items: start;">
+        <!-- Left column: User APIs -->
+        <div>
+          <div style="text-align: center; margin-bottom: 1.2rem;">
+            <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 0.8rem; text-transform: uppercase; letter-spacing: 1px;">User-Facing APIs</div>
+
+            <div style="background: linear-gradient(135deg, #0077b6, #00b4d8); border-radius: 10px; padding: 0.9rem; margin-bottom: 0.8rem;">
+              <div style="font-weight: 800; color: white; font-size: 0.85rem;">1. generate_context_cache</div>
+              <div style="font-size: 0.72rem; color: rgba(255,255,255,0.75); margin-top: 0.3rem;">Chunks of Immutable Tokens</div>
+              <div style="font-size: 0.65rem; color: rgba(255,255,255,0.55); margin-top: 0.15rem;">Returns: Cache IDs</div>
+            </div>
+
+            <div style="text-align: center; color: var(--text-muted); font-size: 1.2rem;">&#8595;</div>
+
+            <div style="background: linear-gradient(135deg, #e63946, #ff6b6b); border-radius: 10px; padding: 0.9rem; margin-top: 0.5rem;">
+              <div style="font-weight: 800; color: white; font-size: 0.85rem;">2. chat_completion</div>
+              <div style="font-size: 0.72rem; color: rgba(255,255,255,0.75); margin-top: 0.3rem;">Cache IDs + Mutable Tokens</div>
+              <div style="font-size: 0.65rem; color: rgba(255,255,255,0.55); margin-top: 0.15rem;">Returns: Response</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right column: Internal System -->
+        <div>
+          <div style="font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 0.8rem; text-transform: uppercase; letter-spacing: 1px; text-align: center;">EPIC Internal Pipeline</div>
+
+          <!-- Scheduler row -->
+          <div style="display: flex; gap: 1rem; margin-bottom: 1rem; justify-content: center;">
+            <div style="background: linear-gradient(135deg, #374151, #4b5563); border: 2px solid #6b7280; border-radius: 10px; padding: 0.8rem 1.5rem; text-align: center; flex: 1; max-width: 200px;">
+              <div style="font-weight: 800; color: #d1d5db; font-size: 0.85rem;">KVCompile</div>
+              <div style="font-size: 0.7rem; color: #9ca3af; margin-top: 0.2rem;">Standard Prefill</div>
+            </div>
+            <div style="background: linear-gradient(135deg, #374151, #4b5563); border: 2px solid #6b7280; border-radius: 10px; padding: 0.8rem 1.5rem; text-align: center; flex: 1; max-width: 200px;">
+              <div style="font-weight: 800; color: #d1d5db; font-size: 0.85rem;">Scheduler</div>
+              <div style="font-size: 0.7rem; color: #9ca3af; margin-top: 0.2rem;">Routes Requests</div>
+            </div>
+          </div>
+
+          <!-- Prefill stages -->
+          <div style="display: flex; gap: 0.8rem; justify-content: center; margin-bottom: 1rem;">
+            <div style="background: linear-gradient(135deg, #0e3440, #164e63); border: 2px solid #06b6d4; border-radius: 10px; padding: 0.7rem 1.2rem; text-align: center; flex: 1; max-width: 280px;">
+              <div style="font-weight: 700; color: #67e8f9; font-size: 0.82rem;">Prefill Stage</div>
+              <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; justify-content: center;">
+                <div style="background: rgba(0,180,216,0.15); border: 1px solid rgba(6,182,212,0.3); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.72rem; color: #67e8f9;">Standard Prefill</div>
+                <div style="background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.72rem; color: #fca5a5;">KVLink Prefill</div>
+              </div>
+            </div>
+            <div style="background: linear-gradient(135deg, #0f3d2c, #1a5c3e); border: 2px solid #22d68c; border-radius: 10px; padding: 0.7rem 1.2rem; text-align: center; flex: 1; max-width: 150px;">
+              <div style="font-weight: 700; color: #6ee7b7; font-size: 0.82rem;">Decode Stage</div>
+              <div style="font-size: 0.68rem; color: #6ee7b7; opacity: 0.7; margin-top: 0.3rem;">Token-by-token</div>
+            </div>
+          </div>
+
+          <!-- KV Cache storage -->
+          <div style="display: flex; gap: 0.8rem; justify-content: center; align-items: center;">
+            <div style="background: linear-gradient(135deg, #1a1040, #2d1b69); border: 2px solid #a78bfa; border-radius: 10px; padding: 0.8rem 1.5rem; text-align: center; flex: 1; max-width: 220px;">
+              <div style="font-weight: 800; color: #c4b5fd; font-size: 0.85rem;">KVCache</div>
+              <div style="display: flex; gap: 0.3rem; margin-top: 0.5rem; justify-content: center;">
+                <div style="background: rgba(167,139,250,0.2); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.65rem; color: #c4b5fd;">KV_1</div>
+                <div style="background: rgba(167,139,250,0.2); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.65rem; color: #c4b5fd;">KV_2</div>
+                <div style="background: rgba(167,139,250,0.2); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.65rem; color: #c4b5fd;">KV_3</div>
+                <div style="background: rgba(167,139,250,0.2); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.65rem; color: #c4b5fd;">KV_4</div>
+              </div>
+            </div>
+            <div style="background: linear-gradient(135deg, #3d2e0f, #5c4a1e); border: 2px solid #f59e0b; border-radius: 10px; padding: 0.8rem 1.5rem; text-align: center; flex: 1; max-width: 220px;">
+              <div style="font-weight: 800; color: #fcd34d; font-size: 0.85rem;">Indexing</div>
+              <div style="font-size: 0.7rem; color: #fcd34d; opacity: 0.7; margin-top: 0.2rem;">Cache ID, Tree, or Hash</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout callout-success">
+      <div class="callout-title">Explicit Caching Paradigm</div>
+      <p>Unlike implicit caching systems (vLLM prefix caching, SGLang RadixAttention) that manage cache internally via hash tables or radix trees, EPIC adopts an <strong>explicit caching</strong> paradigm with user-facing cache IDs. This is analogous to Google Gemini's and Kimi's context caching APIs, giving users fine-grained control -- particularly beneficial in RAG scenarios where document ordering varies between invocations.</p>
+    </div>
+  </section>
+
+  <!-- ====== ALGORITHM ====== -->
+  <section id="algorithm">
+    <div class="section-header">
+      <h2><span class="num">03</span>The LegoLink Algorithm</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="card">
+      <h3>Why "LegoLink"?</h3>
+      <p>Cached KV chunks are assembled like LEGO bricks -- independently compiled, then linked together. The key innovation: <strong>only recompute the first <em>k</em> tokens of each chunk</strong> (except the first chunk), exploiting the static attention sink phenomenon where initial tokens disproportionately absorb attention scores.</p>
+    </div>
+
+    <!-- PIC Algorithms Comparison Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title">Comparison of PIC Link-Step Algorithms</div>
+      <div style="display: flex; flex-direction: column; gap: 1.3rem;">
+
+        <!-- Row header -->
+        <div style="display: flex; gap: 0.4rem; align-items: center; padding-left: 120px;">
+          <div style="flex: 1; text-align: center; font-size: 0.7rem; color: var(--accent-blue); font-weight: 700;">Chunk 1</div>
+          <div style="flex: 1; text-align: center; font-size: 0.7rem; color: var(--accent-blue); font-weight: 700;">Chunk 2</div>
+          <div style="flex: 1; text-align: center; font-size: 0.7rem; color: var(--accent-blue); font-weight: 700;">Chunk 3</div>
+          <div style="flex: 0.6; text-align: center; font-size: 0.7rem; color: var(--accent-yellow); font-weight: 700;">Query</div>
+        </div>
+
+        <!-- Naive -->
+        <div style="display: flex; gap: 0.4rem; align-items: center;">
+          <div style="min-width: 110px; font-size: 0.78rem; font-weight: 700; color: var(--text-secondary);">Naive</div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+          <div style="flex: 0.6; height: 30px; background: linear-gradient(90deg, #4a3310, #6b4c1e); border: 1px solid #f59e0b; border-radius: 5px;"></div>
+          <div style="min-width: 120px; font-size: 0.72rem; color: var(--accent-red);">No recomputation</div>
+        </div>
+
+        <!-- FR -->
+        <div style="display: flex; gap: 0.4rem; align-items: center;">
+          <div style="min-width: 110px; font-size: 0.78rem; font-weight: 700; color: var(--text-secondary);">Fully Recompute</div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #4a1010, #6b1e1e); border: 1px solid #ef4444; border-radius: 5px;"></div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #4a1010, #6b1e1e); border: 1px solid #ef4444; border-radius: 5px;"></div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #4a1010, #6b1e1e); border: 1px solid #ef4444; border-radius: 5px;"></div>
+          <div style="flex: 0.6; height: 30px; background: linear-gradient(90deg, #4a3310, #6b4c1e); border: 1px solid #f59e0b; border-radius: 5px;"></div>
+          <div style="min-width: 120px; font-size: 0.72rem; color: var(--accent-red);">Recompute ALL tokens</div>
+        </div>
+
+        <!-- CacheBlend -->
+        <div style="display: flex; gap: 0.4rem; align-items: center;">
+          <div style="min-width: 110px; font-size: 0.78rem; font-weight: 700; color: var(--text-secondary);">CacheBlend</div>
+          <div style="flex: 1; height: 30px; border-radius: 5px; position: relative; overflow: hidden;">
+            <div style="position: absolute; inset: 0; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+            <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: repeating-linear-gradient(90deg, rgba(239,68,68,0.4) 0px, rgba(239,68,68,0.4) 5px, transparent 5px, transparent 32px); border-radius: 5px;"></div>
+          </div>
+          <div style="flex: 1; height: 30px; border-radius: 5px; position: relative; overflow: hidden;">
+            <div style="position: absolute; inset: 0; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+            <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: repeating-linear-gradient(90deg, rgba(239,68,68,0.4) 0px, rgba(239,68,68,0.4) 5px, transparent 5px, transparent 32px); border-radius: 5px;"></div>
+          </div>
+          <div style="flex: 1; height: 30px; border-radius: 5px; position: relative; overflow: hidden;">
+            <div style="position: absolute; inset: 0; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+            <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: repeating-linear-gradient(90deg, rgba(239,68,68,0.4) 0px, rgba(239,68,68,0.4) 5px, transparent 5px, transparent 32px); border-radius: 5px;"></div>
+          </div>
+          <div style="flex: 0.6; height: 30px; background: linear-gradient(90deg, #4a3310, #6b4c1e); border: 1px solid #f59e0b; border-radius: 5px;"></div>
+          <div style="min-width: 120px; font-size: 0.72rem; color: var(--accent-yellow);">Dynamic 15% selection</div>
+        </div>
+
+        <!-- LegoLink -->
+        <div style="display: flex; gap: 0.4rem; align-items: center;">
+          <div style="min-width: 110px; font-size: 0.78rem; font-weight: 700; color: var(--accent-green);">LegoLink (Ours)</div>
+          <div style="flex: 1; height: 30px; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 5px;"></div>
+          <div style="flex: 1; height: 30px; border-radius: 5px; display: flex; overflow: hidden; border: 1px solid #06b6d4;">
+            <div style="width: 20%; background: linear-gradient(90deg, #4a1010, #6b1e1e); border-right: 2px solid #ef4444;"></div>
+            <div style="flex: 1; background: linear-gradient(90deg, #164e63, #0e3440);"></div>
+          </div>
+          <div style="flex: 1; height: 30px; border-radius: 5px; display: flex; overflow: hidden; border: 1px solid #06b6d4;">
+            <div style="width: 20%; background: linear-gradient(90deg, #4a1010, #6b1e1e); border-right: 2px solid #ef4444;"></div>
+            <div style="flex: 1; background: linear-gradient(90deg, #164e63, #0e3440);"></div>
+          </div>
+          <div style="flex: 0.6; height: 30px; background: linear-gradient(90deg, #4a3310, #6b4c1e); border: 1px solid #f59e0b; border-radius: 5px;"></div>
+          <div style="min-width: 120px; font-size: 0.72rem; color: var(--accent-green);">Static k initial tokens</div>
+        </div>
+      </div>
+
+      <!-- Legend -->
+      <div style="display: flex; gap: 1.5rem; justify-content: center; margin-top: 1.5rem; font-size: 0.75rem; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; gap: 0.4rem;">
+          <div style="width: 20px; height: 12px; background: linear-gradient(90deg, #164e63, #0e3440); border: 1px solid #06b6d4; border-radius: 2px;"></div>
+          <span style="color: var(--text-secondary);">Cached (no recompute)</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.4rem;">
+          <div style="width: 20px; height: 12px; background: linear-gradient(90deg, #4a1010, #6b1e1e); border: 1px solid #ef4444; border-radius: 2px;"></div>
+          <span style="color: var(--text-secondary);">Recomputed</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.4rem;">
+          <div style="width: 20px; height: 12px; background: linear-gradient(90deg, #4a3310, #6b4c1e); border: 1px solid #f59e0b; border-radius: 2px;"></div>
+          <span style="color: var(--text-secondary);">Query (always computed)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- LegoLink Steps -->
+    <div class="card">
+      <h3>LegoLink Recomputation Steps (per layer)</h3>
+      <div class="algo-steps">
+        <div class="algo-step">
+          <div class="step-num" style="background: rgba(0,180,216,0.2); color: #06b6d4;">1</div>
+          <div class="step-content">Compute the <strong>embedding matrix E</strong> of the selected k' tokens (k from each non-first chunk, shape <code class="inline">(k', d)</code>).</div>
+        </div>
+        <div class="algo-step">
+          <div class="step-num" style="background: rgba(167,139,250,0.2); color: #a78bfa;">2</div>
+          <div class="step-content">Compute new <strong>Q, K, V</strong> matrices for these k' tokens: <code class="inline">Q = EW_Q</code>, <code class="inline">K = EW_K</code>, <code class="inline">V = EW_V</code>.</div>
+        </div>
+        <div class="algo-step">
+          <div class="step-num" style="background: rgba(34,214,140,0.2); color: #22d68c;">3</div>
+          <div class="step-content"><strong>Expand K and V</strong> by incorporating cached KV vectors of the N - k' unselected tokens, forming <code class="inline">K_exp</code> and <code class="inline">V_exp</code> (both shape <code class="inline">(N, d)</code>).</div>
+        </div>
+        <div class="algo-step">
+          <div class="step-num" style="background: rgba(255,140,66,0.2); color: #ff8c42;">4</div>
+          <div class="step-content">Compute <strong>attention</strong>: <code class="inline">A = softmax(Q * K_exp^T * MASK)</code> where MASK ensures k' tokens only attend to tokens before them. Output: <code class="inline">O = A * V_exp * W_O</code>.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3>Complexity Advantage</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Algorithm</th><th>Recomp. Complexity</th><th>Sparsity Type</th></tr></thead>
+            <tbody>
+              <tr><td>Fully Recompute</td><td>O(N<sup>2</sup>)</td><td>None</td></tr>
+              <tr><td>CacheBlend-r</td><td>O(rN<sup>2</sup>)</td><td>Dynamic</td></tr>
+              <tr><td class="highlight-cell">LegoLink-k</td><td class="highlight-cell">O(kN) ~ O(N)</td><td class="highlight-cell">Static</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size: 0.85rem; margin-top: 0.8rem;">Since k is fixed (typically 2-16) and does not grow with N, LegoLink achieves <strong>linear complexity</strong> in the link step, while FR and CacheBlend remain quadratic.</p>
+      </div>
+
+      <div class="card">
+        <h3>LegoLink-0: Zero Linking Overhead</h3>
+        <p style="margin-bottom: 0.8rem;">A variant that eliminates all recomputation in the link step:</p>
+        <div class="algo-steps">
+          <div class="algo-step">
+            <div class="step-num" style="background: rgba(244,114,182,0.2); color: #f472b6; font-size: 0.75rem;">C</div>
+            <div class="step-content"><strong>Compile step:</strong> Prepend 4 dummy tokens (e.g., BOS tokens) to each chunk, then discard their KV vectors after compilation. This eliminates "attention sinks" before linking.</div>
+          </div>
+          <div class="algo-step">
+            <div class="step-num" style="background: rgba(244,114,182,0.2); color: #f472b6; font-size: 0.75rem;">L</div>
+            <div class="step-content"><strong>Link step:</strong> Skip recomputation entirely -- zero runtime overhead. The attention sink phenomenon disappears from the middle of the sequence.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== REPO ANALYSIS ====== -->
+  <section id="repo-analysis">
+    <div class="section-header">
+      <h2><span class="num">04</span>Repository Analysis</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="card">
+      <h3>Repository Structure</h3>
+      <p style="margin-bottom: 1rem;">EPIC is implemented as a fork of <strong>vLLM 0.7.0</strong> with modifications concentrated in three areas: the model implementation (LLM forward pass), the attention backend (xformers), and the model runner (logit selection). A separate <code class="inline">benchmarks_ours/</code> directory provides end-to-end evaluation scripts.</p>
+
+      <div class="file-tree">
+        <span class="dir">epic/repo/</span><br>
+        <span class="indent"><span class="dir">vllm/</span></span><br>
+        <span class="indent"><span class="indent"><span class="dir">model_executor/models/</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-mod">llama.py</span> -- LlamaModel + LlamaAttention + cache_fuse_metadata</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-mod">deepseek_v2.py</span> -- DeepSeek V2 model support</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="dir">attention/backends/</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-mod">xformers.py</span> -- KVLink attention logic + partial bias masks</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="dir">worker/</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-mod">model_runner.py</span> -- Logit selection for recomputed tokens</span></span></span><br>
+        <span class="indent"><span class="dir">benchmarks_ours/</span></span><br>
+        <span class="indent"><span class="indent"><span class="dir">evals/</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-new">e2e/main.py</span> -- End-to-end evaluation engine</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-new">zero-linking-overhead/main.py</span> -- LegoLink-0 evaluation</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-new">prob_attn/main.py</span> -- Attention map analysis</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent"><span class="file-new">long_context/main.py</span> -- Long-context scaling tests</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="dir">data_sets/</span></span></span><br>
+        <span class="indent"><span class="indent"><span class="indent">wikimqa.py, musique.py, samsum.py, multi_news.py, hotpotqa.py, needle.py</span></span></span><br>
+      </div>
+    </div>
+
+    <!-- Key Code Walkthrough -->
+    <div class="card">
+      <h3><span class="tag tag-modified">Modified</span> LlamaModel.cache_fuse_metadata</h3>
+      <p style="margin-bottom: 0.8rem;">The central metadata dictionary controlling the PIC algorithm, initialized in <code class="inline">LlamaModel.__init__</code>:</p>
+      <div class="code-block">
+        <div class="code-label">vllm/model_executor/models/llama.py:378-395</div>
+<code><span class="kw">self</span>.cache_fuse_metadata = {
+    <span class="str">"check_layers"</span>: [<span class="num">1</span>],        <span class="cm"># CacheBlend: layers to check for token importance</span>
+    <span class="str">"check"</span>: <span class="num">False</span>,              <span class="cm"># CacheBlend mode toggle</span>
+    <span class="str">"recomp_ratios"</span>: [<span class="num">0.16</span>],     <span class="cm"># CacheBlend: ratio of tokens to recompute</span>
+    <span class="str">"recomp_ratio"</span>: <span class="num">0.16</span>,
+    <span class="str">"original_slot_mapping"</span>: <span class="kw">None</span>,
+    <span class="str">"our_slot_mapping"</span>: <span class="kw">None</span>,
+    <span class="str">"kv_cache_dtype"</span>: <span class="kw">None</span>,
+    <span class="str">"attn_bias"</span>: <span class="kw">None</span>,           <span class="cm"># Partial attention bias mask</span>
+    <span class="str">"imp_indices"</span>: <span class="kw">None</span>,         <span class="cm"># Indices of tokens to recompute</span>
+    <span class="str">"org_seq_len"</span>: <span class="kw">None</span>,         <span class="cm"># Original sequence length</span>
+    <span class="str">"collect"</span>: <span class="num">False</span>,             <span class="cm"># Compile phase: capture KV vectors</span>
+    <span class="str">"kvlink"</span>: <span class="kw">None</span>,              <span class="cm"># LegoLink mode: list of positions to recompute</span>
+                                   <span class="cm"># None=off, [...]=positions, []=computed</span>
+    <span class="str">"prob_attn"</span>: <span class="num">False</span>,           <span class="cm"># Attention probability visualization</span>
+    <span class="str">"attn_matrix"</span>: [],
+    <span class="str">"layer_idx"</span>: <span class="num">0</span>
+}
+<span class="kw">self</span>.old_kvs = [[<span class="kw">None</span>, <span class="kw">None</span>]] * <span class="fn">len</span>(<span class="kw">self</span>.layers) <span class="cm"># Pre-compiled KV cache</span></code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag tag-modified">Modified</span> LlamaAttention.forward -- KVLink Path</h3>
+      <p style="margin-bottom: 0.8rem;">When <code class="inline">kvlink</code> is active, the attention layer applies RoPE to old cached keys and runs the forward pass only on selected positions:</p>
+      <div class="code-block">
+        <div class="code-label">vllm/model_executor/models/llama.py:207-228</div>
+<code><span class="kw">if</span> cache_fuse_metadata[<span class="str">"kvlink"</span>] <span class="kw">is not None</span>:
+    <span class="cm"># Apply RoPE to previously-cached keys at correct positions</span>
+    <span class="kw">if</span> cache_fuse_metadata[<span class="str">"fake_q"</span>] <span class="kw">is None</span>:
+        cache_fuse_metadata[<span class="str">'fake_q'</span>] = torch.<span class="fn">rand_like</span>(q)
+    _, old_kv[<span class="num">0</span>] = <span class="kw">self</span>.rotary_emb(
+        cache_fuse_metadata[<span class="str">'org_pos'</span>],   <span class="cm"># Original positions</span>
+        cache_fuse_metadata[<span class="str">'fake_q'</span>],    <span class="cm"># Dummy Q (only K matters)</span>
+        old_kv[<span class="num">0</span>])                         <span class="cm"># Cached K vectors</span>
+
+<span class="cm"># In LlamaModel.forward, only selected positions are forwarded:</span>
+cache_fuse_metadata[<span class="str">"imp_indices"</span>] = cache_fuse_metadata[<span class="str">"kvlink"</span>]
+positions = positions[cache_fuse_metadata[<span class="str">"imp_indices"</span>]]
+hidden_states = hidden_states[cache_fuse_metadata[<span class="str">"imp_indices"</span>]]</code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag tag-modified">Modified</span> XFormers Attention Backend -- Selective KV Merge</h3>
+      <p style="margin-bottom: 0.8rem;">The xformers backend implements the core KVLink logic: merge newly computed KV vectors into the old cached vectors at the selected positions, then compute attention with a partial causal mask:</p>
+      <div class="code-block">
+        <div class="code-label">vllm/attention/backends/xformers.py:506-526</div>
+<code><span class="kw">if</span> cache_fuse_metadata[<span class="str">"kvlink"</span>] <span class="kw">is not None</span>:
+    key_old = old_kv[<span class="num">0</span>].<span class="fn">view</span>(-<span class="num">1</span>, self.num_kv_heads, self.head_size)
+    value_old = old_kv[<span class="num">1</span>].<span class="fn">view</span>(-<span class="num">1</span>, self.num_kv_heads, self.head_size)
+
+    <span class="kw">if</span> <span class="fn">len</span>(cache_fuse_metadata[<span class="str">"kvlink"</span>]) &gt; <span class="num">0</span>:
+        <span class="cm"># Build partial causal attention mask for recomputed tokens</span>
+        attn_bias = <span class="fn">_make_partial_bias_gqa</span>(cache_fuse_metadata,
+            query.device, self.num_kv_heads, self.num_queries_per_kv)
+        cache_fuse_metadata[<span class="str">"attn_bias"</span>] = attn_bias
+        cache_fuse_metadata[<span class="str">"kvlink"</span>] = []  <span class="cm"># Only compute bias once</span>
+
+    <span class="cm"># Merge: overwrite old KV at recomputed positions</span>
+    imp_indices = cache_fuse_metadata[<span class="str">"imp_indices"</span>]
+    key_old[imp_indices] = key       <span class="cm"># Insert new keys</span>
+    value_old[imp_indices] = value   <span class="cm"># Insert new values</span>
+    key = key_old                    <span class="cm"># Use merged KV for attention</span>
+    value = value_old</code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3><span class="tag tag-new">New</span> End-to-End Evaluation Pipeline</h3>
+      <p style="margin-bottom: 0.8rem;">The evaluation in <code class="inline">benchmarks_ours/evals/e2e/main.py</code> implements the two-phase workflow: compile (collect KV vectors per chunk) then link (run inference with cached KVs):</p>
+      <div class="code-block">
+        <div class="code-label">benchmarks_ours/evals/e2e/main.py:151-225 (simplified)</div>
+<code><span class="cm"># === COMPILE PHASE: Collect KV vectors for each chunk ===</span>
+cache_fuse_metadata[<span class="str">'collect'</span>] = <span class="kw">True</span>
+old_kvs = []
+<span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="fn">len</span>(token_ids)):
+    llm.<span class="fn">generate</span>(prompt_token_ids=[token_ids[i]], max_tokens=<span class="num">1</span>)
+    <span class="kw">for</span> j <span class="kw">in</span> <span class="fn">range</span>(num_layers):
+        temp_k = llm_layers[j].self_attn.hack_kv[<span class="num">0</span>].<span class="fn">clone</span>()
+        temp_v = llm_layers[j].self_attn.hack_kv[<span class="num">1</span>].<span class="fn">clone</span>()
+        old_kvs[j] = <span class="fn">concat</span>(old_kvs[j], [temp_k, temp_v])
+model.old_kvs = old_kvs
+
+<span class="cm"># === LINK PHASE: Determine recomputation indices ===</span>
+<span class="kw">if</span> <span class="str">'kvlink'</span> <span class="kw">in</span> approach:
+    recomp_num = <span class="fn">int</span>(approach.<span class="fn">split</span>(<span class="str">'-'</span>)[-<span class="num">1</span>])
+    temp = []
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="num">1</span>, len(start_offset)-<span class="num">1</span>):
+        <span class="kw">if</span> i == len(start_offset)-<span class="num">2</span>:
+            temp += <span class="fn">list</span>(<span class="fn">range</span>(start_offset[i], start_offset[i+<span class="num">1</span>]))
+        <span class="kw">else</span>:
+            temp += <span class="fn">list</span>(<span class="fn">range</span>(start_offset[i], start_offset[i]+recomp_num))
+    cache_fuse_metadata[<span class="str">"kvlink"</span>] = temp  <span class="cm"># First k tokens of each chunk</span></code>
+      </div>
+    </div>
+
+    <div class="callout callout-warning">
+      <div class="callout-title">Implementation Note</div>
+      <p>The README states: "This prototype focuses solely on functionality rather than performance." The compile step collects KV vectors via <code class="inline">hack_kv</code> (cloned tensors from the attention layer), which is a demonstration approach. A production system would use the vLLM paged KV cache directly. The authors indicate a full production system (similar to LMCache) is under active development.</p>
+    </div>
+  </section>
+
+  <!-- ====== CORE CONCEPTS ====== -->
+  <section id="core-concepts">
+    <div class="section-header">
+      <h2><span class="num">05</span>Core Concepts</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <!-- Attention Sink -->
+    <div class="card">
+      <h3>The Attention Sink Phenomenon</h3>
+      <p style="margin-bottom: 1rem;">When chunks are compiled independently (each starting from position 0), their initial tokens disproportionately absorb attention scores -- a well-documented phenomenon called the "attention sink." After concatenation, these artificial sinks from non-first chunks prevent the model from attending to genuinely relevant context.</p>
+
+      <!-- Attention Sink Visualization -->
+      <div class="diagram-container" style="padding: 1.5rem;">
+        <div class="diagram-title">Attention Score Distribution After Naive Concatenation</div>
+        <div style="display: flex; justify-content: center; gap: 3rem; flex-wrap: wrap;">
+          <!-- Chunk 1 -->
+          <div style="text-align: center;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--accent-blue); margin-bottom: 0.5rem;">Chunk 1 (System)</div>
+            <div style="display: flex; gap: 2px; align-items: flex-end; height: 80px; justify-content: center;">
+              <div style="width: 14px; height: 75px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 55px; background: linear-gradient(to top, #f59e0b, #fcd34d); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 18px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 12px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 8px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 15px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 6px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 4px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+            </div>
+            <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 0.3rem;">Sink tokens dominate</div>
+          </div>
+          <!-- Chunk 2 -->
+          <div style="text-align: center;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--accent-blue); margin-bottom: 0.5rem;">Chunk 2 (Doc)</div>
+            <div style="display: flex; gap: 2px; align-items: flex-end; height: 80px; justify-content: center;">
+              <div style="width: 14px; height: 70px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 50px; background: linear-gradient(to top, #f59e0b, #fcd34d); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 10px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 8px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 5px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 20px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 4px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 3px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+            </div>
+            <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 0.3rem;">False sink blocks real signal</div>
+          </div>
+          <!-- After LegoLink -->
+          <div style="text-align: center;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--accent-green); margin-bottom: 0.5rem;">After LegoLink</div>
+            <div style="display: flex; gap: 2px; align-items: flex-end; height: 80px; justify-content: center;">
+              <div style="width: 14px; height: 45px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 25px; background: linear-gradient(to top, #f59e0b, #fcd34d); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 12px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 10px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 8px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 35px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 6px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+              <div style="width: 14px; height: 4px; background: linear-gradient(to top, #3b82f6, #93c5fd); border-radius: 3px 3px 0 0;"></div>
+            </div>
+            <div style="font-size: 0.65rem; color: var(--accent-green); margin-top: 0.3rem;">Attention restored to relevant tokens</div>
+          </div>
+        </div>
+        <div style="text-align: center; margin-top: 1rem;">
+          <div style="display: flex; gap: 1.5rem; justify-content: center; font-size: 0.72rem;">
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #ef4444; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>Attention sink (BOS/initial)</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #22d68c; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>Relevant context (answer location)</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #3b82f6; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>Other tokens</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Static vs Dynamic Sparsity -->
+    <div class="grid-2">
+      <div class="card">
+        <h3>Static Sparsity (LegoLink)</h3>
+        <p style="margin-bottom: 0.8rem;">LegoLink exploits <strong>static attention sparsity</strong>: the observation that the initial tokens of each independently-compiled chunk <em>always</em> serve as attention sinks. This is predictable before runtime.</p>
+        <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+          <li>Token selection is <strong>predetermined</strong> from chunk boundaries</li>
+          <li>No runtime attention analysis needed</li>
+          <li>Recompute the first <em>k</em> tokens of each non-first chunk</li>
+          <li>Complexity: <strong>O(kN)</strong> where k is typically 2-16</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Dynamic Sparsity (CacheBlend)</h3>
+        <p style="margin-bottom: 0.8rem;">CacheBlend uses <strong>dynamic attention sparsity</strong>: it recomputes all KV vectors in layer 1, compares old vs. new attention maps, then selects the top r% of divergent tokens for subsequent layers.</p>
+        <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+          <li>Token selection requires <strong>runtime comparison</strong></li>
+          <li>Full recomputation at layer 1 adds overhead (16-64% of TTFT)</li>
+          <li>Recompute top-r% across all tokens by attention divergence</li>
+          <li>Complexity: <strong>O(rN<sup>2</sup>)</strong>, remains quadratic</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Selective Recomputation Detail -->
+    <div class="card">
+      <h3>Selective Recomputation in Detail</h3>
+      <p style="margin-bottom: 1rem;">The partial attention mask is constructed in <code class="inline">_make_partial_bias_gqa</code> / <code class="inline">_make_partial_bias_mha</code>. It creates a causal mask from the full sequence length, then selects only the rows corresponding to the recomputed positions:</p>
+      <div class="code-block">
+        <div class="code-label">vllm/attention/backends/xformers.py:872-905</div>
+<code><span class="kw">def</span> <span class="fn">_make_partial_bias_gqa</span>(cache_fuse_metadata, device, num_kv_heads, num_queries_per_kv):
+    seq_len = cache_fuse_metadata[<span class="str">'org_seq_len'</span>]
+    padded_len = (seq_len + <span class="num">7</span>) // <span class="num">8</span> * <span class="num">8</span>
+    dtype = cache_fuse_metadata[<span class="str">'kv_cache_dtype'</span>]
+    imp_indices = cache_fuse_metadata[<span class="str">'imp_indices'</span>]
+
+    <span class="cm"># Create full upper-triangular causal mask</span>
+    attn_mask = torch.<span class="fn">triu</span>(torch.<span class="fn">ones</span>(padded_len, padded_len, dtype=dtype,
+                                        device=device), diagonal=<span class="num">1</span>)
+    attn_mask = (attn_mask * torch.finfo(dtype).min)
+        .<span class="fn">view</span>(<span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>, padded_len, padded_len)
+
+    <span class="cm"># Select only the rows for recomputed positions</span>
+    attn_mask = attn_mask[:, :, :, imp_indices]
+    attn_mask = attn_mask.<span class="fn">expand</span>(<span class="num">1</span>, num_kv_heads, num_queries_per_kv, -<span class="num">1</span>, -<span class="num">1</span>)
+    <span class="kw">return</span> attn_mask[:, :, :, :, :seq_len]</code>
+      </div>
+      <p style="font-size: 0.85rem; margin-top: 0.5rem; color: var(--text-secondary);">This ensures that only the k' recomputed tokens serve as queries while attending to all N key-value vectors, implementing the equation: <strong>A = softmax(Q * K<sub>exp</sub><sup>T</sup> * MASK)</strong>.</p>
+    </div>
+  </section>
+
+  <!-- ====== PERFORMANCE ====== -->
+  <section id="performance">
+    <div class="section-header">
+      <h2><span class="num">06</span>Performance Results</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="stat-card">
+        <div class="stat-value" style="color: var(--accent-cyan);">Up to 8x</div>
+        <div class="stat-label">TTFT Reduction<br>LegoLink-16 vs CacheBlend-15<br>(async workload)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" style="color: var(--accent-green);">Up to 7x</div>
+        <div class="stat-label">Throughput Improvement<br>LegoLink-16 vs CacheBlend-15<br>(varying request rates)</div>
+      </div>
+    </div>
+
+    <!-- Accuracy vs TTFT -->
+    <div class="card">
+      <h3>Synchronous Workload: Accuracy vs. TTFT</h3>
+      <p style="margin-bottom: 1rem;">Across 6 datasets and 3 models (Mistral 7B, Llama 3.1 8B, Yi Coder 9B), LegoLink variants consistently form a new Pareto frontier, outperforming CacheBlend in the accuracy-latency tradeoff.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Algorithm</th>
+              <th>Recomp. Strategy</th>
+              <th>TTFT (relative to FR)</th>
+              <th>Accuracy Loss</th>
+              <th>Complexity</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Fully Recompute (FR)</td>
+              <td>All tokens</td>
+              <td>1.0x (baseline)</td>
+              <td>0% (reference)</td>
+              <td>O(N<sup>2</sup>)</td>
+            </tr>
+            <tr>
+              <td>Naive</td>
+              <td>None</td>
+              <td style="color: var(--accent-green);">Minimal</td>
+              <td style="color: var(--accent-red);">Up to 80% worse</td>
+              <td>O(1)</td>
+            </tr>
+            <tr>
+              <td>CacheBlend-15</td>
+              <td>Top 15% dynamic</td>
+              <td>~0.3-0.5x</td>
+              <td>Within ~7%</td>
+              <td>O(0.15N<sup>2</sup>)</td>
+            </tr>
+            <tr>
+              <td>CacheBlend-5</td>
+              <td>Top 5% dynamic</td>
+              <td>~0.2-0.3x</td>
+              <td>Variable</td>
+              <td>O(0.05N<sup>2</sup>)</td>
+            </tr>
+            <tr>
+              <td class="highlight-cell">LegoLink-16</td>
+              <td class="highlight-cell">First 16 static</td>
+              <td class="highlight-cell">~0.1-0.2x</td>
+              <td class="highlight-cell">Within ~5%</td>
+              <td class="highlight-cell">O(16N)</td>
+            </tr>
+            <tr>
+              <td class="highlight-cell">LegoLink-2</td>
+              <td class="highlight-cell">First 2 static</td>
+              <td class="highlight-cell">~0.05-0.1x</td>
+              <td class="highlight-cell">Within ~7%</td>
+              <td class="highlight-cell">O(2N)</td>
+            </tr>
+            <tr>
+              <td>LegoLink-0</td>
+              <td>None (dummy prefix)</td>
+              <td style="color: var(--accent-green);">Minimal</td>
+              <td>Preserves accuracy well</td>
+              <td>O(1)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Long Context Performance -->
+    <div class="card">
+      <h3>Long Context Scaling (Figure 9 Results)</h3>
+
+      <div class="diagram-container" style="padding: 1.5rem;">
+        <div class="diagram-title">TTFT Scaling: Quadratic (FR, CacheBlend) vs. Linear (LegoLink)</div>
+        <div style="display: flex; justify-content: center; align-items: flex-end; height: 180px; gap: 1.5rem; padding: 0 2rem;">
+          <!-- Context length bars -->
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
+            <div style="width: 60px; background: linear-gradient(to top, #3b82f6, #60a5fa); border-radius: 4px 4px 0 0; height: 20px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 4px 4px 0 0; height: 20px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 4px 4px 0 0; height: 12px;"></div>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">10K</span>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
+            <div style="width: 60px; background: linear-gradient(to top, #3b82f6, #60a5fa); border-radius: 4px 4px 0 0; height: 50px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 4px 4px 0 0; height: 45px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 4px 4px 0 0; height: 20px;"></div>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">20K</span>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
+            <div style="width: 60px; background: linear-gradient(to top, #3b82f6, #60a5fa); border-radius: 4px 4px 0 0; height: 100px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 4px 4px 0 0; height: 85px;"></div>
+            <div style="width: 60px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 4px 4px 0 0; height: 28px;"></div>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">30K</span>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
+            <div style="width: 60px; background: linear-gradient(to top, #ef4444, #fca5a5); border-radius: 4px 4px 0 0; height: 160px; position: relative;">
+              <div style="position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font-size: 0.6rem; color: #fca5a5; white-space: nowrap;">OOM</div>
+            </div>
+            <div style="width: 60px; background: linear-gradient(to top, #3b82f6, #60a5fa); border-radius: 4px 4px 0 0; height: 160px; position: relative;">
+              <div style="position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font-size: 0.6rem; color: #93c5fd; white-space: nowrap;">~5s</div>
+            </div>
+            <div style="width: 60px; background: linear-gradient(to top, #22d68c, #6ee7b7); border-radius: 4px 4px 0 0; height: 38px;"></div>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">50K</span>
+          </div>
+        </div>
+        <div style="text-align: center; margin-top: 0.5rem; font-size: 0.72rem; color: var(--text-muted);">Context Length (tokens)</div>
+        <div style="display: flex; gap: 1.5rem; justify-content: center; margin-top: 1rem; font-size: 0.75rem;">
+          <span><span style="display: inline-block; width: 12px; height: 8px; background: #3b82f6; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>FR (O(N<sup>2</sup>))</span>
+          <span><span style="display: inline-block; width: 12px; height: 8px; background: #ef4444; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>CacheBlend-15 (O(rN<sup>2</sup>), OOM at ~35K)</span>
+          <span><span style="display: inline-block; width: 12px; height: 8px; background: #22d68c; border-radius: 2px; vertical-align: middle; margin-right: 4px;"></span>LegoLink-16 (O(kN), linear)</span>
+        </div>
+      </div>
+
+      <p style="font-size: 0.88rem; color: var(--text-secondary); margin-top: 0.5rem;">CacheBlend-15 encounters OOM at approximately 35,000 tokens due to needing to recompute and store more intermediate results. LegoLink-16 avoids OOM until 50,000 tokens due to its O(kN) complexity, processing far fewer tokens per layer.</p>
+    </div>
+
+    <!-- Async Results -->
+    <div class="card">
+      <h3>Asynchronous Workload Results</h3>
+      <div class="grid-2">
+        <div>
+          <h4 style="color: var(--accent-cyan); font-size: 0.95rem; margin-bottom: 0.5rem;">TTFT vs Request Rate</h4>
+          <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+            <li>LegoLink-16 TTFT remains <strong>stable</strong> as CCR increases</li>
+            <li>CacheBlend-15 TTFT fluctuates around 0.5s</li>
+            <li>TTFT plateaus (does not grow exponentially) due to vLLM's memory-bounded scheduling</li>
+          </ul>
+        </div>
+        <div>
+          <h4 style="color: var(--accent-green); font-size: 0.95rem; margin-bottom: 0.5rem;">Throughput vs Request Rate</h4>
+          <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+            <li>LegoLink-16: <strong>up to 7x higher</strong> throughput than CacheBlend-15</li>
+            <li>Processes more requests simultaneously (7x more concurrent)</li>
+            <li>Throughput improves until CCR reaches ~30%, then plateaus</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Datasets Table -->
+    <div class="card">
+      <h3>Evaluation Configuration</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Dataset</th><th>Task</th><th>Metric</th><th>Source</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>2WikiMQA</td><td>Multi-document QA</td><td>F1 Score</td><td>LongBench</td></tr>
+            <tr><td>MuSiQue</td><td>Multi-document QA</td><td>F1 Score</td><td>LongBench</td></tr>
+            <tr><td>HotpotQA</td><td>Multi-document QA</td><td>F1 Score</td><td>LongBench</td></tr>
+            <tr><td>SAMSum</td><td>Few-shot instruction</td><td>ROUGE-L</td><td>LongBench</td></tr>
+            <tr><td>MultiNews</td><td>Multi-doc summarization</td><td>ROUGE-L</td><td>LongBench</td></tr>
+            <tr><td>Needle in a Haystack</td><td>Long-context retrieval</td><td>F1 Score</td><td>LLM Benchmark</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size: 0.85rem; margin-top: 0.5rem; color: var(--text-secondary);"><strong>Models:</strong> Mistral 7B Instruct v0.2, Llama 3.1 8B Instruct, Yi Coder 9B Chat. <strong>Hardware:</strong> Single NVIDIA A100-80GB GPU, 128-core Xeon Platinum 8358P, 1TB DRAM.</p>
+    </div>
+  </section>
+
+  <!-- ====== AGENT RELEVANCE ====== -->
+  <section id="agent-relevance">
+    <div class="section-header">
+      <h2><span class="num">07</span>Agentic AI Relevance</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="card">
+      <h3>Why EPIC Matters for Agents</h3>
+      <p>In agentic AI systems, LLMs are invoked repeatedly with overlapping but reordered context. Traditional prefix-based caching fails because the <strong>ordering of documents varies between invocations</strong>. EPIC's position-independent caching directly addresses this.</p>
+    </div>
+
+    <div class="grid-3">
+      <div class="card" style="border-top: 3px solid var(--accent-cyan);">
+        <h3 style="color: var(--accent-cyan);">RAG Pipelines</h3>
+        <p>Retrieved documents differ per query but are individually cacheable. EPIC enables caching each document's KV vectors once, then linking them in any retrieval order -- eliminating redundant computation across queries targeting the same knowledge base.</p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--accent-orange);">
+        <h3 style="color: var(--accent-orange);">Multi-Document QA</h3>
+        <p>Agents analyzing multiple documents (legal contracts, medical records, code files) can compile each document independently. Different analysis tasks reorder or subset these documents without recomputing any document's KV cache.</p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--accent-green);">
+        <h3 style="color: var(--accent-green);">Few-Shot Prompting</h3>
+        <p>In-context learning examples remain immutable across invocations. EPIC caches each example independently, allowing the system prompt and example ordering to change without invalidating cached representations.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Agent-Specific Advantages</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Scenario</th><th>Prefix Caching</th><th>EPIC (PIC)</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Same docs, different order</td>
+              <td style="color: var(--accent-red);">Cache miss -- full recompute</td>
+              <td style="color: var(--accent-green);">Cache hit -- only link-step needed</td>
+            </tr>
+            <tr>
+              <td>Docs A,B,C then A,C,D</td>
+              <td style="color: var(--accent-red);">Only "A" prefix reused</td>
+              <td style="color: var(--accent-green);">A and C fully reused, only D compiled</td>
+            </tr>
+            <tr>
+              <td>System prompt changes</td>
+              <td style="color: var(--accent-red);">All cached KVs invalidated</td>
+              <td style="color: var(--accent-green);">Doc KVs unaffected</td>
+            </tr>
+            <tr>
+              <td>Multi-turn agent dialogue</td>
+              <td style="color: var(--accent-yellow);">Only common prefix reused</td>
+              <td style="color: var(--accent-green);">All immutable context chunks reused</td>
+            </tr>
+            <tr>
+              <td>Concurrent users, same docs</td>
+              <td style="color: var(--accent-yellow);">Each user prefix may differ</td>
+              <td style="color: var(--accent-green);">Shared doc cache, per-user link</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="callout callout-insight">
+      <div class="callout-title">Architectural Pattern for Agents</div>
+      <p>EPIC suggests a <strong>compile-once, link-many</strong> pattern for agentic systems: maintain a pre-compiled KV cache library for all knowledge documents, tool descriptions, and system instructions. Each agent invocation becomes a lightweight link step, assembling the required context and paying only O(kN) for recomputation. This is especially valuable when agent tool-calling patterns cause different document subsets to appear in different orders.</p>
+    </div>
+  </section>
+
+  <!-- ====== PAPER VS IMPLEMENTATION ====== -->
+  <section id="paper-vs-impl">
+    <div class="section-header">
+      <h2><span class="num">08</span>Paper vs. Implementation</h2>
+      <div class="section-rule"></div>
+    </div>
+
+    <div class="card">
+      <h3>Implementation Completeness Assessment</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Paper Claim / Component</th><th>Status</th><th>Details</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>LegoLink-k recomputation algorithm</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>Core algorithm present in <code class="inline">llama.py</code> and <code class="inline">xformers.py</code>. Recomputes first k tokens per non-first chunk via <code class="inline">kvlink</code> metadata path.</td>
+            </tr>
+            <tr>
+              <td>CacheBlend baseline (dynamic sparsity)</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>Ported from CacheBlend repo. Uses <code class="inline">check</code> metadata flag, layer-1 recomputation, and top-k% value divergence selection.</td>
+            </tr>
+            <tr>
+              <td>LegoLink-0 (zero overhead variant)</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>Separate evaluation script in <code class="inline">zero-linking-overhead/main.py</code>. Prepends 3-4 dummy BOS tokens during compile, strips them before link.</td>
+            </tr>
+            <tr>
+              <td>KVCompile (compile step via explicit API)</td>
+              <td><span class="tag tag-modified">Demo Only</span></td>
+              <td>Implemented via <code class="inline">hack_kv</code> tensor cloning in attention layers. Not integrated into vLLM's PagedAttention KV cache. No separate compile API endpoint.</td>
+            </tr>
+            <tr>
+              <td>KVLink prefill (link step via scheduler)</td>
+              <td><span class="tag tag-modified">Demo Only</span></td>
+              <td>Link step manipulates metadata and old_kvs directly in Python. Not integrated with vLLM scheduler or async request handling for production use.</td>
+            </tr>
+            <tr>
+              <td>OpenAI-compatible caching API</td>
+              <td style="color: var(--accent-red);"><span class="tag" style="background: rgba(239,68,68,0.15); color: #ef4444;">Not Present</span></td>
+              <td>Paper describes <code class="inline">generate_context_cache</code> and <code class="inline">chat_completion</code> APIs. Repo does not implement these endpoints. Evaluation uses direct Python LLM calls.</td>
+            </tr>
+            <tr>
+              <td>Paged KV cache integration</td>
+              <td style="color: var(--accent-red);"><span class="tag" style="background: rgba(239,68,68,0.15); color: #ef4444;">Not Present</span></td>
+              <td>Old KV vectors stored as flat tensors in <code class="inline">old_kvs</code> list, not in vLLM's paged cache. Would need integration for production use.</td>
+            </tr>
+            <tr>
+              <td>6 benchmark datasets</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>All 6 datasets (2WikiMQA, MuSiQue, SAMSum, MultiNews, HotpotQA, Needle) present with data loaders and evaluation metrics.</td>
+            </tr>
+            <tr>
+              <td>3 model architectures</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>Mistral 7B, Llama 3.1 8B, Yi Coder 9B configs present. Core modifications in <code class="inline">llama.py</code> (also covers Mistral). DeepSeek V2 modifications exist but are secondary.</td>
+            </tr>
+            <tr>
+              <td>Multi-head and grouped-query attention</td>
+              <td><span class="tag tag-new">Implemented</span></td>
+              <td>Both <code class="inline">_make_partial_bias_mha</code> and <code class="inline">_make_partial_bias_gqa</code> are implemented for different attention head configurations.</td>
+            </tr>
+            <tr>
+              <td>Async workload evaluation (Fig 8)</td>
+              <td><span class="tag tag-modified">Partial</span></td>
+              <td>Evaluation scripts exist but require full GPU setup and multi-user simulation. No simple single-command reproduction script.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card" style="border-top: 3px solid var(--accent-green);">
+        <h3 style="color: var(--accent-green);">What the Repo Proves</h3>
+        <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+          <li>The <strong>LegoLink algorithm is correct</strong> -- static selection of initial tokens is sufficient to restore accuracy</li>
+          <li>The <strong>attention sink phenomenon</strong> is real and consistently exploitable at chunk boundaries</li>
+          <li>The <strong>partial attention mask</strong> implementation (selecting Q-rows by imp_indices) is functionally validated</li>
+          <li>Both <strong>MHA and GQA</strong> attention configurations are supported</li>
+          <li>The LegoLink-0 variant with <strong>dummy prefix stripping</strong> achieves zero linking overhead</li>
+          <li>All <strong>6 benchmark datasets</strong> with proper metrics are reproducible</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--accent-yellow);">
+        <h3 style="color: var(--accent-yellow);">Gaps vs. Paper Claims</h3>
+        <ul style="color: var(--text-secondary); font-size: 0.88rem; padding-left: 1.2rem;">
+          <li><strong>Demo prototype only</strong> -- explicitly stated in README as "focusing solely on functionality rather than performance"</li>
+          <li><strong>No production cache management</strong> -- KV vectors stored as cloned tensors, not in paged KV cache</li>
+          <li><strong>No serving API</strong> -- the OpenAI-compatible endpoints described in Section 3 are not implemented</li>
+          <li><strong>Batch size limited to 1</strong> -- partial bias functions contain "FIXME: Now only focus on bsz=1" comments</li>
+          <li>The <strong>RoPE application hack</strong> creates fake queries just to call rotary_emb on keys -- a workaround, not a clean API</li>
+          <li>Production system "similar to LMCache" mentioned but <strong>not yet open-sourced</strong></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout callout-success">
+      <div class="callout-title">Overall Assessment</div>
+      <p>The repository faithfully implements the <strong>core algorithmic contributions</strong> of the paper (LegoLink, LegoLink-0, CacheBlend comparison) with sufficient fidelity to validate the published results. The system-level contributions (EPIC serving system, explicit caching APIs, scheduler integration) remain at the design/description level. This is consistent with the authors' transparent disclosure that the repo is a "demonstration system" with a full production system under development. The 2K lines of modifications over vLLM 0.7.0 cleanly demonstrate the PIC concept while the comprehensive benchmark suite enables end-to-end reproducibility.</p>
+    </div>
+
+    <!-- Key Implementation Patterns -->
+    <div class="card">
+      <h3>Key Implementation Patterns</h3>
+      <div class="grid-2">
+        <div>
+          <h4 style="color: var(--accent-purple); font-size: 0.9rem; margin-bottom: 0.5rem;">Metadata-Driven Control Flow</h4>
+          <p style="font-size: 0.85rem; color: var(--text-secondary);">The entire PIC behavior is controlled by a single dictionary (<code class="inline">cache_fuse_metadata</code>) threaded through the model. The <code class="inline">kvlink</code> field acts as a tri-state switch: <code class="inline">None</code> (off), <code class="inline">[positions...]</code> (compute bias), <code class="inline">[]</code> (bias already computed). This pattern enables runtime switching between Naive, FR, CacheBlend, and LegoLink without model changes.</p>
+        </div>
+        <div>
+          <h4 style="color: var(--accent-pink); font-size: 0.9rem; margin-bottom: 0.5rem;">Two-Pass Inference</h4>
+          <p style="font-size: 0.85rem; color: var(--text-secondary);">The evaluation runs two LLM invocations per test case: (1) a compile pass with <code class="inline">collect=True</code> that captures raw KV vectors via <code class="inline">hack_kv</code>, and (2) a link pass with <code class="inline">kvlink=positions</code> that performs selective recomputation. This cleanly separates the PIC phases while reusing the same vLLM engine.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Footer -->
+<footer class="footer">
+  <p>Technical analysis of "EPIC: Efficient Position-Independent Caching for Serving Large Language Models"</p>
+  <p style="margin-top: 0.3rem;">Hu et al., ICML 2025 (PMLR 267) &middot; arXiv:2410.15332 &middot; Analysis generated for the Agentic AI Survey</p>
+</footer>
+
+</body>
+</html>

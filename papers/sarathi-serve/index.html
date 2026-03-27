@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sarathi-Serve: Chunked Prefills for Efficient LLM Inference | OSDI'24</title>
+<style>
+:root{--bg:#0b0e17;--card:#141825;--border:#1e2436;--text:#cdd6f4;--subtext:#a6adc8;--accent:#89b4fa;--accent2:#f38ba8;--green:#a6e3a1;--peach:#fab387;--mauve:#cba6f7;--yellow:#f9e2af;--teal:#94e2d5;--red:#f38ba8;--sapphire:#74c7ec;--hero1:#16213e;--hero2:#0f3460;--codebg:#1e1e2e;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.7;}
+a{color:var(--accent);text-decoration:none;}a:hover{text-decoration:underline;}
+
+nav{position:sticky;top:0;z-index:100;background:rgba(11,14,23,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:.7rem 2rem;display:flex;align-items:center;gap:2rem;font-size:.85rem;}
+nav .logo{font-weight:700;color:var(--green);font-size:1rem;white-space:nowrap;}
+nav .links{display:flex;gap:1.5rem;flex-wrap:wrap;}
+nav .links a{color:var(--subtext);transition:color .2s;}nav .links a:hover{color:var(--green);text-decoration:none;}
+.badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;}
+.badge-venue{background:#89b4fa22;color:#89b4fa;border:1px solid #89b4fa55;}
+.badge-msft{background:#a6e3a122;color:#a6e3a1;border:1px solid #a6e3a155;}
+
+.hero{background:linear-gradient(135deg,var(--hero1),var(--hero2));padding:4rem 2rem 3rem;text-align:center;}
+.hero h1{font-size:2.4rem;font-weight:800;background:linear-gradient(135deg,#a6e3a1,#94e2d5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem;}
+.hero .subtitle{font-size:1.1rem;color:var(--subtext);max-width:820px;margin:0 auto 1.2rem;}
+.hero .meta{display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;font-size:.85rem;color:var(--subtext);}
+
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem;}
+section{margin-bottom:3rem;}
+section h2{font-size:1.6rem;font-weight:700;color:var(--green);margin-bottom:1rem;padding-bottom:.4rem;border-bottom:2px solid var(--green)33;}
+section h3{font-size:1.2rem;color:var(--mauve);margin:1.5rem 0 .7rem;}
+
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.2rem;}
+.card.blue{border-left:4px solid var(--accent);}
+.card.green{border-left:4px solid var(--green);}
+.card.mauve{border-left:4px solid var(--mauve);}
+.card.peach{border-left:4px solid var(--peach);}
+.card.yellow{border-left:4px solid var(--yellow);}
+.card.teal{border-left:4px solid var(--teal);}
+.card h4{font-size:1.05rem;margin-bottom:.5rem;}
+
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1.2rem;}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1.2rem;}
+
+.callout{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0;font-size:.92rem;}
+.callout.note{background:#89b4fa15;border-left:4px solid var(--accent);}
+.callout.warn{background:#f38ba815;border-left:4px solid var(--red);}
+.callout.info{background:#94e2d515;border-left:4px solid var(--teal);}
+.callout strong{color:var(--yellow);}
+
+pre{background:var(--codebg);border:1px solid var(--border);border-radius:8px;padding:1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:1rem 0;}
+code{font-family:'Cascadia Code','Fira Code',monospace;}
+.kw{color:#cba6f7;}.fn{color:#89b4fa;}.cm{color:#6c7086;font-style:italic;}.st{color:#a6e3a1;}.nu{color:#fab387;}.op{color:#94e2d5;}.ty{color:#f9e2af;}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem;}
+th{background:#1a1e30;color:var(--green);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid var(--green)44;}
+td{padding:.5rem .8rem;border-bottom:1px solid var(--border);}
+tr:hover td{background:#ffffff06;}
+
+.diagram-container{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto;}
+.diagram-title{text-align:center;font-weight:700;color:var(--yellow);margin-bottom:1rem;font-size:.95rem;}
+
+.pipeline{display:flex;align-items:stretch;gap:2px;min-height:50px;margin:.4rem 0;}
+.pipe-stage{padding:.4rem .5rem;border-radius:5px;font-size:.7rem;font-weight:600;text-align:center;display:flex;flex-direction:column;justify-content:center;min-width:40px;}
+.pipe-prefill{background:linear-gradient(135deg,#89b4fa,#74c7ec);color:#0b0e17;}
+.pipe-decode{background:linear-gradient(135deg,#a6e3a1,#94e2d5);color:#0b0e17;}
+.pipe-bubble{background:#45475a;color:var(--subtext);}
+.pipe-chunk{background:linear-gradient(135deg,#cba6f7,#f38ba8);color:#0b0e17;}
+.pipe-hybrid{background:linear-gradient(135deg,#f9e2af,#fab387);color:#0b0e17;}
+
+.arch-box{display:flex;flex-wrap:wrap;gap:1rem;justify-content:center;align-items:center;margin:1rem 0;}
+.arch-node{background:var(--codebg);border:2px solid;border-radius:10px;padding:1rem;text-align:center;min-width:130px;}
+.arch-node .node-title{font-weight:700;font-size:.85rem;margin-bottom:.3rem;}
+.arch-node .node-detail{font-size:.72rem;color:var(--subtext);}
+.arrow-right{display:flex;align-items:center;color:var(--subtext);font-size:1.5rem;padding:0 .2rem;}
+
+.compare-row{display:flex;gap:4px;margin:.4rem 0;align-items:center;}
+.compare-label{min-width:120px;font-size:.78rem;color:var(--subtext);text-align:right;padding-right:.5rem;}
+.compare-bar{height:22px;border-radius:3px;display:flex;align-items:center;padding:0 .5rem;font-size:.7rem;font-weight:600;color:#0b0e17;}
+
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:1rem;margin:1rem 0;}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1.2rem;text-align:center;}
+.kpi .value{font-size:2rem;font-weight:800;background:linear-gradient(135deg,var(--green),var(--teal));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.kpi .label{font-size:.8rem;color:var(--subtext);margin-top:.3rem;}
+
+/* Attention mask grid */
+.attn-grid{display:inline-grid;gap:1px;margin:.5rem 0;}
+.attn-cell{width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:700;border-radius:2px;}
+.attn-1{background:var(--green);color:#0b0e17;}
+.attn-0{background:#1e2436;color:#45475a;}
+.attn-cur{background:var(--yellow);color:#0b0e17;}
+
+footer{text-align:center;padding:2rem;color:var(--subtext);font-size:.8rem;border-top:1px solid var(--border);}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Sarathi-Serve</div>
+  <div class="links">
+    <a href="#overview">Overview</a>
+    <a href="#problem">Problem</a>
+    <a href="#chunked">Chunked Prefills</a>
+    <a href="#decode-max">Decode-Maximal</a>
+    <a href="#chunk-size">Chunk Size</a>
+    <a href="#code">Code</a>
+    <a href="#eval">Evaluation</a>
+    <a href="#tradeoffs">Tradeoffs</a>
+  </div>
+  <span class="badge badge-venue">OSDI 2024</span>
+</nav>
+
+<div class="hero">
+  <h1>Sarathi-Serve: Chunked Prefills</h1>
+  <p class="subtitle">Piggybacking decode tokens onto chunked prefill batches to convert memory-bound decoding into compute-bound operation, eliminating pipeline bubbles and improving LLM serving throughput by up to 1.91x.</p>
+  <div class="meta">
+    <span class="badge badge-venue">OSDI 2024</span>
+    <span class="badge badge-msft">Microsoft Research</span>
+    <span>arXiv: 2308.16369</span>
+    <span>Amey Agrawal, Ashish Panwar, Jayashree Mohan et al.</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ============ OVERVIEW ============ -->
+<section id="overview">
+<h2>1. Overview and Key Results</h2>
+
+<div class="kpi-grid">
+  <div class="kpi"><div class="value">10x</div><div class="label">Decode throughput improvement (LLaMA-13B, A6000)</div></div>
+  <div class="kpi"><div class="value">1.33x</div><div class="label">End-to-end throughput gain (LLaMA-13B)</div></div>
+  <div class="kpi"><div class="value">6.29x</div><div class="label">Pipeline bubble reduction (GPT-3, 64xA100 simulation)</div></div>
+  <div class="kpi"><div class="value">1.91x</div><div class="label">E2E speedup with pipeline parallelism</div></div>
+</div>
+
+<div class="card green">
+  <h4>Two Key Techniques</h4>
+  <p><strong>Chunked-prefills:</strong> Split a long prefill request into equal-sized compute-saturating chunks instead of processing the entire prompt at once. This creates uniform work units.<br>
+  <strong>Decode-maximal batching:</strong> Use a single prefill chunk to construct a hybrid batch, filling remaining slots with decode tokens that "piggyback" on the prefill's compute. This converts memory-bound decode into compute-bound operation.</p>
+</div>
+
+<div class="grid2">
+  <div class="card blue">
+    <h4>Core Problem Addressed</h4>
+    <p>Prefill saturates GPU compute at batch size 1. Decode costs 200x more per token at batch size 1. The fundamental mismatch between prefill and decode phases creates pipeline bubbles and GPU underutilization.</p>
+  </div>
+  <div class="card mauve">
+    <h4>Key Insight</h4>
+    <p>Since prefill and decode share the same weight matrices for linear operations, they can be <em>fused</em> into a single matrix multiplication. Decode tokens computed alongside prefill add near-zero marginal cost -- weights are already loaded from memory.</p>
+  </div>
+</div>
+</section>
+
+<!-- ============ PROBLEM ============ -->
+<section id="problem">
+<h2>2. The Problem: Prefill-Decode Mismatch</h2>
+
+<h3>2.1 Per-Token Cost Asymmetry</h3>
+
+<div class="card peach">
+  <p>The decode cost per token is <strong>200x, 100x, and 16.7x</strong> that of prefill at batch sizes 1, 2, and 18 respectively (LLaMA-13B, A6000). This extreme asymmetry means:</p>
+  <ul style="margin-top:.5rem;padding-left:1.2rem;font-size:.9rem;">
+    <li>Prefill: matrix-matrix multiplications (compute-bound, high arithmetic intensity)</li>
+    <li>Decode: vector-matrix multiplications (memory-bound, low arithmetic intensity)</li>
+    <li>Single prefill request saturates GPU, but decode needs batch size 256+ to saturate</li>
+  </ul>
+</div>
+
+<h3>2.2 Pipeline Bubbles in LLM Inference</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">(a) Baseline: Iteration-Level Scheduling with Pipeline Parallelism</div>
+  <div style="display:flex;flex-direction:column;gap:6px;">
+    <div style="display:flex;align-items:center;gap:4px;">
+      <span style="min-width:50px;font-size:.75rem;color:var(--subtext);">GPU 1</span>
+      <div class="pipeline" style="flex:1;">
+        <div class="pipe-stage pipe-prefill" style="flex:3;">A<sub>p</sub></div>
+        <div class="pipe-stage pipe-decode" style="flex:1;">B<sub>d1</sub></div>
+        <div class="pipe-stage pipe-prefill" style="flex:2;">C<sub>p</sub></div>
+        <div class="pipe-stage pipe-decode" style="flex:1.5;">D<sub>d1</sub></div>
+        <div class="pipe-stage pipe-bubble" style="flex:2;">Bubble<br>PB<sub>1</sub></div>
+        <div class="pipe-stage pipe-bubble" style="flex:1.5;">PB<sub>2</sub></div>
+        <div class="pipe-stage pipe-decode" style="flex:.8;">C<sub>d1</sub>D<sub>d2</sub></div>
+        <div class="pipe-stage pipe-bubble" style="flex:1;">PB<sub>3</sub></div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px;">
+      <span style="min-width:50px;font-size:.75rem;color:var(--subtext);">GPU 2</span>
+      <div class="pipeline" style="flex:1;">
+        <div class="pipe-stage" style="flex:.5;background:transparent;"></div>
+        <div class="pipe-stage pipe-prefill" style="flex:3;">A<sub>p</sub></div>
+        <div class="pipe-stage pipe-decode" style="flex:1;">B<sub>d1</sub></div>
+        <div class="pipe-stage pipe-bubble" style="flex:1;">PB</div>
+        <div class="pipe-stage pipe-prefill" style="flex:2;">C<sub>p</sub></div>
+        <div class="pipe-stage pipe-decode" style="flex:1.5;">D<sub>d1</sub></div>
+        <div class="pipe-stage pipe-bubble" style="flex:1.5;"></div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:.78rem;color:var(--subtext);margin-top:.5rem;text-align:center;">PB<sub>1</sub>: varying prefill lengths. PB<sub>2</sub>: prefill vs decode compute mismatch. PB<sub>3</sub>: varying context/decode lengths.</p>
+</div>
+
+<div class="diagram-container">
+  <div class="diagram-title">(b) Sarathi: Chunked Prefills + Decode-Maximal Batching</div>
+  <div style="display:flex;flex-direction:column;gap:6px;">
+    <div style="display:flex;align-items:center;gap:4px;">
+      <span style="min-width:50px;font-size:.75rem;color:var(--subtext);">GPU 1</span>
+      <div class="pipeline" style="flex:1;">
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">C<sub>p</sub>A<sub>d1</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">D<sub>p1</sub>A<sub>d2</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">C<sub>p</sub>B<sub>d1</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">B<sub>d2</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">D<sub>p2</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">B<sub>d3</sub>C<sub>d1</sub>D<sub>d1</sub></div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px;">
+      <span style="min-width:50px;font-size:.75rem;color:var(--subtext);">GPU 2</span>
+      <div class="pipeline" style="flex:1;">
+        <div class="pipe-stage" style="flex:.3;background:transparent;"></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">C<sub>p</sub>A<sub>d1</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">D<sub>p1</sub>A<sub>d2</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">C<sub>p</sub>B<sub>d1</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">B<sub>d2</sub></div>
+        <div class="pipe-stage pipe-hybrid" style="flex:1.5;">D<sub>p2</sub></div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;gap:1rem;margin-top:.6rem;justify-content:center;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div style="width:14px;height:14px;border-radius:3px;background:linear-gradient(135deg,#89b4fa,#74c7ec);"></div> Prefill</div>
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div style="width:14px;height:14px;border-radius:3px;background:linear-gradient(135deg,#a6e3a1,#94e2d5);"></div> Decode</div>
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div style="width:14px;height:14px;border-radius:3px;background:#45475a;"></div> Bubble</div>
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div style="width:14px;height:14px;border-radius:3px;background:linear-gradient(135deg,#f9e2af,#fab387);"></div> Hybrid (chunk+decode)</div>
+  </div>
+  <p style="font-size:.78rem;color:var(--subtext);margin-top:.5rem;text-align:center;">Uniform hybrid batches eliminate all three types of pipeline bubbles. No wasted GPU cycles.</p>
+</div>
+</section>
+
+<!-- ============ CHUNKED PREFILLS ============ -->
+<section id="chunked">
+<h2>3. Chunked Prefills</h2>
+
+<h3>3.1 Mechanism</h3>
+<div class="card green">
+  <p>A prefill request with prompt length P is split into <em>ceil(P / C)</em> chunks of size C. Each chunk is processed in a separate iteration. The key challenge is correctly setting the <strong>attention mask</strong> so that each chunk can only attend to tokens from the current and previous chunks -- not future chunks.</p>
+</div>
+
+<h3>3.2 Attention Mask Across Chunks</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">Attention Mask for Chunked Prefills (chunk_size=4, prompt_len=12)</div>
+  <div style="display:flex;flex-wrap:wrap;gap:2rem;justify-content:center;">
+    <div>
+      <div style="font-size:.78rem;color:var(--teal);margin-bottom:.3rem;text-align:center;">Chunk 1 (tokens 0-3)</div>
+      <div class="attn-grid" style="grid-template-columns:repeat(4,24px);">
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div>
+      </div>
+    </div>
+    <div>
+      <div style="font-size:.78rem;color:var(--teal);margin-bottom:.3rem;text-align:center;">Chunk 2 (tokens 4-7)</div>
+      <div class="attn-grid" style="grid-template-columns:repeat(8,24px);">
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-0">-</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-0">-</div>
+        <div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-1">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div><div class="attn-cell attn-cur">1</div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;gap:1rem;margin-top:.8rem;justify-content:center;">
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div class="attn-cell attn-1" style="width:16px;height:16px;">1</div> Prior KV-cache</div>
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div class="attn-cell attn-cur" style="width:16px;height:16px;">1</div> Current chunk</div>
+    <div style="display:flex;align-items:center;gap:.3rem;font-size:.75rem;"><div class="attn-cell attn-0" style="width:16px;height:16px;">-</div> Masked (future)</div>
+  </div>
+</div>
+
+<h3>3.3 Overhead Analysis</h3>
+<div class="grid2">
+  <div class="card yellow">
+    <h4>Reduced Arithmetic Intensity</h4>
+    <p>Smaller chunks have lower arithmetic intensity for linear operations. Chunk size 256 loses ~12.5% prefill throughput vs full prefill. Chunk size 512 loses ~10%.</p>
+  </div>
+  <div class="card blue">
+    <h4>Repeated KV-Cache Reads</h4>
+    <p>Subsequent chunks must re-read KV vectors from prior chunks during attention. For N chunks, chunk i reads KV from chunks 0..i-1. This overhead is small because attention is a minor fraction of total compute.</p>
+  </div>
+</div>
+</section>
+
+<!-- ============ DECODE MAXIMAL ============ -->
+<section id="decode-max">
+<h2>4. Decode-Maximal Batching</h2>
+
+<h3>4.1 Hybrid Batch Construction</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">Decode-Maximal Batch Composition</div>
+  <div style="display:flex;flex-wrap:wrap;gap:1rem;justify-content:center;align-items:stretch;">
+    <div style="flex:0 0 160px;background:linear-gradient(135deg,#89b4fa22,#74c7ec22);border:2px solid var(--accent);border-radius:10px;padding:1rem;text-align:center;">
+      <div style="font-weight:700;color:var(--accent);font-size:.9rem;">Prefill Chunk</div>
+      <div style="font-size:2rem;font-weight:800;color:var(--accent);margin:.3rem 0;">C</div>
+      <div style="font-size:.75rem;color:var(--subtext);">tokens (1 request)</div>
+    </div>
+    <div style="display:flex;align-items:center;font-size:1.5rem;color:var(--subtext);">+</div>
+    <div style="flex:0 0 160px;background:linear-gradient(135deg,#a6e3a122,#94e2d522);border:2px solid var(--green);border-radius:10px;padding:1rem;text-align:center;">
+      <div style="font-weight:700;color:var(--green);font-size:.9rem;">Piggybacked Decodes</div>
+      <div style="font-size:2rem;font-weight:800;color:var(--green);margin:.3rem 0;">B-1</div>
+      <div style="font-size:.75rem;color:var(--subtext);">tokens (B-1 requests)</div>
+    </div>
+    <div style="display:flex;align-items:center;font-size:1.5rem;color:var(--subtext);">=</div>
+    <div style="flex:0 0 180px;background:linear-gradient(135deg,#f9e2af22,#fab38722);border:2px solid var(--yellow);border-radius:10px;padding:1rem;text-align:center;">
+      <div style="font-weight:700;color:var(--yellow);font-size:.9rem;">Hybrid Batch</div>
+      <div style="font-size:2rem;font-weight:800;color:var(--yellow);margin:.3rem 0;">C+B-1</div>
+      <div style="font-size:.75rem;color:var(--subtext);">Uniform compute cost</div>
+    </div>
+  </div>
+</div>
+
+<h3>4.2 Why It Works: Fused Linear Operations</h3>
+
+<div class="card green">
+  <p>For linear operations (preproj, postproj, ffn_ln1, ffn_ln2), prefill and decode share the same weight tensors W. By concatenating their activations, both are computed in a <strong>single GEMM call</strong>:</p>
+</div>
+
+<pre><code><span class="cm">// Without decode-maximal batching:</span>
+<span class="ty">prefill_out</span> = <span class="fn">matmul</span>(prefill_activations, W)    <span class="cm">// shape [B,C,H] x [H,H]</span>
+<span class="ty">decode_out</span>  = <span class="fn">matmul</span>(decode_activations, W)     <span class="cm">// shape [D,1,H] x [H,H] -- weight reloaded!</span>
+
+<span class="cm">// With decode-maximal batching (SARATHI):</span>
+<span class="ty">fused_input</span> = <span class="fn">concat</span>(prefill_chunk, decode_tokens)  <span class="cm">// shape [1,C+D,H]</span>
+<span class="ty">fused_out</span>   = <span class="fn">matmul</span>(fused_input, W)                 <span class="cm">// shape [1,C+D,H] x [H,H]</span>
+<span class="cm">//   Weight loaded ONCE. Decode tokens computed at marginal cost ~ 0.</span></code></pre>
+
+<h3>4.3 Decode Cost Comparison</h3>
+<table>
+  <tr><th>Batching Scheme</th><th>Linear (ms)</th><th>Attn (ms)</th><th>Total (ms)</th><th>Per-token Decode (ms)</th></tr>
+  <tr><td>Prefill-only (B=4, L=1024)</td><td>224.8</td><td>10</td><td>234.8</td><td style="color:var(--subtext);">0.229</td></tr>
+  <tr><td style="color:var(--red);">Decode-only (B=4)</td><td>44.28</td><td>5.68</td><td>49.96</td><td style="color:var(--red);">12.49</td></tr>
+  <tr><td style="color:var(--green);font-weight:600;">Decode-maximal (1 pf + 3 dec)</td><td>223.2</td><td>15.2</td><td>238.4</td><td style="color:var(--green);font-weight:700;">1.2</td></tr>
+</table>
+
+<div class="callout info">
+  <strong>10.4x decode speedup:</strong> Decode-maximal batching reduces per-token decode time from 12.49ms to 1.2ms -- an order of magnitude improvement -- by eliminating the redundant weight loading that dominates standalone decode iterations.
+</div>
+</section>
+
+<!-- ============ CHUNK SIZE ============ -->
+<section id="chunk-size">
+<h2>5. Choosing the Ideal Chunk Size</h2>
+
+<h3>5.1 P:D Ratio Analysis</h3>
+<div class="card peach">
+  <p>The <strong>P:D ratio</strong> (prefill-to-decode token ratio) determines the optimal chunk size. A prefill of size P yields P/C chunks, each piggybacking B-1 decodes. Peak Sarathi performance occurs when the number of chunks equals the decode iterations:</p>
+  <pre><code><span class="cm">// Peak performance condition</span>
+<span class="ty">P:D</span> = C / (B - <span class="nu">1</span>)
+
+<span class="cm">// Example: chunk_size=256, batch_size=18</span>
+<span class="ty">Optimal P:D</span> = <span class="nu">256</span> / (<span class="nu">18</span> - <span class="nu">1</span>) = <span class="nu">15.06</span>
+<span class="cm">// At this ratio, ALL decodes can piggyback with prefill chunks</span></code></pre>
+</div>
+
+<h3>5.2 Chunk Size Tradeoffs</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">Tradeoff: Smaller Chunks vs Larger Chunks</div>
+  <div style="display:flex;flex-wrap:wrap;gap:1rem;justify-content:center;">
+    <div style="flex:1;min-width:240px;background:#1a1e30;border:2px solid var(--teal);border-radius:10px;padding:1.2rem;">
+      <div style="text-align:center;font-weight:700;color:var(--teal);margin-bottom:.5rem;">Smaller Chunks (e.g. 128)</div>
+      <div style="font-size:.82rem;color:var(--green);margin-bottom:.3rem;">+ More decode piggybacking</div>
+      <div style="font-size:.82rem;color:var(--green);margin-bottom:.3rem;">+ More uniform work units</div>
+      <div style="font-size:.82rem;color:var(--red);margin-bottom:.3rem;">- Lower prefill arithmetic intensity</div>
+      <div style="font-size:.82rem;color:var(--red);">- More KV-cache re-reads</div>
+    </div>
+    <div style="flex:1;min-width:240px;background:#1a1e30;border:2px solid var(--peach);border-radius:10px;padding:1.2rem;">
+      <div style="text-align:center;font-weight:700;color:var(--peach);margin-bottom:.5rem;">Larger Chunks (e.g. 512)</div>
+      <div style="font-size:.82rem;color:var(--green);margin-bottom:.3rem;">+ Higher prefill efficiency</div>
+      <div style="font-size:.82rem;color:var(--green);margin-bottom:.3rem;">+ Fewer KV-cache re-reads</div>
+      <div style="font-size:.82rem;color:var(--red);margin-bottom:.3rem;">- Fewer decode piggybacks</div>
+      <div style="font-size:.82rem;color:var(--red);">- Less uniform batch sizes</div>
+    </div>
+  </div>
+</div>
+
+<h3>5.3 Tile Quantization Effect</h3>
+<div class="callout warn">
+  <strong>Critical detail:</strong> GPUs compute matmuls by partitioning into tiles (typically 128 tokens). When the total batch dimension (chunk_size + decode_count) is not a multiple of the tile size, wasted compute occurs. For example, going from 128 to 129 tokens increases iteration time by 32%. Sarathi ensures chunk + decode count aligns to tile boundaries.
+</div>
+</section>
+
+<!-- ============ CODE ============ -->
+<section id="code">
+<h2>6. Implementation Deep Dive</h2>
+
+<h3>6.1 Scheduler Architecture</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">Sarathi Scheduler Class Hierarchy</div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:.5rem;">
+    <div style="background:var(--codebg);border:2px solid var(--accent);border-radius:8px;padding:.7rem 1.5rem;text-align:center;">
+      <div style="font-weight:700;color:var(--accent);font-size:.85rem;">BaseScheduler</div>
+      <div style="font-size:.7rem;color:var(--subtext);">Block space manager, waiting/running queues</div>
+    </div>
+    <div style="color:var(--subtext);font-size:1rem;">&#8595;</div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
+      <div style="background:var(--codebg);border:2px solid var(--subtext);border-radius:8px;padding:.5rem 1rem;text-align:center;">
+        <div style="font-size:.78rem;color:var(--subtext);">OrcaScheduler</div>
+      </div>
+      <div style="background:var(--codebg);border:2px solid var(--subtext);border-radius:8px;padding:.5rem 1rem;text-align:center;">
+        <div style="font-size:.78rem;color:var(--subtext);">VllmScheduler</div>
+      </div>
+      <div style="background:var(--codebg);border:2px solid var(--green);border-radius:8px;padding:.5rem 1rem;text-align:center;">
+        <div style="font-weight:700;font-size:.78rem;color:var(--green);">SarathiScheduler</div>
+      </div>
+      <div style="background:var(--codebg);border:2px solid var(--subtext);border-radius:8px;padding:.5rem 1rem;text-align:center;">
+        <div style="font-size:.78rem;color:var(--subtext);">FasterTransformerScheduler</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3>6.2 SarathiScheduler Core Logic</h3>
+<pre><code><span class="kw">class</span> <span class="ty">SarathiScheduler</span>(<span class="ty">BaseScheduler</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, model_config, scheduler_config, cache_config, ...):
+        <span class="kw">self</span>.chunk_size = scheduler_config.chunk_size
+        <span class="kw">self</span>.enable_dynamic_chunking_schedule = (
+            scheduler_config.enable_dynamic_chunking_schedule
+        )
+        <span class="cm"># Dynamic chunking: schedule adapts chunk size over time</span>
+        <span class="kw">self</span>.low_chunk_size = scheduler_config.low_chunk_size
+        <span class="kw">self</span>.high_chunk_size = scheduler_config.high_chunk_size
+
+    <span class="kw">def</span> <span class="fn">_get_seq_next_num_prefill_tokens</span>(<span class="kw">self</span>, seq, num_batched_tokens):
+        <span class="st">"""Determine how many prefill tokens for next chunk."""</span>
+        <span class="kw">if</span> <span class="kw">self</span>.enable_dynamic_chunking_schedule:
+            <span class="cm"># Adapt chunk size based on processing stage</span>
+            request_stage_idx = <span class="fn">int</span>(
+                seq.num_processed_tokens / <span class="kw">self</span>._tokens_per_stage
+            )
+            chunk_size = <span class="kw">self</span>._chunk_sizes[
+                <span class="fn">min</span>(request_stage_idx, <span class="fn">len</span>(<span class="kw">self</span>._chunk_sizes) - <span class="nu">1</span>)
+            ]
+        <span class="kw">else</span>:
+            chunk_size = <span class="kw">self</span>.chunk_size
+
+        remaining = seq.get_num_prompt_tokens_remaining()
+        <span class="kw">return</span> <span class="fn">min</span>(chunk_size, remaining, max_tokens - num_batched_tokens)
+
+    <span class="kw">def</span> <span class="fn">_schedule</span>(<span class="kw">self</span>):
+        <span class="st">"""Form hybrid batch: 1 prefill chunk + B-1 decodes."""</span>
+        <span class="cm"># 1. Schedule running decodes first (highest priority)</span>
+        <span class="kw">for</span> seq <span class="kw">in</span> <span class="kw">self</span>.running:
+            <span class="kw">if</span> seq.is_in_decode_phase():
+                scheduled_decodes.<span class="fn">append</span>(seq)
+
+        <span class="cm"># 2. Fill remaining capacity with one prefill chunk</span>
+        remaining_budget = <span class="kw">self</span>.max_batch_tokens - num_decode_tokens
+        <span class="kw">if</span> remaining_budget >= <span class="kw">self</span>.chunk_size:
+            chunk_tokens = <span class="kw">self</span>.<span class="fn">_get_seq_next_num_prefill_tokens</span>(
+                next_prefill, num_batched_tokens
+            )
+            <span class="cm"># 3. Align to tile size for GPU efficiency</span></code></pre>
+
+<h3>6.3 Configuration System</h3>
+<pre><code><span class="cm"># sarathi/benchmark/config.py -- Scheduler configuration</span>
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">PoissonRequestIntervalGeneratorConfig</span>:
+    qps: <span class="ty">float</span> = <span class="nu">1.0</span>  <span class="cm"># Queries per second</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">TraceRequestIntervalGeneratorConfig</span>:
+    trace_file: <span class="ty">str</span> = <span class="st">"AzureFunctionsInvocationTrace...csv"</span>
+    time_scale_factor: <span class="ty">float</span> = <span class="nu">0.3</span></code></pre>
+</section>
+
+<!-- ============ EVALUATION ============ -->
+<section id="eval">
+<h2>7. Evaluation Results</h2>
+
+<h3>7.1 Single-GPU Decode Speedup</h3>
+<table>
+  <tr><th>Model (GPU)</th><th>Seq. Length</th><th>Batch Size</th><th>P:D Ratio</th><th>Decode Speedup</th><th>E2E Gain</th></tr>
+  <tr><td>LLaMA-13B (A6000)</td><td>1K</td><td>6</td><td>50:1</td><td style="color:var(--green);">5.45x</td><td style="color:var(--green);">1.33x</td></tr>
+  <tr><td>LLaMA-13B (A6000)</td><td>2K</td><td>6</td><td>50:1</td><td style="color:var(--green);">3.26x</td><td>1.26x</td></tr>
+  <tr><td>LLaMA-13B (A6000)</td><td>3K</td><td>6</td><td>50:1</td><td style="color:var(--green);">2.51x</td><td>1.22x</td></tr>
+  <tr><td>LLaMA-33B (A100)</td><td>1K</td><td>10</td><td>28:1</td><td style="color:var(--green);">3.83x</td><td>1.25x</td></tr>
+  <tr><td>LLaMA-33B (A100)</td><td>2K</td><td>5</td><td>63:1</td><td style="color:var(--green);">4.25x</td><td>1.22x</td></tr>
+</table>
+
+<h3>7.2 Pipeline Parallelism (GPT-3, 64xA100 Simulation)</h3>
+
+<div class="diagram-container">
+  <div class="diagram-title">Pipeline Bubble Reduction and Throughput Comparison</div>
+  <div style="display:flex;flex-wrap:wrap;gap:1.5rem;justify-content:center;">
+    <div style="flex:1;min-width:220px;text-align:center;">
+      <div style="font-size:.85rem;color:var(--subtext);margin-bottom:.5rem;">Median Bubble Time / Request</div>
+      <div class="compare-row"><div class="compare-label">TP+PP Baseline</div><div class="compare-bar" style="width:90%;background:var(--red);">~60s</div></div>
+      <div class="compare-row"><div class="compare-label" style="color:var(--green);">Sarathi TP+PP</div><div class="compare-bar" style="width:14%;background:var(--green);">~9.5s</div></div>
+      <p style="font-size:.78rem;color:var(--teal);margin-top:.3rem;">6.29x bubble reduction</p>
+    </div>
+    <div style="flex:1;min-width:220px;text-align:center;">
+      <div style="font-size:.85rem;color:var(--subtext);margin-bottom:.5rem;">E2E Request Completion (10K req)</div>
+      <div class="compare-row"><div class="compare-label">TP only (8 rep)</div><div class="compare-bar" style="width:85%;background:var(--peach);">~2800s</div></div>
+      <div class="compare-row"><div class="compare-label">TP+PP Baseline</div><div class="compare-bar" style="width:70%;background:var(--yellow);">~2300s</div></div>
+      <div class="compare-row"><div class="compare-label" style="color:var(--green);">Sarathi TP+PP</div><div class="compare-bar" style="width:45%;background:var(--green);">~1500s</div></div>
+    </div>
+  </div>
+</div>
+
+<h3>7.3 Comparison with Orca Scheduling</h3>
+<div class="card blue">
+  <p>Orca's iteration-level scheduling processes full prefills in one shot, incidentally overlapping with some ongoing decodes. Sarathi consistently outperforms Orca's best-case with throughput gains of <strong>1.27x (1K), 1.25x (2K), and 1.23x (3K)</strong> across all sequence lengths, because chunked prefills create more piggybacking opportunities than Orca's opportunistic overlap.</p>
+</div>
+</section>
+
+<!-- ============ TRADEOFFS ============ -->
+<section id="tradeoffs">
+<h2>8. Tradeoffs and Relation to PD Disaggregation</h2>
+
+<h3>8.1 Sarathi vs. Prefill-Decode Disaggregation</h3>
+<div class="grid2">
+  <div class="card green">
+    <h4 style="color:var(--green);">Sarathi Approach: Co-located PD</h4>
+    <ul style="font-size:.88rem;padding-left:1rem;">
+      <li>Prefill and decode on the same GPU</li>
+      <li>Fused matrix multiplications eliminate decode overhead</li>
+      <li>No KV-cache transfer between machines</li>
+      <li>Uniform batches reduce pipeline bubbles</li>
+      <li>Better for moderate P:D ratios (10-50)</li>
+    </ul>
+  </div>
+  <div class="card mauve">
+    <h4 style="color:var(--mauve);">Disaggregation (DistServe/Splitwise)</h4>
+    <ul style="font-size:.88rem;padding-left:1rem;">
+      <li>Separate GPU pools for prefill and decode</li>
+      <li>Each pool independently optimized</li>
+      <li>Requires KV-cache transfer (network overhead)</li>
+      <li>Better for extreme P:D ratios or strict SLOs</li>
+      <li>Higher hardware cost (separate pools)</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout note">
+  <strong>Key tradeoff:</strong> Sarathi's chunked prefills can delay ongoing decode requests during the prefill chunk processing. Disaggregation avoids this by isolating the two phases. The Sarathi-Serve follow-up paper (arXiv:2403.02310) explores this tradeoff in detail, showing that for most production workloads, co-located serving with chunked prefills remains more cost-effective.
+</div>
+
+<h3>8.2 Adoption and Legacy</h3>
+<div class="card teal">
+  <p>Chunked prefills have become a standard technique in production LLM serving systems. The technique has been adopted by:</p>
+  <ul style="padding-left:1.2rem;font-size:.9rem;margin-top:.5rem;">
+    <li><strong>vLLM</strong>: <code>enable_chunked_prefill</code> flag, default in many configurations</li>
+    <li><strong>NanoFlow</strong> (OSDI'25): uses Sarathi's chunked prefill policy for request scheduling</li>
+    <li><strong>SGLang</strong>: implements chunked prefills as a core scheduling primitive</li>
+    <li><strong>TensorRT-LLM</strong>: supports chunked context mode</li>
+  </ul>
+</div>
+
+<h3>8.3 Limitations</h3>
+<div class="grid2">
+  <div class="card yellow">
+    <h4>Assumed Uniform Requests</h4>
+    <p>The analysis assumes each request has the same number of prefill and decode tokens. Real-world requests have highly variable lengths, which complicates optimal chunk size selection.</p>
+  </div>
+  <div class="card peach">
+    <h4>Sequence Length Scaling</h4>
+    <p>Evaluated on sequences up to 3K and P:D ratios 1-200. Very long sequences (10K-100K+) introduce new challenges as attention cost grows quadratically.</p>
+  </div>
+</div>
+
+<!-- ============ MATH MODEL ============ -->
+<section id="mathmodel">
+<h2>9. Mathematical Model of Decode-Maximal Batching</h2>
+
+<h3>9.1 Batch Size Constraints</h3>
+<div class="card green">
+  <p>The maximum permissible batch size B is constrained by GPU memory:</p>
+  <pre><code><span class="ty">B</span> = <span class="fn">floor</span>( (<span class="ty">M_G</span> - <span class="ty">M_S</span>) / (<span class="ty">L</span> * <span class="ty">m_kv</span>) )
+
+<span class="cm">// M_G  = available GPU memory (e.g., 48GB for A6000)</span>
+<span class="cm">// M_S  = model parameter memory footprint</span>
+<span class="cm">// L    = maximum sequence length the model supports</span>
+<span class="cm">// m_kv = memory per KV pair per token</span>
+
+<span class="cm">// Example: LLaMA-13B on A6000 (48GB)</span>
+<span class="cm">// M_G = 48GB, M_S = 26GB, L = 2048, m_kv = ~1.2MB</span>
+<span class="cm">// B = floor(22GB / (2048 * 1.2MB)) = 18</span></code></pre>
+</div>
+
+<h3>9.2 Piggybacking Coverage</h3>
+<div class="card blue">
+  <p>With chunk size C and batch size B, a single prefill request generates P/C chunks. Each chunk can piggyback B-1 decode tokens. The total number of piggybacked decodes per prefill is:</p>
+  <pre><code><span class="ty">total_piggybacked</span> = (P / C) * (B - <span class="nu">1</span>)
+
+<span class="cm">// For ALL decodes to piggyback (ideal case):</span>
+<span class="cm">// D = P/C * (B-1), where D is total decode tokens</span>
+<span class="cm">// Therefore: P:D = C / (B-1)</span>
+
+<span class="cm">// Example: C=256, B=18</span>
+<span class="cm">// Optimal P:D = 256/17 = 15.06</span>
+<span class="cm">// At this ratio, SARATHI achieves peak 1.27x throughput</span></code></pre>
+</div>
+
+<h3>9.3 Decode Efficiency Formula</h3>
+<div class="card peach">
+  <p>The per-token decode cost in decode-maximal batching can be approximated as:</p>
+  <pre><code><span class="cm">// Marginal decode cost = additional attention cost only</span>
+<span class="ty">decode_cost_sarathi</span> = <span class="ty">T_attn</span>(C + D) - <span class="ty">T_attn</span>(C)
+                     + <span class="ty">epsilon</span>  <span class="cm">// negligible linear op overhead</span>
+
+<span class="cm">// vs baseline where all linear ops must be re-executed:</span>
+<span class="ty">decode_cost_baseline</span> = <span class="ty">T_linear</span>(D) + <span class="ty">T_attn</span>(D)
+
+<span class="cm">// Since T_linear dominates (>80% of total time):</span>
+<span class="cm">// decode_cost_sarathi / decode_cost_baseline ≈ 1/10 to 1/200</span></code></pre>
+</div>
+</section>
+
+<!-- ============ PIPELINE PARALLEL ============ -->
+<section id="pipeline-details">
+<h2>10. Pipeline Parallelism Integration Details</h2>
+
+<h3>10.1 Three Types of Pipeline Bubbles</h3>
+<div class="grid3">
+  <div class="card yellow">
+    <h4>PB<sub>1</sub>: Variable Prefill Length</h4>
+    <p>Different requests have different prompt sizes. In a pipeline, stage completion times vary, creating bubbles between consecutive micro-batches. Chunked prefills eliminate this by making all chunks the same size C.</p>
+  </div>
+  <div class="card blue">
+    <h4>PB<sub>2</sub>: Prefill-Decode Mismatch</h4>
+    <p>A prefill stage followed by a decode stage has vastly different compute times. The decode stage finishes much faster, leaving the GPU idle waiting for the next micro-batch. Hybrid batches equalize compute.</p>
+  </div>
+  <div class="card mauve">
+    <h4>PB<sub>3</sub>: Variable Decode Context</h4>
+    <p>Decode attention cost grows with context length (accumulated KV-cache). Different requests at different stages of generation have different decode times. Uniform batching mitigates this variance.</p>
+  </div>
+</div>
+
+<h3>10.2 Simulation Results (GPT-3, 64xA100)</h3>
+<table>
+  <tr><th>Configuration</th><th>Parallelism</th><th>Batch Size</th><th>Completion (10K req)</th><th>vs TP-only</th></tr>
+  <tr><td>8-way TP (8 replicas)</td><td>TP only</td><td>27</td><td>2800s</td><td>1.00x</td></tr>
+  <tr><td>8-way TP + 8-way PP (Orca)</td><td>TP+PP</td><td>27</td><td>2300s</td><td>1.22x</td></tr>
+  <tr><td style="color:var(--green);font-weight:600;">8-way TP + 8-way PP (Sarathi)</td><td>TP+PP</td><td>27</td><td style="color:var(--green);font-weight:700;">1500s</td><td style="color:var(--green);">1.87x</td></tr>
+</table>
+
+<div class="callout info">
+  <strong>Key takeaway:</strong> Without Sarathi, adding pipeline parallelism to tensor parallelism yields only 1.22x speedup due to pipeline bubbles. With Sarathi's chunked prefills and decode-maximal batching, the same PP configuration yields 1.87x speedup -- making pipeline parallelism practically viable for LLM inference.
+</div>
+
+<h3>10.3 Repository Structure</h3>
+<div class="diagram-container">
+  <div class="diagram-title">Sarathi-Serve Repository Organization</div>
+  <div style="display:flex;flex-wrap:wrap;gap:1.5rem;justify-content:center;font-size:.8rem;">
+    <div style="background:#1a1e30;border:1px solid var(--green);border-radius:8px;padding:1rem;min-width:170px;">
+      <div style="font-weight:700;color:var(--green);margin-bottom:.4rem;">sarathi/core/scheduler/</div>
+      <div style="color:var(--subtext);font-size:.75rem;">
+        sarathi_scheduler.py<br>
+        orca_scheduler.py<br>
+        vllm_scheduler.py<br>
+        faster_transformer_scheduler.py<br>
+        simple_chunking_scheduler.py<br>
+        base_scheduler.py
+      </div>
+    </div>
+    <div style="background:#1a1e30;border:1px solid var(--accent);border-radius:8px;padding:1rem;min-width:170px;">
+      <div style="font-weight:700;color:var(--accent);margin-bottom:.4rem;">sarathi/core/datatypes/</div>
+      <div style="color:var(--subtext);font-size:.75rem;">
+        sequence.py<br>
+        scheduler_output.py<br>
+        step_inputs.py<br>
+        sampling_params.py<br>
+        block.py<br>
+        request_output.py
+      </div>
+    </div>
+    <div style="background:#1a1e30;border:1px solid var(--yellow);border-radius:8px;padding:1rem;min-width:170px;">
+      <div style="font-weight:700;color:var(--yellow);margin-bottom:.4rem;">sarathi/benchmark/</div>
+      <div style="color:var(--subtext);font-size:.75rem;">
+        config.py<br>
+        benchmark_runner.py<br>
+        capacity_search/<br>
+        request_generator/<br>
+        Poisson, trace, synthetic
+      </div>
+    </div>
+    <div style="background:#1a1e30;border:1px solid var(--peach);border-radius:8px;padding:1rem;min-width:170px;">
+      <div style="font-weight:700;color:var(--peach);margin-bottom:.4rem;">csrc/ (C++/CUDA)</div>
+      <div style="color:var(--subtext);font-size:.75rem;">
+        Attention kernels<br>
+        Custom CUDA ops<br>
+        Pybind11 bindings<br>
+        Memory management
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="callout note">
+  <strong>Built on nanoGPT:</strong> Sarathi is implemented on top of the nanoGPT codebase with support for both chunked-prefills and decode-maximal batching. It uses xformers for attention computation and compares against multiple scheduler baselines (Orca, FasterTransformer, vLLM) within the same framework for fair evaluation.
+</div>
+</section>
+
+<!-- ============ IMPL DETAILS ============ -->
+<section id="impl-details">
+<h2>11. Implementation Details and Reproducibility</h2>
+
+<h3>11.1 Dynamic Chunking Schedule</h3>
+<div class="card green">
+  <p>Beyond fixed chunk sizes, Sarathi supports <strong>dynamic chunking</strong> that adapts chunk size over a request's lifetime. The scheduler computes equally spaced chunk sizes between <code>low_chunk_size</code> and <code>high_chunk_size</code>, aligned to multiples of 32. Early chunks are larger (higher prefill efficiency) while later chunks are smaller (more piggybacking for accumulated decodes):</p>
+  <pre><code><span class="cm"># Dynamic chunk schedule computation</span>
+chunk_sizes = np.<span class="fn">linspace</span>(
+    low_chunk_size,     <span class="cm"># e.g., 128</span>
+    high_chunk_size,    <span class="cm"># e.g., 512</span>
+    num_stages,         <span class="cm"># e.g., 4 stages</span>
+)[::-<span class="nu">1</span>]               <span class="cm"># Reverse: start large, end small</span>
+<span class="cm"># Result: [512, 384, 256, 128]</span>
+<span class="cm"># Stage determined by: num_processed_tokens / tokens_per_stage</span></code></pre>
+</div>
+
+<h3>11.2 Evaluation Hardware Configurations</h3>
+<table>
+  <tr><th>Model</th><th>GPU</th><th>Num GPUs</th><th>Per-GPU Mem</th><th>Mode</th></tr>
+  <tr><td>LLaMA-13B</td><td>A6000</td><td>1</td><td>48 GB</td><td>Physical deployment</td></tr>
+  <tr><td>LLaMA-33B</td><td>A100</td><td>1</td><td>80 GB</td><td>Physical deployment</td></tr>
+  <tr><td>GPT-3 175B</td><td>A100</td><td>64</td><td>80 GB</td><td>Profile-driven simulation</td></tr>
+</table>
+
+<h3>11.3 Arithmetic Intensity Analysis</h3>
+<div class="card blue">
+  <p>The fundamental asymmetry between prefill and decode is captured by <strong>arithmetic intensity</strong> (FLOPs per byte of memory accessed):</p>
+  <ul style="padding-left:1.2rem;font-size:.88rem;margin-top:.4rem;">
+    <li><strong>Prefill (batch=1, seq=512):</strong> All operations have high arithmetic intensity (1000-3000). GPU fully utilized.</li>
+    <li><strong>Decode (batch=1):</strong> Arithmetic intensity drops by 100-200x. Operations become memory-bound vector-matrix multiplications.</li>
+    <li><strong>Decode (batch=256):</strong> Only at this extreme batch size does decode begin to saturate compute. But KV-cache memory makes this infeasible (e.g., max batch = 18 for LLaMA-13B at seq_len=1024).</li>
+  </ul>
+</div>
+
+<h3>11.4 Comparison with Subsequent Work</h3>
+<div class="grid2">
+  <div class="card mauve">
+    <h4>Sarathi-Serve (2024, follow-up)</h4>
+    <p>The authors' subsequent paper (arXiv:2403.02310) extends Sarathi with a taming of the latency-throughput tradeoff. It demonstrates that with proper stall-free scheduling, chunked prefills can serve as an alternative to full prefill-decode disaggregation at lower cost.</p>
+  </div>
+  <div class="card peach">
+    <h4>Influence on vLLM</h4>
+    <p>vLLM (v0.3+) adopted chunked prefills as <code>enable_chunked_prefill=True</code>. This became the default configuration for many production deployments, validating Sarathi's core contribution. NanoFlow (OSDI'25) also builds on Sarathi's chunked prefill policy for request scheduling.</p>
+  </div>
+</div>
+
+<div class="callout info">
+  <strong>Broader impact:</strong> Chunked prefills are now considered a standard primitive in LLM serving systems, alongside continuous batching (Orca) and paged attention (vLLM). Sarathi's insight that mixing prefill and decode in the same batch can transform memory-bound decode into compute-bound operation has become foundational knowledge in the systems-for-ML community.
+</div>
+
+<h3>11.5 Serving Capacity Improvements</h3>
+<div class="diagram-container">
+  <div class="diagram-title">Summary of Throughput Gains Across All Configurations</div>
+  <div style="display:flex;flex-direction:column;gap:.5rem;max-width:550px;margin:0 auto;">
+    <div class="compare-row">
+      <div class="compare-label">LLaMA-13B 1K (A6000)</div>
+      <div class="compare-bar" style="width:66%;background:var(--green);">1.33x end-to-end</div>
+    </div>
+    <div class="compare-row">
+      <div class="compare-label">LLaMA-13B 2K (A6000)</div>
+      <div class="compare-bar" style="width:63%;background:var(--green);">1.26x end-to-end</div>
+    </div>
+    <div class="compare-row">
+      <div class="compare-label">LLaMA-33B 1K (A100)</div>
+      <div class="compare-bar" style="width:63%;background:var(--teal);">1.25x end-to-end</div>
+    </div>
+    <div class="compare-row">
+      <div class="compare-label">LLaMA-33B 2K (A100)</div>
+      <div class="compare-bar" style="width:61%;background:var(--teal);">1.22x end-to-end</div>
+    </div>
+    <div class="compare-row">
+      <div class="compare-label">GPT-3 TP+PP (64xA100)</div>
+      <div class="compare-bar" style="width:95%;background:var(--mauve);">1.91x end-to-end</div>
+    </div>
+    <div class="compare-row">
+      <div class="compare-label">Decode speedup (best)</div>
+      <div class="compare-bar" style="width:80%;background:var(--yellow);">Up to 10x decode throughput</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid3">
+  <div class="card yellow">
+    <h4>Serving Capacity Translation</h4>
+    <p>A 1.33x throughput improvement directly translates to serving 33% more concurrent users on the same hardware, or equivalently, a 25% reduction in GPU costs for the same QPS target.</p>
+  </div>
+  <div class="card green">
+    <h4>Pipeline Parallel Impact</h4>
+    <p>The 1.91x improvement with pipeline parallelism means Sarathi makes PP a viable strategy for LLM inference, whereas without it, PP barely improves over TP-only deployments due to bubbles.</p>
+  </div>
+  <div class="card blue">
+    <h4>Decode Efficiency</h4>
+    <p>The up to 10x decode speedup means that in decode-dominated workloads (like long-form generation), Sarathi provides the most dramatic improvements -- precisely where traditional systems are most wasteful.</p>
+  </div>
+</div>
+</section>
+
+</div>
+
+<footer>
+  Sarathi: Efficient LLM Inference by Piggybacking Decodes with Chunked Prefills | OSDI 2024<br>
+  Amey Agrawal, Ashish Panwar, Jayashree Mohan et al. | Microsoft Research India + Georgia Tech | arXiv:2308.16369
+</footer>
+
+</body>
+</html>

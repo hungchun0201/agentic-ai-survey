@@ -1,0 +1,1682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Splitwise: Efficient Generative LLM Inference Using Phase Splitting - Technical Analysis</title>
+<style>
+  :root {
+    --bg-primary: #0f1117;
+    --bg-secondary: #161822;
+    --bg-card: #1c1f2e;
+    --bg-code: #12141f;
+    --accent-orange: #f97316;
+    --accent-blue: #3b82f6;
+    --accent-green: #22c55e;
+    --accent-purple: #a855f7;
+    --accent-cyan: #06b6d4;
+    --accent-red: #ef4444;
+    --accent-yellow: #eab308;
+    --accent-pink: #ec4899;
+    --text-primary: #e8eaed;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --border-color: #2d3148;
+    --gradient-hero: linear-gradient(135deg, #0c0e16 0%, #151a2e 40%, #1a1040 70%, #0c0e16 100%);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+
+  /* Sticky Navigation */
+  .sticky-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(15, 17, 23, 0.92);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0;
+  }
+  .sticky-nav .nav-inner {
+    max-width: 1260px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 24px;
+    overflow-x: auto;
+  }
+  .sticky-nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.82rem;
+    padding: 14px 12px;
+    white-space: nowrap;
+    transition: color 0.2s;
+    border-bottom: 2px solid transparent;
+  }
+  .sticky-nav a:hover {
+    color: var(--accent-orange);
+    border-bottom-color: var(--accent-orange);
+  }
+
+  /* Hero Section */
+  .hero {
+    background: var(--gradient-hero);
+    padding: 80px 24px 60px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -120px; right: -120px;
+    width: 400px; height: 400px;
+    background: radial-gradient(circle, rgba(249,115,22,0.12) 0%, transparent 70%);
+    border-radius: 50%;
+  }
+  .hero::after {
+    content: '';
+    position: absolute;
+    bottom: -100px; left: -100px;
+    width: 350px; height: 350px;
+    background: radial-gradient(circle, rgba(59,130,246,0.1) 0%, transparent 70%);
+    border-radius: 50%;
+  }
+  .hero .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: linear-gradient(135deg, rgba(249,115,22,0.18), rgba(234,179,8,0.12));
+    border: 1px solid rgba(249,115,22,0.4);
+    color: var(--accent-orange);
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 6px 18px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+    letter-spacing: 0.5px;
+  }
+  .hero .badge .trophy { font-size: 1rem; }
+  .hero h1 {
+    font-size: 2.6rem;
+    font-weight: 800;
+    line-height: 1.2;
+    margin-bottom: 14px;
+    background: linear-gradient(135deg, #fff 40%, var(--accent-orange));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero .subtitle {
+    color: var(--text-secondary);
+    font-size: 1.08rem;
+    max-width: 750px;
+    margin: 0 auto 22px;
+  }
+  .hero .meta-row {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 20px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .hero .meta-row span { display: inline-flex; align-items: center; gap: 5px; }
+
+  /* Stats Banner */
+  .stats-banner {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1px;
+    background: var(--border-color);
+    border-top: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+  }
+  .stat-item {
+    background: var(--bg-secondary);
+    padding: 24px 20px;
+    text-align: center;
+  }
+  .stat-item .stat-value {
+    font-size: 1.8rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent-orange), var(--accent-yellow));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stat-item .stat-label {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Section styles */
+  .section {
+    max-width: 1260px;
+    margin: 0 auto;
+    padding: 60px 24px;
+  }
+  .section-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--accent-orange);
+    margin-bottom: 8px;
+  }
+  .section h2 {
+    font-size: 1.9rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .section .section-desc {
+    color: var(--text-secondary);
+    font-size: 0.98rem;
+    max-width: 800px;
+    margin-bottom: 30px;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 20px;
+  }
+  .card h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .card p, .card li {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+  }
+
+  /* Grid layouts */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 1.8rem; }
+  }
+
+  /* Code blocks */
+  .code-block {
+    background: var(--bg-code);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 20px;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    margin: 14px 0;
+  }
+  .code-block code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    color: var(--text-primary);
+  }
+  .code-block .kw { color: #c678dd; }
+  .code-block .fn { color: #61afef; }
+  .code-block .str { color: #98c379; }
+  .code-block .cm { color: #5c6370; font-style: italic; }
+  .code-block .num { color: #d19a66; }
+  .code-block .cls { color: #e5c07b; }
+  .code-block .op { color: #56b6c2; }
+  .code-block .dec { color: #e06c75; }
+  .code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .code-header .filename {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .code-header .lang-tag {
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--accent-blue);
+    background: rgba(59,130,246,0.1);
+    padding: 2px 10px;
+    border-radius: 10px;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 14px 0;
+  }
+  thead th {
+    background: linear-gradient(135deg, #1e2235, #252840);
+    color: var(--accent-orange);
+    font-weight: 600;
+    text-align: left;
+    padding: 12px 16px;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  thead th:first-child { border-radius: 8px 0 0 0; }
+  thead th:last-child { border-radius: 0 8px 0 0; }
+  td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+  }
+  tbody tr:hover { background: rgba(249,115,22,0.04); }
+
+  /* Callouts */
+  .callout {
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 18px 0;
+    font-size: 0.9rem;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .callout-icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+  .callout.insight {
+    background: rgba(59,130,246,0.08);
+    border-left: 3px solid var(--accent-blue);
+    color: #93c5fd;
+  }
+  .callout.warning {
+    background: rgba(234,179,8,0.08);
+    border-left: 3px solid var(--accent-yellow);
+    color: #fde68a;
+  }
+  .callout.success {
+    background: rgba(34,197,94,0.08);
+    border-left: 3px solid var(--accent-green);
+    color: #86efac;
+  }
+  .callout.critical {
+    background: rgba(239,68,68,0.08);
+    border-left: 3px solid var(--accent-red);
+    color: #fca5a5;
+  }
+
+  /* Diagrams */
+  .diagram-container {
+    background: var(--bg-code);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 36px 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .diagram-title {
+    text-align: center;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-bottom: 28px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  /* Phase comparison bars */
+  .phase-bar {
+    display: flex;
+    align-items: center;
+    margin: 10px 0;
+    gap: 12px;
+  }
+  .phase-bar .label {
+    min-width: 130px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    text-align: right;
+  }
+  .phase-bar .bar-track {
+    flex: 1;
+    height: 28px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+  }
+  .phase-bar .bar-fill {
+    height: 100%;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #fff;
+    transition: width 0.5s ease;
+  }
+  .phase-bar .bar-fill.compute { background: linear-gradient(90deg, #f97316, #fb923c); }
+  .phase-bar .bar-fill.memory { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+  .phase-bar .bar-fill.power { background: linear-gradient(90deg, #ef4444, #f87171); }
+  .phase-bar .bar-fill.idle { background: linear-gradient(90deg, #22c55e, #4ade80); }
+
+  /* Tag / pill */
+  .pill {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 10px;
+    letter-spacing: 0.3px;
+  }
+  .pill-orange { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+  .pill-blue { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .pill-green { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+  .pill-purple { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+  .pill-red { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+  .pill-cyan { background: rgba(6,182,212,0.15); color: var(--accent-cyan); }
+
+  /* Architecture diagram SVG styles */
+  .arch-diagram { width: 100%; max-width: 960px; margin: 0 auto; display: block; }
+
+  /* Separator */
+  .sep {
+    height: 1px;
+    background: var(--border-color);
+    max-width: 1260px;
+    margin: 0 auto;
+  }
+
+  /* Insight card grid */
+  .insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .insight-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 22px;
+    border-top: 3px solid var(--accent-orange);
+  }
+  .insight-card .insight-num {
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--accent-orange);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .insight-card h4 {
+    font-size: 1rem;
+    margin-bottom: 8px;
+  }
+  .insight-card p {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+
+  /* Comparison table highlight */
+  .match { color: var(--accent-green); }
+  .partial { color: var(--accent-yellow); }
+  .gap { color: var(--accent-red); }
+
+  .footer {
+    text-align: center;
+    padding: 40px 24px;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    border-top: 1px solid var(--border-color);
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== STICKY NAV ===== -->
+<nav class="sticky-nav">
+  <div class="nav-inner">
+    <a href="#overview">Overview</a>
+    <a href="#profiling">Phase Profiling</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#simulator">Simulator</a>
+    <a href="#findings">Key Findings</a>
+    <a href="#performance">Performance</a>
+    <a href="#agentic">Agentic Workloads</a>
+    <a href="#comparison">Paper vs Impl</a>
+  </div>
+</nav>
+
+<!-- ===== HERO ===== -->
+<header class="hero">
+  <div class="badge"><span class="trophy">&#127942;</span> ISCA 2024 &mdash; Best Paper Nominee</div>
+  <h1>Splitwise: Efficient Generative LLM<br>Inference Using Phase Splitting</h1>
+  <p class="subtitle">
+    A hardware characterization and deployment technique that separates the compute-bound prefill phase
+    from the memory-bandwidth-bound decode phase, enabling heterogeneous GPU clusters with
+    1.4&times; throughput at 20% lower cost.
+  </p>
+  <div class="meta-row">
+    <span>arXiv:2311.18677</span>
+    <span>|</span>
+    <span>Patel, Choukse, Zhang, Shah, Goiri, Maleki, Bianchini</span>
+    <span>|</span>
+    <span>U. Washington &amp; Microsoft</span>
+    <span>|</span>
+    <span>ISCA 2024</span>
+  </div>
+</header>
+
+<!-- ===== STATS BANNER ===== -->
+<div class="stats-banner">
+  <div class="stat-item">
+    <div class="stat-value">1.4&times;</div>
+    <div class="stat-label">Throughput Improvement</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-value">20%</div>
+    <div class="stat-label">Lower Cost</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-value">2.35&times;</div>
+    <div class="stat-label">Better Throughput (Iso-budget)</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-value">25%</div>
+    <div class="stat-label">Power Reduction</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-value">&lt;3%</div>
+    <div class="stat-label">Perf Model MAPE</div>
+  </div>
+</div>
+
+<!-- ===== 1. OVERVIEW ===== -->
+<section class="section" id="overview">
+  <div class="section-label">Section 1</div>
+  <h2>Overview &mdash; Hardware Profiling of LLM Inference Phases</h2>
+  <p class="section-desc">
+    Splitwise is built on a fundamental observation: generative LLM inference consists of two
+    computationally distinct phases with radically different hardware utilization profiles. By
+    characterizing these phases on production traces from Microsoft Azure, the authors reveal
+    that the conventional practice of running both phases on the same GPU is inherently wasteful.
+  </p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>The Core Insight</h3>
+      <p>
+        Every generative LLM request passes through two phases: <strong>prompt computation (prefill)</strong>
+        processes all input tokens in parallel to generate the first output token, while
+        <strong>token generation (decode)</strong> produces subsequent tokens one at a time, auto-regressively.
+        These phases have fundamentally different computational requirements &mdash; prefill is
+        compute-bound and saturates GPU FLOPs, while decode is memory-bandwidth-bound
+        and leaves compute resources largely idle.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Production Trace Analysis</h3>
+      <p>
+        The paper uses production traces from two Azure LLM inference services (coding and conversation)
+        captured on November 11, 2023. Key statistics: coding service has median prompt size of
+        1500 tokens and median output of 13 tokens; conversation service has median prompt of
+        1020 tokens with median output of 129 tokens. With mixed continuous batching, machines spend
+        60-70% of time with fewer than 20 active tokens batched.
+      </p>
+    </div>
+  </div>
+
+  <!-- Phase Comparison Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">LLM Inference Phase Comparison</div>
+    <svg viewBox="0 0 900 320" class="arch-diagram" xmlns="http://www.w3.org/2000/svg">
+      <!-- Prompt Phase -->
+      <rect x="30" y="20" width="380" height="280" rx="14" fill="#1a1d2e" stroke="#f97316" stroke-width="2"/>
+      <text x="220" y="50" text-anchor="middle" fill="#f97316" font-size="14" font-weight="700">PROMPT PHASE (PREFILL)</text>
+
+      <!-- Input tokens visualization -->
+      <rect x="55" y="70" width="330" height="50" rx="6" fill="rgba(249,115,22,0.08)" stroke="rgba(249,115,22,0.3)" stroke-width="1"/>
+      <text x="70" y="100" fill="#fbbf24" font-size="11" font-weight="600">Input Tokens (processed in parallel)</text>
+      <!-- Parallel arrows -->
+      <line x1="90" y1="125" x2="90" y2="150" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+      <line x1="150" y1="125" x2="150" y2="150" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+      <line x1="210" y1="125" x2="210" y2="150" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+      <line x1="270" y1="125" x2="270" y2="150" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+      <line x1="330" y1="125" x2="330" y2="150" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+      <!-- GPU compute block -->
+      <rect x="55" y="155" width="330" height="40" rx="6" fill="rgba(249,115,22,0.2)" stroke="#f97316" stroke-width="1.5"/>
+      <text x="220" y="180" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">GPU Compute (High FLOP Utilization)</text>
+
+      <!-- Arrow down -->
+      <line x1="220" y1="200" x2="220" y2="225" stroke="#f97316" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+      <!-- Output -->
+      <rect x="170" y="230" width="100" height="34" rx="6" fill="rgba(249,115,22,0.12)" stroke="#f97316" stroke-width="1"/>
+      <text x="220" y="251" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="600">1st Token</text>
+
+      <!-- KV Cache -->
+      <rect x="290" y="230" width="100" height="34" rx="6" fill="rgba(168,85,247,0.15)" stroke="#a855f7" stroke-width="1"/>
+      <text x="340" y="251" text-anchor="middle" fill="#c084fc" font-size="11" font-weight="600">KV Cache</text>
+
+      <!-- Decode Phase -->
+      <rect x="490" y="20" width="380" height="280" rx="14" fill="#1a1d2e" stroke="#3b82f6" stroke-width="2"/>
+      <text x="680" y="50" text-anchor="middle" fill="#3b82f6" font-size="14" font-weight="700">TOKEN PHASE (DECODE)</text>
+
+      <!-- Sequential iteration blocks -->
+      <rect x="515" y="70" width="70" height="40" rx="5" fill="rgba(59,130,246,0.2)" stroke="#3b82f6" stroke-width="1"/>
+      <text x="550" y="95" text-anchor="middle" fill="#93c5fd" font-size="9" font-weight="600">Iter 1</text>
+
+      <line x1="590" y1="90" x2="610" y2="90" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <rect x="615" y="70" width="70" height="40" rx="5" fill="rgba(59,130,246,0.2)" stroke="#3b82f6" stroke-width="1"/>
+      <text x="650" y="95" text-anchor="middle" fill="#93c5fd" font-size="9" font-weight="600">Iter 2</text>
+
+      <line x1="690" y1="90" x2="710" y2="90" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+
+      <rect x="715" y="70" width="70" height="40" rx="5" fill="rgba(59,130,246,0.2)" stroke="#3b82f6" stroke-width="1"/>
+      <text x="750" y="95" text-anchor="middle" fill="#93c5fd" font-size="9" font-weight="600">Iter N</text>
+
+      <text x="680" y="132" text-anchor="middle" fill="#6b7280" font-size="10">Sequential, one token per iteration</text>
+
+      <!-- Memory bandwidth block -->
+      <rect x="515" y="150" width="330" height="40" rx="6" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="680" y="175" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Memory Bandwidth Bound (Low Compute)</text>
+
+      <!-- KV Cache access -->
+      <rect x="515" y="210" width="150" height="34" rx="6" fill="rgba(168,85,247,0.15)" stroke="#a855f7" stroke-width="1"/>
+      <text x="590" y="231" text-anchor="middle" fill="#c084fc" font-size="11" font-weight="600">Read Full KV Cache</text>
+
+      <!-- Output tokens -->
+      <rect x="690" y="210" width="155" height="34" rx="6" fill="rgba(59,130,246,0.12)" stroke="#3b82f6" stroke-width="1"/>
+      <text x="767" y="231" text-anchor="middle" fill="#93c5fd" font-size="11" font-weight="600">Generate Token</text>
+
+      <!-- Power profile bars at bottom -->
+      <text x="220" y="285" text-anchor="middle" fill="#ef4444" font-size="10" font-weight="600">Power: ~100% TDP</text>
+      <text x="680" y="265" text-anchor="middle" fill="#22c55e" font-size="10" font-weight="600">Power: ~50% TDP</text>
+      <text x="680" y="285" text-anchor="middle" fill="#6b7280" font-size="10">Minimal power impact from capping</text>
+
+      <!-- Arrow definitions -->
+      <defs>
+        <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#f97316"/>
+        </marker>
+        <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/>
+        </marker>
+        <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#a855f7"/>
+        </marker>
+        <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#22c55e"/>
+        </marker>
+        <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#06b6d4"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 2. PHASE PROFILING ===== -->
+<section class="section" id="profiling">
+  <div class="section-label">Section 2</div>
+  <h2>Phase Profiling: A100 vs H100 Hardware Characterization</h2>
+  <p class="section-desc">
+    The paper provides an extensive characterization on NVIDIA DGX-A100 and DGX-H100 machines,
+    revealing diverging compute and memory scaling across GPU generations that creates the
+    opportunity for phase-aware heterogeneous deployment.
+  </p>
+
+  <!-- Hardware comparison table -->
+  <div class="card">
+    <h3>GPU Generation Comparison</h3>
+    <table>
+      <thead>
+        <tr><th>Specification</th><th>A100</th><th>H100</th><th>Ratio (H100/A100)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>TFLOPs</td><td>19.5</td><td>66.9</td><td style="color:#22c55e;">3.43&times;</td></tr>
+        <tr><td>HBM Capacity</td><td>80 GB</td><td>80 GB</td><td style="color:#eab308;">1.00&times;</td></tr>
+        <tr><td>HBM Bandwidth</td><td>2039 GB/s</td><td>3352 GB/s</td><td style="color:#22c55e;">1.64&times;</td></tr>
+        <tr><td>Power (TDP)</td><td>400W</td><td>700W</td><td style="color:#ef4444;">1.75&times;</td></tr>
+        <tr><td>NVLink</td><td>50 GB/s</td><td>100 GB/s</td><td style="color:#22c55e;">2.00&times;</td></tr>
+        <tr><td>InfiniBand</td><td>200 GB/s</td><td>400 GB/s</td><td style="color:#22c55e;">2.00&times;</td></tr>
+        <tr><td>Cost per Machine</td><td>$17.6/hr</td><td>$38/hr</td><td style="color:#ef4444;">2.16&times;</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout insight">
+      <span class="callout-icon">&#128161;</span>
+      <div>
+        <strong>Key Observation:</strong> H100 delivers 3.43&times; more compute than A100 but only 1.64&times; more
+        memory bandwidth, with no increase in HBM capacity. This asymmetry means the compute-heavy prefill
+        phase benefits greatly from H100, while the memory-bound decode phase sees diminishing returns.
+      </div>
+    </div>
+  </div>
+
+  <!-- Utilization Profiles -->
+  <div class="grid-2">
+    <div class="card">
+      <h3>Prefill Phase Profile</h3>
+      <div class="phase-bar">
+        <div class="label">GPU Compute</div>
+        <div class="bar-track"><div class="bar-fill compute" style="width:92%">92%</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Memory BW</div>
+        <div class="bar-track"><div class="bar-fill memory" style="width:35%">35%</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Power Draw</div>
+        <div class="bar-track"><div class="bar-fill power" style="width:95%">~100% TDP</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Idle Resources</div>
+        <div class="bar-track"><div class="bar-fill idle" style="width:8%">8%</div></div>
+      </div>
+      <p style="margin-top:12px; font-size:0.85rem;">
+        TTFT grows linearly with prompt size. Throughput drops when batch exceeds 2048 prompt tokens.
+        Highly sensitive to power capping &mdash; halving power budget significantly increases TTFT.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Decode Phase Profile</h3>
+      <div class="phase-bar">
+        <div class="label">GPU Compute</div>
+        <div class="bar-track"><div class="bar-fill compute" style="width:15%">15%</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Memory BW</div>
+        <div class="bar-track"><div class="bar-fill memory" style="width:88%">88%</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Power Draw</div>
+        <div class="bar-track"><div class="bar-fill power" style="width:50%">~50% TDP</div></div>
+      </div>
+      <div class="phase-bar">
+        <div class="label">Idle Resources</div>
+        <div class="bar-track"><div class="bar-fill idle" style="width:55%">55%</div></div>
+      </div>
+      <p style="margin-top:12px; font-size:0.85rem;">
+        TBT barely changes with batch size (2&times; at batch 64). Throughput scales with batch until
+        memory limit. Power capping to 50% has almost no latency impact. Token generation is
+        fundamentally memory-bound.
+      </p>
+    </div>
+  </div>
+
+  <!-- A100 vs H100 per-phase comparison -->
+  <div class="card">
+    <h3>Cross-Hardware Phase Performance (Llama2-70B, P50 Latency)</h3>
+    <table>
+      <thead>
+        <tr><th>Metric</th><th colspan="3" style="text-align:center">Coding</th><th colspan="3" style="text-align:center">Conversation</th></tr>
+        <tr><th></th><th>A100</th><th>H100</th><th>H100/A100</th><th>A100</th><th>H100</th><th>H100/A100</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>TTFT</strong></td>
+          <td>185 ms</td><td>95 ms</td><td style="color:#22c55e">0.51&times;</td>
+          <td>155 ms</td><td>84 ms</td><td style="color:#22c55e">0.54&times;</td>
+        </tr>
+        <tr>
+          <td><strong>TBT</strong></td>
+          <td>52 ms</td><td>31 ms</td><td style="color:#eab308">0.70&times;</td>
+          <td>40 ms</td><td>28 ms</td><td style="color:#eab308">0.70&times;</td>
+        </tr>
+        <tr>
+          <td><strong>E2E</strong></td>
+          <td>856 ms</td><td>493 ms</td><td style="color:#22c55e">0.58&times;</td>
+          <td>4957 ms</td><td>3387 ms</td><td style="color:#22c55e">0.68&times;</td>
+        </tr>
+        <tr>
+          <td><strong>Cost</strong></td>
+          <td>$0.42</td><td>$0.52</td><td style="color:#ef4444">1.24&times;</td>
+          <td>$2.4</td><td>$3.6</td><td style="color:#ef4444">1.5&times;</td>
+        </tr>
+        <tr>
+          <td><strong>Energy</strong></td>
+          <td>1.37 Whr</td><td>1.37 Whr</td><td>1&times;</td>
+          <td>7.9 Whr</td><td>9.4 Whr</td><td style="color:#ef4444">1.2&times;</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warning">
+      <span class="callout-icon">&#9888;&#65039;</span>
+      <div>
+        <strong>Insight VII from the paper:</strong> Token generation can be run on less compute-capable hardware
+        for better Perf/W and Perf/$ efficiency. A100 achieves similar or better cost and energy for the
+        token phase compared to H100, despite being older and cheaper.
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 3. ARCHITECTURE ===== -->
+<section class="section" id="architecture">
+  <div class="section-label">Section 3</div>
+  <h2>Architecture: Heterogeneous Phase-Split Deployment</h2>
+  <p class="section-desc">
+    Splitwise separates the prompt and token phases onto different machine pools, connected via
+    high-speed InfiniBand. A hierarchical scheduler routes requests across prompt, token, and
+    mixed pools with KV-cache transfer optimization.
+  </p>
+
+  <!-- Main Architecture Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">Splitwise System Architecture</div>
+    <svg viewBox="0 0 960 550" class="arch-diagram" xmlns="http://www.w3.org/2000/svg">
+      <!-- Background zones -->
+      <!-- Prompt Pool Zone -->
+      <rect x="30" y="120" width="270" height="390" rx="14" fill="rgba(249,115,22,0.05)" stroke="rgba(249,115,22,0.25)" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="165" y="150" text-anchor="middle" fill="#f97316" font-size="13" font-weight="700">PROMPT POOL</text>
+
+      <!-- Mixed Pool Zone -->
+      <rect x="340" y="120" width="270" height="390" rx="14" fill="rgba(168,85,247,0.05)" stroke="rgba(168,85,247,0.25)" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="475" y="150" text-anchor="middle" fill="#a855f7" font-size="13" font-weight="700">MIXED POOL</text>
+
+      <!-- Token Pool Zone -->
+      <rect x="650" y="120" width="270" height="390" rx="14" fill="rgba(59,130,246,0.05)" stroke="rgba(59,130,246,0.25)" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="785" y="150" text-anchor="middle" fill="#3b82f6" font-size="13" font-weight="700">TOKEN POOL</text>
+
+      <!-- Cluster-Level Scheduler (CLS) -->
+      <rect x="300" y="18" width="350" height="70" rx="12" fill="rgba(6,182,212,0.12)" stroke="#06b6d4" stroke-width="2"/>
+      <text x="475" y="46" text-anchor="middle" fill="#06b6d4" font-size="14" font-weight="700">Cluster-Level Scheduler (CLS)</text>
+      <text x="475" y="66" text-anchor="middle" fill="#67e8f9" font-size="10">JSQ Routing | Pool Management | Request Assignment</text>
+
+      <!-- Incoming requests arrow -->
+      <line x1="150" y1="53" x2="295" y2="53" stroke="#06b6d4" stroke-width="2" marker-end="url(#arrowCyan)"/>
+      <text x="100" y="50" text-anchor="middle" fill="#67e8f9" font-size="10" font-weight="600">Requests</text>
+
+      <!-- CLS to Pools -->
+      <line x1="380" y1="92" x2="165" y2="117" stroke="#f97316" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowOrange)"/>
+      <line x1="475" y1="92" x2="475" y2="117" stroke="#a855f7" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowPurple)"/>
+      <line x1="570" y1="92" x2="785" y2="117" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowBlue)"/>
+
+      <!-- Prompt Pool Machines -->
+      <rect x="55" y="170" width="220" height="70" rx="8" fill="rgba(249,115,22,0.12)" stroke="#f97316" stroke-width="1.5"/>
+      <text x="165" y="195" text-anchor="middle" fill="#fb923c" font-size="12" font-weight="700">DGX-H100 Machines</text>
+      <text x="165" y="215" text-anchor="middle" fill="#fdba74" font-size="10">8x H100 GPUs | 66.9 TFLOPs each</text>
+      <text x="165" y="230" text-anchor="middle" fill="#6b7280" font-size="9">Optimized for compute-intensive prefill</text>
+
+      <!-- MLS box under prompt -->
+      <rect x="80" y="260" width="170" height="40" rx="6" fill="rgba(249,115,22,0.08)" stroke="rgba(249,115,22,0.3)" stroke-width="1"/>
+      <text x="165" y="278" text-anchor="middle" fill="#fdba74" font-size="10" font-weight="600">Machine-Level Scheduler</text>
+      <text x="165" y="292" text-anchor="middle" fill="#6b7280" font-size="8">FCFS | Max 2048 prompt tokens</text>
+
+      <!-- Pending Queue -->
+      <rect x="80" y="320" width="170" height="30" rx="5" fill="rgba(249,115,22,0.06)" stroke="rgba(249,115,22,0.2)" stroke-width="1"/>
+      <text x="165" y="340" text-anchor="middle" fill="#9ca3af" font-size="9">Pending Queue</text>
+
+      <!-- Second prompt machine hint -->
+      <rect x="60" y="370" width="210" height="50" rx="8" fill="rgba(249,115,22,0.06)" stroke="rgba(249,115,22,0.15)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="165" y="400" text-anchor="middle" fill="#6b7280" font-size="10">... more prompt machines</text>
+
+      <!-- Mixed Pool Machines -->
+      <rect x="365" y="170" width="220" height="70" rx="8" fill="rgba(168,85,247,0.12)" stroke="#a855f7" stroke-width="1.5"/>
+      <text x="475" y="195" text-anchor="middle" fill="#c084fc" font-size="12" font-weight="700">Flexible Machines</text>
+      <text x="475" y="215" text-anchor="middle" fill="#d8b4fe" font-size="10">Can run either phase</text>
+      <text x="475" y="230" text-anchor="middle" fill="#6b7280" font-size="9">Mixed continuous batching</text>
+
+      <!-- MLS box under mixed -->
+      <rect x="390" y="260" width="170" height="40" rx="6" fill="rgba(168,85,247,0.08)" stroke="rgba(168,85,247,0.3)" stroke-width="1"/>
+      <text x="475" y="278" text-anchor="middle" fill="#d8b4fe" font-size="10" font-weight="600">Machine-Level Scheduler</text>
+      <text x="475" y="292" text-anchor="middle" fill="#6b7280" font-size="8">Prompt priority | Token preemption</text>
+
+      <!-- Dynamic arrows -->
+      <path d="M 310 220 C 340 220, 340 220, 360 220" stroke="#a855f7" stroke-width="1.5" fill="none" stroke-dasharray="3,3" marker-end="url(#arrowPurple)"/>
+      <text x="335" y="215" text-anchor="middle" fill="#a855f7" font-size="7" transform="rotate(-90, 335, 215)">overflow</text>
+
+      <path d="M 590 220 C 620 220, 620 220, 645 220" stroke="#a855f7" stroke-width="1.5" fill="none" stroke-dasharray="3,3" marker-end="url(#arrowPurple)"/>
+      <text x="617" y="215" text-anchor="middle" fill="#a855f7" font-size="7" transform="rotate(-90, 617, 215)">overflow</text>
+
+      <!-- Token Pool Machines -->
+      <rect x="675" y="170" width="220" height="70" rx="8" fill="rgba(59,130,246,0.12)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="785" y="195" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="700">DGX-A100 Machines</text>
+      <text x="785" y="215" text-anchor="middle" fill="#93c5fd" font-size="10">8x A100 GPUs | 80GB HBM each</text>
+      <text x="785" y="230" text-anchor="middle" fill="#6b7280" font-size="9">Optimized for memory-bound decode</text>
+
+      <!-- MLS box under token -->
+      <rect x="700" y="260" width="170" height="40" rx="6" fill="rgba(59,130,246,0.08)" stroke="rgba(59,130,246,0.3)" stroke-width="1"/>
+      <text x="785" y="278" text-anchor="middle" fill="#93c5fd" font-size="10" font-weight="600">Machine-Level Scheduler</text>
+      <text x="785" y="292" text-anchor="middle" fill="#6b7280" font-size="8">FCFS | Max batch by memory</text>
+
+      <!-- Pending Queue token -->
+      <rect x="700" y="320" width="170" height="30" rx="5" fill="rgba(59,130,246,0.06)" stroke="rgba(59,130,246,0.2)" stroke-width="1"/>
+      <text x="785" y="340" text-anchor="middle" fill="#9ca3af" font-size="9">Pending Queue</text>
+
+      <!-- Second token machine hint -->
+      <rect x="680" y="370" width="210" height="50" rx="8" fill="rgba(59,130,246,0.06)" stroke="rgba(59,130,246,0.15)" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="785" y="400" text-anchor="middle" fill="#6b7280" font-size="10">... more token machines</text>
+
+      <!-- KV-Cache Transfer -->
+      <rect x="320" y="440" width="310" height="60" rx="10" fill="rgba(34,197,94,0.08)" stroke="#22c55e" stroke-width="2"/>
+      <text x="475" y="464" text-anchor="middle" fill="#22c55e" font-size="12" font-weight="700">KV-Cache Transfer via InfiniBand</text>
+      <text x="475" y="484" text-anchor="middle" fill="#86efac" font-size="10">Layer-wise async transfer | Overlapped with compute | 200-400 GB/s</text>
+
+      <!-- KV transfer arrows -->
+      <line x1="165" y1="425" x2="165" y2="460" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+      <line x1="165" y1="460" x2="315" y2="460" stroke="#22c55e" stroke-width="1.5"/>
+      <line x1="635" y1="460" x2="785" y2="460" stroke="#22c55e" stroke-width="1.5"/>
+      <line x1="785" y1="460" x2="785" y2="425" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+    </svg>
+  </div>
+
+  <!-- Design Variants -->
+  <div class="card">
+    <h3>Splitwise Design Variants</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Variant</th>
+          <th>Prompt Machine</th>
+          <th>Token Machine</th>
+          <th>Prompt-Token BW</th>
+          <th>Relative Cost</th>
+          <th>Relative Power</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Splitwise-AA</strong></td>
+          <td><span class="pill pill-green">DGX-A100</span></td>
+          <td><span class="pill pill-green">DGX-A100</span></td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+        </tr>
+        <tr>
+          <td><strong>Splitwise-HH</strong></td>
+          <td><span class="pill pill-orange">DGX-H100</span></td>
+          <td><span class="pill pill-orange">DGX-H100</span></td>
+          <td>2&times;</td>
+          <td>2.35&times;</td>
+          <td>1.75&times;</td>
+        </tr>
+        <tr>
+          <td><strong>Splitwise-HA</strong></td>
+          <td><span class="pill pill-orange">DGX-H100</span></td>
+          <td><span class="pill pill-green">DGX-A100</span></td>
+          <td>1&times;</td>
+          <td>Mixed</td>
+          <td>Mixed</td>
+        </tr>
+        <tr>
+          <td><strong>Splitwise-HHcap</strong></td>
+          <td><span class="pill pill-orange">DGX-H100</span></td>
+          <td><span class="pill pill-purple">DGX-H100 (50% power)</span></td>
+          <td>2&times;</td>
+          <td>2.35&times;</td>
+          <td>1.23&times;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- KV-Cache Transfer Optimization -->
+  <div class="grid-2">
+    <div class="card">
+      <h3>Serialized KV Transfer</h3>
+      <p>
+        Naive approach: wait for the entire prompt phase to complete, then transfer the full KV-cache
+        to the token machine. Transfer time is proportional to prompt size and inversely proportional
+        to interconnect bandwidth. For large prompts, this adds up to 3% E2E overhead.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Layer-wise Async Transfer</h3>
+      <p>
+        Optimized approach: as each layer finishes computing in the prompt phase, the corresponding
+        KV-cache is immediately sent via a one-sided RDMA <code>put</code> using MSCCL++. This overlaps
+        transfer with computation, reducing visible overhead to ~0.8% of E2E and constant ~5-8ms
+        non-overlapped time.
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 4. SIMULATOR ANALYSIS ===== -->
+<section class="section" id="simulator">
+  <div class="section-label">Section 4</div>
+  <h2>SplitwiseSim: Repository &amp; Simulator Analysis</h2>
+  <p class="section-desc">
+    The authors provide SplitwiseSim, a discrete-event simulator written in Python that faithfully
+    models the Splitwise machine pools, schedulers, memory management, and KV-cache transfers.
+    The simulator is validated against real hardware with &lt;3% MAPE.
+  </p>
+
+  <!-- Repo structure card -->
+  <div class="card">
+    <h3>Repository Architecture</h3>
+    <div class="code-block">
+      <code>
+<span class="cm">splitwise/repo/</span>
+<span class="cm">  Core Simulation Engine</span>
+  ├── <span class="fn">simulator.py</span>      <span class="cm"># Discrete event simulator with heap-based event queue</span>
+  ├── <span class="fn">run.py</span>            <span class="cm"># Entry point with Hydra configuration management</span>
+  ├── <span class="fn">initialize.py</span>     <span class="cm"># Cluster and application initialization</span>
+<span class="cm">  Request Processing Pipeline</span>
+  ├── <span class="fn">request.py</span>        <span class="cm"># GenerativeLLMRequest with DAG of PromptTask→TokenTask</span>
+  ├── <span class="fn">task.py</span>           <span class="cm"># PromptTask and TokenTask with memory and iteration tracking</span>
+  ├── <span class="fn">flow.py</span>           <span class="cm"># KVCacheTransfer flow between instances</span>
+  ├── <span class="fn">executor.py</span>       <span class="cm"># Orchestrates request execution across instances</span>
+<span class="cm">  Scheduling Layer</span>
+  ├── <span class="fn">scheduler.py</span>      <span class="cm"># 10 scheduler variants including MixedPoolScheduler</span>
+  ├── <span class="fn">instance.py</span>       <span class="cm"># ORCAInstance and SplitwiseInstance with batching</span>
+  ├── <span class="fn">allocator.py</span>      <span class="cm"># Instance allocation to processors</span>
+<span class="cm">  Infrastructure Modeling</span>
+  ├── <span class="fn">cluster.py</span>        <span class="cm"># Cluster of servers with power tracking</span>
+  ├── <span class="fn">server.py</span>         <span class="cm"># Server with processors and memory</span>
+  ├── <span class="fn">processor.py</span>      <span class="cm"># CPU/GPU processor abstraction</span>
+  ├── <span class="fn">interconnect.py</span>   <span class="cm"># Link types: IB, NVLink, PCIe, DummyLink</span>
+<span class="cm">  Performance &amp; Power</span>
+  ├── <span class="fn">performance_model.py</span> <span class="cm"># DatabasePerformanceModel with linear interpolation</span>
+  ├── <span class="fn">power_model.py</span>    <span class="cm"># Power estimation (currently placeholder)</span>
+  ├── <span class="fn">generate_trace.py</span> <span class="cm"># Trace generation from Azure production distributions</span>
+<span class="cm">  Configuration (Hydra YAML)</span>
+  └── <span class="fn">configs/</span>
+      ├── cluster/        <span class="cm"># dgx-a100, dgx-h100, half_half, iso* variants</span>
+      ├── start_state/    <span class="cm"># baseline (ORCA), splitwise, splitwise_hhcap</span>
+      ├── orchestrator_repo/  <span class="cm"># Scheduler configs (token_jsq, kv_jsq, mixed_pool...)</span>
+      └── experiment/     <span class="cm"># Sweep configs for iso-cost, iso-power experiments</span>
+      </code>
+    </div>
+  </div>
+
+  <!-- Core simulator class -->
+  <div class="card">
+    <h3>Core: Discrete Event Simulator</h3>
+    <div class="code-header">
+      <span class="filename">simulator.py</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <div class="code-block">
+      <code><span class="kw">class</span> <span class="cls">Simulator</span>:
+    <span class="str">"""A discrete event simulator that schedules and runs Events."""</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="dec">self</span>, end_time):
+        <span class="dec">self</span>.time = <span class="num">0</span>
+        <span class="dec">self</span>.end_time = end_time
+        <span class="dec">self</span>.events = []              <span class="cm"># min-heap priority queue</span>
+        <span class="dec">self</span>.deleted_events = []       <span class="cm"># lazy deletion list</span>
+
+    <span class="kw">def</span> <span class="fn">schedule</span>(<span class="dec">self</span>, delay, action):
+        <span class="cm"># Run immediately if delay is 0, else push to heap</span>
+        <span class="kw">if</span> delay == <span class="num">0</span>:
+            action()
+            <span class="kw">return</span> <span class="num">None</span>
+        event = <span class="cls">Event</span>(<span class="dec">self</span>.time + delay, action)
+        heapq.heappush(<span class="dec">self</span>.events, event)
+
+    <span class="kw">def</span> <span class="fn">run</span>(<span class="dec">self</span>):
+        <span class="kw">while</span> <span class="dec">self</span>.events <span class="kw">and</span> <span class="dec">self</span>.time < <span class="dec">self</span>.end_time:
+            event = heapq.heappop(<span class="dec">self</span>.events)
+            <span class="kw">if</span> event <span class="kw">in</span> <span class="dec">self</span>.deleted_events:
+                <span class="kw">continue</span>                <span class="cm"># lazy cancellation</span>
+            <span class="dec">self</span>.time = event.time
+            event.action()             <span class="cm"># advance simulation clock</span></code>
+    </div>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 10px;">
+      The simulator uses a global singleton pattern. <code>TraceSimulator</code> extends this
+      to load request arrivals from CSV traces and wire them through
+      Router &rarr; Application &rarr; Scheduler &rarr; Executor &rarr; Instance.
+    </p>
+  </div>
+
+  <!-- Instance hierarchy -->
+  <div class="card">
+    <h3>Instance Hierarchy: The Heart of Phase Splitting</h3>
+    <div class="code-header">
+      <span class="filename">instance.py</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <div class="code-block">
+      <code><span class="kw">class</span> <span class="cls">Instance</span>:                    <span class="cm"># Base: FIFO task queue, no batching</span>
+    <span class="cm"># └── get_duration() based performance model</span>
+
+<span class="kw">class</span> <span class="cls">ORCAInstance</span>(<span class="cls">Instance</span>):       <span class="cm"># Iteration-level FCFS + selective batching</span>
+    <span class="cm"># Mixed continuous batching (prompt priority)</span>
+    <span class="cm"># Contiguous iteration optimization</span>
+    <span class="cm"># Memory-aware batch selection</span>
+    <span class="cm"># └── get_iteration_duration() based performance model</span>
+
+<span class="kw">class</span> <span class="cls">SplitwiseInstance</span>(<span class="cls">ORCAInstance</span>):  <span class="cm"># Adds preemption support</span>
+    <span class="cm"># Priority queue ordered by (num_preemptions, arrival_time)</span>
+    <span class="cm"># Configurable max_preemptions (default: 4)</span>
+    <span class="cm"># Configurable max_batch_tokens (default: 2048)</span>
+    <span class="cm"># Token tasks preempted for arriving prompts</span>
+    <span class="cm"># Batch selection: preempted_max → prompts → blocked → old_batch → new</span></code>
+    </div>
+
+    <div class="callout insight">
+      <span class="callout-icon">&#128269;</span>
+      <div>
+        <strong>Implementation detail:</strong> The SplitwiseInstance batch selection uses a 5-phase
+        priority scheme: (1) tasks exceeding max preemption limit, (2) pending prompt tasks,
+        (3) blocked (previously preempted) token tasks, (4) tasks from the old batch, then
+        (5) any remaining pending tasks. This prevents token starvation while maintaining prompt priority.
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheduler hierarchy -->
+  <div class="card">
+    <h3>Scheduler Architecture: 10 Scheduling Strategies</h3>
+    <div class="code-header">
+      <span class="filename">scheduler.py</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <div class="code-block">
+      <code><span class="cm"># Baseline schedulers (single-pool, no KV transfer)</span>
+<span class="cls">Scheduler</span> (ABC)
+├── <span class="cls">RandomScheduler</span>          <span class="cm"># Random instance selection</span>
+├── <span class="cls">RoundRobinScheduler</span>      <span class="cm"># Rotate through instances</span>
+├── <span class="cls">JSQScheduler</span>             <span class="cm"># Join-Shortest-Queue by request count</span>
+└── <span class="cls">TokenJSQScheduler</span>        <span class="cm"># JSQ by pending token count</span>
+
+<span class="cm"># Splitwise schedulers (separate pools, KV-cache transfer)</span>
+<span class="cls">KVScheduler</span>(<span class="cls">Scheduler</span>)       <span class="cm"># Base: prompt/token instance tracking + KV transfer</span>
+├── <span class="cls">KVRoundRobinScheduler</span>    <span class="cm"># Round-robin on prompt+token pools</span>
+├── <span class="cls">KVJSQScheduler</span>           <span class="cm"># JSQ on both pools independently</span>
+├── <span class="cls">OverlapKVJSQScheduler</span>    <span class="cm"># Simulates 90% overlap (10× bandwidth)</span>
+├── <span class="cls">KVTokenJSQScheduler</span>      <span class="cm"># JSQ by pending tokens</span>
+├── <span class="cls">OverlapKVTokenJSQScheduler</span> <span class="cm"># Overlap + token-based JSQ</span>
+└── <span class="cls">MixedPoolScheduler</span>       <span class="cm"># Dynamic 3-pool (prompt/mixed/token)</span></code>
+    </div>
+  </div>
+
+  <!-- Performance model -->
+  <div class="card">
+    <h3>Performance Model: Profiling-Based Prediction</h3>
+    <div class="code-header">
+      <span class="filename">performance_model.py</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <div class="code-block">
+      <code><span class="kw">class</span> <span class="cls">DatabasePerformanceModel</span>(<span class="cls">PerformanceModel</span>):
+    <span class="str">"""Interpolates profiling data from data/perf-model.csv"""</span>
+
+    <span class="kw">def</span> <span class="fn">init_predictor</span>(<span class="dec">self</span>):
+        <span class="cm"># Build per-(model, hardware, tensor_parallel) predictors</span>
+        <span class="cm"># X-axis: batch_tokens = prompt_size * batch_size</span>
+        <span class="cm"># Y-axis: median prompt_time or token_time</span>
+        <span class="cm"># Uses scipy.interpolate.interp1d with linear extrapolation</span>
+        <span class="kw">for</span> model <span class="kw">in</span> <span class="dec">self</span>.db[<span class="str">"model"</span>].unique():
+            <span class="kw">for</span> hardware <span class="kw">in</span> <span class="dec">self</span>.db[<span class="str">"hardware"</span>].unique():
+                <span class="cm"># ... grouped by batch_tokens, median aggregation</span>
+                <span class="dec">self</span>.prompt_time_predictors[key] = interp1d(x, y, ...)
+                <span class="dec">self</span>.token_time_predictors[key] = interp1d(x, y, ...)
+
+    <span class="kw">def</span> <span class="fn">get_iteration_duration</span>(<span class="dec">self</span>, batch, instance):
+        <span class="cm"># Sum batch tokens: prompt tokens count as prompt_size each,</span>
+        <span class="cm"># token tasks count as 1 each</span>
+        <span class="cm"># Pure prompt batch → prompt_time predictor</span>
+        <span class="cm"># Pure token batch → token_time predictor</span>
+        <span class="cm"># Mixed batch → prompt_time * 1.1 (10% overhead)</span></code>
+    </div>
+  </div>
+
+  <!-- MixedPoolScheduler deep dive -->
+  <div class="card">
+    <h3>MixedPoolScheduler: Dynamic 3-Pool Management</h3>
+    <div class="code-header">
+      <span class="filename">scheduler.py &mdash; MixedPoolScheduler.schedule()</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <div class="code-block">
+      <code><span class="kw">def</span> <span class="fn">schedule</span>(<span class="dec">self</span>, request):
+    <span class="cm"># 1. Try to find prompt instance from prompt_pool, then mixed_pool</span>
+    prompt_instance = <span class="dec">self</span>.find_best_prompt_instance(
+        [<span class="dec">self</span>.prompt_instances, <span class="dec">self</span>.mixed_instances])
+
+    <span class="cm"># 2. Try to find token instance from token_pool, then mixed_pool</span>
+    token_instance = <span class="dec">self</span>.find_best_token_instance(
+        [<span class="dec">self</span>.token_instances, <span class="dec">self</span>.mixed_instances])
+
+    <span class="cm"># 3. If no prompt instance found → steal from token pool → mixed</span>
+    <span class="kw">if</span> prompt_instance <span class="kw">is</span> <span class="num">None</span>:
+        prompt_instance = min(<span class="dec">self</span>.token_instances, ...)
+        <span class="dec">self</span>.mixed_instances.append(prompt_instance)
+
+    <span class="cm"># 4. If still no pair found → devolve to baseline mixed batching</span>
+    <span class="kw">if</span> prompt_instance == token_instance:
+        prompt_task.chain = [token_task]  <span class="cm"># run-to-completion</span>
+    <span class="kw">else</span>:
+        <span class="dec">self</span>.add_kv_cache_transfer(...)  <span class="cm"># insert DAG edge for KV flow</span></code>
+    </div>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 10px;">
+      When a mixed-pool instance becomes idle, <code>notify_free_instance()</code> transitions it back
+      to its original pool (prompt or token), enabling dynamic rebalancing based on load.
+    </p>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 5. KEY FINDINGS ===== -->
+<section class="section" id="findings">
+  <div class="section-label">Section 5</div>
+  <h2>Key Findings: Seven Insights from Hardware Profiling</h2>
+  <p class="section-desc">
+    The paper derives seven actionable insights from extensive profiling on A100 and H100 GPUs
+    with production traces, forming the theoretical foundation for Splitwise's design.
+  </p>
+
+  <div class="insight-grid">
+    <div class="insight-card">
+      <div class="insight-num">Insight I</div>
+      <h4>Diverse Workload Distributions</h4>
+      <p>Different inference services have widely different prompt and token size distributions.
+         Coding: large prompts (1500 median), few tokens (13 median). Conversation: moderate prompts (1020), many tokens (129).</p>
+    </div>
+    <div class="insight-card">
+      <div class="insight-num">Insight II</div>
+      <h4>Poor Batching Utilization</h4>
+      <p>Mixed continuous batching spends most of its time with very few active tokens batched.
+         60-70% of the time, machines run with 20 or fewer tokens. Coding experiences even worse batching.</p>
+    </div>
+    <div class="insight-card">
+      <div class="insight-num">Insight III</div>
+      <h4>Token Phase Dominates E2E</h4>
+      <p>For most requests, the majority of E2E time is spent in the token generation phase.
+         A prompt phase with 1500 input tokens takes the same time as generating only 6 output tokens.</p>
+    </div>
+    <div class="insight-card">
+      <div class="insight-num">Insight IV</div>
+      <h4>Asymmetric Batching Behavior</h4>
+      <p>Prompt phase throughput drops after 2048 batch tokens. Token phase throughput keeps scaling
+         with batch size until memory exhaustion. Splitting enables optimal batching for each phase.</p>
+    </div>
+    <div class="insight-card" style="border-top-color: #ef4444;">
+      <div class="insight-num" style="color: #ef4444;">Insight V (Critical)</div>
+      <h4>Compute vs Memory Bound</h4>
+      <p>Batching during prompt phase is compute-bound, whereas the token phase is memory capacity
+         and bandwidth bound. This is the fundamental insight that enables phase splitting.</p>
+    </div>
+    <div class="insight-card">
+      <div class="insight-num">Insight VI</div>
+      <h4>Distinct Power Profiles</h4>
+      <p>Prompt phase utilizes the GPU power budget efficiently; power draw increases with batch size.
+         Token phase does not &mdash; power capping by 50% has almost no impact on token generation latency.</p>
+    </div>
+    <div class="insight-card">
+      <div class="insight-num">Insight VII</div>
+      <h4>Hardware Flexibility for Decode</h4>
+      <p>Token generation can run on less compute-capable (cheaper, older) hardware with better Perf/W
+         and Perf/$ efficiency. A100 shows similar or better cost-energy profile compared to H100 for decode.</p>
+    </div>
+  </div>
+
+  <div class="callout success" style="margin-top: 24px;">
+    <span class="callout-icon">&#10003;</span>
+    <div>
+      <strong>Design implication:</strong> These seven insights converge to a single conclusion &mdash;
+      running both phases on the same homogeneous GPU wastes resources. Prefill needs compute (H100),
+      decode needs memory bandwidth (A100 suffices), and their power profiles are opposites. Splitting
+      them enables right-sizing hardware for each phase.
+    </div>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 6. PERFORMANCE ===== -->
+<section class="section" id="performance">
+  <div class="section-label">Section 6</div>
+  <h2>Performance: 1.4&times; Throughput at 20% Lower Cost</h2>
+  <p class="section-desc">
+    The paper evaluates Splitwise across multiple optimization dimensions: iso-power throughput-optimized,
+    iso-cost throughput-optimized, and iso-throughput cost/power-optimized clusters, demonstrating
+    consistent improvements across all configurations.
+  </p>
+
+  <!-- Performance summary table -->
+  <div class="card">
+    <h3>Summary: Throughput-Optimized Cluster Comparisons (Conversation Trace)</h3>
+    <table>
+      <thead>
+        <tr><th>Configuration</th><th>Machines</th><th>Throughput vs Baseline-A100</th><th>Cost</th><th>Power</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Baseline-A100</strong> (70P/T)</td>
+          <td>70</td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+        </tr>
+        <tr>
+          <td><strong>Baseline-H100</strong> (40P/T)</td>
+          <td>40</td>
+          <td>~1&times;</td>
+          <td>~1&times;</td>
+          <td>~1&times;</td>
+        </tr>
+        <tr style="background: rgba(34,197,94,0.06);">
+          <td><strong>Splitwise-AA</strong> (45P, 25T)</td>
+          <td>70</td>
+          <td style="color:#22c55e; font-weight:700">2.15&times;</td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+        </tr>
+        <tr style="background: rgba(59,130,246,0.06);">
+          <td><strong>Splitwise-HH</strong> (25P, 15T)</td>
+          <td>40</td>
+          <td style="color:#22c55e; font-weight:700">~1.5&times;</td>
+          <td>1&times;</td>
+          <td>1&times;</td>
+        </tr>
+        <tr style="background: rgba(249,115,22,0.06);">
+          <td><strong>Splitwise-HA</strong> (25P, 26T)</td>
+          <td>51</td>
+          <td style="color:#22c55e; font-weight:700">1.18&times;</td>
+          <td>0.9&times;</td>
+          <td>1&times;</td>
+        </tr>
+        <tr style="background: rgba(168,85,247,0.06);">
+          <td><strong>Splitwise-HHcap</strong> (25P, 21T)</td>
+          <td>46</td>
+          <td style="color:#22c55e; font-weight:700">~1.2&times;</td>
+          <td>1&times;</td>
+          <td>0.75&times;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>Iso-Cost Throughput-Optimized</h3>
+      <p>
+        For the same total cost, <strong>Splitwise-AA achieves 1.4&times; more throughput</strong> than
+        Baseline-H100, using 25% more power and 2&times; the physical space. This is an attractive
+        option for customers who prioritize throughput per dollar using readily available older GPUs.
+      </p>
+      <div class="callout success">
+        <span class="callout-icon">&#128176;</span>
+        <div>Splitwise-AA can achieve the same throughput as Baseline-H100 at <strong>25% lower cost</strong>.</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Iso-Throughput Power-Optimized</h3>
+      <p>
+        <strong>Splitwise-HHcap</strong> achieves the same throughput as Baseline-H100 at
+        <strong>25% lower power</strong> and the same cost and space. This is achieved by capping the
+        token machines to 50% power (since token generation is memory-bound, not compute-bound,
+        capping has minimal performance impact).
+      </p>
+      <div class="callout success">
+        <span class="callout-icon">&#9889;</span>
+        <div>Splitwise-HHcap: same throughput, same cost, <strong>25% less power</strong>. A clear win for CSPs.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- KV-cache transfer overhead -->
+  <div class="card">
+    <h3>KV-Cache Transfer Overhead</h3>
+    <div class="grid-2" style="gap: 30px;">
+      <div>
+        <h4 style="font-size: 0.95rem; margin-bottom: 8px;">Serialized Transfer</h4>
+        <div class="phase-bar">
+          <div class="label">Small prompts</div>
+          <div class="bar-track"><div class="bar-fill compute" style="width:3%">&lt;1%</div></div>
+        </div>
+        <div class="phase-bar">
+          <div class="label">Large prompts</div>
+          <div class="bar-track"><div class="bar-fill compute" style="width:15%">~3% E2E</div></div>
+        </div>
+        <div class="phase-bar">
+          <div class="label">2nd token overhead</div>
+          <div class="bar-track"><div class="bar-fill power" style="width:64%">64%</div></div>
+        </div>
+      </div>
+      <div>
+        <h4 style="font-size: 0.95rem; margin-bottom: 8px;">Layer-wise Async Transfer</h4>
+        <div class="phase-bar">
+          <div class="label">Small prompts</div>
+          <div class="bar-track"><div class="bar-fill idle" style="width:3%">&lt;0.5%</div></div>
+        </div>
+        <div class="phase-bar">
+          <div class="label">Large prompts</div>
+          <div class="bar-track"><div class="bar-fill idle" style="width:5%">~0.8% E2E</div></div>
+        </div>
+        <div class="phase-bar">
+          <div class="label">2nd token overhead</div>
+          <div class="bar-track"><div class="bar-fill idle" style="width:16.5%">16.5%</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SLO definition -->
+  <div class="card">
+    <h3>Service Level Objectives (SLOs)</h3>
+    <table>
+      <thead><tr><th>Metric</th><th>P50 Slowdown</th><th>P90 Slowdown</th><th>P99 Slowdown</th></tr></thead>
+      <tbody>
+        <tr><td><strong>TTFT</strong></td><td>2&times;</td><td>3&times;</td><td>6&times;</td></tr>
+        <tr><td><strong>TBT</strong></td><td>1.25&times;</td><td>1.5&times;</td><td>5&times;</td></tr>
+        <tr><td><strong>E2E</strong></td><td>1.25&times;</td><td>1.5&times;</td><td>5&times;</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 8px;">
+      SLOs are expressed as slowdown relative to a single request running on DGX-A100 with no contention.
+      All nine SLO constraints must be met simultaneously.
+    </p>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 7. AGENTIC WORKLOADS ===== -->
+<section class="section" id="agentic">
+  <div class="section-label">Section 7</div>
+  <h2>Mixed-Pool Concept for Agentic Workloads</h2>
+  <p class="section-desc">
+    Splitwise's architecture is particularly relevant for agentic AI workloads, where multi-step
+    reasoning chains create variable-length prefill and decode phases with unpredictable load patterns.
+  </p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>Why Splitwise Matters for Agents</h3>
+      <ul style="list-style: none; padding: 0;">
+        <li style="margin-bottom: 12px; padding-left: 20px; border-left: 3px solid var(--accent-orange);">
+          <strong style="color: var(--accent-orange);">Multi-step Reasoning:</strong>
+          <span style="color: var(--text-secondary); font-size: 0.88rem;">
+            Agentic workflows involve chains of LLM calls where each step's output feeds the next.
+            Phase splitting prevents the compute-heavy initial processing from blocking ongoing
+            token generation of previous steps.
+          </span>
+        </li>
+        <li style="margin-bottom: 12px; padding-left: 20px; border-left: 3px solid var(--accent-blue);">
+          <strong style="color: var(--accent-blue);">Tool-Calling Patterns:</strong>
+          <span style="color: var(--text-secondary); font-size: 0.88rem;">
+            Agents frequently call tools, requiring rapid prefill of tool results (large prompts)
+            followed by brief decode phases. Splitwise's prompt pool handles these compute-heavy
+            bursts without disrupting ongoing generation.
+          </span>
+        </li>
+        <li style="margin-bottom: 12px; padding-left: 20px; border-left: 3px solid var(--accent-green);">
+          <strong style="color: var(--accent-green);">Dynamic Load Balancing:</strong>
+          <span style="color: var(--text-secondary); font-size: 0.88rem;">
+            The MixedPoolScheduler dynamically moves machines between prompt and token pools,
+            adapting to bursty agentic workloads where prefill demand spikes during tool orchestration.
+          </span>
+        </li>
+        <li style="margin-bottom: 12px; padding-left: 20px; border-left: 3px solid var(--accent-purple);">
+          <strong style="color: var(--accent-purple);">Cost Efficiency:</strong>
+          <span style="color: var(--text-secondary); font-size: 0.88rem;">
+            Agentic systems are cost-sensitive due to high token usage across multiple LLM calls.
+            Using cheaper A100s for decode phases reduces per-agent-step cost while maintaining latency SLOs.
+          </span>
+        </li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Workload Robustness</h3>
+      <p>The paper demonstrates that Splitwise is robust to workload changes:</p>
+      <ul style="list-style: none; padding: 0; margin-top: 12px;">
+        <li style="margin-bottom: 10px;">
+          <span class="pill pill-green">Validated</span>
+          <span style="color: var(--text-secondary); font-size: 0.88rem; margin-left: 8px;">
+            Running a conversation trace on a coding-optimized cluster: all Splitwise designs
+            perform better than any baseline, with only 7% throughput reduction for heterogeneous variants.
+          </span>
+        </li>
+        <li style="margin-bottom: 10px;">
+          <span class="pill pill-green">Validated</span>
+          <span style="color: var(--text-secondary); font-size: 0.88rem; margin-left: 8px;">
+            Switching from BLOOM-176B to Llama2-70B on the same cluster: Splitwise designs
+            consistently outperform baselines at higher load, maintaining best latency.
+          </span>
+        </li>
+        <li style="margin-bottom: 10px;">
+          <span class="pill pill-blue">Extensible</span>
+          <span style="color: var(--text-secondary); font-size: 0.88rem; margin-left: 8px;">
+            All modern transformer-based generative LLMs (2B to 176B+ parameters), including
+            MoE architectures, exhibit the same two-phase behavior that Splitwise exploits.
+          </span>
+        </li>
+      </ul>
+
+      <div class="callout insight" style="margin-top: 16px;">
+        <span class="callout-icon">&#128300;</span>
+        <div>
+          <strong>Agentic opportunity:</strong> The mixed pool acts as a natural buffer for the
+          bursty, unpredictable traffic patterns of agentic orchestration, preventing both prompt
+          starvation (waiting for compute) and token starvation (via preemption limits).
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agentic workflow diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">Splitwise for Multi-Step Agentic Workflows</div>
+    <svg viewBox="0 0 900 280" class="arch-diagram" xmlns="http://www.w3.org/2000/svg">
+      <!-- Agent step 1 -->
+      <rect x="20" y="30" width="150" height="60" rx="8" fill="rgba(249,115,22,0.15)" stroke="#f97316" stroke-width="1.5"/>
+      <text x="95" y="55" text-anchor="middle" fill="#fb923c" font-size="10" font-weight="700">STEP 1: Prefill</text>
+      <text x="95" y="72" text-anchor="middle" fill="#9ca3af" font-size="8">User query → H100</text>
+
+      <line x1="175" y1="60" x2="200" y2="60" stroke="#f97316" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+      <!-- KV Transfer 1 -->
+      <rect x="205" y="42" width="50" height="36" rx="5" fill="rgba(34,197,94,0.12)" stroke="#22c55e" stroke-width="1"/>
+      <text x="230" y="64" text-anchor="middle" fill="#86efac" font-size="7" font-weight="600">KV Xfer</text>
+
+      <line x1="260" y1="60" x2="285" y2="60" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+      <!-- Decode 1 -->
+      <rect x="290" y="30" width="130" height="60" rx="8" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="355" y="55" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="700">Decode: Tool Call</text>
+      <text x="355" y="72" text-anchor="middle" fill="#9ca3af" font-size="8">Short output → A100</text>
+
+      <line x1="425" y1="60" x2="425" y2="120" stroke="#a855f7" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <text x="440" y="95" fill="#c084fc" font-size="8" font-weight="600">Tool exec</text>
+
+      <!-- Agent step 2 -->
+      <rect x="350" y="120" width="150" height="60" rx="8" fill="rgba(249,115,22,0.15)" stroke="#f97316" stroke-width="1.5"/>
+      <text x="425" y="145" text-anchor="middle" fill="#fb923c" font-size="10" font-weight="700">STEP 2: Prefill</text>
+      <text x="425" y="162" text-anchor="middle" fill="#9ca3af" font-size="8">Tool result → H100</text>
+
+      <line x1="505" y1="150" x2="530" y2="150" stroke="#f97316" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+      <!-- KV Transfer 2 -->
+      <rect x="535" y="132" width="50" height="36" rx="5" fill="rgba(34,197,94,0.12)" stroke="#22c55e" stroke-width="1"/>
+      <text x="560" y="154" text-anchor="middle" fill="#86efac" font-size="7" font-weight="600">KV Xfer</text>
+
+      <line x1="590" y1="150" x2="615" y2="150" stroke="#22c55e" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+      <!-- Decode 2 -->
+      <rect x="620" y="120" width="130" height="60" rx="8" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="685" y="145" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="700">Decode: Reason</text>
+      <text x="685" y="162" text-anchor="middle" fill="#9ca3af" font-size="8">Long output → A100</text>
+
+      <line x1="755" y1="150" x2="755" y2="210" stroke="#a855f7" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <text x="770" y="185" fill="#c084fc" font-size="8" font-weight="600">Next step</text>
+
+      <!-- Step 3 -->
+      <rect x="680" y="210" width="150" height="60" rx="8" fill="rgba(249,115,22,0.15)" stroke="#f97316" stroke-width="1.5"/>
+      <text x="755" y="235" text-anchor="middle" fill="#fb923c" font-size="10" font-weight="700">STEP 3: Prefill</text>
+      <text x="755" y="252" text-anchor="middle" fill="#9ca3af" font-size="8">Context + result → H100</text>
+
+      <!-- Annotations -->
+      <rect x="20" y="210" width="280" height="60" rx="8" fill="rgba(168,85,247,0.08)" stroke="rgba(168,85,247,0.3)" stroke-width="1"/>
+      <text x="160" y="232" text-anchor="middle" fill="#c084fc" font-size="10" font-weight="700">Mixed Pool Absorbs Spikes</text>
+      <text x="160" y="250" text-anchor="middle" fill="#9ca3af" font-size="9">Token machines overflow → mixed pool handles prefill bursts</text>
+      <text x="160" y="263" text-anchor="middle" fill="#9ca3af" font-size="9">Returns to home pool when queue drains</text>
+    </svg>
+  </div>
+</section>
+
+<div class="sep"></div>
+
+<!-- ===== 8. PAPER VS IMPLEMENTATION ===== -->
+<section class="section" id="comparison">
+  <div class="section-label">Section 8</div>
+  <h2>Paper vs Implementation: Fidelity Analysis</h2>
+  <p class="section-desc">
+    The SplitwiseSim repository is the official artifact accompanying the ISCA'24 paper. Here we
+    analyze how faithfully the simulator implements the paper's design and identify both strengths
+    and gaps.
+  </p>
+
+  <div class="card">
+    <h3>Implementation Fidelity Matrix</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Paper Concept</th>
+          <th>Status</th>
+          <th>Implementation Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Prompt/Token Phase Splitting</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">Separate PromptTask/TokenTask classes with distinct memory, compute, and iteration handling. Request DAG cleanly models prompt→token dependency.</td>
+        </tr>
+        <tr>
+          <td><strong>KV-Cache Transfer</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">KVScheduler.add_kv_cache_transfer() inserts a Flow node into the request DAG. DummyLink with configurable bandwidth models transfer delay. Size estimated from model architecture.</td>
+        </tr>
+        <tr>
+          <td><strong>Layer-wise Overlap</strong></td>
+          <td><span class="pill pill-orange">Approximated</span></td>
+          <td class="partial">OverlapKVJSQScheduler simulates 90% overlap by using 10&times; the actual bandwidth. Effective but not a true layer-by-layer overlap simulation.</td>
+        </tr>
+        <tr>
+          <td><strong>3-Pool Architecture</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">MixedPoolScheduler maintains prompt_instances, token_instances, and mixed_instances lists with dynamic pool transitions and notify_free_instance() callbacks.</td>
+        </tr>
+        <tr>
+          <td><strong>JSQ Scheduling (CLS)</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">Multiple JSQ variants: by request count (KVJSQScheduler) and by pending tokens (KVTokenJSQScheduler). O(n) search per scheduling decision.</td>
+        </tr>
+        <tr>
+          <td><strong>Mixed Continuous Batching (MLS)</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">ORCAInstance implements iteration-level scheduling with prompt priority and contiguous iteration optimization. SplitwiseInstance adds preemption support.</td>
+        </tr>
+        <tr>
+          <td><strong>Token Preemption</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">SplitwiseInstance.preempt_task() with max_preemptions limit (default: 4). Priority queue ordered by (preemption_count, arrival_time) prevents starvation.</td>
+        </tr>
+        <tr>
+          <td><strong>Performance Model</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">DatabasePerformanceModel with profiling data from DGX-A100/H100. Linear interpolation via scipy interp1d. Separate prompt and token predictors keyed by (model, hardware, TP).</td>
+        </tr>
+        <tr>
+          <td><strong>Power Modeling</strong></td>
+          <td><span class="pill pill-red">Placeholder</span></td>
+          <td class="gap">PowerModel exists but is marked TODO/unused. ConstantPowerModel provides per-task power values but cluster.py's power tracking is not connected to simulation logic.</td>
+        </tr>
+        <tr>
+          <td><strong>Real Hardware Validation</strong></td>
+          <td><span class="pill pill-cyan">Separate</span></td>
+          <td>KV-cache transfer implementation is done on vLLM (not in this repo). Available as a separate PR: github.com/vllm-project/vllm/pull/2809.</td>
+        </tr>
+        <tr>
+          <td><strong>Dynamic Reprovisioning</strong></td>
+          <td><span class="pill pill-orange">Partial</span></td>
+          <td class="partial">Pool transitions are implemented (mixed pool overflow). But full machine re-purposing (changing model weights) is not simulated &mdash; treated as negligible overhead.</td>
+        </tr>
+        <tr>
+          <td><strong>Production Traces</strong></td>
+          <td><span class="pill pill-green">Full Match</span></td>
+          <td class="match">generate_trace.py downloads Azure LLM traces and generates simulator-compatible CSVs with Poisson arrivals and production prompt/token distributions.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Detailed gaps analysis -->
+  <div class="grid-2">
+    <div class="card" style="border-top: 3px solid var(--accent-green);">
+      <h3 style="color: var(--accent-green);">Strengths of Implementation</h3>
+      <ul style="list-style: none; padding: 0; color: var(--text-secondary); font-size: 0.88rem;">
+        <li style="margin-bottom: 8px;">&#10003; Clean object-oriented architecture with clear separation of concerns</li>
+        <li style="margin-bottom: 8px;">&#10003; Request DAG abstraction cleanly models prompt→KV-transfer→token pipeline</li>
+        <li style="margin-bottom: 8px;">&#10003; Extensive configurability via Hydra YAML &mdash; 15+ cluster configs, 10 schedulers</li>
+        <li style="margin-bottom: 8px;">&#10003; Profiling-based performance model with &lt;3% MAPE validated against hardware</li>
+        <li style="margin-bottom: 8px;">&#10003; Validated end-to-end with 50K+ iterations on production traces</li>
+        <li style="margin-bottom: 8px;">&#10003; Parallel simulation support via Ray for design space exploration</li>
+        <li style="margin-bottom: 8px;">&#10003; Debug mode with per-instance iteration logs for Gantt chart visualization</li>
+      </ul>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--accent-yellow);">
+      <h3 style="color: var(--accent-yellow);">Limitations &amp; Gaps</h3>
+      <ul style="list-style: none; padding: 0; color: var(--text-secondary); font-size: 0.88rem;">
+        <li style="margin-bottom: 8px;">&#9888; Power model is stub only &mdash; power-optimized results rely on analytical calculation, not simulation</li>
+        <li style="margin-bottom: 8px;">&#9888; KV-cache overlap approximated as 10&times; bandwidth rather than true layer-by-layer modeling</li>
+        <li style="margin-bottom: 8px;">&#9888; Network model is simplified &mdash; DummyLink ignores congestion and contention effects</li>
+        <li style="margin-bottom: 8px;">&#9888; Arbiter and Router are no-ops &mdash; multi-application routing not implemented</li>
+        <li style="margin-bottom: 8px;">&#9888; Global singleton pattern for simulator, performance_model, power_model limits testability</li>
+        <li style="margin-bottom: 8px;">&#9888; JSQ scheduling uses O(n) search &mdash; acknowledged as inefficient in code comments</li>
+        <li style="margin-bottom: 8px;">&#9888; No prompt chunking support &mdash; prompts are always fully processed in one iteration</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout warning" style="margin-top: 10px;">
+    <span class="callout-icon">&#128221;</span>
+    <div>
+      <strong>Artifact note from paper:</strong> "Artifact functionality was only tested for the traces and
+      SplitwiseSim due to limited hardware availability." The real hardware validation (vLLM-based KV
+      transfer over InfiniBand) was run on 2 DGX-A100 + 2 DGX-H100 machines on Microsoft Azure. The
+      simulator is the primary evaluation vehicle for the cluster-scale design space exploration.
+    </div>
+  </div>
+
+  <!-- Final summary -->
+  <div class="card" style="border: 1px solid var(--accent-orange); margin-top: 24px;">
+    <h3 style="color: var(--accent-orange);">Overall Assessment</h3>
+    <p style="font-size: 0.92rem;">
+      SplitwiseSim is a high-quality research artifact that faithfully implements the core concepts of
+      the Splitwise paper. The three-pool architecture with dynamic rebalancing, the hierarchical
+      CLS/MLS scheduling, KV-cache transfer via request DAG modification, and the profiling-based
+      performance model are all implemented with strong alignment to the paper's design. The primary
+      gaps are in power modeling (placeholder only) and network fidelity (simplified link model). The
+      paper's headline claims &mdash; 1.4&times; throughput at 20% lower cost and 2.35&times; throughput at
+      iso-budget &mdash; are supported by the simulator's design space exploration methodology, which
+      is well-implemented and reproducible.
+    </p>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer class="footer">
+  <p>
+    Technical analysis of "Splitwise: Efficient Generative LLM Inference Using Phase Splitting"
+    (arXiv:2311.18677) &mdash; Patel et al., ISCA 2024 Best Paper Nominee
+  </p>
+  <p style="margin-top: 6px;">
+    Repository: github.com/Mutinifni/splitwise-sim &middot;
+    Paper: doi.org/10.1145/3620666.3651382
+  </p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marconi: Prefix Caching for the Era of Hybrid LLMs - Technical Analysis</title>
+<style>
+  :root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-card: #1c2333;
+    --bg-code: #0d1117;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border-default: #30363d;
+    --accent-teal: #2dd4bf;
+    --accent-green: #52b788;
+    --accent-blue: #58a6ff;
+    --accent-purple: #bc8cff;
+    --accent-orange: #f0883e;
+    --accent-red: #f85149;
+    --accent-yellow: #e3b341;
+    --accent-pink: #f778ba;
+    --gradient-hero: linear-gradient(135deg, #0f172a 0%, #1e1b4b 35%, #172554 70%, #0f172a 100%);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+  a { color: var(--accent-blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* -- Sticky Nav -- */
+  .sticky-nav {
+    position: sticky; top: 0; z-index: 1000;
+    background: rgba(13,17,23,0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-default);
+    padding: 0 2rem;
+  }
+  .sticky-nav ul {
+    list-style: none; display: flex; gap: 0.25rem;
+    max-width: 1200px; margin: 0 auto;
+    overflow-x: auto; flex-wrap: nowrap;
+  }
+  .sticky-nav li a {
+    display: block; padding: 0.75rem 0.85rem;
+    font-size: 0.82rem; font-weight: 500;
+    color: var(--text-secondary);
+    white-space: nowrap; transition: color 0.2s;
+    border-bottom: 2px solid transparent;
+  }
+  .sticky-nav li a:hover {
+    color: var(--accent-teal); text-decoration: none;
+    border-bottom-color: var(--accent-teal);
+  }
+
+  /* -- Hero -- */
+  .hero {
+    background: var(--gradient-hero);
+    padding: 5rem 2rem 4rem;
+    text-align: center;
+    border-bottom: 1px solid var(--border-default);
+    position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 30% 20%, rgba(45,212,191,0.08) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 80%, rgba(188,140,255,0.06) 0%, transparent 50%);
+  }
+  .hero-content { position: relative; max-width: 900px; margin: 0 auto; }
+  .hero h1 {
+    font-size: 2.8rem; font-weight: 800;
+    background: linear-gradient(135deg, #2dd4bf, #58a6ff, #bc8cff);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin-bottom: 1rem;
+  }
+  .hero .subtitle {
+    font-size: 1.15rem; color: var(--text-secondary);
+    max-width: 700px; margin: 0 auto 1.5rem;
+  }
+  .badge-row { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; margin-bottom: 1rem; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.35rem 0.85rem; border-radius: 999px;
+    font-size: 0.78rem; font-weight: 600;
+  }
+  .badge-award { background: linear-gradient(135deg, #f0883e, #e3b341); color: #0d1117; }
+  .badge-venue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-arxiv { background: rgba(188,140,255,0.15); color: var(--accent-purple); border: 1px solid rgba(188,140,255,0.3); }
+  .hero .authors { font-size: 0.9rem; color: var(--text-muted); margin-top: 0.5rem; }
+
+  /* -- Containers -- */
+  .container { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
+  .section-title {
+    font-size: 1.75rem; font-weight: 700; margin-bottom: 1.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border-default);
+  }
+  .section-title .accent { color: var(--accent-teal); }
+
+  /* -- Cards -- */
+  .card {
+    background: var(--bg-card); border-radius: 10px;
+    border: 1px solid var(--border-default);
+    padding: 1.75rem; margin-bottom: 1.5rem;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: #444c56; }
+  .card-teal   { border-left: 4px solid var(--accent-teal); }
+  .card-green  { border-left: 4px solid var(--accent-green); }
+  .card-blue   { border-left: 4px solid var(--accent-blue); }
+  .card-purple { border-left: 4px solid var(--accent-purple); }
+  .card-orange { border-left: 4px solid var(--accent-orange); }
+  .card-red    { border-left: 4px solid var(--accent-red); }
+  .card-yellow { border-left: 4px solid var(--accent-yellow); }
+  .card-pink   { border-left: 4px solid var(--accent-pink); }
+  .card h3 { font-size: 1.15rem; font-weight: 600; margin-bottom: 0.75rem; }
+
+  /* -- Callouts -- */
+  .callout {
+    border-radius: 8px; padding: 1rem 1.25rem;
+    margin: 1.25rem 0; font-size: 0.92rem;
+  }
+  .callout-insight {
+    background: rgba(45,212,191,0.08); border: 1px solid rgba(45,212,191,0.25);
+    color: var(--accent-teal);
+  }
+  .callout-warning {
+    background: rgba(240,136,62,0.08); border: 1px solid rgba(240,136,62,0.25);
+    color: var(--accent-orange);
+  }
+  .callout-info {
+    background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25);
+    color: var(--accent-blue);
+  }
+  .callout-success {
+    background: rgba(82,183,136,0.08); border: 1px solid rgba(82,183,136,0.25);
+    color: var(--accent-green);
+  }
+  .callout strong { color: inherit; }
+
+  /* -- Code Blocks -- */
+  pre {
+    background: var(--bg-code); border: 1px solid var(--border-default);
+    border-radius: 8px; padding: 1.25rem; overflow-x: auto;
+    font-size: 0.82rem; line-height: 1.65; margin: 1rem 0;
+  }
+  code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; }
+  pre code { color: var(--text-primary); }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm { color: #8b949e; font-style: italic; }
+  .num { color: #79c0ff; }
+  .cls { color: #f0883e; }
+  .op { color: #ff7b72; }
+  .param { color: #ffa657; }
+  .self { color: #ff7b72; }
+  .builtin { color: #ffa657; }
+
+  /* -- Tables -- */
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.88rem;
+  }
+  th {
+    background: #21262d; color: var(--accent-teal);
+    padding: 0.75rem 1rem; text-align: left;
+    font-weight: 600; font-size: 0.82rem;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 2px solid var(--border-default);
+  }
+  td {
+    padding: 0.65rem 1rem; border-bottom: 1px solid var(--border-default);
+    color: var(--text-primary);
+  }
+  tr:hover td { background: rgba(45,212,191,0.04); }
+
+  /* -- Metrics Grid -- */
+  .metrics-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem; margin: 1.5rem 0;
+  }
+  .metric-card {
+    background: var(--bg-secondary); border-radius: 10px;
+    border: 1px solid var(--border-default);
+    padding: 1.25rem; text-align: center;
+  }
+  .metric-value {
+    font-size: 2.2rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent-teal), var(--accent-blue));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .metric-label { font-size: 0.82rem; color: var(--text-secondary); margin-top: 0.25rem; }
+
+  /* -- Architecture Diagrams (CSS Block Diagrams) -- */
+  .diagram-container {
+    background: var(--bg-secondary); border-radius: 12px;
+    border: 1px solid var(--border-default);
+    padding: 2rem; margin: 1.5rem 0; overflow-x: auto;
+  }
+  .diagram-title {
+    font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 1.25rem; text-align: center;
+  }
+
+  /* Architecture Flow */
+  .arch-flow {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; flex-wrap: wrap;
+  }
+  .arch-block {
+    padding: 0.9rem 1.2rem; border-radius: 8px;
+    font-size: 0.78rem; font-weight: 600;
+    text-align: center; min-width: 120px;
+    position: relative;
+  }
+  .arch-block small { display: block; font-weight: 400; opacity: 0.8; margin-top: 0.2rem; font-size: 0.7rem; }
+  .arch-arrow {
+    font-size: 1.3rem; color: var(--text-muted);
+    padding: 0 0.35rem; flex-shrink: 0;
+  }
+
+  .block-request   { background: rgba(88,166,255,0.15); border: 1.5px solid rgba(88,166,255,0.5); color: #93c5fd; }
+  .block-admission { background: rgba(45,212,191,0.15); border: 1.5px solid rgba(45,212,191,0.5); color: #5eead4; }
+  .block-radix     { background: rgba(188,140,255,0.15); border: 1.5px solid rgba(188,140,255,0.5); color: #d4b5ff; }
+  .block-eviction  { background: rgba(248,81,73,0.15); border: 1.5px solid rgba(248,81,73,0.5); color: #fca5a5; }
+  .block-tuner     { background: rgba(227,179,65,0.15); border: 1.5px solid rgba(227,179,65,0.5); color: #fde68a; }
+  .block-ssm       { background: rgba(82,183,136,0.15); border: 1.5px solid rgba(82,183,136,0.5); color: #86efac; }
+  .block-attn      { background: rgba(240,136,62,0.15); border: 1.5px solid rgba(240,136,62,0.5); color: #fdba74; }
+
+  /* Radix Tree Diagram */
+  .tree-container { display: flex; flex-direction: column; align-items: center; gap: 0; }
+  .tree-level { display: flex; justify-content: center; gap: 1.5rem; position: relative; }
+  .tree-node {
+    padding: 0.5rem 0.9rem; border-radius: 6px;
+    font-size: 0.72rem; font-weight: 600;
+    text-align: center; position: relative;
+    min-width: 90px;
+  }
+  .tree-node small { display: block; font-weight: 400; opacity: 0.75; font-size: 0.65rem; }
+  .tree-edge {
+    width: 2px; height: 24px; margin: 0 auto;
+    position: relative;
+  }
+  .tree-edge-group { display: flex; justify-content: center; gap: 1.5rem; }
+  .tree-edge-branch {
+    width: 2px; height: 24px;
+  }
+  .tree-connector {
+    height: 2px; align-self: center;
+  }
+
+  /* Hybrid Model Layer Diagram */
+  .layer-stack {
+    display: flex; gap: 0.5rem; align-items: stretch; justify-content: center;
+    flex-wrap: wrap;
+  }
+  .layer-col {
+    display: flex; flex-direction: column; gap: 0.3rem;
+    align-items: center;
+  }
+  .layer-block {
+    width: 36px; height: 22px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.55rem; font-weight: 700; color: rgba(255,255,255,0.9);
+  }
+  .layer-ssm { background: #2d6a4f; }
+  .layer-attn { background: #e85d04; }
+  .layer-mlp { background: #3a0ca3; }
+  .layer-label {
+    font-size: 0.6rem; color: var(--text-muted);
+    writing-mode: horizontal-tb; margin-top: 0.25rem;
+  }
+
+  /* Eviction Policy Comparison Diagram */
+  .policy-compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+  }
+  .policy-box {
+    border-radius: 10px; padding: 1.25rem;
+  }
+  .policy-box h4 {
+    font-size: 0.9rem; margin-bottom: 0.75rem;
+    padding-bottom: 0.4rem;
+  }
+  .policy-box ul { list-style: none; font-size: 0.82rem; }
+  .policy-box li { padding: 0.3rem 0; display: flex; align-items: flex-start; gap: 0.5rem; }
+  .policy-box li::before { content: ''; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; margin-top: 0.45rem; }
+  .policy-sglang { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); }
+  .policy-sglang h4 { color: var(--accent-blue); border-bottom: 1px solid rgba(88,166,255,0.2); }
+  .policy-sglang li::before { background: var(--accent-blue); }
+  .policy-marconi { background: rgba(45,212,191,0.08); border: 1px solid rgba(45,212,191,0.25); }
+  .policy-marconi h4 { color: var(--accent-teal); border-bottom: 1px solid rgba(45,212,191,0.2); }
+  .policy-marconi li::before { background: var(--accent-teal); }
+
+  /* Utility Score Diagram */
+  .formula-box {
+    background: rgba(188,140,255,0.06); border: 1px solid rgba(188,140,255,0.2);
+    border-radius: 10px; padding: 1.25rem; text-align: center;
+    margin: 1rem 0;
+  }
+  .formula {
+    font-size: 1.2rem; font-weight: 700;
+    font-family: 'Georgia', serif; letter-spacing: 0.02em;
+  }
+  .formula .alpha { color: var(--accent-yellow); }
+  .formula .eff { color: var(--accent-green); }
+  .formula .recency { color: var(--accent-blue); }
+  .formula-caption {
+    font-size: 0.78rem; color: var(--text-muted); margin-top: 0.5rem;
+  }
+
+  /* Config Tuner Diagram */
+  .tuner-flow {
+    display: flex; align-items: flex-start; gap: 0; justify-content: center;
+    flex-wrap: wrap;
+  }
+  .tuner-step {
+    padding: 0.75rem 1rem; border-radius: 8px;
+    font-size: 0.75rem; text-align: center;
+    min-width: 135px; max-width: 160px;
+  }
+  .tuner-step strong { display: block; font-size: 0.82rem; margin-bottom: 0.25rem; }
+  .tuner-arrow { color: var(--text-muted); font-size: 1.2rem; padding: 0 0.2rem; align-self: center; }
+
+  /* File tree */
+  .file-tree { font-size: 0.82rem; line-height: 2; }
+  .file-tree .dir { color: var(--accent-blue); font-weight: 600; }
+  .file-tree .file { color: var(--text-primary); }
+  .file-tree .desc { color: var(--text-muted); font-size: 0.78rem; }
+  .file-tree .indent { padding-left: 1.5rem; }
+
+  /* Stat bar chart (CSS-based) */
+  .bar-chart { display: flex; flex-direction: column; gap: 0.6rem; margin: 1rem 0; }
+  .bar-row { display: flex; align-items: center; gap: 0.75rem; }
+  .bar-label { font-size: 0.78rem; font-weight: 500; min-width: 80px; text-align: right; color: var(--text-secondary); }
+  .bar-track { flex: 1; height: 22px; background: var(--bg-primary); border-radius: 4px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 0.5rem; font-size: 0.7rem; font-weight: 600; transition: width 0.5s; }
+  .bar-value { font-size: 0.78rem; min-width: 50px; font-weight: 600; }
+
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 1.8rem; }
+    .container { padding: 2rem 1rem; }
+    .policy-compare { grid-template-columns: 1fr; }
+    .arch-flow { flex-direction: column; gap: 0.5rem; }
+    .arch-arrow { transform: rotate(90deg); }
+    .tuner-flow { flex-direction: column; align-items: center; }
+    .tuner-arrow { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- STICKY NAV -->
+<!-- ============================================================ -->
+<nav class="sticky-nav">
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#hybrid-challenge">Hybrid Challenge</a></li>
+    <li><a href="#policies">Policies</a></li>
+    <li><a href="#config-tuner">Config Tuner</a></li>
+    <li><a href="#repo">Repository</a></li>
+    <li><a href="#performance">Performance</a></li>
+    <li><a href="#agentic">Agentic Relevance</a></li>
+    <li><a href="#sglang">SGLang</a></li>
+    <li><a href="#paper-vs-impl">Paper vs Impl</a></li>
+  </ul>
+</nav>
+
+<!-- ============================================================ -->
+<!-- HERO -->
+<!-- ============================================================ -->
+<header class="hero">
+  <div class="hero-content">
+    <h1>Marconi</h1>
+    <p class="subtitle">Prefix Caching for the Era of Hybrid LLMs</p>
+    <div class="badge-row">
+      <span class="badge badge-award">MLSys '25 Outstanding Paper Honorable Mention</span>
+      <span class="badge badge-venue">MLSys 2025</span>
+      <a href="https://arxiv.org/abs/2411.19379" class="badge badge-arxiv" target="_blank">arXiv:2411.19379</a>
+    </div>
+    <p class="authors">
+      Rui Pan, Zhuang Wang, Zhen Jia, Can Karakus, Luca Zancato, Tri Dao, Ravi Netravali, Yida Wang
+    </p>
+  </div>
+</header>
+
+<!-- ============================================================ -->
+<!-- 1. OVERVIEW -->
+<!-- ============================================================ -->
+<section id="overview" class="container">
+  <h2 class="section-title"><span class="accent">#1</span> Overview</h2>
+
+  <div class="card card-teal">
+    <h3>The First Prefix Caching System for Hybrid LLMs</h3>
+    <p>
+      Marconi is the first prefix caching system designed for <strong>hybrid Large Language Models</strong> that combine
+      Attention layers with State Space Models (SSMs) such as Mamba. While prefix caching is standard practice in
+      Transformer-only serving systems (SGLang, vLLM), hybrid architectures introduce a fundamental new challenge:
+      SSM layers maintain <em>recurrent hidden states</em> that depend on the entire input history, preventing the simple
+      rolling-back of partial prefix overlaps that KV-cache reuse relies on.
+    </p>
+    <p style="margin-top:0.75rem;">
+      Marconi solves this with novel admission and eviction policies that forecast <strong>reuse likelihood</strong> of
+      cached entries and weigh <strong>compute savings against memory footprints</strong>, yielding up to 34.4x higher
+      token hit rates than existing prefix caching approaches.
+    </p>
+  </div>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-value">34.4x</div>
+      <div class="metric-label">Higher Token Hit Rate vs vLLM+</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">71.1%</div>
+      <div class="metric-label">Token Hit Rate Achieved</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">617ms</div>
+      <div class="metric-label">TTFT Reduction</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">3</div>
+      <div class="metric-label">Datasets: LMSys, ShareGPT, SWEBench</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 2. HYBRID CHALLENGE -->
+<!-- ============================================================ -->
+<section id="hybrid-challenge" class="container">
+  <h2 class="section-title"><span class="accent">#2</span> The Hybrid Model Challenge</h2>
+
+  <div class="card card-orange">
+    <h3>Why Prefix Caching Breaks for Hybrid Architectures</h3>
+    <p>
+      In a pure Transformer, the KV cache at position <em>i</em> depends only on tokens 1 through <em>i</em>, and
+      each position's KV pair is independent. Reusing a prefix means simply copying the KV blocks and continuing
+      decoding from the divergence point. Hybrid models with SSM layers break this assumption in two critical ways:
+    </p>
+    <ul style="margin-top:0.75rem; padding-left:1.25rem; color:var(--text-secondary);">
+      <li><strong>In-place state updates:</strong> SSM recurrent states (h<sub>t</sub>) are updated in-place as each token is processed. There is no per-token KV pair; only the final aggregate state after processing L tokens.</li>
+      <li><strong>No partial rollback:</strong> When a new request shares a prefix but diverges mid-sequence, there is no way to "roll back" the SSM state to the divergence point unless it was explicitly checkpointed.</li>
+      <li><strong>Asymmetric memory costs:</strong> Each SSM state checkpoint costs a fixed amount regardless of sequence length (D x N x 2 bytes), while KV cache costs scale linearly with sequence length.</li>
+    </ul>
+  </div>
+
+  <!-- Hybrid Model Layer Composition Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">NVIDIA Attention-Mamba2 7B Hybrid Model -- Layer Composition (28 total layers)</div>
+    <div style="display:flex; flex-direction:column; align-items:center; gap:1rem;">
+      <div style="display:flex; gap:0.3rem; align-items:flex-end; flex-wrap:wrap; justify-content:center;">
+        <!-- 24 SSM layers -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0.2rem;">
+          <div style="display:flex; gap:2px; flex-wrap:wrap; max-width:320px; justify-content:center;">
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-attn" style="width:32px;">A</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-attn" style="width:32px;">A</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-attn" style="width:32px;">A</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-ssm" style="width:32px;">S</div>
+            <div class="layer-block layer-attn" style="width:32px;">A</div>
+          </div>
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.3rem;">
+            <span style="color:#52b788;">24 SSM Layers</span> &nbsp;+&nbsp;
+            <span style="color:#e85d04;">4 Attention Layers</span> &nbsp;+&nbsp;
+            <span style="color:#7b2ff2;">28 MLP Layers (paired)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- State Size Comparison -->
+      <div style="display:flex; gap:1.5rem; flex-wrap:wrap; justify-content:center; margin-top:0.5rem;">
+        <div style="background:rgba(82,183,136,0.1); border:1px solid rgba(82,183,136,0.3); border-radius:8px; padding:0.75rem 1rem; text-align:center;">
+          <div style="font-size:1.1rem; font-weight:700; color:var(--accent-green);">SSM State</div>
+          <div style="font-size:0.75rem; color:var(--text-secondary);">D x N x 2 bytes = <strong style="color:var(--text-primary);">1 MB</strong> per checkpoint</div>
+          <div style="font-size:0.7rem; color:var(--text-muted);">Fixed size, independent of seq length</div>
+        </div>
+        <div style="background:rgba(240,136,62,0.1); border:1px solid rgba(240,136,62,0.3); border-radius:8px; padding:0.75rem 1rem; text-align:center;">
+          <div style="font-size:1.1rem; font-weight:700; color:var(--accent-orange);">KV Cache</div>
+          <div style="font-size:0.75rem; color:var(--text-secondary);">2 x L x D x 2 bytes = <strong style="color:var(--text-primary);">scales with L</strong></div>
+          <div style="font-size:0.7rem; color:var(--text-muted);">Grows linearly with sequence length</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout-insight">
+    <strong>Key Insight:</strong> SSM state checkpoints have a fixed memory cost regardless of sequence length, while KV cache
+    scales linearly. Marconi exploits this asymmetry -- caching states for short, frequently-reused prefixes is
+    cheap in memory but saves substantial recomputation.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 3. ARCHITECTURE -->
+<!-- ============================================================ -->
+<section id="architecture" class="container">
+  <h2 class="section-title"><span class="accent">#3</span> System Architecture</h2>
+
+  <!-- Main Pipeline Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">Marconi Request Processing Pipeline</div>
+    <div class="arch-flow">
+      <div class="arch-block block-request">
+        Incoming<br>Request
+        <small>Token IDs</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-radix">
+        match_prefix()
+        <small>Radix Tree Lookup</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-admission">
+        Selective<br>Admission
+        <small>Cache or Skip?</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-radix" style="min-width:140px;">
+        insert()
+        <small>Radix Tree Update +<br>State Checkpoint</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-eviction">
+        evict_v2()
+        <small>Utility-Based<br>Eviction</small>
+      </div>
+    </div>
+    <div style="display:flex; justify-content:center; margin-top:1.25rem;">
+      <div class="arch-arrow" style="transform:rotate(90deg); margin:0;">&#10132;</div>
+    </div>
+    <div style="display:flex; justify-content:center;">
+      <div class="arch-block block-tuner" style="min-width:240px;">
+        ConfigTuner.tune_config()
+        <small>Retrospective alpha tuning via grid search on past window</small>
+      </div>
+    </div>
+  </div>
+
+  <!-- Radix Tree Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">Radix Tree Structure -- Hybrid State Caching</div>
+    <div class="tree-container">
+      <!-- Root -->
+      <div class="tree-level">
+        <div class="tree-node" style="background:rgba(188,140,255,0.15); border:1.5px solid rgba(188,140,255,0.4); color:#d4b5ff;">
+          ROOT
+          <small>No states stored</small>
+        </div>
+      </div>
+      <!-- Edge down -->
+      <div style="display:flex; justify-content:center;">
+        <div style="width:2px; height:20px; background:var(--border-default);"></div>
+      </div>
+      <!-- Level 1 -->
+      <div style="display:flex; justify-content:center; gap:3rem;">
+        <div style="display:flex; flex-direction:column; align-items:center;">
+          <div class="tree-node block-ssm">
+            "Princeton University is"
+            <small>SSM state + KV cache</small>
+          </div>
+          <div style="width:2px; height:18px; background:rgba(82,183,136,0.4);"></div>
+          <div style="display:flex; gap:1rem;">
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <div style="width:40px; height:2px; background:rgba(82,183,136,0.4);"></div>
+              <div class="tree-node block-attn" style="font-size:0.68rem;">
+                "a beautiful place"
+                <small>SSM + KV</small>
+              </div>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <div style="width:40px; height:2px; background:rgba(82,183,136,0.4);"></div>
+              <div class="tree-node block-attn" style="font-size:0.68rem;">
+                "a big deal"
+                <small>SSM + KV</small>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:center;">
+          <div class="tree-node block-ssm">
+            "Harvard University is"
+            <small>SSM state + KV cache</small>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="font-size:0.75rem; color:var(--text-muted); text-align:center; margin-top:1rem;">
+      Each node stores: (1) SSM recurrent states for all 24 Mamba layers, (2) KV cache for 4 Attention layers.
+      Branching requires checkpointing the SSM state at the divergence point.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 4. ADMISSION & EVICTION POLICIES -->
+<!-- ============================================================ -->
+<section id="policies" class="container">
+  <h2 class="section-title"><span class="accent">#4</span> Admission & Eviction Policies</h2>
+
+  <div class="policy-compare">
+    <div class="policy-box policy-sglang">
+      <h4>V1: SGLang+ (Baseline)</h4>
+      <ul>
+        <li>LRU eviction on <strong>leaf nodes only</strong></li>
+        <li>All ancestor timestamps updated on access</li>
+        <li>No awareness of compute savings vs memory cost</li>
+        <li>Admits all prefixes indiscriminately</li>
+        <li>Single signal: recency of access</li>
+      </ul>
+    </div>
+    <div class="policy-box policy-marconi">
+      <h4>V2: Marconi</h4>
+      <ul>
+        <li>Utility-based eviction on <strong>leaf + single-child nodes</strong></li>
+        <li>Only the deepest accessed node's timestamp is updated</li>
+        <li>Weighs FLOPs savings / memory footprint per node</li>
+        <li>Selective admission via radix tree structure</li>
+        <li>Two signals: recency + compute efficiency, balanced by alpha</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Utility Score Formula -->
+  <div class="formula-box">
+    <div class="formula">
+      Utility(node) = <span class="alpha">&alpha;</span> &middot; <span class="eff">efficiency(node)</span> + <span class="recency">recency(node)</span>
+    </div>
+    <div class="formula-caption">
+      Where <span style="color:var(--accent-green);">efficiency = FLOPs_saved / memory_footprint</span> (min-max normalized),
+      <span style="color:var(--accent-blue);">recency = 1 / (now - last_access)</span> (min-max normalized),
+      and <span style="color:var(--accent-yellow);">&alpha;</span> is tuned retrospectively via grid search.
+    </div>
+  </div>
+
+  <div class="card card-purple">
+    <h3>Eviction Policy V2 -- Compute-Aware Node Scoring</h3>
+    <p>Marconi's eviction policy (implemented in <code>radix_cache_hybrid.py:evict_v2()</code>) collects all nodes with 0 or 1 children, then computes a utility score for each:</p>
+    <ol style="margin-top:0.75rem; padding-left:1.25rem; color:var(--text-secondary); font-size:0.9rem;">
+      <li><strong>FLOPs Efficiency Calculation:</strong> For each candidate node, compute the FLOPs saved by caching it (Mamba FLOPs + Attention FLOPs + MLP FLOPs) divided by its memory footprint (SSM states + KV cache).</li>
+      <li><strong>Recency Score:</strong> Inverse of time since last access, with only the deepest node's timestamp updated on lookup -- not ancestors.</li>
+      <li><strong>Combined Utility:</strong> Weighted combination: <code>&alpha; * normalized_efficiency + normalized_recency</code></li>
+      <li><strong>Eviction:</strong> The node with the <em>lowest</em> utility score is evicted first. Leaf nodes are deleted; single-child nodes are merged with their child.</li>
+    </ol>
+  </div>
+
+  <div class="callout callout-warning">
+    <strong>Critical Difference from SGLang:</strong> SGLang (V1) updates the timestamps of <em>all</em> ancestor nodes on every
+    access, making parent nodes appear artificially "hot." Marconi (V2) updates only the deepest accessed node,
+    allowing cold intermediate nodes to be evicted and merged with their children -- freeing SSM state memory.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 5. CONFIG TUNER -->
+<!-- ============================================================ -->
+<section id="config-tuner" class="container">
+  <h2 class="section-title"><span class="accent">#5</span> Retrospective Alpha Tuning</h2>
+
+  <div class="card card-yellow">
+    <h3>ConfigTuner: Adaptive Weight Optimization</h3>
+    <p>
+      The weight <strong>&alpha;</strong> that balances compute-efficiency against recency is not a fixed hyperparameter.
+      Marconi uses a <strong>retrospective configuration tuner</strong> (implemented in <code>config_tuner.py</code>) that
+      periodically replays recent request history against a snapshot of the radix tree to find the optimal &alpha;.
+    </p>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Retrospective Alpha Tuning Pipeline</div>
+    <div class="tuner-flow">
+      <div class="tuner-step block-request">
+        <strong>1. Bootstrap</strong>
+        Wait for first eviction,<br>then observe 5x requests
+      </div>
+      <div class="tuner-arrow">&#10132;</div>
+      <div class="tuner-step block-radix">
+        <strong>2. Snapshot</strong>
+        Deep-copy radix tree<br>at window start
+      </div>
+      <div class="tuner-arrow">&#10132;</div>
+      <div class="tuner-step block-tuner">
+        <strong>3. Grid Search</strong>
+        Replay window with 21<br>values of alpha [0, 2.0]
+      </div>
+      <div class="tuner-arrow">&#10132;</div>
+      <div class="tuner-step block-admission">
+        <strong>4. Parallel Eval</strong>
+        ProcessPoolExecutor<br>across all CPU cores
+      </div>
+      <div class="tuner-arrow">&#10132;</div>
+      <div class="tuner-step block-ssm">
+        <strong>5. Update</strong>
+        Pick alpha maximizing<br>FLOPs savings
+      </div>
+    </div>
+  </div>
+
+  <pre><code><span class="cm"># config_tuner.py -- Core tuning logic</span>
+<span class="kw">def</span> <span class="fn">tune_config</span>(<span class="self">self</span>, <span class="param">request_history_windowed</span>, <span class="param">weights</span>=[<span class="num">0</span>, <span class="num">0.1</span>, ..., <span class="num">2.0</span>]):
+    configs = [{
+        <span class="str">"radix_tree"</span>: pickle.loads(pickle.dumps(<span class="self">self</span>.tree_snapshot, -<span class="num">1</span>)),
+        <span class="str">"past_requests"</span>: request_history_windowed,
+        <span class="str">"evict_policy_version"</span>: <span class="num">3</span>,  <span class="cm"># oracle-style replay</span>
+        <span class="str">"eff_weight"</span>: eff_weight,
+    } <span class="kw">for</span> eff_weight <span class="kw">in</span> weights]
+
+    <span class="kw">with</span> <span class="cls">ProcessPoolExecutor</span>(max_workers=NUM_CPUS) <span class="kw">as</span> executor:
+        futures = [executor.submit(replay_trace, **config) <span class="kw">for</span> config <span class="kw">in</span> configs]
+        <span class="cm"># ... find alpha maximizing FLOPs savings</span>
+    best_eff_weight = <span class="builtin">max</span>(results, key=<span class="kw">lambda</span> k: results[k][<span class="num">2</span>])
+    <span class="kw">return</span> best_eff_weight</code></pre>
+
+  <div class="callout callout-info">
+    <strong>Bootstrap Multiplier:</strong> The tuning window size is set to <code>bootstrap_multiplier x num_reqs_before_first_eviction</code>.
+    For LMSys traces this is 15x; for ShareGPT and SWEBench it defaults to 5x. This ensures the tuner has seen enough
+    traffic to make statistically meaningful predictions.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 6. REPOSITORY IMPLEMENTATION -->
+<!-- ============================================================ -->
+<section id="repo" class="container">
+  <h2 class="section-title"><span class="accent">#6</span> Repository Implementation</h2>
+
+  <div class="card card-blue">
+    <h3>Project Structure</h3>
+    <div class="file-tree">
+      <div><span class="dir">marconi/</span></div>
+      <div class="indent"><span class="file">radix_cache_hybrid.py</span> <span class="desc">-- Core: RadixCache with Marconi's V1/V2/V3 eviction policies (560 lines)</span></div>
+      <div class="indent"><span class="file">radix_cache_vllm.py</span> <span class="desc">-- vLLM+ baseline: block-based token caching with LRU eviction (416 lines)</span></div>
+      <div class="indent"><span class="file">config_tuner.py</span> <span class="desc">-- Retrospective alpha tuning via parallel grid search (120 lines)</span></div>
+      <div class="indent"><span class="file">policy_exploration.py</span> <span class="desc">-- Experiment runner: sweeps datasets x cache sizes x arrival rates (354 lines)</span></div>
+      <div class="indent"><span class="file">utils.py</span> <span class="desc">-- FLOPs/state-size formulas for Mamba, Attention, MLP layers (169 lines)</span></div>
+      <div class="indent"><span class="file">toy_example.py</span> <span class="desc">-- Interactive demo of radix tree operations (60 lines)</span></div>
+      <div class="indent"><span class="file">run_all_experiments.sh</span> <span class="desc">-- Full experiment sweep: sharegpt, lmsys, swebench</span></div>
+      <div class="indent"><span class="dir">plotting/</span> <span class="desc">-- Scripts for Figures 7-13 from the paper (12 files)</span></div>
+      <div class="indent"><span class="dir">utils/</span> <span class="desc">-- Trace generation from LMSys, ShareGPT, SWEBench datasets</span></div>
+      <div class="indent"><span class="dir">data/</span> <span class="desc">-- Pre-computed TTFT data (Jamba-1.5-Mini)</span></div>
+    </div>
+  </div>
+
+  <div class="card card-green">
+    <h3>Core Data Structures</h3>
+    <pre><code><span class="kw">class</span> <span class="cls">HybridStates</span>:
+    <span class="cm">"""Encapsulates the heterogeneous cached states for a radix tree node."""</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, input_ids, mamba_states, kv_cache):
+        <span class="self">self</span>.input_ids = input_ids      <span class="cm"># original tokens for this node</span>
+        <span class="self">self</span>.mamba_states = mamba_states  <span class="cm"># SSM recurrent + conv states (all layers)</span>
+        <span class="self">self</span>.kv_cache = kv_cache          <span class="cm"># Attention KV pairs (per-layer, per-token)</span>
+
+<span class="kw">class</span> <span class="cls">TreeNode</span>:
+    <span class="cm">"""A node in the radix tree, storing a segment of token IDs and cached states."""</span>
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, logical_ts=<span class="num">None</span>):
+        <span class="self">self</span>.key = <span class="num">None</span>           <span class="cm"># tuple of token IDs (parent -> this node)</span>
+        <span class="self">self</span>.value = <span class="num">None</span>         <span class="cm"># list of token IDs</span>
+        <span class="self">self</span>.parent = <span class="num">None</span>        <span class="cm"># parent pointer</span>
+        <span class="self">self</span>.children = defaultdict(<span class="cls">TreeNode</span>)  <span class="cm"># keyed by first token ID</span>
+        <span class="self">self</span>.last_access_time = logical_ts   <span class="cm"># for LRU / utility scoring</span>
+        <span class="self">self</span>.hybrid_states = <span class="num">None</span>             <span class="cm"># HybridStates object</span></code></pre>
+  </div>
+
+  <div class="card card-purple">
+    <h3>FLOPs and Memory Formulas (utils.py)</h3>
+    <table>
+      <thead>
+        <tr><th>Component</th><th>FLOPs Formula</th><th>Memory Formula</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Attention Layer</td>
+          <td><code>8LD<sup>2</sup> + 4L<sup>2</sup>D</code></td>
+          <td><code>2 * L * D * 2</code> bytes (KV cache)</td>
+        </tr>
+        <tr>
+          <td>MLP Layer</td>
+          <td><code>16LD<sup>2</sup></code></td>
+          <td>--</td>
+        </tr>
+        <tr>
+          <td>Mamba1/2 Layer</td>
+          <td><code>12LD<sup>2</sup> + 16LDN + 10LD</code></td>
+          <td><code>D*N*2 + (2D+2N)*4*2</code> bytes (SSM state)</td>
+        </tr>
+        <tr>
+          <td>Efficiency Ratio</td>
+          <td colspan="2"><code>total_flops_saved / total_state_size</code> -- the key metric for eviction decisions</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout callout-success" style="margin-top:1rem;">
+      <strong>Note on FLOPs formula:</strong> The codebase contains a corrected Mamba FLOPs formula (camera-ready version) versus
+      the original submission. The corrected version adds the <code>10*L*D</code> scalar-engine term that was previously <code>10*L</code>.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 7. PERFORMANCE -->
+<!-- ============================================================ -->
+<section id="performance" class="container">
+  <h2 class="section-title"><span class="accent">#7</span> Performance Results</h2>
+
+  <div class="card card-teal">
+    <h3>Token Hit Rate Comparison Across Datasets</h3>
+    <p style="margin-bottom:1rem;">Marconi (V2) vs vLLM+ across all configurations (cache sizes x arrival rates):</p>
+    <div class="bar-chart">
+      <div class="bar-row">
+        <div class="bar-label">SWEBench</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:92%; background:linear-gradient(90deg, #2d6a4f, #52b788);">Marconi</div>
+        </div>
+        <div class="bar-value" style="color:var(--accent-green);">Up to 34.4x</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">LMSys</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:75%; background:linear-gradient(90deg, #1d4e89, #58a6ff);">Marconi</div>
+        </div>
+        <div class="bar-value" style="color:var(--accent-blue);">Significant</div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">ShareGPT</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:68%; background:linear-gradient(90deg, #6b21a8, #bc8cff);">Marconi</div>
+        </div>
+        <div class="bar-value" style="color:var(--accent-purple);">Significant</div>
+      </div>
+    </div>
+    <p style="font-size:0.82rem; color:var(--text-muted); margin-top:0.5rem;">
+      Improvement is most dramatic on SWEBench, where agentic workloads create heavily-branching conversation
+      trees with long shared prefixes -- exactly the scenario where compute-aware eviction matters most.
+    </p>
+  </div>
+
+  <div class="card card-green">
+    <h3>Comparison Hierarchy: Marconi vs SGLang+ vs vLLM+</h3>
+    <table>
+      <thead>
+        <tr><th>System</th><th>Implementation</th><th>Eviction Strategy</th><th>Admission Strategy</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong style="color:var(--accent-orange);">vLLM+</strong></td>
+          <td>radix_cache_vllm.py</td>
+          <td>LRU on leaf token-blocks (block_size=32)</td>
+          <td>Cache all prefixes</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-blue);">SGLang+ (V1)</strong></td>
+          <td>radix_cache_hybrid.py (v=1)</td>
+          <td>LRU on leaf nodes, update all ancestors</td>
+          <td>Selective (token-level)</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-teal);">Marconi (V2)</strong></td>
+          <td>radix_cache_hybrid.py (v=2)</td>
+          <td>Utility-based on leaf + single-child nodes</td>
+          <td>Selective + alpha-tuned</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--text-muted);">Oracle (V3)</strong></td>
+          <td>radix_cache_hybrid.py (v=3)</td>
+          <td>Offline-optimal static alpha (grid search)</td>
+          <td>Selective</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Eviction Policy Decision Flow (V2 -- Marconi)</div>
+    <div class="arch-flow" style="flex-wrap:wrap; gap:0;">
+      <div class="arch-block block-eviction" style="min-width:130px;">
+        evict() called
+        <small>Capacity exceeded</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-radix" style="min-width:145px;">
+        Collect candidates
+        <small>Leaf + single-child<br>nodes (DFS)</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-ssm" style="min-width:145px;">
+        Compute efficiency
+        <small>FLOPs saved /<br>memory cost</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-attn" style="min-width:130px;">
+        Score recency
+        <small>1 / (now - ts)</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-tuner" style="min-width:140px;">
+        Combine scores
+        <small>&alpha; * eff + recency</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-eviction" style="min-width:130px;">
+        Evict min(utility)
+        <small>Delete leaf or<br>merge single-child</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-value" style="font-size:1.6rem;">24</div>
+      <div class="metric-label">SSM Layers (Mamba2)</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="font-size:1.6rem;">4</div>
+      <div class="metric-label">Attention Layers</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="font-size:1.6rem;">D=4096</div>
+      <div class="metric-label">Model Dimension</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value" style="font-size:1.6rem;">N=128</div>
+      <div class="metric-label">SSM State Dimension</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 8. AGENTIC RELEVANCE -->
+<!-- ============================================================ -->
+<section id="agentic" class="container">
+  <h2 class="section-title"><span class="accent">#8</span> Agentic AI Relevance</h2>
+
+  <div class="card card-pink">
+    <h3>SWE-Agent / SWEBench Evaluation</h3>
+    <p>
+      Marconi is explicitly evaluated on <strong>SWE-Agent</strong> workloads derived from the
+      <a href="https://github.com/SWE-bench/experiments" target="_blank">SWEBench Verified</a> dataset. This is a
+      code-editing agentic benchmark where an LLM agent iteratively reads code, executes commands, and modifies files
+      over many turns to resolve GitHub issues.
+    </p>
+    <p style="margin-top:0.75rem;">
+      SWE-Agent sessions exhibit the <em>highest cache pressure</em> among all evaluated workloads because:
+    </p>
+    <ul style="margin-top:0.5rem; padding-left:1.25rem; color:var(--text-secondary); font-size:0.9rem;">
+      <li>Each turn appends the full conversation history (system prompt + all prior observations and actions)</li>
+      <li>Sessions can span 50+ turns, with context lengths reaching 32K tokens</li>
+      <li>The environment observations are collapsed (except the last 5) following SWE-Agent guidelines to manage context length</li>
+      <li>Cache sizes range from 40-100 GB, reflecting the massive state requirements</li>
+    </ul>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">SWE-Agent Trace Generation Pipeline</div>
+    <div class="arch-flow">
+      <div class="arch-block block-request" style="min-width:130px;">
+        SWEBench<br>Verified
+        <small>GitHub Issues</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-radix" style="min-width:135px;">
+        Honeycomb<br>Trajectories
+        <small>Agent action logs</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-admission" style="min-width:135px;">
+        Tokenize with<br>Llama-2-7b
+        <small>Consistent tokenizer</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-tuner" style="min-width:145px;">
+        Simulate Arrivals
+        <small>Poisson inter-request,<br>configurable rate</small>
+      </div>
+      <div class="arch-arrow">&#10132;</div>
+      <div class="arch-block block-ssm" style="min-width:130px;">
+        JSONL Trace
+        <small>100 sessions,<br>6 arrival rates</small>
+      </div>
+    </div>
+  </div>
+
+  <pre><code><span class="cm"># generate_trace.py -- SWEBench trace processing (key excerpt)</span>
+<span class="kw">def</span> <span class="fn">process_swebench_trace</span>(sessions_per_second, avg_response_time, seed=<span class="num">42</span>,
+                           num_sessions=<span class="num">100</span>, collapse_except_last=<span class="num">5</span>):
+    <span class="cm"># Observations before the last 5 are collapsed into single lines</span>
+    <span class="cm"># -- following SWE-Agent's context management strategy</span>
+    <span class="kw">if</span> [<span class="builtin">len</span>(x) <span class="kw">for</span> x <span class="kw">in</span> conv_history_ids_list].count(<span class="num">2</span>) >= collapse_except_last + <span class="num">1</span>:
+        conv_history_ids_list[-(collapse_except_last)].pop(<span class="num">0</span>)
+
+    <span class="cm"># Skip requests with >32K input tokens or >50 rounds</span>
+    <span class="kw">if</span> <span class="builtin">len</span>(conv_history_ids + user_input_tokens) > <span class="num">32768</span> <span class="kw">or</span> turn_id > <span class="num">50</span>:
+        <span class="kw">break</span></code></pre>
+
+  <div class="callout callout-success">
+    <strong>Why Agentic Workloads Benefit Most:</strong> Agentic LLM applications (code agents, tool-using agents, multi-step
+    reasoning) generate long, heavily-overlapping request sequences with growing context windows. This is precisely
+    the regime where Marconi's compute-aware eviction outperforms naive LRU, because the cost of re-computing SSM
+    states for long prefixes is enormous while the memory savings from evicting them are modest.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 9. SGLANG INTEGRATION -->
+<!-- ============================================================ -->
+<section id="sglang" class="container">
+  <h2 class="section-title"><span class="accent">#9</span> Integration with SGLang</h2>
+
+  <div class="card card-blue">
+    <h3>SGLang as the Foundation</h3>
+    <p>
+      Marconi builds directly on top of <a href="https://github.com/sgl-project/sglang" target="_blank">SGLang</a>'s
+      radix-tree-based prefix caching architecture. The paper frames SGLang's existing approach as "V1" (SGLang+)
+      and Marconi as "V2" -- an enhanced replacement for SGLang's eviction policy module.
+    </p>
+    <p style="margin-top:0.75rem;">Key integration points:</p>
+    <ul style="margin-top:0.5rem; padding-left:1.25rem; color:var(--text-secondary); font-size:0.9rem;">
+      <li><strong>Same radix tree structure:</strong> Marconi uses the same tree node layout as SGLang, adding <code>HybridStates</code> (Mamba states + KV cache) at each node</li>
+      <li><strong>Drop-in eviction replacement:</strong> The <code>evict_policy_version</code> flag switches between SGLang's LRU (V1) and Marconi's utility-based eviction (V2)</li>
+      <li><strong>Selective admission:</strong> Where vLLM caches all token blocks, Marconi/SGLang+ only cache at radix tree branching points -- naturally filtering for shared prefixes</li>
+      <li><strong>Timestamp semantics:</strong> The critical behavioral change: V2 only updates the deepest accessed node's timestamp, vs V1 updating all ancestor timestamps</li>
+    </ul>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">SGLang+ (V1) vs Marconi (V2) -- Eviction Candidate Selection</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem;">
+      <!-- SGLang+ -->
+      <div style="text-align:center;">
+        <div style="font-size:0.85rem; font-weight:600; color:var(--accent-blue); margin-bottom:0.75rem;">SGLang+ (V1): Leaf-Only LRU</div>
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0;">
+          <div style="padding:0.4rem 0.8rem; border-radius:5px; background:rgba(188,140,255,0.15); border:1px solid rgba(188,140,255,0.3); font-size:0.7rem; color:#d4b5ff;">ROOT</div>
+          <div style="width:2px; height:12px; background:var(--border-default);"></div>
+          <div style="padding:0.4rem 0.8rem; border-radius:5px; background:rgba(88,166,255,0.2); border:1px solid rgba(88,166,255,0.4); font-size:0.7rem; color:#93c5fd;">Node A <span style="font-size:0.6rem; opacity:0.7;">(protected)</span></div>
+          <div style="display:flex; gap:0.5rem; margin-top:0;">
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <div style="width:2px; height:12px; background:var(--border-default);"></div>
+              <div style="padding:0.4rem 0.6rem; border-radius:5px; background:rgba(248,81,73,0.2); border:1.5px solid rgba(248,81,73,0.5); font-size:0.65rem; color:#fca5a5;">Leaf B (evictable)</div>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <div style="width:2px; height:12px; background:var(--border-default);"></div>
+              <div style="padding:0.4rem 0.6rem; border-radius:5px; background:rgba(248,81,73,0.2); border:1.5px solid rgba(248,81,73,0.5); font-size:0.65rem; color:#fca5a5;">Leaf C (evictable)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Marconi -->
+      <div style="text-align:center;">
+        <div style="font-size:0.85rem; font-weight:600; color:var(--accent-teal); margin-bottom:0.75rem;">Marconi (V2): Leaf + Single-Child</div>
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0;">
+          <div style="padding:0.4rem 0.8rem; border-radius:5px; background:rgba(188,140,255,0.15); border:1px solid rgba(188,140,255,0.3); font-size:0.7rem; color:#d4b5ff;">ROOT</div>
+          <div style="width:2px; height:12px; background:var(--border-default);"></div>
+          <div style="padding:0.4rem 0.8rem; border-radius:5px; background:rgba(248,81,73,0.2); border:1.5px solid rgba(248,81,73,0.5); font-size:0.7rem; color:#fca5a5;">Node A <span style="font-size:0.6rem;">(evictable: 1 child)</span></div>
+          <div style="display:flex; gap:0.5rem; margin-top:0;">
+            <div style="display:flex; flex-direction:column; align-items:center;">
+              <div style="width:2px; height:12px; background:var(--border-default);"></div>
+              <div style="padding:0.4rem 0.6rem; border-radius:5px; background:rgba(248,81,73,0.2); border:1.5px solid rgba(248,81,73,0.5); font-size:0.65rem; color:#fca5a5;">Leaf B (evictable)</div>
+            </div>
+          </div>
+        </div>
+        <div style="font-size:0.68rem; color:var(--text-muted); margin-top:0.5rem;">
+          Evicting Node A merges it with child B,<br>freeing the SSM state checkpoint
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- 10. PAPER vs IMPLEMENTATION -->
+<!-- ============================================================ -->
+<section id="paper-vs-impl" class="container">
+  <h2 class="section-title"><span class="accent">#10</span> Paper vs Implementation Comparison</h2>
+
+  <div class="card card-red">
+    <h3>Findings from Code Analysis</h3>
+    <p style="margin-bottom:1rem;">
+      After thorough examination of the codebase against the paper claims, here are the key observations:
+    </p>
+    <table>
+      <thead>
+        <tr><th>Aspect</th><th>Paper Description</th><th>Implementation Detail</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Eviction V2 (Marconi)</td>
+          <td>Compute-aware utility scoring combining efficiency and recency</td>
+          <td>Implemented exactly as described in <code>evict_v2()</code>; min-max normalization on both signals with alpha weighting</td>
+          <td style="color:var(--accent-green);">Faithful</td>
+        </tr>
+        <tr>
+          <td>Timestamp semantics</td>
+          <td>Only deepest accessed node is updated on prefix match</td>
+          <td>V2/V3 update only <code>nodes_accessed[-1]</code>; V1 updates all ancestors via recursive traversal</td>
+          <td style="color:var(--accent-green);">Faithful</td>
+        </tr>
+        <tr>
+          <td>Retrospective tuning</td>
+          <td>Replays past requests on tree snapshot to find optimal alpha</td>
+          <td><code>ConfigTuner</code> uses <code>ProcessPoolExecutor</code> across 21 alpha values [0..2.0] with 0.1 step</td>
+          <td style="color:var(--accent-green);">Faithful</td>
+        </tr>
+        <tr>
+          <td>Mamba FLOPs formula</td>
+          <td>Includes scalar engine term <code>10*L*D</code></td>
+          <td>Code comment notes the original submission had <code>10*L</code>; camera-ready version corrected to <code>10*L*D</code></td>
+          <td style="color:var(--accent-yellow);">Corrected post-submission</td>
+        </tr>
+        <tr>
+          <td>Selective admission</td>
+          <td>Marconi only caches at branching points</td>
+          <td>Admission is structural: radix tree inherently creates nodes at divergence points. vLLM+ uses block-based caching as contrasting baseline</td>
+          <td style="color:var(--accent-green);">Faithful</td>
+        </tr>
+        <tr>
+          <td>V3 Oracle policy</td>
+          <td>Not in the paper (oracle baseline)</td>
+          <td>Present in code as V3: offline-optimal static alpha via exhaustive grid search -- used for upper-bound analysis</td>
+          <td style="color:var(--accent-blue);">Code-only</td>
+        </tr>
+        <tr>
+          <td>Evaluation model</td>
+          <td>NVIDIA Attention-Mamba2 7B Hybrid</td>
+          <td>Hardcoded defaults: 24 SSM layers, 4 Attn layers, 28 MLP, D=4096, N=128</td>
+          <td style="color:var(--accent-green);">Faithful</td>
+        </tr>
+        <tr>
+          <td>Trace-driven simulation</td>
+          <td>Simulates cache behavior on real request traces</td>
+          <td>Full trace-driven simulation without GPU execution; states are represented symbolically (session IDs, not actual tensors)</td>
+          <td style="color:var(--accent-blue);">Simulation-only</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout callout-warning">
+    <strong>Important Observation -- Simulation vs Runtime:</strong> The open-source implementation is a <em>trace-driven simulator</em>,
+    not a GPU runtime integration. Actual tensor states (Mamba hidden states, KV cache tensors) are not materialized;
+    instead, the code tracks node metadata (token IDs, timestamps, session IDs) and computes memory/FLOPs costs analytically
+    using the formulas in <code>utils.py</code>. This is the standard approach for cache policy research -- the TTFT
+    results from the paper were measured separately on a real serving system (data in <code>data/ttft_AI21-Jamba-1.5-Mini.pickle</code>).
+  </div>
+
+  <div class="card card-yellow">
+    <h3>Code Quality and Reproducibility Notes</h3>
+    <ul style="padding-left:1.25rem; color:var(--text-secondary); font-size:0.9rem;">
+      <li>
+        <strong>Artifact evaluation:</strong> Full reproduction instructions provided in <code>artifact_evaluation.md</code>
+        with conda environment, automated dataset download via gdown, and end-to-end experiment scripts.
+      </li>
+      <li>
+        <strong>Logical timestamps:</strong> The code uses <code>use_logical_ts=True</code> by default for exact reproducibility --
+        eliminating non-determinism from wall-clock timestamps.
+      </li>
+      <li>
+        <strong>Bootstrap multiplier tuning:</strong> LMSys uses a higher multiplier (15x vs 5x default) because its sessions
+        have more turns and the cache fills more slowly, requiring a longer observation window for reliable alpha estimation.
+      </li>
+      <li>
+        <strong>Minor code note:</strong> A comment on line 89 of <code>radix_cache_hybrid.py</code> flags <code>self.num_nodes</code>
+        as potentially buggy. In practice, the counter is correctly incremented/decremented in insert/delete/merge operations
+        and is used only for pretty-printing, not for algorithmic decisions.
+      </li>
+    </ul>
+  </div>
+
+  <div class="card card-teal">
+    <h3>Experiment Configuration Sweep</h3>
+    <table>
+      <thead>
+        <tr><th>Dataset</th><th>Cache Sizes</th><th>Arrival Rates (sessions/s)</th><th>Extra Params</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>LMSys</td>
+          <td>1, 2, 3, 4, 5 GB</td>
+          <td>0.25, 0.5, 1, 2, 5, 10</td>
+          <td>bootstrap_multiplier=15</td>
+        </tr>
+        <tr>
+          <td>ShareGPT</td>
+          <td>1, 2, 3, 4, 5, 10 GB</td>
+          <td>0.25, 0.5, 1, 2, 5, 10</td>
+          <td>bootstrap_multiplier=5</td>
+        </tr>
+        <tr>
+          <td>SWEBench</td>
+          <td>40, 60, 80, 100 GB</td>
+          <td>0.25, 0.5, 1, 2, 5, 10</td>
+          <td>avg_response_time: 5, 7.5, 10s</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="font-size:0.82rem; color:var(--text-muted); margin-top:0.5rem;">
+      SWEBench requires 10-20x larger caches than chatbot workloads due to the massive context windows
+      in agentic coding sessions (up to 32K tokens per request, 50+ turns per session).
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- FOOTER -->
+<!-- ============================================================ -->
+<footer style="border-top:1px solid var(--border-default); padding:2rem; text-align:center; color:var(--text-muted); font-size:0.8rem;">
+  <p>
+    Technical analysis of <a href="https://arxiv.org/abs/2411.19379" target="_blank">Marconi: Prefix Caching for the Era of Hybrid LLMs</a>
+    (Pan et al., MLSys 2025).
+  </p>
+  <p style="margin-top:0.5rem;">
+    Repository: <a href="https://github.com/ruipeterpan/marconi" target="_blank">github.com/ruipeterpan/marconi</a>
+    &nbsp;|&nbsp; DOI: <a href="https://doi.org/10.5281/zenodo.14970139" target="_blank">10.5281/zenodo.14970139</a>
+  </p>
+</footer>
+
+</body>
+</html>

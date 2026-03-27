@@ -1,0 +1,1742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM PagedAttention - Technical Analysis</title>
+<style>
+:root {
+  --dark: #16213e;
+  --mid: #0f3460;
+  --primary: #e94560;
+  --green: #2ecc71;
+  --amber: #f5a623;
+  --purple: #9b59b6;
+  --code-bg: #1e1e2e;
+  --card-bg: #1a2744;
+  --text: #e0e0e0;
+  --text-muted: #a0aec0;
+  --border: #2d3e5e;
+  --surface: #1e2d4a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--dark);
+  color: var(--text);
+  line-height: 1.7;
+}
+
+/* ---- Sticky Nav ---- */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(15, 52, 96, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 2rem;
+}
+nav ul {
+  display: flex;
+  list-style: none;
+  max-width: 1200px;
+  margin: 0 auto;
+  gap: 0.25rem;
+  overflow-x: auto;
+}
+nav ul li a {
+  display: block;
+  padding: 0.85rem 1rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 0.2s, border-bottom 0.2s;
+  border-bottom: 2px solid transparent;
+}
+nav ul li a:hover {
+  color: #fff;
+  border-bottom: 2px solid var(--primary);
+}
+
+/* ---- Hero ---- */
+.hero {
+  background: linear-gradient(135deg, var(--dark) 0%, var(--mid) 40%, #1a1a3e 70%, var(--dark) 100%);
+  padding: 5rem 2rem 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(ellipse at 30% 50%, rgba(233, 69, 96, 0.08) 0%, transparent 50%),
+              radial-gradient(ellipse at 70% 50%, rgba(155, 89, 182, 0.06) 0%, transparent 50%);
+  animation: heroShift 15s ease-in-out infinite alternate;
+}
+@keyframes heroShift {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(-5%, 3%); }
+}
+.hero > * { position: relative; z-index: 1; }
+.hero h1 {
+  font-size: 3rem;
+  font-weight: 800;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.5px;
+}
+.hero h1 span.vllm { color: var(--primary); }
+.hero h1 span.pa { color: var(--amber); }
+.hero .subtitle {
+  font-size: 1.3rem;
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+  font-weight: 300;
+}
+.hero .badges {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.5rem;
+}
+.badge {
+  display: inline-block;
+  padding: 0.35rem 1rem;
+  border-radius: 50px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.badge.venue { background: var(--primary); color: #fff; }
+.badge.arxiv { background: var(--mid); color: var(--amber); border: 1px solid var(--amber); }
+.badge.year { background: var(--mid); color: var(--green); border: 1px solid var(--green); }
+.badge.foundation { background: linear-gradient(135deg, var(--purple), var(--primary)); color: #fff; }
+.hero .paper-title {
+  font-size: 1rem;
+  color: var(--text-muted);
+  max-width: 700px;
+  margin: 0 auto 1rem;
+  font-style: italic;
+}
+.hero .authors {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+/* ---- Main Layout ---- */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+section {
+  margin-bottom: 3rem;
+}
+
+section > h2 {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 3px solid var(--primary);
+  display: inline-block;
+}
+
+h3 {
+  font-size: 1.25rem;
+  color: var(--amber);
+  margin: 1.5rem 0 0.75rem;
+}
+
+p { margin-bottom: 1rem; }
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin-bottom: 1.25rem;
+  border-left: 4px solid var(--primary);
+  transition: transform 0.15s;
+}
+.card:hover { transform: translateX(3px); }
+.card.green { border-left-color: var(--green); }
+.card.amber { border-left-color: var(--amber); }
+.card.purple { border-left-color: var(--purple); }
+.card h4 {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+  color: #fff;
+}
+
+/* ---- Grid ---- */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+@media (max-width: 900px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+
+/* ---- Callouts ---- */
+.callout {
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  margin: 1.25rem 0;
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.callout .icon {
+  font-size: 1.4rem;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+.callout.info {
+  background: rgba(15, 52, 96, 0.6);
+  border: 1px solid rgba(137, 180, 250, 0.3);
+}
+.callout.info .icon { background: rgba(137, 180, 250, 0.15); color: #89b4fa; }
+.callout.warn {
+  background: rgba(245, 166, 35, 0.08);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+}
+.callout.warn .icon { background: rgba(245, 166, 35, 0.15); color: var(--amber); }
+.callout.note {
+  background: rgba(46, 204, 113, 0.06);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+}
+.callout.note .icon { background: rgba(46, 204, 113, 0.15); color: var(--green); }
+
+/* ---- Code Blocks ---- */
+pre {
+  background: var(--code-bg);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  border: 1px solid #313244;
+}
+code {
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}
+.kw { color: #cba6f7; }
+.fn { color: #89b4fa; }
+.cm { color: #6c7086; font-style: italic; }
+.st { color: #a6e3a1; }
+.nu { color: #fab387; }
+.ty { color: #f9e2af; }
+.op { color: #94e2d5; }
+.ident { color: #cdd6f4; }
+
+code.inline {
+  background: var(--code-bg);
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.88em;
+  color: #cba6f7;
+}
+
+/* ---- Tables ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+}
+thead th {
+  background: var(--mid);
+  color: #fff;
+  padding: 0.85rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--primary);
+}
+tbody td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+tbody tr:hover { background: rgba(233, 69, 96, 0.04); }
+td.metric { color: var(--green); font-weight: 600; }
+
+/* ---- Diagram Styles ---- */
+.diagram-container {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.diagram-title {
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--amber);
+  margin-bottom: 1.5rem;
+}
+.diagram-caption {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 1rem;
+}
+
+/* Diagram blocks */
+.d-block {
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 600;
+  position: relative;
+}
+
+.d-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.d-col { display: flex; flex-direction: column; gap: 0.5rem; align-items: center; }
+.d-center { justify-content: center; }
+
+/* Arrows */
+.arrow-right {
+  width: 40px;
+  height: 2px;
+  background: var(--text-muted);
+  position: relative;
+  flex-shrink: 0;
+}
+.arrow-right::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: -4px;
+  border: 5px solid transparent;
+  border-left: 7px solid var(--text-muted);
+}
+.arrow-down {
+  width: 2px;
+  height: 30px;
+  background: var(--text-muted);
+  position: relative;
+  margin: 0 auto;
+}
+.arrow-down::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: -4px;
+  border: 5px solid transparent;
+  border-top: 7px solid var(--text-muted);
+}
+.arrow-down.short { height: 18px; }
+.arrow-right.primary { background: var(--primary); }
+.arrow-right.primary::after { border-left-color: var(--primary); }
+.arrow-down.primary { background: var(--primary); }
+.arrow-down.primary::after { border-top-color: var(--primary); }
+.arrow-down.green { background: var(--green); }
+.arrow-down.green::after { border-top-color: var(--green); }
+
+/* Connector line */
+.connector-h {
+  height: 2px;
+  flex: 1;
+  min-width: 20px;
+}
+.connector-v {
+  width: 2px;
+  flex: 1;
+  min-height: 20px;
+}
+
+/* Special layout helpers */
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.gap-1 { gap: 0.5rem; }
+.gap-2 { gap: 1rem; }
+.gap-3 { gap: 1.5rem; }
+.mt-1 { margin-top: 0.5rem; }
+.mt-2 { margin-top: 1rem; }
+.mb-1 { margin-bottom: 0.5rem; }
+.mb-2 { margin-bottom: 1rem; }
+.w-full { width: 100%; }
+.text-center { text-align: center; }
+
+/* Block token cells */
+.token-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 34px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.token-cell.filled { background: var(--green); color: var(--dark); }
+.token-cell.reserved { background: rgba(245, 166, 35, 0.2); color: var(--amber); border-color: var(--amber); }
+.token-cell.empty { background: rgba(255,255,255,0.04); color: var(--text-muted); border-style: dashed; }
+.token-cell.wasted { background: rgba(233, 69, 96, 0.2); color: var(--primary); }
+
+/* Metric pill */
+.metric-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(46, 204, 113, 0.1);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  color: var(--green);
+  padding: 0.3rem 0.85rem;
+  border-radius: 50px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* Scrollable for mobile */
+@media (max-width: 768px) {
+  .hero h1 { font-size: 2rem; }
+  .container { padding: 1rem; }
+  .diagram-container { padding: 1rem; }
+  nav ul { gap: 0; }
+  nav ul li a { padding: 0.7rem 0.6rem; font-size: 0.78rem; }
+}
+
+/* Progress bar */
+.bar-chart { margin: 1rem 0; }
+.bar-row { display: flex; align-items: center; margin-bottom: 0.6rem; gap: 0.75rem; }
+.bar-label { width: 140px; font-size: 0.85rem; text-align: right; flex-shrink: 0; }
+.bar-track { flex: 1; height: 26px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; position: relative; }
+.bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  padding-left: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  transition: width 0.6s ease;
+}
+
+/* Glow effect for key items */
+.glow-primary { box-shadow: 0 0 20px rgba(233, 69, 96, 0.15); }
+.glow-green { box-shadow: 0 0 20px rgba(46, 204, 113, 0.15); }
+.glow-purple { box-shadow: 0 0 20px rgba(155, 89, 182, 0.15); }
+
+</style>
+</head>
+<body>
+
+<!-- ================================================================ -->
+<!-- NAV                                                              -->
+<!-- ================================================================ -->
+<nav>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#problem">Problem</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#pagedattention">PagedAttention</a></li>
+    <li><a href="#mechanisms">Key Mechanisms</a></li>
+    <li><a href="#code">Code Concepts</a></li>
+    <li><a href="#performance">Performance</a></li>
+    <li><a href="#limitations">Agentic Limitations</a></li>
+    <li><a href="#impact">Impact</a></li>
+    <li><a href="#repo">Repository</a></li>
+  </ul>
+</nav>
+
+<!-- ================================================================ -->
+<!-- HERO                                                             -->
+<!-- ================================================================ -->
+<header class="hero">
+  <h1><span class="vllm">vLLM</span> &mdash; <span class="pa">PagedAttention</span></h1>
+  <div class="subtitle">Foundation of Modern LLM Serving</div>
+  <div class="badges">
+    <span class="badge venue">SOSP '23</span>
+    <span class="badge arxiv">arXiv: 2309.06180</span>
+    <span class="badge year">October 2023</span>
+    <span class="badge foundation">Foundational Paper</span>
+  </div>
+  <div class="paper-title">
+    "Efficient Memory Management for Large Language Model Serving with PagedAttention"
+  </div>
+  <div class="authors">
+    Woosuk Kwon*, Zhuohan Li*, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu,
+    Joseph E. Gonzalez, Hao Zhang, Ion Stoica &mdash; UC Berkeley, Stanford
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ================================================================ -->
+<!-- OVERVIEW                                                         -->
+<!-- ================================================================ -->
+<section id="overview">
+  <h2>Overview</h2>
+
+  <p>
+    vLLM introduces <strong>PagedAttention</strong>, an attention algorithm inspired by
+    operating-system virtual memory and paging, that fundamentally changes how
+    LLM serving systems manage the <strong>key-value (KV) cache</strong>. By dividing the
+    KV cache into fixed-size <em>blocks</em> that need not be contiguous in physical GPU
+    memory, PagedAttention achieves near-zero memory waste and enables flexible
+    memory sharing across sequences&mdash;delivering <strong>2&ndash;4&times; throughput
+    improvements</strong> over prior systems such as FasterTransformer and Orca.
+  </p>
+
+  <div class="grid-3">
+    <div class="card green">
+      <h4>The Core Insight</h4>
+      <p>KV cache has OS-process-like behavior: it grows dynamically, has an unknown
+      lifetime, and can be shared. Treat it like virtual memory with paging.</p>
+    </div>
+    <div class="card amber">
+      <h4>Key Innovation</h4>
+      <p>PagedAttention: an attention kernel that operates on non-contiguous KV blocks
+      mapped via a block table&mdash;exactly like page tables map virtual to physical memory.</p>
+    </div>
+    <div class="card purple">
+      <h4>Practical Impact</h4>
+      <p>Near-zero waste (96.3% effective utilization vs. 20.4% in prior systems), enabling
+      far larger batches and higher throughput.</p>
+    </div>
+  </div>
+
+  <div class="callout info">
+    <div class="icon">i</div>
+    <div>
+      <strong>Why This Paper Matters:</strong> Every major LLM serving system built after 2023&mdash;from
+      SGLang to TensorRT-LLM to Mooncake&mdash;adopts or extends PagedAttention's core ideas.
+      This paper is the <em>foundational reference</em> for all KV cache management research
+      in the agentic AI survey.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- PROBLEM                                                          -->
+<!-- ================================================================ -->
+<section id="problem">
+  <h2>The Memory Problem</h2>
+
+  <p>
+    In autoregressive LLM serving, each request requires storing <strong>key and value tensors</strong>
+    for every previously generated token&mdash;the KV cache. For a 13B-parameter model
+    (OPT-13B), a single token's KV cache occupies <strong>800 KB</strong>
+    (2 &times; 5120 &times; 40 &times; 2 bytes), and a full 2048-token sequence can require up to
+    <strong>1.6 GB</strong>. On an A100 GPU with 40GB RAM, roughly 65% goes to model parameters,
+    leaving only ~30% for KV cache&mdash;the critical bottleneck.
+  </p>
+
+  <h3>Three Sources of Memory Waste</h3>
+
+  <!-- WASTE DIAGRAM -->
+  <div class="diagram-container">
+    <div class="diagram-title">Memory Waste in Existing LLM Serving Systems</div>
+
+    <div style="display:flex; flex-direction:column; gap:1.25rem;">
+
+      <!-- Request A -->
+      <div>
+        <div style="font-size:0.85rem; font-weight:600; color:var(--green); margin-bottom:0.5rem;">
+          Request A &mdash; max length 2048, actual length 10
+        </div>
+        <div class="d-row" style="gap:2px; flex-wrap:nowrap; overflow-x:auto;">
+          <div class="token-cell filled" style="width:48px;">Four</div>
+          <div class="token-cell filled" style="width:48px;">score</div>
+          <div class="token-cell filled" style="width:48px;">and</div>
+          <div class="token-cell filled" style="width:48px;">seven</div>
+          <div class="token-cell filled" style="width:48px;">years</div>
+          <div class="token-cell filled" style="width:48px;">ago</div>
+          <div class="token-cell filled" style="width:48px;">our</div>
+          <div class="token-cell filled" style="width:48px;">fathers</div>
+          <div class="token-cell filled" style="width:48px;">brought</div>
+          <div class="token-cell filled" style="width:48px;">forth</div>
+          <div class="token-cell reserved" style="width:48px;">rsv</div>
+          <div class="token-cell reserved" style="width:48px;">rsv</div>
+          <div class="token-cell wasted" style="min-width:120px; flex:1;">
+            &#8592; 2038 slots: Internal Fragmentation &#8594;
+          </div>
+        </div>
+      </div>
+
+      <!-- External Frag -->
+      <div style="background:rgba(233,69,96,0.08); border:1px dashed var(--primary); border-radius:8px; padding:0.75rem 1rem;">
+        <div style="font-size:0.82rem; color:var(--primary); font-weight:600;">
+          External Fragmentation &mdash; unusable gaps between pre-allocated chunks
+        </div>
+      </div>
+
+      <!-- Request B -->
+      <div>
+        <div style="font-size:0.85rem; font-weight:600; color:var(--green); margin-bottom:0.5rem;">
+          Request B &mdash; max length 512, actual length 5
+        </div>
+        <div class="d-row" style="gap:2px; flex-wrap:nowrap; overflow-x:auto;">
+          <div class="token-cell filled" style="width:48px;">You</div>
+          <div class="token-cell filled" style="width:48px;">only</div>
+          <div class="token-cell filled" style="width:48px;">live</div>
+          <div class="token-cell filled" style="width:48px;">once</div>
+          <div class="token-cell filled" style="width:48px;">!</div>
+          <div class="token-cell reserved" style="width:48px;">rsv</div>
+          <div class="token-cell wasted" style="min-width:120px; flex:1;">
+            &#8592; 507 slots: Internal Fragmentation &#8594;
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="diagram-caption">
+      Pre-allocation forces reserving max-length contiguous blocks. Actual usage can be as low as 20.4%.
+    </div>
+  </div>
+
+  <!-- Waste bar chart -->
+  <h3>Measured Memory Waste (OPT-13B on ShareGPT)</h3>
+  <div class="bar-chart">
+    <div class="bar-row">
+      <div class="bar-label" style="color:var(--green);">Token states</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:20.4%; background:var(--green);">20.4%</div>
+      </div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label" style="color:var(--amber);">Reservation</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:13.3%; background:var(--amber);">13.3%</div>
+      </div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label" style="color:#e94560;">Internal frag.</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:57.3%; background:var(--primary);">57.3%</div>
+      </div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label" style="color:var(--text-muted);">External frag.</div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:8.9%; background:var(--text-muted);">8.9%</div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:0.88rem; color:var(--text-muted);">
+    Orca (Max): only 20.4% of KV cache memory stores actual token states. vLLM achieves <strong>96.3%</strong>.
+  </p>
+</section>
+
+<!-- ================================================================ -->
+<!-- ARCHITECTURE                                                     -->
+<!-- ================================================================ -->
+<section id="architecture">
+  <h2>System Architecture</h2>
+
+  <p>
+    vLLM adopts a centralized scheduler with distributed GPU workers. The
+    <strong>KV Cache Manager</strong> manages memory via block tables, analogous to how an OS
+    kernel manages page tables. GPU workers only see physical block IDs&mdash;they never
+    need to reason about memory sharing or fragmentation.
+  </p>
+
+  <!-- SYSTEM ARCHITECTURE DIAGRAM -->
+  <div class="diagram-container glow-primary">
+    <div class="diagram-title">vLLM System Architecture</div>
+
+    <div style="display:flex; gap:1.5rem; align-items:flex-start; flex-wrap:wrap; justify-content:center;">
+
+      <!-- Left: Scheduler + KV Cache Manager -->
+      <div style="display:flex; flex-direction:column; gap:0.75rem; min-width:260px;">
+
+        <div class="d-block" style="background:linear-gradient(135deg, var(--primary), #c0392b); color:#fff; padding:1rem; font-size:0.95rem;">
+          Centralized Scheduler
+          <div style="font-size:0.72rem; font-weight:400; margin-top:0.25rem;">FCFS policy + preemption</div>
+        </div>
+
+        <div class="arrow-down primary" style="margin:0 auto;"></div>
+
+        <div class="d-block" style="background:linear-gradient(135deg, var(--amber), #e67e22); color:var(--dark); padding:1rem;">
+          KV Cache Manager
+          <div style="font-size:0.72rem; font-weight:400; margin-top:0.25rem;">Block tables + ref counts</div>
+        </div>
+
+        <div style="display:flex; gap:0.5rem; justify-content:center;">
+          <div class="d-block" style="background:rgba(46,204,113,0.15); border:1px solid var(--green); color:var(--green); padding:0.5rem 0.75rem; font-size:0.75rem;">
+            CPU Block<br>Allocator
+          </div>
+          <div class="d-block" style="background:rgba(155,89,182,0.15); border:1px solid var(--purple); color:var(--purple); padding:0.5rem 0.75rem; font-size:0.75rem;">
+            GPU Block<br>Allocator
+          </div>
+        </div>
+
+        <!-- Block Table Visual -->
+        <div style="background:var(--code-bg); border-radius:8px; padding:0.75rem; border:1px solid #313244;">
+          <div style="font-size:0.75rem; color:var(--amber); font-weight:700; margin-bottom:0.5rem; text-align:center;">Block Tables</div>
+          <div style="display:grid; grid-template-columns:auto auto auto; gap:2px; font-size:0.7rem; text-align:center;">
+            <div style="background:var(--mid); padding:0.3rem; border-radius:3px; color:#89b4fa; font-weight:700;">Logical</div>
+            <div style="background:var(--mid); padding:0.3rem; border-radius:3px; color:#89b4fa; font-weight:700;">Physical</div>
+            <div style="background:var(--mid); padding:0.3rem; border-radius:3px; color:#89b4fa; font-weight:700;">#Filled</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">0</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px; color:var(--green);">7</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">4</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">1</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px; color:var(--green);">1</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">3</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">2</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px; color:var(--green);">3</div>
+            <div style="background:rgba(255,255,255,0.05); padding:0.3rem; border-radius:3px;">1</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Center: Arrow -->
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:200px; gap:0.5rem;">
+        <div style="font-size:0.7rem; color:var(--text-muted); writing-mode:vertical-rl; text-orientation:mixed;">Control messages</div>
+        <div class="arrow-right primary" style="width:60px;"></div>
+        <div style="font-size:0.7rem; color:var(--text-muted); writing-mode:vertical-rl; text-orientation:mixed;">Block IDs + tokens</div>
+      </div>
+
+      <!-- Right: Workers -->
+      <div style="display:flex; flex-direction:column; gap:0.6rem; min-width:300px;">
+        <div style="font-size:0.85rem; color:var(--text-muted); text-align:center; margin-bottom:0.25rem;">Distributed GPU Workers</div>
+
+        <div style="display:flex; gap:0.5rem; align-items:center; background:rgba(155,89,182,0.08); border:1px solid rgba(155,89,182,0.3); border-radius:8px; padding:0.75rem;">
+          <div style="background:var(--purple); color:#fff; border-radius:6px; padding:0.4rem 0.6rem; font-size:0.75rem; font-weight:700;">W0</div>
+          <div style="display:flex; gap:0.35rem; flex:1;">
+            <div style="background:rgba(46,204,113,0.12); border:1px solid rgba(46,204,113,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--green); flex:1; text-align:center;">Cache Engine</div>
+            <div style="background:rgba(233,69,96,0.12); border:1px solid rgba(233,69,96,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--primary); flex:1; text-align:center;">Model Shard 0</div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.5rem; align-items:center; background:rgba(155,89,182,0.08); border:1px solid rgba(155,89,182,0.3); border-radius:8px; padding:0.75rem;">
+          <div style="background:var(--purple); color:#fff; border-radius:6px; padding:0.4rem 0.6rem; font-size:0.75rem; font-weight:700;">W1</div>
+          <div style="display:flex; gap:0.35rem; flex:1;">
+            <div style="background:rgba(46,204,113,0.12); border:1px solid rgba(46,204,113,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--green); flex:1; text-align:center;">Cache Engine</div>
+            <div style="background:rgba(233,69,96,0.12); border:1px solid rgba(233,69,96,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--primary); flex:1; text-align:center;">Model Shard 1</div>
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.5rem; align-items:center; background:rgba(155,89,182,0.08); border:1px solid rgba(155,89,182,0.3); border-radius:8px; padding:0.75rem;">
+          <div style="background:var(--purple); color:#fff; border-radius:6px; padding:0.4rem 0.6rem; font-size:0.75rem; font-weight:700;">W2</div>
+          <div style="display:flex; gap:0.35rem; flex:1;">
+            <div style="background:rgba(46,204,113,0.12); border:1px solid rgba(46,204,113,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--green); flex:1; text-align:center;">Cache Engine</div>
+            <div style="background:rgba(233,69,96,0.12); border:1px solid rgba(233,69,96,0.3); border-radius:4px; padding:0.3rem 0.5rem; font-size:0.7rem; color:var(--primary); flex:1; text-align:center;">Model Shard 2</div>
+          </div>
+        </div>
+
+        <div style="font-size:0.72rem; text-align:center; color:var(--text-muted); margin-top:0.25rem;">
+          All-reduce sync via NCCL &mdash; SPMD execution
+        </div>
+      </div>
+
+    </div>
+    <div class="diagram-caption">
+      The scheduler broadcasts block tables to workers. Workers only see physical block IDs&mdash;sharing is transparent.
+    </div>
+  </div>
+
+  <!-- VIRTUAL MEMORY ANALOGY DIAGRAM -->
+  <div class="diagram-container glow-purple">
+    <div class="diagram-title">Virtual Memory Analogy: OS Paging &harr; PagedAttention</div>
+
+    <div class="grid-2" style="gap:2rem;">
+      <!-- OS Side -->
+      <div style="text-align:center;">
+        <div style="font-size:0.9rem; font-weight:700; color:var(--purple); margin-bottom:1rem;">Operating System</div>
+        <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+          <div class="d-block" style="background:rgba(155,89,182,0.15); border:1px solid var(--purple); color:var(--purple); width:80%;">Process</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">owns</div>
+          <div class="d-block" style="background:rgba(155,89,182,0.1); border:1px solid rgba(155,89,182,0.4); color:#cdd6f4; width:80%;">Virtual Pages</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">mapped via Page Table to</div>
+          <div class="d-block" style="background:rgba(46,204,113,0.15); border:1px solid var(--green); color:var(--green); width:80%;">Physical Frames (RAM)</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">unit = fixed-size page (4KB)</div>
+        </div>
+      </div>
+
+      <!-- vLLM Side -->
+      <div style="text-align:center;">
+        <div style="font-size:0.9rem; font-weight:700; color:var(--primary); margin-bottom:1rem;">PagedAttention (vLLM)</div>
+        <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+          <div class="d-block" style="background:rgba(233,69,96,0.15); border:1px solid var(--primary); color:var(--primary); width:80%;">Request / Sequence</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">owns</div>
+          <div class="d-block" style="background:rgba(233,69,96,0.1); border:1px solid rgba(233,69,96,0.4); color:#cdd6f4; width:80%;">Logical KV Blocks</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">mapped via Block Table to</div>
+          <div class="d-block" style="background:rgba(46,204,113,0.15); border:1px solid var(--green); color:var(--green); width:80%;">Physical KV Blocks (GPU DRAM)</div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">unit = B tokens' KV vectors (B=16)</div>
+        </div>
+      </div>
+    </div>
+    <div class="diagram-caption">
+      OS paging maps virtual-to-physical pages for processes; PagedAttention maps logical-to-physical KV blocks for sequences.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- PAGEDATTENTION ALGORITHM                                         -->
+<!-- ================================================================ -->
+<section id="pagedattention">
+  <h2>PagedAttention Algorithm</h2>
+
+  <p>
+    Traditional attention requires keys and values stored contiguously in memory.
+    PagedAttention partitions the KV cache into <strong>blocks</strong>, each holding <em>B</em> tokens'
+    keys and values. During attention computation, the kernel fetches blocks from
+    non-contiguous physical locations via the block table, computing attention
+    <strong>block-by-block</strong>.
+  </p>
+
+  <!-- BLOCK-WISE ATTENTION DIAGRAM -->
+  <div class="diagram-container">
+    <div class="diagram-title">PagedAttention: Block-wise Attention Computation</div>
+
+    <div style="display:flex; flex-direction:column; gap:1.5rem; align-items:center;">
+
+      <!-- Query vector -->
+      <div style="display:flex; align-items:center; gap:1rem;">
+        <div style="font-size:0.8rem; color:var(--text-muted); font-weight:600; width:100px; text-align:right;">Query vector</div>
+        <div class="d-block" style="background:linear-gradient(135deg, #e94560, #c0392b); color:#fff; padding:0.6rem 1.5rem; font-size:0.85rem;">
+          q<sub>i</sub> ("forth")
+        </div>
+      </div>
+
+      <!-- Arrow down -->
+      <div style="display:flex; gap:2rem; align-items:flex-start;">
+        <div style="display:flex; flex-direction:column; align-items:center;">
+          <div class="arrow-down primary"></div>
+          <div style="font-size:0.7rem; color:var(--primary); margin-top:0.25rem;">attends to</div>
+        </div>
+      </div>
+
+      <!-- KV Blocks -->
+      <div style="display:flex; gap:1rem; flex-wrap:wrap; justify-content:center;">
+        <!-- Block 0 -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0.35rem;">
+          <div style="font-size:0.75rem; color:var(--amber); font-weight:700;">Physical Block 7</div>
+          <div style="background:rgba(46,204,113,0.1); border:1px solid var(--green); border-radius:8px; padding:0.6rem; display:flex; gap:3px;">
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">Four</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">score</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">and</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">seven</div>
+          </div>
+          <div style="font-size:0.7rem; color:var(--text-muted);">Logical Block 0</div>
+        </div>
+
+        <!-- Block 1 -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0.35rem;">
+          <div style="font-size:0.75rem; color:var(--amber); font-weight:700;">Physical Block 1</div>
+          <div style="background:rgba(46,204,113,0.1); border:1px solid var(--green); border-radius:8px; padding:0.6rem; display:flex; gap:3px;">
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">years</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">ago</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">our</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">fathers</div>
+          </div>
+          <div style="font-size:0.7rem; color:var(--text-muted);">Logical Block 1</div>
+        </div>
+
+        <!-- Block 2 -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:0.35rem;">
+          <div style="font-size:0.75rem; color:var(--amber); font-weight:700;">Physical Block 3</div>
+          <div style="background:rgba(245,166,35,0.1); border:1px solid var(--amber); border-radius:8px; padding:0.6rem; display:flex; gap:3px;">
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">brought</div>
+            <div class="token-cell filled" style="width:52px; font-size:0.68rem;">forth</div>
+            <div class="token-cell reserved" style="width:52px; font-size:0.68rem;">--</div>
+            <div class="token-cell reserved" style="width:52px; font-size:0.68rem;">--</div>
+          </div>
+          <div style="font-size:0.7rem; color:var(--text-muted);">Logical Block 2 (partial)</div>
+        </div>
+      </div>
+
+      <div style="font-size:0.82rem; color:var(--text-muted); max-width:600px; text-align:center;">
+        Blocks reside at <strong>non-contiguous</strong> physical addresses (7, 1, 3).
+        The kernel fetches each block separately, computes partial attention scores,
+        then combines results.
+      </div>
+    </div>
+  </div>
+
+  <h3>Mathematical Formulation</h3>
+  <p>
+    For a sequence of length <em>i</em>, denote the key block
+    <code class="inline">K<sub>j</sub> = (k<sub>(j-1)B+1</sub>, ..., k<sub>jB</sub>)</code> and value block
+    <code class="inline">V<sub>j</sub></code> similarly. The attention computation becomes block-wise:
+  </p>
+
+  <pre><code><span class="cm">// Block-wise attention computation (Equation 4 from the paper)</span>
+<span class="cm">// B = block size (default 16 tokens per block)</span>
+
+<span class="cm">// For each key block j = 1 ... ceil(i/B):</span>
+A<sub>ij</sub> = <span class="fn">exp</span>(q<sub>i</sub><sup>T</sup> K<sub>j</sub> / <span class="fn">sqrt</span>(d)) / <span class="fn">sum</span>(<span class="fn">exp</span>(q<sub>i</sub><sup>T</sup> K<sub>t</sub> 1 / <span class="fn">sqrt</span>(d)), t=<span class="nu">1</span>..<span class="fn">ceil</span>(i/B))
+
+<span class="cm">// Final output is weighted sum over value blocks:</span>
+o<sub>i</sub> = <span class="fn">sum</span>(V<sub>j</sub> A<sub>ij</sub><sup>T</sup>, j=<span class="nu">1</span>..<span class="fn">ceil</span>(i/B))
+
+<span class="cm">// Key difference: kernel identifies and fetches DIFFERENT KV blocks</span>
+<span class="cm">// from non-contiguous physical memory using the block table.</span>
+<span class="cm">// Each GPU warp processes one block for coalesced memory access.</span></code></pre>
+</section>
+
+<!-- ================================================================ -->
+<!-- KEY MECHANISMS                                                    -->
+<!-- ================================================================ -->
+<section id="mechanisms">
+  <h2>Key Mechanisms</h2>
+
+  <!-- MECHANISM 1: Block-Level Memory Management -->
+  <h3>1. Block-Level Memory Management</h3>
+
+  <div class="card green">
+    <h4>Dynamic Allocation on Demand</h4>
+    <p>Unlike prior systems that pre-allocate max-length contiguous chunks, vLLM
+    allocates physical blocks <strong>one at a time</strong> as the sequence grows. A new physical
+    block is only allocated when the last logical block is full. This limits internal
+    fragmentation to at most <strong>one block per sequence</strong> (the last, partially filled block).</p>
+  </div>
+
+  <!-- DYNAMIC ALLOCATION DIAGRAM -->
+  <div class="diagram-container">
+    <div class="diagram-title">Dynamic Block Allocation During Decoding</div>
+
+    <div style="display:flex; flex-direction:column; gap:1.5rem;">
+
+      <!-- Step 1 -->
+      <div style="display:flex; align-items:center; gap:1rem;">
+        <div style="background:var(--primary); color:#fff; border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:0.85rem; flex-shrink:0;">1</div>
+        <div style="flex:1;">
+          <div style="font-size:0.82rem; color:var(--amber); font-weight:600; margin-bottom:0.35rem;">Prefill: 7 prompt tokens arrive</div>
+          <div style="display:flex; gap:4px; flex-wrap:wrap;">
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">Four</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">score</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">and</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">seven</div>
+            <div style="border:1px solid var(--border); border-radius:3px; padding:0 3px; font-size:0.7rem; color:var(--text-muted);">|</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">years</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">ago</div>
+            <div style="background:var(--green); color:var(--dark); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">our</div>
+            <div style="background:rgba(245,166,35,0.2); color:var(--amber); border:1px dashed var(--amber); border-radius:4px; padding:0.25rem 0.5rem; font-size:0.72rem; font-weight:600;">1 slot free</div>
+          </div>
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.25rem;">Allocates 2 physical blocks (Block 7, Block 1). Block 1 has 1 empty slot.</div>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div style="display:flex; align-items:center; gap:1rem;">
+        <div style="background:var(--amber); color:var(--dark); border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:0.85rem; flex-shrink:0;">2</div>
+        <div style="flex:1;">
+          <div style="font-size:0.82rem; color:var(--amber); font-weight:600; margin-bottom:0.35rem;">Decode step 1: generate "fathers"</div>
+          <div style="font-size:0.78rem; color:var(--text-muted);">
+            Block 1 has 1 free slot &rarr; store "fathers" there. No new block needed. Update #filled: 3 &rarr; 4.
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div style="display:flex; align-items:center; gap:1rem;">
+        <div style="background:var(--green); color:var(--dark); border-radius:50%; width:32px; height:32px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:0.85rem; flex-shrink:0;">3</div>
+        <div style="flex:1;">
+          <div style="font-size:0.82rem; color:var(--amber); font-weight:600; margin-bottom:0.35rem;">Decode step 2: generate "brought"</div>
+          <div style="font-size:0.78rem; color:var(--text-muted);">
+            Block 1 is now full &rarr; allocate <strong>new physical block 3</strong>. Store "brought" in Block 3, slot 0.
+            Block table grows: logical block 2 &rarr; physical block 3, #filled = 1.
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="diagram-caption">
+      Blocks are allocated lazily, one at a time. Memory waste is limited to the last block's unfilled slots.
+    </div>
+  </div>
+
+  <!-- MECHANISM 2: Copy-on-Write -->
+  <h3>2. Copy-on-Write (CoW)</h3>
+
+  <div class="card purple">
+    <h4>Shared Blocks with Reference Counting</h4>
+    <p>When multiple sequences share a common prefix (parallel sampling, beam search),
+    their logical blocks map to the <strong>same physical blocks</strong> with reference counts &gt; 1.
+    A copy is only triggered when a sequence tries to <strong>write to a shared block</strong>.
+    This is identical to OS copy-on-write for forked processes.</p>
+  </div>
+
+  <!-- COW DIAGRAM -->
+  <div class="diagram-container glow-green">
+    <div class="diagram-title">Copy-on-Write in Parallel Sampling</div>
+
+    <div style="display:flex; gap:2rem; flex-wrap:wrap; justify-content:center; align-items:flex-start;">
+
+      <!-- Two samples sharing prompt -->
+      <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+        <div style="font-size:0.82rem; color:var(--primary); font-weight:700;">Sample A1</div>
+        <div style="display:flex; gap:3px; font-size:0.7rem;">
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L0 &rarr; P7</div>
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L1 &rarr; P1</div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; align-items:center; gap:0.25rem;">
+        <div style="font-size:0.7rem; color:var(--text-muted);">shared</div>
+        <div style="display:flex; gap:0.5rem;">
+          <div style="width:2px; height:40px; background:var(--green);"></div>
+          <div style="width:2px; height:40px; background:var(--green);"></div>
+        </div>
+        <div style="font-size:0.7rem; color:var(--green); font-weight:600;">ref_count = 2</div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+        <div style="font-size:0.82rem; color:var(--primary); font-weight:700;">Sample A2</div>
+        <div style="display:flex; gap:3px; font-size:0.7rem;">
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L0 &rarr; P7</div>
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L1 &rarr; P1</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down green" style="margin:0.75rem auto;"></div>
+    <div style="text-align:center; font-size:0.82rem; color:var(--amber); font-weight:600; margin-bottom:0.75rem;">
+      A1 writes to Block 1 (ref_count &gt; 1) &rarr; triggers Copy-on-Write
+    </div>
+
+    <div style="display:flex; gap:2rem; flex-wrap:wrap; justify-content:center; align-items:flex-start;">
+      <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+        <div style="font-size:0.82rem; color:var(--primary); font-weight:700;">Sample A1 (after CoW)</div>
+        <div style="display:flex; gap:3px; font-size:0.7rem;">
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L0 &rarr; P7</div>
+          <div style="background:rgba(233,69,96,0.2); border:1px solid var(--primary); border-radius:4px; padding:0.35rem 0.6rem; color:var(--primary); font-weight:700;">L1 &rarr; P3 (new!)</div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+        <div style="font-size:0.82rem; color:var(--primary); font-weight:700;">Sample A2 (unchanged)</div>
+        <div style="display:flex; gap:3px; font-size:0.7rem;">
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L0 &rarr; P7</div>
+          <div style="background:rgba(155,89,182,0.2); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.6rem; color:var(--purple);">L1 &rarr; P1</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="diagram-caption">
+      P7 is still shared (ref_count=1 for each now). P1's data was copied to new P3 for A1. Only one block of data is copied.
+    </div>
+  </div>
+
+  <!-- MECHANISM 3: Scheduling -->
+  <h3>3. FCFS Scheduling with Preemption</h3>
+
+  <div class="grid-2">
+    <div class="card amber">
+      <h4>First-Come-First-Served</h4>
+      <p>vLLM serves requests in arrival order to prevent starvation. When GPU memory
+      is exhausted, the <strong>latest</strong> request is preempted first (preserving fairness for
+      earlier arrivals).</p>
+    </div>
+    <div class="card">
+      <h4>Recovery: Swap or Recompute</h4>
+      <p><strong>Swapping:</strong> Evict KV blocks to CPU RAM via PCIe (all-or-nothing per sequence).
+      <strong>Recomputation:</strong> Discard blocks and regenerate KV cache from the prompt +
+      generated tokens. Better for small block sizes.</p>
+    </div>
+  </div>
+
+  <!-- MECHANISM 4: Decoding Scenarios -->
+  <h3>4. Application to Decoding Scenarios</h3>
+
+  <div class="grid-3">
+    <div class="card green">
+      <h4>Parallel Sampling</h4>
+      <p>Multiple samples from one prompt share the prompt's KV blocks. Only divergent
+      generation blocks are separate. Saves <strong>6&ndash;10%</strong> memory.</p>
+    </div>
+    <div class="card amber">
+      <h4>Beam Search</h4>
+      <p>Beam candidates share blocks dynamically as the tree evolves. Candidates that
+      are pruned have their blocks freed immediately. Saves <strong>37&ndash;55%</strong> memory.</p>
+    </div>
+    <div class="card purple">
+      <h4>Shared Prefix</h4>
+      <p>System prompts and few-shot examples are cached as shared physical blocks.
+      New requests map their logical blocks to these cached blocks (copy-on-write protected).
+      Achieves up to <strong>3.6&times;</strong> higher throughput.</p>
+    </div>
+  </div>
+
+  <!-- BEAM SEARCH SHARING DIAGRAM -->
+  <div class="diagram-container">
+    <div class="diagram-title">Block Sharing in Beam Search (k=4)</div>
+
+    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+      <!-- Candidate 0 -->
+      <div style="display:flex; align-items:center; gap:0.5rem;">
+        <div style="width:120px; font-size:0.8rem; color:var(--text-muted); text-align:right; flex-shrink:0;">Candidate 0</div>
+        <div style="display:flex; gap:3px;">
+          <div style="background:rgba(233,69,96,0.3); border:1px solid var(--primary); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--primary); font-weight:600;">B0</div>
+          <div style="background:rgba(155,89,182,0.3); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--purple); font-weight:600;">B1</div>
+          <div style="background:rgba(46,204,113,0.3); border:1px solid var(--green); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--green); font-weight:600;">B3</div>
+          <div style="background:rgba(245,166,35,0.3); border:1px solid var(--amber); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--amber); font-weight:600;">B6</div>
+          <div style="background:rgba(137,180,250,0.2); border:1px solid #89b4fa; border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:#89b4fa; font-weight:600;">B9</div>
+        </div>
+      </div>
+      <!-- Candidate 1 -->
+      <div style="display:flex; align-items:center; gap:0.5rem;">
+        <div style="width:120px; font-size:0.8rem; color:var(--text-muted); text-align:right; flex-shrink:0;">Candidate 1</div>
+        <div style="display:flex; gap:3px;">
+          <div style="background:rgba(233,69,96,0.3); border:1px solid var(--primary); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--primary); font-weight:600;">B0</div>
+          <div style="background:rgba(155,89,182,0.3); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--purple); font-weight:600;">B1</div>
+          <div style="background:rgba(46,204,113,0.3); border:1px solid var(--green); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--green); font-weight:600;">B3</div>
+          <div style="background:rgba(245,166,35,0.3); border:1px solid var(--amber); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--amber); font-weight:600;">B6</div>
+          <div style="background:rgba(137,180,250,0.2); border:1px solid #89b4fa; border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:#89b4fa; font-weight:600;">B10</div>
+        </div>
+      </div>
+      <!-- Candidate 2 -->
+      <div style="display:flex; align-items:center; gap:0.5rem;">
+        <div style="width:120px; font-size:0.8rem; color:var(--text-muted); text-align:right; flex-shrink:0;">Candidate 2</div>
+        <div style="display:flex; gap:3px;">
+          <div style="background:rgba(233,69,96,0.3); border:1px solid var(--primary); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--primary); font-weight:600;">B0</div>
+          <div style="background:rgba(155,89,182,0.3); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--purple); font-weight:600;">B7</div>
+          <div style="background:rgba(46,204,113,0.3); border:1px solid var(--green); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--green); font-weight:600;">B8</div>
+          <div style="background:rgba(245,166,35,0.3); border:1px solid var(--amber); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--amber); font-weight:600;">B6</div>
+          <div style="background:rgba(137,180,250,0.2); border:1px solid #89b4fa; border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:#89b4fa; font-weight:600;">B11</div>
+        </div>
+      </div>
+      <!-- Candidate 3 -->
+      <div style="display:flex; align-items:center; gap:0.5rem;">
+        <div style="width:120px; font-size:0.8rem; color:var(--text-muted); text-align:right; flex-shrink:0;">Candidate 3</div>
+        <div style="display:flex; gap:3px;">
+          <div style="background:rgba(233,69,96,0.3); border:1px solid var(--primary); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--primary); font-weight:600;">B0</div>
+          <div style="background:rgba(155,89,182,0.3); border:1px solid var(--purple); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--purple); font-weight:600;">B7</div>
+          <div style="background:rgba(46,204,113,0.3); border:1px solid var(--green); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--green); font-weight:600;">B8</div>
+          <div style="background:rgba(245,166,35,0.3); border:1px solid var(--amber); border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:var(--amber); font-weight:600;">B6</div>
+          <div style="background:rgba(137,180,250,0.2); border:1px solid #89b4fa; border-radius:4px; padding:0.35rem 0.65rem; font-size:0.72rem; color:#89b4fa; font-weight:600;">B12</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:1rem; flex-wrap:wrap; margin-top:1rem; justify-content:center;">
+      <div style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;">
+        <div style="width:14px; height:14px; background:rgba(233,69,96,0.3); border:1px solid var(--primary); border-radius:3px;"></div>
+        B0: shared by all 4
+      </div>
+      <div style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;">
+        <div style="width:14px; height:14px; background:rgba(155,89,182,0.3); border:1px solid var(--purple); border-radius:3px;"></div>
+        B1/B7: shared by pairs
+      </div>
+      <div style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;">
+        <div style="width:14px; height:14px; background:rgba(245,166,35,0.3); border:1px solid var(--amber); border-radius:3px;"></div>
+        B6: shared by all 4
+      </div>
+      <div style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;">
+        <div style="width:14px; height:14px; background:rgba(137,180,250,0.2); border:1px solid #89b4fa; border-radius:3px;"></div>
+        B9-12: unique per candidate
+      </div>
+    </div>
+
+    <div class="diagram-caption">
+      Block sharing evolves dynamically as beam candidates diverge and merge. Pruned candidates' blocks are freed immediately.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- CODE CONCEPTS                                                    -->
+<!-- ================================================================ -->
+<section id="code">
+  <h2>Code Concepts</h2>
+
+  <p>
+    vLLM is implemented in ~8.5K lines of Python and ~2K lines of C++/CUDA. The
+    block manager and scheduler are in Python; the PagedAttention kernel and block
+    operations are fused CUDA kernels.
+  </p>
+
+  <h3>Block Table Data Structure</h3>
+  <pre><code><span class="cm"># Conceptual block table structure (per sequence)</span>
+<span class="cm"># Maps logical block index -> (physical_block_id, num_filled, ref_count)</span>
+
+<span class="kw">class</span> <span class="ty">BlockTable</span>:
+    <span class="cm">"""Maps logical KV blocks to physical blocks in GPU DRAM."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="ident">self</span>, <span class="ident">block_size</span>: <span class="ty">int</span> = <span class="nu">16</span>):
+        <span class="ident">self</span>.<span class="ident">block_size</span> = <span class="ident">block_size</span>  <span class="cm"># tokens per block (B)</span>
+        <span class="ident">self</span>.<span class="ident">entries</span>: <span class="ty">List</span>[<span class="ty">BlockEntry</span>] = []
+
+    <span class="kw">def</span> <span class="fn">append_token</span>(<span class="ident">self</span>, <span class="ident">allocator</span>: <span class="ty">BlockAllocator</span>):
+        <span class="cm">"""Called for each new token generated."""</span>
+        <span class="kw">if</span> <span class="kw">not</span> <span class="ident">self</span>.<span class="ident">entries</span> <span class="kw">or</span> <span class="ident">self</span>.<span class="ident">entries</span>[-<span class="nu">1</span>].<span class="fn">is_full</span>():
+            <span class="cm"># Last block is full -> allocate a NEW physical block</span>
+            <span class="ident">phys_block</span> = <span class="ident">allocator</span>.<span class="fn">allocate</span>()
+            <span class="ident">self</span>.<span class="ident">entries</span>.<span class="fn">append</span>(<span class="ty">BlockEntry</span>(<span class="ident">phys_block</span>, <span class="ident">num_filled</span>=<span class="nu">1</span>))
+        <span class="kw">else</span>:
+            <span class="cm"># Room in current block -> just increment counter</span>
+            <span class="ident">self</span>.<span class="ident">entries</span>[-<span class="nu">1</span>].<span class="ident">num_filled</span> += <span class="nu">1</span>
+
+    <span class="kw">def</span> <span class="fn">get_physical_ids</span>(<span class="ident">self</span>) -> <span class="ty">List</span>[<span class="ty">int</span>]:
+        <span class="cm">"""Returns physical block IDs for the attention kernel."""</span>
+        <span class="kw">return</span> [<span class="ident">e</span>.<span class="ident">physical_block_id</span> <span class="kw">for</span> <span class="ident">e</span> <span class="kw">in</span> <span class="ident">self</span>.<span class="ident">entries</span>]</code></pre>
+
+  <h3>Copy-on-Write Logic</h3>
+  <pre><code><span class="cm"># When a sequence writes to a block shared by others (ref_count > 1)</span>
+
+<span class="kw">def</span> <span class="fn">cow_write</span>(<span class="ident">block_entry</span>: <span class="ty">BlockEntry</span>, <span class="ident">allocator</span>: <span class="ty">BlockAllocator</span>):
+    <span class="cm">"""Copy-on-write: fork a new physical block if shared."""</span>
+    <span class="kw">if</span> <span class="ident">block_entry</span>.<span class="ident">ref_count</span> > <span class="nu">1</span>:
+        <span class="cm"># Shared block -> copy to new physical block</span>
+        <span class="ident">old_phys</span> = <span class="ident">block_entry</span>.<span class="ident">physical_block_id</span>
+        <span class="ident">new_phys</span> = <span class="ident">allocator</span>.<span class="fn">allocate</span>()
+        <span class="fn">cuda_block_copy</span>(<span class="ident">src</span>=<span class="ident">old_phys</span>, <span class="ident">dst</span>=<span class="ident">new_phys</span>)  <span class="cm"># fused kernel</span>
+        <span class="ident">block_entry</span>.<span class="ident">physical_block_id</span> = <span class="ident">new_phys</span>
+        <span class="ident">block_entry</span>.<span class="ident">ref_count</span> = <span class="nu">1</span>
+        <span class="ident">allocator</span>.<span class="fn">dec_ref</span>(<span class="ident">old_phys</span>)  <span class="cm"># decrement old block's ref</span>
+    <span class="cm"># ref_count == 1 -> write directly, no copy needed</span></code></pre>
+
+  <h3>Fused CUDA Kernels</h3>
+  <pre><code><span class="cm">// Conceptual structure of the PagedAttention CUDA kernel</span>
+<span class="cm">// Three fused operations minimize kernel launch overhead:</span>
+
+<span class="cm">// 1. Fused Reshape & Block Write</span>
+<span class="cm">//    New KV cache is split into blocks, reshaped for coalesced reads,</span>
+<span class="cm">//    and saved at positions specified by the block table.</span>
+
+<span class="cm">// 2. Fused Block Read & Attention</span>
+<span class="cm">//    Each GPU warp reads one KV block from the block table,</span>
+<span class="cm">//    computes partial attention scores, then reduces across warps.</span>
+<span class="kw">__global__</span> <span class="kw">void</span> <span class="fn">paged_attention_kernel</span>(
+    <span class="kw">const</span> <span class="ty">float</span>* <span class="ident">query</span>,           <span class="cm">// [num_heads, head_dim]</span>
+    <span class="kw">const</span> <span class="ty">float</span>* <span class="ident">key_cache</span>,       <span class="cm">// [num_blocks, block_size, num_heads, head_dim]</span>
+    <span class="kw">const</span> <span class="ty">float</span>* <span class="ident">value_cache</span>,     <span class="cm">// [num_blocks, block_size, num_heads, head_dim]</span>
+    <span class="kw">const</span> <span class="ty">int</span>*   <span class="ident">block_tables</span>,    <span class="cm">// [num_seqs, max_blocks_per_seq]</span>
+    <span class="kw">const</span> <span class="ty">int</span>*   <span class="ident">seq_lens</span>,        <span class="cm">// [num_seqs]</span>
+    <span class="ty">float</span>*       <span class="ident">output</span>           <span class="cm">// [num_seqs, num_heads, head_dim]</span>
+) {
+    <span class="cm">// Each warp handles one KV block for one attention head</span>
+    <span class="ty">int</span> <span class="ident">block_idx</span> = <span class="ident">block_tables</span>[<span class="ident">seq_id</span> * <span class="ident">max_blocks</span> + <span class="ident">logical_block</span>];
+    <span class="cm">// Fetch K, V from physical block_idx (non-contiguous!)</span>
+    <span class="cm">// Compute softmax(Q * K^T / sqrt(d)) * V per block</span>
+    <span class="cm">// Reduce partial results across blocks</span>
+}
+
+<span class="cm">// 3. Fused Block Copy (for CoW)</span>
+<span class="cm">//    Batches all pending copy operations into a single kernel launch.</span></code></pre>
+
+  <h3>Three Core API Methods</h3>
+  <pre><code><span class="cm"># vLLM supports all decoding via three sequence operations:</span>
+
+<span class="fn">fork</span>(<span class="ident">seq</span>)    <span class="cm"># Create new sequence sharing parent's KV blocks</span>
+              <span class="cm"># Used for: parallel sampling, beam search branching</span>
+
+<span class="fn">append</span>(<span class="ident">seq</span>)  <span class="cm"># Add new token to sequence (may allocate block or trigger CoW)</span>
+              <span class="cm"># Used for: every autoregressive decode step</span>
+
+<span class="fn">free</span>(<span class="ident">seq</span>)    <span class="cm"># Release sequence's blocks (decrement ref counts)</span>
+              <span class="cm"># Used for: completed sequences, pruned beam candidates</span></code></pre>
+</section>
+
+<!-- ================================================================ -->
+<!-- PERFORMANCE                                                      -->
+<!-- ================================================================ -->
+<section id="performance">
+  <h2>Performance Results</h2>
+
+  <h3>Throughput Improvement (Basic Sampling)</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Configuration</th>
+        <th>vs. FasterTransformer</th>
+        <th>vs. Orca (Oracle)</th>
+        <th>vs. Orca (Max)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>OPT-13B, 1 GPU, ShareGPT</td>
+        <td class="metric">up to 22&times;</td>
+        <td class="metric">1.7&ndash;2.7&times;</td>
+        <td class="metric">2.2&ndash;4.3&times;</td>
+      </tr>
+      <tr>
+        <td>OPT-66B, 4 GPUs, ShareGPT</td>
+        <td class="metric">--</td>
+        <td class="metric">1.7&ndash;2.7&times;</td>
+        <td class="metric">2.7&ndash;8&times;</td>
+      </tr>
+      <tr>
+        <td>OPT-175B, 8 GPUs, ShareGPT</td>
+        <td class="metric">--</td>
+        <td class="metric">1.7&ndash;2.7&times;</td>
+        <td class="metric">2.7&ndash;8&times;</td>
+      </tr>
+      <tr>
+        <td>OPT-13B, 1 GPU, Alpaca</td>
+        <td class="metric">up to 22&times;</td>
+        <td class="metric">1.7&ndash;2.7&times;</td>
+        <td class="metric">2.2&ndash;4.3&times;</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Memory Utilization</h3>
+
+  <div class="diagram-container">
+    <div class="diagram-title">KV Cache Effective Utilization Comparison</div>
+    <div class="bar-chart">
+      <div class="bar-row">
+        <div class="bar-label" style="color:var(--green); font-weight:700;">vLLM</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:96.3%; background:linear-gradient(90deg, var(--green), #27ae60);">96.3%</div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">Orca (Oracle)</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:38.2%; background:var(--amber);">38.2%</div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">Orca (Pow2)</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:26.8%; background:var(--amber); opacity:0.7;">26.8%</div>
+        </div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">Orca (Max)</div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:20.4%; background:var(--primary);">20.4%</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>Memory Savings from Sharing</h3>
+
+  <div class="grid-2">
+    <div class="card green">
+      <h4>Parallel Sampling</h4>
+      <table>
+        <thead><tr><th># Output Sequences</th><th>Memory Saved</th></tr></thead>
+        <tbody>
+          <tr><td>2</td><td class="metric">6.1%</td></tr>
+          <tr><td>4</td><td class="metric">8.5%</td></tr>
+          <tr><td>6</td><td class="metric">9.8%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card amber">
+      <h4>Beam Search</h4>
+      <table>
+        <thead><tr><th>Beam Width</th><th>Memory Saved</th></tr></thead>
+        <tbody>
+          <tr><td>2</td><td class="metric">37.6%</td></tr>
+          <tr><td>4</td><td class="metric">53.1%</td></tr>
+          <tr><td>6</td><td class="metric">55.2%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3>Batch Size Improvement</h3>
+  <div class="callout note">
+    <div class="icon">+</div>
+    <div>
+      On OPT-13B with ShareGPT, vLLM batches <strong>30.42 requests simultaneously</strong> on average,
+      compared to 7.00 for Orca (Max) and 13.62 for Orca (Oracle)&mdash;a
+      <strong>2.2&times; and 4.3&times;</strong> improvement respectively. Higher batch sizes directly
+      translate to better GPU utilization and higher throughput.
+    </div>
+  </div>
+
+  <h3>Kernel Overhead</h3>
+  <div class="card">
+    <h4>Attention Kernel Latency: 20&ndash;26% Higher</h4>
+    <p>
+      The PagedAttention kernel is <strong>20&ndash;26% slower</strong> than FasterTransformer's
+      contiguous attention kernel due to block table lookups, extra branches, and
+      handling variable sequence lengths. However, this only affects the attention
+      operator, not other layers (FFN, LayerNorm, etc.). The end-to-end throughput
+      improvement from better memory utilization far outweighs this overhead.
+    </p>
+  </div>
+
+  <h3>Block Size Selection</h3>
+
+  <table>
+    <thead>
+      <tr><th>Block Size</th><th>ShareGPT Perf.</th><th>Alpaca Perf.</th><th>Trade-off</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1&ndash;4</td><td>Poor</td><td>Poor</td><td>Too small: low GPU parallelism, high table overhead</td></tr>
+      <tr><td class="metric">16 (default)</td><td class="metric">Optimal</td><td class="metric">Optimal</td><td>Best balance of utilization vs. internal fragmentation</td></tr>
+      <tr><td>32&ndash;128</td><td>Good</td><td>Degraded</td><td>Larger blocks increase internal frag for short sequences</td></tr>
+      <tr><td>256</td><td>Degraded</td><td>Poor</td><td>Too large: approaches contiguous allocation behavior</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================ -->
+<!-- LIMITATIONS                                                      -->
+<!-- ================================================================ -->
+<section id="limitations">
+  <h2>Limitations for Agentic AI Systems</h2>
+
+  <p>
+    While PagedAttention is foundational, its design targets single-request serving
+    within a single session. Modern agentic AI systems expose several gaps:
+  </p>
+
+  <div class="grid-2">
+    <div class="card" style="border-left-color: var(--primary);">
+      <h4>1. No Cross-Request KV Reuse</h4>
+      <p>PagedAttention shares KV blocks <em>within</em> a single request (parallel sampling,
+      beam search) but has no mechanism to cache and reuse blocks <em>across different requests</em>.
+      Every new request recomputes its KV cache from scratch. Agentic systems that issue
+      many requests with shared prefixes (system prompts, tool schemas) waste significant
+      computation.</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: SGLang RadixAttention, Mooncake KVCache-centric disaggregation
+      </p>
+    </div>
+
+    <div class="card" style="border-left-color: var(--primary);">
+      <h4>2. Basic Eviction Policy</h4>
+      <p>vLLM uses an <strong>all-or-nothing</strong> eviction policy: when memory is exhausted, it
+      evicts all blocks of a sequence. There is no LRU/LFU cache with partial
+      eviction or intelligent retention of high-value prefixes. This limits
+      performance for workloads with temporal locality (e.g., multi-turn agents
+      revisiting contexts).</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: CacheBlend, Epic, InfiniGen
+      </p>
+    </div>
+
+    <div class="card" style="border-left-color: var(--amber);">
+      <h4>3. Single-Node Focus</h4>
+      <p>While vLLM supports tensor-parallel execution across GPUs within a node,
+      the KV cache manager is centralized. There is no cross-node KV cache transfer,
+      disaggregated storage, or distributed caching tier. This limits scalability
+      for cloud-scale agentic deployments.</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: Mooncake, MemServe, InfiniStore
+      </p>
+    </div>
+
+    <div class="card" style="border-left-color: var(--amber);">
+      <h4>4. No Semantic-Aware Scheduling</h4>
+      <p>FCFS scheduling treats all requests equally regardless of their KV cache
+      sharing potential. An agentic scheduler could co-locate requests with shared
+      prefixes, reorder to maximize cache hits, or prioritize high-value
+      continuations.</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: SGLang, CachedAttention, MemServe
+      </p>
+    </div>
+
+    <div class="card" style="border-left-color: var(--purple);">
+      <h4>5. Full-Precision KV Storage Only</h4>
+      <p>All KV blocks are stored at full precision (FP16). There is no compression,
+      quantization, or selective retention. For long-context agentic interactions
+      (100K+ tokens), this becomes prohibitively expensive.</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: CacheGen, KIVI, Gear, DMC
+      </p>
+    </div>
+
+    <div class="card" style="border-left-color: var(--purple);">
+      <h4>6. No Prefill/Decode Disaggregation</h4>
+      <p>Prefill (compute-bound) and decode (memory-bound) phases run on the same
+      GPUs, creating resource contention. Agentic systems with variable-length
+      inputs could benefit from separating these phases onto specialized hardware.</p>
+      <p style="font-size:0.82rem; color:var(--text-muted);">
+        Addressed later by: Splitwise, DistServe, Mooncake
+      </p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="icon">!</div>
+    <div>
+      <strong>Key gap for agentic AI:</strong> PagedAttention solves memory <em>waste</em> within
+      a single serving session, but does not address memory <em>reuse</em> across the
+      multi-turn, multi-request workflows that define agentic systems. This is the
+      central problem that every subsequent paper in this survey builds upon.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- IMPACT                                                           -->
+<!-- ================================================================ -->
+<section id="impact">
+  <h2>Impact &amp; Legacy</h2>
+
+  <p>
+    PagedAttention is arguably the single most influential systems contribution
+    to LLM serving. Its impact extends across three dimensions:
+  </p>
+
+  <!-- IMPACT FLOW DIAGRAM -->
+  <div class="diagram-container glow-primary">
+    <div class="diagram-title">PagedAttention's Influence on Subsequent KV Cache Systems</div>
+
+    <div style="display:flex; flex-direction:column; gap:1.25rem; align-items:center;">
+
+      <!-- Root -->
+      <div class="d-block" style="background:linear-gradient(135deg, var(--primary), #c0392b); color:#fff; padding:1rem 2rem; font-size:1rem; max-width:400px; width:100%;">
+        PagedAttention (vLLM)
+        <div style="font-size:0.72rem; font-weight:400; margin-top:0.2rem;">Block-level KV cache with virtual memory</div>
+      </div>
+
+      <div style="display:flex; gap:0.5rem;">
+        <div class="arrow-down primary"></div>
+        <div class="arrow-down primary"></div>
+        <div class="arrow-down primary"></div>
+      </div>
+
+      <!-- Three branches -->
+      <div style="display:flex; gap:1rem; flex-wrap:wrap; justify-content:center; width:100%;">
+
+        <!-- Branch 1: Caching -->
+        <div style="flex:1; min-width:220px; display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+          <div class="d-block" style="background:rgba(46,204,113,0.15); border:1px solid var(--green); color:var(--green); width:100%; max-width:280px;">
+            Cross-Request Caching
+            <div style="font-size:0.7rem; font-weight:400; color:var(--text-muted);">Reuse KV blocks across requests</div>
+          </div>
+          <div class="arrow-down green short"></div>
+          <div style="display:flex; flex-direction:column; gap:0.35rem; width:100%; max-width:280px;">
+            <div class="d-block" style="background:rgba(46,204,113,0.06); border:1px solid rgba(46,204,113,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">SGLang / RadixAttention</div>
+            <div class="d-block" style="background:rgba(46,204,113,0.06); border:1px solid rgba(46,204,113,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">CachedAttention</div>
+            <div class="d-block" style="background:rgba(46,204,113,0.06); border:1px solid rgba(46,204,113,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">ChunkAttention</div>
+          </div>
+        </div>
+
+        <!-- Branch 2: Compression -->
+        <div style="flex:1; min-width:220px; display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+          <div class="d-block" style="background:rgba(155,89,182,0.15); border:1px solid var(--purple); color:var(--purple); width:100%; max-width:280px;">
+            KV Cache Compression
+            <div style="font-size:0.7rem; font-weight:400; color:var(--text-muted);">Reduce per-token storage</div>
+          </div>
+          <div class="arrow-down" style="background:var(--purple);">
+            <div style="position:absolute; bottom:0; left:-4px; border:5px solid transparent; border-top:7px solid var(--purple);"></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:0.35rem; width:100%; max-width:280px;">
+            <div class="d-block" style="background:rgba(155,89,182,0.06); border:1px solid rgba(155,89,182,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">CacheGen / CacheBlend</div>
+            <div class="d-block" style="background:rgba(155,89,182,0.06); border:1px solid rgba(155,89,182,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">KIVI / Gear / KVCACHE-Q</div>
+            <div class="d-block" style="background:rgba(155,89,182,0.06); border:1px solid rgba(155,89,182,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">DMC (Dynamic Memory Compression)</div>
+          </div>
+        </div>
+
+        <!-- Branch 3: Disaggregation -->
+        <div style="flex:1; min-width:220px; display:flex; flex-direction:column; gap:0.5rem; align-items:center;">
+          <div class="d-block" style="background:rgba(245,166,35,0.15); border:1px solid var(--amber); color:var(--amber); width:100%; max-width:280px;">
+            Disaggregated Serving
+            <div style="font-size:0.7rem; font-weight:400; color:var(--text-muted);">Separate compute & memory tiers</div>
+          </div>
+          <div class="arrow-down" style="background:var(--amber);">
+            <div style="position:absolute; bottom:0; left:-4px; border:5px solid transparent; border-top:7px solid var(--amber);"></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:0.35rem; width:100%; max-width:280px;">
+            <div class="d-block" style="background:rgba(245,166,35,0.06); border:1px solid rgba(245,166,35,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">Mooncake</div>
+            <div class="d-block" style="background:rgba(245,166,35,0.06); border:1px solid rgba(245,166,35,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">Splitwise / DistServe</div>
+            <div class="d-block" style="background:rgba(245,166,35,0.06); border:1px solid rgba(245,166,35,0.2); color:var(--text); font-size:0.75rem; padding:0.5rem;">MemServe / InfiniStore</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div class="diagram-caption">
+      Every major KV cache innovation since 2023 builds on or extends PagedAttention's block-based memory model.
+    </div>
+  </div>
+
+  <h3>Why PagedAttention is Foundational</h3>
+
+  <div class="grid-2">
+    <div class="card green">
+      <h4>Conceptual Breakthrough</h4>
+      <p>The insight that KV cache management is <em>isomorphic</em> to OS virtual memory
+      management unlocked decades of systems research (paging, CoW, swapping,
+      reference counting) for direct application to GPU memory in LLM serving.
+      This analogy continues to guide new research.</p>
+    </div>
+    <div class="card amber">
+      <h4>Universal Adoption</h4>
+      <p>By March 2026, vLLM has 48K+ GitHub stars and is the default serving engine
+      for most LLM deployments. Its block-based KV cache design has been adopted by
+      TensorRT-LLM, SGLang, and virtually every production serving system.</p>
+    </div>
+    <div class="card purple">
+      <h4>Abstraction Layer</h4>
+      <p>The block table abstraction cleanly separates the <em>logical</em> view (sequences see
+      contiguous KV) from the <em>physical</em> view (GPU DRAM uses scattered blocks).
+      This separation enables all downstream innovations: caching, compression,
+      disaggregation, and scheduling can all operate at the block level without
+      changing the attention computation.</p>
+    </div>
+    <div class="card">
+      <h4>Enabling the Agentic Survey</h4>
+      <p>This survey exists because PagedAttention created the block-based vocabulary
+      that all subsequent papers use. "KV blocks," "block tables," "physical vs. logical,"
+      "reference counting," "copy-on-write"&mdash;these concepts, introduced here, are the
+      shared language of every paper analyzed in this survey.</p>
+    </div>
+  </div>
+
+  <h3>Key Numbers at a Glance</h3>
+
+  <div style="display:flex; gap:1rem; flex-wrap:wrap; justify-content:center; margin-top:1rem;">
+    <div style="background:var(--surface); border:1px solid var(--green); border-radius:12px; padding:1.25rem 1.75rem; text-align:center; min-width:140px;">
+      <div style="font-size:2rem; font-weight:800; color:var(--green);">2-4x</div>
+      <div style="font-size:0.82rem; color:var(--text-muted);">Throughput gain</div>
+    </div>
+    <div style="background:var(--surface); border:1px solid var(--amber); border-radius:12px; padding:1.25rem 1.75rem; text-align:center; min-width:140px;">
+      <div style="font-size:2rem; font-weight:800; color:var(--amber);">96.3%</div>
+      <div style="font-size:0.82rem; color:var(--text-muted);">Memory utilization</div>
+    </div>
+    <div style="background:var(--surface); border:1px solid var(--primary); border-radius:12px; padding:1.25rem 1.75rem; text-align:center; min-width:140px;">
+      <div style="font-size:2rem; font-weight:800; color:var(--primary);">~0%</div>
+      <div style="font-size:0.82rem; color:var(--text-muted);">External frag.</div>
+    </div>
+    <div style="background:var(--surface); border:1px solid var(--purple); border-radius:12px; padding:1.25rem 1.75rem; text-align:center; min-width:140px;">
+      <div style="font-size:2rem; font-weight:800; color:var(--purple);">55%</div>
+      <div style="font-size:0.82rem; color:var(--text-muted);">Beam search savings</div>
+    </div>
+    <div style="background:var(--surface); border:1px solid #89b4fa; border-radius:12px; padding:1.25rem 1.75rem; text-align:center; min-width:140px;">
+      <div style="font-size:2rem; font-weight:800; color:#89b4fa;">16</div>
+      <div style="font-size:0.82rem; color:var(--text-muted);">Default block size</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<!-- REPOSITORY                                                       -->
+<!-- ================================================================ -->
+<section id="repo">
+  <h2>Repository &amp; Resources</h2>
+
+  <div class="grid-2">
+    <div class="card green">
+      <h4>Source Code</h4>
+      <p>
+        <a href="https://github.com/vllm-project/vllm" target="_blank">
+          github.com/vllm-project/vllm
+        </a>
+      </p>
+      <p style="font-size:0.88rem; color:var(--text-muted);">
+        8.5K lines of Python + 2K lines of C++/CUDA (original paper).
+        Supports OPT, GPT, LLaMA, and many other model architectures.
+        Built on FastAPI frontend with OpenAI-compatible API.
+      </p>
+    </div>
+    <div class="card amber">
+      <h4>Paper</h4>
+      <p>
+        <a href="https://arxiv.org/abs/2309.06180" target="_blank">
+          arXiv:2309.06180
+        </a>
+      </p>
+      <p style="font-size:0.88rem; color:var(--text-muted);">
+        Published at SOSP '23 (Symposium on Operating Systems Principles),
+        October 23&ndash;26, 2023, Koblenz, Germany.
+        ACM ISBN 979-8-4007-0229-7/23/10.
+      </p>
+    </div>
+  </div>
+
+  <h3>Implementation Summary</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Component</th>
+        <th>Language</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Frontend</td>
+        <td>Python (FastAPI)</td>
+        <td>OpenAI-compatible API; user-configurable sampling params and beam width</td>
+      </tr>
+      <tr>
+        <td>Scheduler</td>
+        <td>Python</td>
+        <td>Centralized FCFS scheduler with preemption; manages block tables</td>
+      </tr>
+      <tr>
+        <td>Block Manager</td>
+        <td>Python</td>
+        <td>CPU + GPU block allocators; reference counting; CoW tracking</td>
+      </tr>
+      <tr>
+        <td>PagedAttention Kernel</td>
+        <td>C++/CUDA</td>
+        <td>Fused reshape-write, block-read-attention, and block-copy kernels</td>
+      </tr>
+      <tr>
+        <td>Model Executor</td>
+        <td>Python (PyTorch)</td>
+        <td>Supports GPT, OPT, LLaMA; uses NCCL for tensor parallelism</td>
+      </tr>
+      <tr>
+        <td>Distributed</td>
+        <td>Python + NCCL</td>
+        <td>Megatron-LM style SPMD tensor parallelism across GPUs</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================ -->
+<!-- CLOSING CONTEXT BOX                                              -->
+<!-- ================================================================ -->
+<div class="callout info" style="margin-top:2rem;">
+  <div class="icon">i</div>
+  <div>
+    <strong>Survey Context:</strong> This page analyzes the foundational paper that introduced
+    block-based KV cache management. Every subsequent paper in the agentic AI survey&mdash;from
+    SGLang's RadixAttention to Mooncake's disaggregated architecture to CacheGen's compression
+    codecs&mdash;builds on, extends, or reacts to the concepts introduced here. Understanding
+    PagedAttention is a prerequisite for understanding the entire field.
+  </div>
+</div>
+
+</div><!-- /.container -->
+
+<!-- ================================================================ -->
+<!-- FOOTER                                                           -->
+<!-- ================================================================ -->
+<footer style="background:var(--mid); border-top:1px solid var(--border); padding:2rem; text-align:center; margin-top:2rem;">
+  <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:0.5rem;">
+    Technical analysis for the Agentic AI KV Cache Management Survey
+  </p>
+  <p style="color:var(--text-muted); font-size:0.8rem;">
+    Paper: Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention," SOSP '23
+  </p>
+</footer>
+
+</body>
+</html>

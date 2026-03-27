@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Continuum: Multi-Turn LLM Agent Scheduling with KV Cache TTL - Technical Analysis</title>
+<style>
+:root {
+  --dark: #16213e;
+  --mid: #0f3460;
+  --primary: #e94560;
+  --accent: #533483;
+  --light: #f8f9fa;
+  --text: #e0e0e0;
+  --text-dark: #2d2d2d;
+  --card-bg: #ffffff;
+  --code-bg: #1e1e2e;
+  --border: #e0e0e0;
+  --success: #27ae60;
+  --warn: #f39c12;
+  --info: #3498db;
+  --danger: #e74c3c;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: #f4f5f7;
+  color: var(--text-dark);
+  line-height: 1.7;
+}
+
+/* Hero Section */
+.hero {
+  background: linear-gradient(135deg, var(--dark) 0%, var(--mid) 50%, var(--accent) 100%);
+  color: var(--text);
+  padding: 80px 40px 60px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle at 30% 70%, rgba(233,69,96,0.08) 0%, transparent 50%),
+              radial-gradient(circle at 70% 30%, rgba(83,52,131,0.08) 0%, transparent 50%);
+  animation: drift 20s linear infinite;
+}
+@keyframes drift { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.hero h1 {
+  font-size: 2.4em;
+  font-weight: 700;
+  margin-bottom: 12px;
+  position: relative;
+  z-index: 1;
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.hero .subtitle {
+  font-size: 1.15em;
+  opacity: 0.85;
+  margin-bottom: 24px;
+  position: relative;
+  z-index: 1;
+}
+.badge-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  position: relative;
+  z-index: 1;
+}
+.badge {
+  display: inline-block;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.badge-arxiv { background: var(--primary); color: #fff; }
+.badge-venue { background: var(--accent); color: #fff; }
+.badge-year { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.3); }
+.badge-impl { background: var(--success); color: #fff; }
+.badge a { color: #fff; text-decoration: none; }
+
+/* Sticky Nav */
+.nav-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--dark);
+  padding: 0 20px;
+  display: flex;
+  justify-content: center;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+}
+.nav-sticky a {
+  color: #ccc;
+  text-decoration: none;
+  padding: 14px 18px;
+  font-size: 0.88em;
+  font-weight: 500;
+  transition: color 0.2s, border-bottom 0.2s;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.nav-sticky a:hover {
+  color: #fff;
+  border-bottom: 2px solid var(--primary);
+}
+
+/* Main Content */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 30px 20px;
+}
+
+section {
+  margin-bottom: 48px;
+}
+
+h2 {
+  font-size: 1.7em;
+  color: var(--dark);
+  margin-bottom: 20px;
+  padding-bottom: 10px;
+  border-bottom: 3px solid var(--primary);
+  display: inline-block;
+}
+
+h3 {
+  font-size: 1.25em;
+  color: var(--mid);
+  margin: 24px 0 12px;
+}
+
+p { margin-bottom: 14px; }
+
+/* Cards */
+.card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 24px 28px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  border-left: 5px solid var(--info);
+}
+.card.primary { border-left-color: var(--primary); }
+.card.success { border-left-color: var(--success); }
+.card.warn { border-left-color: var(--warn); }
+.card.accent { border-left-color: var(--accent); }
+.card.danger { border-left-color: var(--danger); }
+
+.card h3 { margin-top: 0; }
+
+/* Callouts */
+.callout {
+  padding: 16px 20px;
+  border-radius: 8px;
+  margin: 18px 0;
+  font-size: 0.95em;
+}
+.callout-note {
+  background: #e8f4fd;
+  border-left: 4px solid var(--info);
+  color: #1a5276;
+}
+.callout-warn {
+  background: #fef9e7;
+  border-left: 4px solid var(--warn);
+  color: #7d6608;
+}
+.callout-info {
+  background: #eaf7ef;
+  border-left: 4px solid var(--success);
+  color: #1e6b3e;
+}
+.callout-danger {
+  background: #fdedec;
+  border-left: 4px solid var(--danger);
+  color: #922b21;
+}
+
+/* Code Blocks */
+pre {
+  background: var(--code-bg);
+  color: #cdd6f4;
+  padding: 20px 24px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.88em;
+  line-height: 1.6;
+  margin: 14px 0 18px;
+}
+code {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+p code, li code, td code {
+  background: #eef1f7;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: var(--mid);
+}
+.kw { color: #cba6f7; }  /* keywords - purple */
+.fn { color: #89b4fa; }  /* functions - blue */
+.cm { color: #6c7086; }  /* comments - gray */
+.st { color: #a6e3a1; }  /* strings - green */
+.nu { color: #fab387; }  /* numbers - orange */
+.op { color: #89dceb; }  /* operators - cyan */
+.ty { color: #f9e2af; }  /* types - yellow */
+.bi { color: #f38ba8; }  /* builtins - pink */
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0 24px;
+  font-size: 0.92em;
+}
+th {
+  background: var(--dark);
+  color: #fff;
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+}
+td {
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+}
+tr:nth-child(even) { background: #f8f9fa; }
+tr:hover { background: #eef1f7; }
+
+/* Diagram Styles */
+.diagram-container {
+  background: #f8f9fb;
+  border-radius: 12px;
+  padding: 32px 24px;
+  margin: 20px 0 28px;
+  border: 1px solid #e0e4eb;
+  overflow-x: auto;
+}
+.diagram-title {
+  text-align: center;
+  font-weight: 700;
+  font-size: 1.05em;
+  color: var(--dark);
+  margin-bottom: 24px;
+}
+
+/* Block Diagram Shared Styles */
+.block {
+  border-radius: 8px;
+  padding: 14px 18px;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-align: center;
+  color: #fff;
+  position: relative;
+}
+.block-dark { background: var(--dark); }
+.block-mid { background: var(--mid); }
+.block-primary { background: var(--primary); }
+.block-accent { background: var(--accent); }
+.block-success { background: var(--success); }
+.block-info { background: var(--info); }
+.block-warn { background: var(--warn); color: var(--text-dark); }
+.block-light {
+  background: #fff;
+  color: var(--text-dark);
+  border: 2px solid #d0d5dd;
+}
+
+.block-sm {
+  padding: 8px 12px;
+  font-size: 0.78em;
+  border-radius: 6px;
+}
+
+/* Arrows */
+.arrow-down {
+  text-align: center;
+  font-size: 1.6em;
+  color: #888;
+  line-height: 1.2;
+  margin: 6px 0;
+}
+.arrow-right {
+  display: flex;
+  align-items: center;
+  color: #888;
+  font-size: 1.6em;
+  margin: 0 8px;
+}
+.arrow-label {
+  font-size: 0.7em;
+  color: #666;
+  text-align: center;
+  font-weight: 500;
+  margin: 2px 0;
+}
+
+/* Flow Layouts */
+.flow-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.flow-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Specific architecture diagram */
+.arch-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  max-width: 880px;
+  margin: 0 auto;
+}
+.arch-layer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.arch-box {
+  border-radius: 10px;
+  padding: 16px 22px;
+  font-size: 0.88em;
+  text-align: center;
+  min-width: 140px;
+}
+.arch-box .sub {
+  font-size: 0.8em;
+  opacity: 0.8;
+  font-weight: 400;
+  display: block;
+  margin-top: 4px;
+}
+
+/* File tree */
+.file-tree {
+  background: var(--code-bg);
+  color: #cdd6f4;
+  padding: 20px 24px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.84em;
+  line-height: 1.9;
+}
+.file-tree .dir { color: #89b4fa; }
+.file-tree .file { color: #a6e3a1; }
+.file-tree .note { color: #6c7086; font-style: italic; }
+
+/* TTL diagram specifics */
+.ttl-timeline {
+  display: flex;
+  align-items: stretch;
+  margin: 24px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  height: 52px;
+  border: 2px solid #d0d5dd;
+}
+.ttl-segment {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78em;
+  font-weight: 600;
+  color: #fff;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+/* Comparison checkmarks */
+.check { color: var(--success); font-weight: bold; }
+.cross { color: var(--danger); font-weight: bold; }
+.partial { color: var(--warn); font-weight: bold; }
+
+/* Grid layout for side-by-side */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 768px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 1.6em; }
+  .nav-sticky { flex-wrap: wrap; }
+  .nav-sticky a { padding: 10px 12px; font-size: 0.82em; }
+}
+
+.metric-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.metric-box .value {
+  font-size: 2em;
+  font-weight: 700;
+  color: var(--primary);
+}
+.metric-box .label {
+  font-size: 0.88em;
+  color: #666;
+  margin-top: 4px;
+}
+
+/* Decision box for TTL */
+.decision-diamond {
+  width: 120px;
+  height: 120px;
+  background: var(--warn);
+  transform: rotate(45deg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 20px auto;
+  border-radius: 8px;
+}
+.decision-diamond span {
+  transform: rotate(-45deg);
+  font-size: 0.75em;
+  font-weight: 700;
+  color: var(--text-dark);
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================ -->
+<!-- HERO SECTION                                 -->
+<!-- ============================================ -->
+<div class="hero">
+  <h1>Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live</h1>
+  <p class="subtitle">A KV cache-aware scheduling framework that uses predicted tool-call durations to decide whether to retain or evict cached state during agent pauses</p>
+  <div class="badge-row">
+    <span class="badge badge-arxiv"><a href="https://arxiv.org/abs/2511.02230" target="_blank">arXiv:2511.02230</a></span>
+    <span class="badge badge-venue">Systems / ML Serving</span>
+    <span class="badge badge-year">2025</span>
+    <span class="badge badge-impl">Built on vLLM</span>
+  </div>
+</div>
+
+<!-- ============================================ -->
+<!-- STICKY NAVIGATION                            -->
+<!-- ============================================ -->
+<nav class="nav-sticky">
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#repo">Repo Analysis</a>
+  <a href="#mechanisms">Core Mechanisms</a>
+  <a href="#results">Results</a>
+  <a href="#claims">Claims vs Code</a>
+  <a href="#reproduce">Reproduce</a>
+</nav>
+
+<div class="container">
+
+<!-- ============================================ -->
+<!-- SECTION 1: OVERVIEW                          -->
+<!-- ============================================ -->
+<section id="overview">
+  <h2>Paper Overview</h2>
+
+  <div class="card primary">
+    <h3>The Problem</h3>
+    <p>Multi-turn LLM agents (e.g., coding assistants running SWE-Bench tasks) alternate between generating text and executing tool calls (shell commands, API calls). During tool execution, the agent's KV cache sits idle on GPU memory. In high-concurrency settings, this creates a fundamental tension:</p>
+    <ul>
+      <li><strong>Keep the KV cache pinned:</strong> the next turn avoids expensive prefill recomputation, but GPU memory is wasted while the tool runs.</li>
+      <li><strong>Evict the KV cache:</strong> GPU memory is freed for other requests, but the returning request must re-prefill all its context.</li>
+    </ul>
+    <p>Standard FCFS scheduling in vLLM is unaware of this multi-turn structure. The paper reports that <strong>58.2% of end-to-end latency</strong> in baseline vLLM comes from scheduling bubbles -- idle time caused by requests waiting in queue while KV cache is locked by paused agents.</p>
+  </div>
+
+  <div class="card success">
+    <h3>Key Contributions</h3>
+    <ol>
+      <li><strong>KV Cache TTL (Time-to-Live):</strong> A mechanism that assigns an expiration timer to each pinned KV cache. If the tool call returns before the TTL expires, the cache is reused; otherwise it is evicted to free memory.</li>
+      <li><strong>Tool-call duration prediction:</strong> Uses historical inter-request intervals (per-command averages) to estimate how long each tool call will take, enabling informed TTL decisions.</li>
+      <li><strong>Program-level FCFS scheduling:</strong> A <code>ContinuumRequestQueue</code> that groups requests by <code>job_id</code> and applies job-level first-come-first-served ordering, prioritizing pinned requests whose cache is still warm.</li>
+      <li><strong>Cost-benefit eviction logic:</strong> Compares predicted tool-call duration against a threshold to decide whether retaining the cache (saving prefill) is worth the memory occupation cost.</li>
+    </ol>
+  </div>
+
+  <div class="card accent">
+    <h3>Evaluation Summary</h3>
+    <p>The system is evaluated on <strong>SWE-Bench Verified (500 instances)</strong> and <strong>BFCL traces</strong> using <strong>Llama-3.1 8B and 70B</strong> models on H100 GPUs. Key claim: Continuum achieves a <strong>2.16x improvement</strong> in average job completion time over baseline vLLM FCFS scheduling for 500 concurrent SWE-Bench jobs with Llama-3.1-70B on 4 H100s.</p>
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 2: SYSTEM ARCHITECTURE               -->
+<!-- ============================================ -->
+<section id="architecture">
+  <h2>System Architecture</h2>
+
+  <p>Continuum extends vLLM's V1 scheduler with three new components: a tool-call estimator, a pin/unpin manager for KV cache, and a program-level request queue. The following diagram illustrates the end-to-end flow.</p>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Continuum System Architecture</div>
+    <div class="arch-grid">
+
+      <!-- Layer 1: Agent Client -->
+      <div class="arch-layer">
+        <div class="arch-box block-dark" style="min-width:340px;">
+          Agent Client (mini-swe-agent)
+          <span class="sub">Sends job_id, is_last_step via extra_body in OpenAI API</span>
+        </div>
+      </div>
+
+      <div class="arrow-down">&#9660;</div>
+      <div class="arrow-label">OpenAI-compatible API (POST /v1/chat/completions)</div>
+
+      <!-- Layer 2: vLLM API Layer -->
+      <div class="arch-layer">
+        <div class="arch-box block-mid" style="min-width:340px;">
+          vLLM Entrypoints
+          <span class="sub">protocol.py: Extracts job_id, is_last_step into SamplingParams.extra_args</span>
+        </div>
+      </div>
+
+      <div class="arrow-down">&#9660;</div>
+      <div class="arrow-label">EngineCoreRequest with extra metadata</div>
+
+      <!-- Layer 3: Scheduler Core -->
+      <div style="background:#e8ecf4; border-radius:12px; padding:24px; border:2px solid #c5cee0;">
+        <div style="text-align:center; font-weight:700; color:var(--dark); margin-bottom:16px; font-size:1.05em;">Scheduler (scheduler.py) -- Continuum Extensions</div>
+        <div class="arch-layer" style="gap:16px;">
+          <div class="arch-box block-primary" style="min-width:200px;">
+            ToolCallEstimator
+            <span class="sub">Predicts tool duration from history; decides TTL</span>
+          </div>
+          <div class="arch-box block-accent" style="min-width:200px;">
+            ContinuumRequestQueue
+            <span class="sub">Job-level FCFS; pinned priority</span>
+          </div>
+          <div class="arch-box block-success" style="min-width:200px;">
+            Pin/Unpin Manager
+            <span class="sub">pinned_requests list; TTL expiry via unpin_requests_regular()</span>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <div class="arch-layer" style="gap:16px;">
+            <div class="arch-box block-info" style="min-width:180px;">
+              Continuum_Recorder
+              <span class="sub">Logs timestamps for analysis</span>
+            </div>
+            <div class="arch-box block-warn" style="min-width:180px;">
+              ToolCallParser
+              <span class="sub">Extracts bash commands from LLM output</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-down">&#9660;</div>
+
+      <!-- Layer 4: KV Cache -->
+      <div class="arch-layer">
+        <div class="arch-box block-dark" style="min-width:240px;">
+          KVCacheManager
+          <span class="sub">allocate_slots() / free() / get_computed_blocks()</span>
+        </div>
+        <div class="arch-box block-mid" style="min-width:240px;">
+          LMCache Connector (optional)
+          <span class="sub">CPU offloading via KVConnectorBase_V1</span>
+        </div>
+      </div>
+
+      <div class="arrow-down">&#9660;</div>
+
+      <!-- Layer 5: GPU -->
+      <div class="arch-layer">
+        <div class="arch-box block-primary" style="min-width:420px; background: linear-gradient(90deg, var(--primary), var(--accent));">
+          GPU Workers (H100 x N, Tensor Parallel)
+          <span class="sub">Model execution with cached / recomputed KV states</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="callout callout-note">
+    <strong>Key insight:</strong> The entire Continuum mechanism is confined to the scheduler layer. No changes are needed in the model executor, attention kernels, or GPU workers. This makes it a relatively lightweight modification to vLLM.
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 3: REPO IMPLEMENTATION ANALYSIS      -->
+<!-- ============================================ -->
+<section id="repo">
+  <h2>Repo Implementation Analysis</h2>
+
+  <h3>Repository Structure</h3>
+  <p>The implementation is a fork of vLLM (V1 engine) with Continuum-specific modifications concentrated in a small set of files.</p>
+
+  <div class="file-tree">
+    <span class="dir">vllm-continuum/</span><br>
+    &nbsp;&nbsp;<span class="dir">vllm/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/core/sched/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">scheduler.py</span> <span class="note"># Main scheduler -- pin/unpin, preemption, TTL logic</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">request_queue.py</span> <span class="note"># ContinuumRequestQueue -- job-level FCFS</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/core/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">estimate_with_func.py</span> <span class="note"># ToolCallEstimator, ToolCallParser, Continuum_Recorder</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">v1/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">request.py</span> <span class="note"># Request class -- added job_id, last_func_call, is_last_step, this_func_call</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">config/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">scheduler.py</span> <span class="note"># SchedulerPolicy: "continuum" added as third option</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">entrypoints/openai/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">protocol.py</span> <span class="note"># ChatCompletionRequest -- job_id, is_last_step fields</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">sampling_params.py</span> <span class="note"># extra_args dict for passing metadata</span><br>
+    &nbsp;&nbsp;<span class="dir">mini-swe-agent/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">src/minisweagent/models/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">vllm_model.py</span> <span class="note"># VllmModel -- sends job_id, is_last_step via extra_body</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="dir">src/minisweagent/agents/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="file">default.py</span> <span class="note"># DefaultAgent -- agentic loop with step_limit, job_timeout</span><br>
+    &nbsp;&nbsp;<span class="dir">continuum_exp/</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">analyze.py</span> <span class="note"># Post-hoc analysis of scheduler_timestamps</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="file">tool_traces.json</span> <span class="note"># Recorded tool-call traces</span><br>
+  </div>
+
+  <h3>Key Classes and Their Roles</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Class</th>
+        <th>File</th>
+        <th>Purpose</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ContinuumRequestQueue</code></td>
+        <td>request_queue.py</td>
+        <td>Implements job-level FCFS with pinned-request priority. Extends <code>deque</code> and tracks <code>job_id_first_entry_time</code></td>
+      </tr>
+      <tr>
+        <td><code>ToolCallEstimator</code></td>
+        <td>estimate_with_func.py</td>
+        <td>Maintains per-command execution time history. Computes running average. Decides pin duration via <code>set_up_pin()</code></td>
+      </tr>
+      <tr>
+        <td><code>ToolCallParser</code></td>
+        <td>estimate_with_func.py</td>
+        <td>Extracts bash command names from LLM output via regex matching on markdown code blocks</td>
+      </tr>
+      <tr>
+        <td><code>Continuum_Recorder</code></td>
+        <td>estimate_with_func.py</td>
+        <td>Timestamps all scheduler events (arrival, departure, pin, unpin, eviction) for post-hoc analysis</td>
+      </tr>
+      <tr>
+        <td><code>Scheduler</code></td>
+        <td>scheduler.py</td>
+        <td>Extended with <code>pinned_requests</code> list, TTL-based unpin logic, Continuum preemption, and tool-call estimator integration</td>
+      </tr>
+      <tr>
+        <td><code>Request</code></td>
+        <td>request.py</td>
+        <td>Extended with <code>job_id</code>, <code>last_func_call</code>, <code>is_last_step</code>, <code>this_func_call</code> fields</td>
+      </tr>
+      <tr>
+        <td><code>VllmModel</code></td>
+        <td>vllm_model.py</td>
+        <td>Client-side model wrapper that injects <code>job_id</code> and <code>is_last_step</code> into <code>extra_body</code></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 4: CORE MECHANISMS                   -->
+<!-- ============================================ -->
+<section id="mechanisms">
+  <h2>Core Mechanisms</h2>
+
+  <!-- 4.1 TTL Computation -->
+  <h3>4.1 TTL Computation and Pin/Unpin Logic</h3>
+
+  <div class="card primary">
+    <h3>How TTL Works in the Code</h3>
+    <p>When a request finishes generating, the scheduler calls <code>_free_blocks()</code>. If the scheduling policy is Continuum and the request is <strong>not</strong> on its last step, the estimator is consulted to determine a pin duration. If the predicted tool-call time is short (below the threshold), the KV cache is pinned for a fixed TTL window.</p>
+  </div>
+
+  <pre><span class="cm"># scheduler.py -- _free_blocks() [lines 1349-1370]</span>
+<span class="kw">def</span> <span class="fn">_free_blocks</span>(<span class="ty">self</span>, request: Request):
+    <span class="kw">assert</span> request.is_finished()
+    <span class="cm"># First, unpin any existing pin for this job_id</span>
+    <span class="kw">for</span> req, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
+        <span class="kw">if</span> req.job_id == request.job_id:
+            <span class="ty">self</span>.<span class="fn">unpin_request</span>(req, end_time)
+
+    <span class="cm"># Continuum TTL decision</span>
+    <span class="kw">if</span> <span class="ty">self</span>.policy == SchedulingPolicy.CONTINUUM <span class="kw">and not</span> request.is_last_step:
+        length_of_pin = <span class="ty">self</span>.tool_call_estimator.<span class="fn">set_up_pin</span>(request)
+        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:  <span class="cm"># Floating point guard</span>
+            <span class="ty">self</span>.<span class="fn">pin_request</span>(request, length_of_pin)
+            <span class="kw">del</span> <span class="ty">self</span>.requests[request.request_id]
+            <span class="kw">return</span>
+
+    <span class="ty">self</span>.kv_cache_manager.<span class="fn">free</span>(request)
+    <span class="kw">del</span> <span class="ty">self</span>.requests[request.request_id]</pre>
+
+  <p>The <code>set_up_pin()</code> method in <code>ToolCallEstimator</code> implements the cost-benefit decision:</p>
+
+  <pre><span class="cm"># estimate_with_func.py [lines 150-159]</span>
+FIXED_THRESHOLD_CONTINUUM = <span class="nu">2.0</span>  <span class="cm"># seconds</span>
+
+<span class="kw">def</span> <span class="fn">set_up_pin</span>(<span class="ty">self</span>, request: Request) -> <span class="ty">float</span>:
+    <span class="kw">if</span> request.this_func_call <span class="kw">is</span> <span class="kw">None</span>:
+        <span class="kw">return</span> <span class="nu">0</span>
+
+    this_func_call_exec_time = <span class="ty">self</span>.<span class="fn">get_func_call_exec_time</span>(
+        request.this_func_call) <span class="kw">or</span> <span class="nu">0.0</span>
+
+    <span class="kw">if</span> this_func_call_exec_time > FIXED_THRESHOLD_CONTINUUM:
+        <span class="kw">return</span> <span class="nu">0</span>          <span class="cm"># Tool too slow -- don't pin, evict cache</span>
+
+    <span class="kw">return</span> FIXED_THRESHOLD_CONTINUUM  <span class="cm"># Pin for the threshold duration</span></pre>
+
+  <div class="diagram-container">
+    <div class="diagram-title">TTL Decision Flow</div>
+    <div class="flow-col">
+      <div class="block block-mid" style="min-width:280px;">Request finishes generating</div>
+      <div class="arrow-down">&#9660;</div>
+
+      <div style="display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; justify-content:center;">
+        <div class="flow-col">
+          <div class="block block-warn block-sm" style="min-width:120px; padding:12px;">is_last_step?</div>
+          <div style="display:flex; gap:40px;">
+            <div class="flow-col">
+              <div class="arrow-label">Yes</div>
+              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
+              <div class="block block-danger block-sm">Evict KV cache</div>
+            </div>
+            <div class="flow-col">
+              <div class="arrow-label">No</div>
+              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
+              <div class="block block-info block-sm" style="min-width:160px;">Check func_call exists</div>
+              <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
+              <div class="block block-warn block-sm" style="min-width:180px; padding:12px;">exec_time &gt; 2.0s?</div>
+              <div style="display:flex; gap:40px;">
+                <div class="flow-col">
+                  <div class="arrow-label">Yes (slow tool)</div>
+                  <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
+                  <div class="block block-danger block-sm">Evict KV cache</div>
+                </div>
+                <div class="flow-col">
+                  <div class="arrow-label">No (fast tool)</div>
+                  <div class="arrow-down" style="font-size:1.2em;">&#9660;</div>
+                  <div class="block block-success block-sm" style="min-width:160px;">Pin for 2.0s TTL</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.2 TTL Expiry -->
+  <h3>4.2 TTL Expiry and Regular Unpinning</h3>
+
+  <p>At the start of every scheduling step, <code>unpin_requests_regular()</code> checks the wall-clock time against each pinned request's expiry. If the TTL has elapsed and the job has not yet returned to the waiting queue, the cache is freed.</p>
+
+  <pre><span class="cm"># scheduler.py [lines 248-256]</span>
+<span class="kw">def</span> <span class="fn">unpin_requests_regular</span>(<span class="ty">self</span>) -> <span class="kw">None</span>:
+    waiting_job_ids = [req.job_id <span class="kw">for</span> req <span class="kw">in</span> <span class="ty">self</span>.waiting]
+
+    <span class="kw">for</span> request, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
+        <span class="cm"># Unpin if: (1) job not back in waiting AND (2) TTL expired</span>
+        <span class="kw">if</span> request.job_id <span class="kw">not in</span> waiting_job_ids <span class="kw">and</span> time.<span class="fn">time</span>() >= end_time:
+            <span class="ty">self</span>.<span class="fn">unpin_request</span>(request, end_time)</pre>
+
+  <div class="diagram-container">
+    <div class="diagram-title">KV Cache Lifecycle During a Multi-Turn Interaction</div>
+    <div class="ttl-timeline">
+      <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N)</div>
+      <div class="ttl-segment" style="flex:1.5; background:var(--success);">Pinned (TTL)</div>
+      <div class="ttl-segment" style="flex:0.5; background:var(--warn); color:var(--text-dark); border-left:3px dashed #888;">Tool returns</div>
+      <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N+1)</div>
+    </div>
+    <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#666; padding:0 4px;">
+      <span>Request departs</span>
+      <span>Cache held on GPU</span>
+      <span>Cache hit -- skip prefill</span>
+      <span>Continue from cached state</span>
+    </div>
+
+    <div style="margin-top:24px;">
+      <div style="font-weight:600; font-size:0.9em; margin-bottom:8px; color:var(--dark);">Contrast: When TTL expires before tool returns</div>
+      <div class="ttl-timeline">
+        <div class="ttl-segment" style="flex:2; background:var(--info);">LLM Generate (Turn N)</div>
+        <div class="ttl-segment" style="flex:1.5; background:var(--success);">Pinned (TTL)</div>
+        <div class="ttl-segment" style="flex:1; background:var(--danger);">Evicted</div>
+        <div class="ttl-segment" style="flex:0.5; background:var(--warn); color:var(--text-dark); border-left:3px dashed #888;">Tool returns</div>
+        <div class="ttl-segment" style="flex:2; background:#888;">Full Re-Prefill</div>
+      </div>
+      <div style="display:flex; justify-content:space-between; font-size:0.78em; color:#666; padding:0 4px;">
+        <span>Request departs</span>
+        <span>Cache held</span>
+        <span>TTL expired, freed</span>
+        <span>Cache miss</span>
+        <span>Must recompute KV</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.3 Tool-Call Duration Prediction -->
+  <h3>4.3 Tool-Call Duration Prediction</h3>
+
+  <div class="card accent">
+    <h3>How Prediction Works</h3>
+    <p>The <code>ToolCallEstimator</code> maintains a dictionary mapping command names (e.g., <code>"ls"</code>, <code>"git"</code>, <code>"python"</code>) to their observed execution times. When a request returns from a tool call, the estimator updates the running average for that command.</p>
+  </div>
+
+  <pre><span class="cm"># estimate_with_func.py [lines 136-147]</span>
+<span class="kw">def</span> <span class="fn">update_func_call_exec_time</span>(<span class="ty">self</span>, job_id: <span class="ty">str</span>) -> <span class="kw">None</span>:
+    last_departure_time = <span class="ty">self</span>.job_to_history[job_id][<span class="nu">-1</span>][<span class="st">"departure_time"</span>]
+    func = <span class="ty">self</span>.job_to_history[job_id][<span class="nu">-1</span>][<span class="st">"func_call"</span>]
+    exec_time = time.<span class="fn">time</span>() - last_departure_time
+
+    <span class="kw">if</span> func <span class="kw">not in</span> <span class="ty">self</span>.record_func_call_to_exec_time:
+        <span class="ty">self</span>.record_func_call_to_exec_time[func] = [exec_time]
+    <span class="kw">else</span>:
+        <span class="ty">self</span>.record_func_call_to_exec_time[func].<span class="fn">append</span>(exec_time)
+    <span class="cm"># Running average across all observed executions of this command</span>
+    <span class="ty">self</span>.func_call_to_exec_time[func] = (
+        <span class="bi">sum</span>(<span class="ty">self</span>.record_func_call_to_exec_time[func]) /
+        <span class="bi">len</span>(<span class="ty">self</span>.record_func_call_to_exec_time[func])
+    )</pre>
+
+  <p>The <code>ToolCallParser</code> extracts the tool name from LLM output using regex on markdown bash code blocks -- the same format used by mini-swe-agent:</p>
+
+  <pre><span class="cm"># estimate_with_func.py [lines 73-92]</span>
+<span class="kw">class</span> <span class="ty">ToolCallParser</span>:
+    <span class="kw">def</span> <span class="fn">parse</span>(<span class="ty">self</span>, text: <span class="ty">str</span>) -> Optional[<span class="ty">str</span>]:
+        <span class="cm"># Same regex as mini-swe-agent</span>
+        actions = re.<span class="fn">findall</span>(<span class="st">r"```bash\s*\n(.*?)\n```"</span>, text, re.DOTALL)
+        <span class="kw">if</span> <span class="bi">len</span>(actions) == <span class="nu">1</span>:
+            bash_action = actions[<span class="nu">0</span>].<span class="fn">strip</span>()
+            words = bash_action.<span class="fn">split</span>()
+            <span class="kw">if</span> words:
+                <span class="kw">return</span> words[<span class="nu">0</span>]  <span class="cm"># e.g., "ls", "git", "find"</span>
+        <span class="kw">return</span> <span class="kw">None</span></pre>
+
+  <!-- 4.4 Program-Level FCFS Scheduling -->
+  <h3>4.4 Program-Level FCFS Scheduling</h3>
+
+  <div class="card success">
+    <h3>ContinuumRequestQueue Design</h3>
+    <p>Unlike standard FCFS (which orders by individual request arrival time), the Continuum queue orders by <strong>job-level first entry time</strong>. Each <code>job_id</code> (representing an agent session) is assigned the timestamp of its first request, and all subsequent turns from that job inherit that priority. Additionally, jobs whose KV cache is currently pinned are given scheduling priority.</p>
+  </div>
+
+  <pre><span class="cm"># request_queue.py -- ContinuumRequestQueue.peek_request() [lines 241-273]</span>
+<span class="kw">def</span> <span class="fn">peek_request</span>(<span class="ty">self</span>, pinned_requests, kv_cache_manager, connector):
+    <span class="kw">if not</span> <span class="ty">self</span>:
+        <span class="kw">raise</span> <span class="ty">IndexError</span>(<span class="st">"peek from an empty queue"</span>)
+
+    pinned_request_job_id_set = {req.job_id <span class="kw">for</span> req, _ <span class="kw">in</span> pinned_requests}
+
+    <span class="cm"># Phase 1: Prioritize requests with pinned KV cache (warm cache)</span>
+    earliest_request = <span class="kw">None</span>
+    earliest_entry_time = <span class="bi">float</span>(<span class="st">'inf'</span>)
+    <span class="kw">for</span> request <span class="kw">in</span> <span class="ty">self</span>:
+        <span class="kw">if</span> request.job_id <span class="kw">in</span> pinned_request_job_id_set:
+            job_entry_time = <span class="ty">self</span>.job_id_first_entry_time.<span class="fn">get</span>(
+                request.job_id, request.arrival_time)
+            <span class="kw">if</span> job_entry_time < earliest_entry_time:
+                earliest_entry_time = job_entry_time
+                earliest_request = request
+    <span class="kw">if</span> earliest_request <span class="kw">is not</span> <span class="kw">None</span>:
+        <span class="kw">return</span> earliest_request    <span class="cm"># Use warm cache -- avoid re-prefill</span>
+
+    <span class="cm"># Phase 2: Fall back to job-level FCFS</span>
+    <span class="kw">for</span> request <span class="kw">in</span> <span class="ty">self</span>:
+        job_entry_time = <span class="ty">self</span>.job_id_first_entry_time.<span class="fn">get</span>(
+            request.job_id, request.arrival_time)
+        <span class="kw">if</span> job_entry_time < earliest_entry_time:
+            earliest_entry_time = job_entry_time
+            earliest_request = request
+    <span class="kw">return</span> earliest_request</pre>
+
+  <div class="diagram-container">
+    <div class="diagram-title">ContinuumRequestQueue Scheduling Priority</div>
+    <div class="flow-col" style="gap:12px;">
+      <div style="display:flex; gap:16px; align-items:stretch; flex-wrap:wrap; justify-content:center;">
+        <div class="flow-col" style="gap:8px;">
+          <div class="block block-success" style="min-width:260px;">
+            Priority 1: Pinned Requests
+            <div style="font-size:0.8em; font-weight:400; margin-top:4px;">KV cache still warm on GPU</div>
+          </div>
+          <div style="font-size:0.75em; color:#666;">Among pinned: earliest job_id_first_entry_time wins</div>
+        </div>
+        <div class="arrow-right" style="font-size:1em; color:#aaa;">then &#9654;</div>
+        <div class="flow-col" style="gap:8px;">
+          <div class="block block-info" style="min-width:260px;">
+            Priority 2: Job-level FCFS
+            <div style="font-size:0.8em; font-weight:400; margin-top:4px;">No pinned cache available</div>
+          </div>
+          <div style="font-size:0.75em; color:#666;">Earliest job_id_first_entry_time wins</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.5 Preemption -->
+  <h3>4.5 Continuum-Aware Preemption</h3>
+
+  <p>When the scheduler cannot allocate KV cache blocks for a new token, it must preempt a running request. The Continuum policy avoids preempting requests that are on their last step (about to finish), preferring to evict the most recently arrived job:</p>
+
+  <pre><span class="cm"># scheduler.py [lines 195-234]</span>
+<span class="kw">def</span> <span class="fn">pop_running_request_based_on_last_step</span>(<span class="ty">self</span>, request):
+    <span class="kw">if</span> <span class="bi">len</span>(<span class="ty">self</span>.running) <= <span class="nu">1</span>:
+        <span class="cm"># If only one running req, try to reclaim from pinned_requests</span>
+        <span class="cm"># (evict the pin with the latest end_time)</span>
+        latest_pin_end_request = <span class="kw">None</span>
+        latest_pin_end_time = -<span class="bi">float</span>(<span class="st">'inf'</span>)
+        <span class="kw">for</span> req, end_time <span class="kw">in</span> <span class="ty">self</span>.pinned_requests:
+            <span class="kw">if</span> end_time > latest_pin_end_time:
+                latest_pin_end_time = end_time
+                latest_pin_end_request = req
+        <span class="kw">if</span> latest_pin_end_request <span class="kw">is not</span> <span class="kw">None</span>:
+            <span class="ty">self</span>.pinned_requests.<span class="fn">remove</span>((latest_pin_end_request, latest_pin_end_time))
+            <span class="kw">return</span> latest_pin_end_request, <span class="kw">True</span>  <span class="cm"># is_unpin=True</span>
+
+    <span class="cm"># Prefer to evict non-last-step requests with latest entry time</span>
+    latest_request = <span class="kw">None</span>
+    latest_entry_time = -<span class="bi">float</span>(<span class="st">'inf'</span>)
+    <span class="kw">for</span> req <span class="kw">in</span> <span class="ty">self</span>.running:
+        job_entry_time = <span class="ty">self</span>.running_job_id_first_entry_time.<span class="fn">get</span>(req.job_id)
+        <span class="kw">if</span> job_entry_time > latest_entry_time <span class="kw">and not</span> req.is_last_step:
+            latest_entry_time = job_entry_time
+            latest_request = req
+    <span class="cm">...</span></pre>
+
+  <!-- 4.6 Client Integration -->
+  <h3>4.6 Client-Side Integration (mini-swe-agent)</h3>
+
+  <p>The <code>VllmModel</code> client passes Continuum metadata through the OpenAI-compatible API's <code>extra_body</code> parameter:</p>
+
+  <pre><span class="cm"># mini-swe-agent/src/minisweagent/models/vllm_model.py [lines 124-142]</span>
+<span class="cm"># Calculate is_last_step based on step_limit</span>
+is_last_step = <span class="kw">False</span>
+<span class="kw">if</span> <span class="ty">self</span>.config.step_limit > <span class="nu">0</span>:
+    is_last_step = (<span class="ty">self</span>.n_calls + <span class="nu">1</span>) >= <span class="ty">self</span>.config.step_limit
+
+<span class="cm"># Prepare extra_body with Continuum-specific parameters</span>
+extra_body = {
+    <span class="st">"ignore_eos"</span>: <span class="kw">False</span>,
+    <span class="st">"job_id"</span>: <span class="bi">str</span>(job_id_value),
+    <span class="st">"is_last_step"</span>: is_last_step
+}
+
+<span class="kw">return</span> <span class="ty">self</span>.client.chat.completions.<span class="fn">create</span>(
+    model=<span class="ty">self</span>.config.model_name,
+    messages=messages,
+    extra_body=extra_body,
+    **filtered_params
+)</pre>
+
+  <div class="callout callout-info">
+    <strong>Data flow:</strong> <code>extra_body</code> fields propagate through: <code>ChatCompletionRequest</code> (protocol.py) &#8594; <code>SamplingParams.extra_args</code> &#8594; <code>Request.from_engine_core_request()</code> &#8594; <code>Request.job_id</code> / <code>Request.is_last_step</code>. The scheduler then uses these fields for TTL and queue ordering decisions.
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 5: PERFORMANCE RESULTS               -->
+<!-- ============================================ -->
+<section id="results">
+  <h2>Performance Results</h2>
+
+  <h3>SWE-Bench Verified (500 Jobs, Llama-3.1-70B, 4x H100)</h3>
+
+  <p>The repository includes actual benchmark results comparing Continuum scheduling against baseline vLLM FCFS for 500 SWE-Bench jobs.</p>
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:16px; margin:20px 0;">
+    <div class="metric-box">
+      <div class="value">2.16x</div>
+      <div class="label">Avg Job Duration Speedup</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">215.5s</div>
+      <div class="label">Continuum Avg Duration</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">465.2s</div>
+      <div class="label">vLLM FCFS Avg Duration</div>
+    </div>
+    <div class="metric-box">
+      <div class="value" style="font-size:1.5em;">1.61x</div>
+      <div class="label">Total Time Speedup</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        <th>vLLM FCFS (baseline)</th>
+        <th>Continuum</th>
+        <th>Improvement</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Number of Jobs</td>
+        <td>500</td>
+        <td>500</td>
+        <td>--</td>
+      </tr>
+      <tr>
+        <td>Average Job Duration</td>
+        <td>465.2s</td>
+        <td>215.5s</td>
+        <td><strong>2.16x faster</strong></td>
+      </tr>
+      <tr>
+        <td>Median Job Duration</td>
+        <td>420.4s</td>
+        <td>180.7s</td>
+        <td><strong>2.33x faster</strong></td>
+      </tr>
+      <tr>
+        <td>P95 Job Duration</td>
+        <td>928.5s</td>
+        <td>492.3s</td>
+        <td><strong>1.89x faster</strong></td>
+      </tr>
+      <tr>
+        <td>P99 Job Duration</td>
+        <td>952.9s</td>
+        <td>926.5s</td>
+        <td>1.03x faster</td>
+      </tr>
+      <tr>
+        <td>Total Makespan</td>
+        <td>3782.5s</td>
+        <td>2345.8s</td>
+        <td><strong>1.61x faster</strong></td>
+      </tr>
+      <tr>
+        <td>Min Job Duration</td>
+        <td>24.5s</td>
+        <td>29.7s</td>
+        <td>0.82x (slightly slower)</td>
+      </tr>
+      <tr>
+        <td>Max Job Duration</td>
+        <td>1178.1s</td>
+        <td>972.5s</td>
+        <td>1.21x faster</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-note">
+    <strong>Note on P99 and Min Duration:</strong> The P99 improvement is minimal (1.03x), suggesting that a small fraction of very long jobs see limited benefit. The minimum duration is actually slightly slower for Continuum (29.7s vs 24.5s), likely due to overhead from the TTL tracking and job-level queue management for short jobs that finish quickly regardless.
+  </div>
+
+  <h3>Paper-Level Claims (from arXiv:2511.02230)</h3>
+
+  <div class="card primary">
+    <h3>Key Claims in the Paper</h3>
+    <ul>
+      <li><strong>58.2% of end-to-end delay</strong> in baseline vLLM comes from scheduling bubbles during tool-call pauses.</li>
+      <li>Continuum <strong>eliminates scheduling bubbles</strong> by retaining KV cache during predicted-short tool calls.</li>
+      <li><strong>Program-level FCFS</strong> ensures fairness across multi-turn agent sessions rather than individual requests.</li>
+      <li>The approach is <strong>complementary to CPU offloading</strong> (tested with LMCache connector).</li>
+      <li>Evaluated on SWE-Bench Verified and BFCL traces with Llama-3.1 8B and 70B.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 6: CLAIMS VS IMPLEMENTATION          -->
+<!-- ============================================ -->
+<section id="claims">
+  <h2>Paper Claims vs Implementation</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Paper Claim</th>
+        <th>Status</th>
+        <th>Code Evidence</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>KV Cache TTL mechanism</td>
+        <td><span class="partial">PARTIAL</span></td>
+        <td>Implemented but uses a <strong>fixed threshold</strong> (2.0s) rather than a dynamic cost-benefit model. The paper describes modeling the tradeoff between prefill cost and memory occupation cost; the code uses a simple comparison against <code>FIXED_THRESHOLD_CONTINUUM</code>.</td>
+      </tr>
+      <tr>
+        <td>Tool-call duration prediction from historical data</td>
+        <td><span class="check">YES</span></td>
+        <td><code>ToolCallEstimator</code> maintains per-command running averages in <code>func_call_to_exec_time</code>. Updated via <code>update_func_call_exec_time()</code> on each request return.</td>
+      </tr>
+      <tr>
+        <td>Program-level FCFS scheduling</td>
+        <td><span class="check">YES</span></td>
+        <td><code>ContinuumRequestQueue</code> tracks <code>job_id_first_entry_time</code> and orders by job-level arrival rather than per-request arrival.</td>
+      </tr>
+      <tr>
+        <td>Pinned request priority in scheduling</td>
+        <td><span class="check">YES</span></td>
+        <td><code>peek_request()</code> first checks <code>pinned_request_job_id_set</code> before falling back to job-level FCFS.</td>
+      </tr>
+      <tr>
+        <td>Cost-benefit eviction model</td>
+        <td><span class="cross">SIMPLIFIED</span></td>
+        <td>The paper describes a formal cost-benefit model comparing <code>C_prefill</code> (reload cost) vs <code>C_memory</code> (GPU occupation cost). The code uses a simple threshold: if <code>exec_time > 2.0s</code>, evict; otherwise pin for 2.0s. The README itself notes: "without the estimation in the paper."</td>
+      </tr>
+      <tr>
+        <td>Preemption avoids last-step requests</td>
+        <td><span class="check">YES</span></td>
+        <td><code>pop_running_request_based_on_last_step()</code> explicitly checks <code>req.is_last_step</code> to avoid preempting nearly-finished jobs.</td>
+      </tr>
+      <tr>
+        <td>SWE-Bench evaluation</td>
+        <td><span class="check">YES</span></td>
+        <td>Full mini-swe-agent integration with <code>VllmModel</code>, experiment scripts, and stored results for 500 jobs.</td>
+      </tr>
+      <tr>
+        <td>CPU offloading integration</td>
+        <td><span class="check">YES</span></td>
+        <td>LMCache connector support via <code>--kv-transfer-config</code>. Scheduler handles <code>connector</code> for external KV cache tokens.</td>
+      </tr>
+      <tr>
+        <td>Eliminates 58.2% scheduling bubbles</td>
+        <td><span class="partial">PLAUSIBLE</span></td>
+        <td>The 2.16x average speedup on 500 jobs is consistent with this claim. The <code>Continuum_Recorder</code> logs all timestamps needed to verify this, but the repo does not include a script that calculates bubble percentage directly.</td>
+      </tr>
+      <tr>
+        <td>ToolCallParser extracts function names</td>
+        <td><span class="check">YES</span></td>
+        <td>Uses identical regex as mini-swe-agent: <code>r"```bash\s*\n(.*?)\n```"</code>. Extracts first word as command name.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warn">
+    <strong>Key Gap: Simplified TTL Model.</strong> The README explicitly states: "This repository contains a modified version of vLLM with Continuum-style scheduling support <strong>(without the estimation in the paper)</strong>." The sophisticated cost-benefit optimization described in the paper (which models prefill token cost, memory pressure, and request queue depth) is replaced by a simple fixed-threshold check. This is a significant simplification -- the core algorithmic contribution of the paper is only partially implemented.
+  </div>
+
+  <div class="callout callout-info">
+    <strong>Despite the simplification,</strong> the approach still achieves strong results. The fixed 2.0-second threshold appears to work well for SWE-Bench traces where most tool calls (shell commands) are fast. The per-command averaging is present and functional, suggesting the estimation infrastructure is ready for a more sophisticated model.
+  </div>
+
+  <h3>Implementation Maturity Assessment</h3>
+
+  <div class="grid-2">
+    <div class="card success">
+      <h3>Strengths</h3>
+      <ul>
+        <li>Clean integration into vLLM V1 scheduler architecture</li>
+        <li>All metadata plumbed end-to-end from client to scheduler</li>
+        <li>Full experiment pipeline (agent, server, analysis)</li>
+        <li>Real benchmark results for 500 SWE-Bench jobs</li>
+        <li>Comprehensive event recording for analysis</li>
+        <li>CPU offloading support via LMCache</li>
+      </ul>
+    </div>
+    <div class="card warn">
+      <h3>Limitations</h3>
+      <ul>
+        <li>Fixed 2.0s TTL threshold (paper's cost-benefit model not implemented)</li>
+        <li>Multiple TODO comments indicating work-in-progress</li>
+        <li>Linear scan over pinned_requests (O(n) per scheduling step)</li>
+        <li>ToolCallParser only handles bash code blocks (SWE-Bench specific)</li>
+        <li>No automated test suite for Continuum-specific logic</li>
+        <li>Some debug print statements left in protocol.py</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ -->
+<!-- SECTION 7: REPRODUCE                         -->
+<!-- ============================================ -->
+<section id="reproduce">
+  <h2>How to Reproduce</h2>
+
+  <h3>Step 1: Environment Setup</h3>
+
+  <pre><span class="cm"># Clone the repository</span>
+git clone &lt;repo-url&gt; vllm-continuum
+<span class="kw">cd</span> vllm-continuum
+
+<span class="cm"># Create virtual environment and install</span>
+uv venv
+<span class="kw">source</span> .venv/bin/activate
+uv pip install -e .
+
+<span class="cm"># Install mini-swe-agent</span>
+<span class="kw">cd</span> mini-swe-agent
+uv pip install -e .
+uv pip install datasets
+<span class="kw">cd</span> ..
+
+<span class="cm"># Install additional dependencies</span>
+uv pip install lmcache hf_transfer
+
+<span class="cm"># Login to Hugging Face for model access</span>
+hf auth login</pre>
+
+  <h3>Step 2: Start vLLM Server with Continuum Scheduling</h3>
+
+  <pre><span class="cm"># Without CPU offload</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+  --scheduling-policy continuum \
+  --tensor-parallel-size <span class="nu">4</span> \
+  --port <span class="nu">8100</span>
+
+<span class="cm"># With CPU offload (LMCache)</span>
+LMCACHE_MAX_LOCAL_CPU_SIZE=<span class="nu">200</span> \
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+  --kv-transfer-config <span class="st">'{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'</span> \
+  --scheduling-policy continuum \
+  --tensor-parallel-size <span class="nu">4</span> \
+  --port <span class="nu">8100</span></pre>
+
+  <h3>Step 3: Run SWE-Bench Evaluation</h3>
+
+  <pre><span class="cm"># Clear previous output</span>
+rm -rf ./swebench_output
+
+<span class="cm"># Fixed concurrency mode (64 concurrent workers)</span>
+mini-extra swebench \
+  --model-class vllm \
+  --model meta-llama/Llama-3.1-70B-Instruct \
+  --port <span class="nu">8100</span> \
+  --subset verified \
+  --split test \
+  --workers <span class="nu">64</span> \
+  --output ./swebench_output
+
+<span class="cm"># OR: Poisson arrival mode (1 job/second)</span>
+mini-extra swebench \
+  --model-class vllm \
+  --model meta-llama/Llama-3.1-70B-Instruct \
+  --port <span class="nu">8100</span> \
+  --subset verified \
+  --split test \
+  --use-jps --jps <span class="nu">1.0</span> \
+  --output ./swebench_output</pre>
+
+  <h3>Step 4: Analyze Results</h3>
+
+  <pre><span class="cm"># Stop the vLLM server first (Ctrl+C), then:</span>
+python continuum_exp/analyze.py \
+  --input-dir ./swebench_output \
+  --output-dir ./continuum_exp/result
+
+<span class="cm"># For pass-rate evaluation (requires sb-cli setup)</span>
+sb-cli submit swe-bench_verified test \
+  --predictions_path swebench_output/preds.json \
+  --run_id my_continuum_run</pre>
+
+  <h3>Step 5: Compare Against Baseline</h3>
+
+  <pre><span class="cm"># Start vLLM in standard FCFS mode</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+  --tensor-parallel-size <span class="nu">4</span> \
+  --port <span class="nu">8100</span>
+
+<span class="cm"># Run the same SWE-Bench evaluation with --workers 64</span>
+<span class="cm"># Compare scheduler_timestamps from both runs using analyze.py</span></pre>
+
+  <div class="callout callout-warn">
+    <strong>Hardware Requirements:</strong> The default setup requires <strong>4x H100 GPUs</strong> for Llama-3.1-70B with tensor parallelism. For Llama-3.1-8B, a single GPU may suffice but mini-swe-agent may produce lower-quality patches.
+  </div>
+
+  <h3>Key Configuration Parameters</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Description</th>
+        <th>Default</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>--scheduling-policy</code></td>
+        <td>Scheduling mode: <code>fcfs</code>, <code>priority</code>, or <code>continuum</code></td>
+        <td><code>fcfs</code></td>
+      </tr>
+      <tr>
+        <td><code>--tensor-parallel-size</code></td>
+        <td>Number of GPUs for tensor parallelism</td>
+        <td><code>1</code></td>
+      </tr>
+      <tr>
+        <td><code>FIXED_THRESHOLD_CONTINUUM</code></td>
+        <td>TTL threshold in seconds (hardcoded in estimate_with_func.py)</td>
+        <td><code>2.0</code></td>
+      </tr>
+      <tr>
+        <td><code>--workers</code></td>
+        <td>Fixed number of concurrent SWE-Bench jobs</td>
+        <td><code>64</code></td>
+      </tr>
+      <tr>
+        <td><code>--jps</code></td>
+        <td>Jobs per second for Poisson arrival mode</td>
+        <td><code>1.0</code></td>
+      </tr>
+      <tr>
+        <td><code>step_limit</code></td>
+        <td>Max agentic turns per job (for is_last_step calculation)</td>
+        <td><code>0</code> (unlimited)</td>
+      </tr>
+      <tr>
+        <td><code>job_timeout</code></td>
+        <td>Maximum wall-clock time per agent job</td>
+        <td><code>900s</code></td>
+      </tr>
+      <tr>
+        <td><code>LMCACHE_MAX_LOCAL_CPU_SIZE</code></td>
+        <td>CPU memory in GB for KV cache offloading</td>
+        <td>Not set (disabled)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-note">
+    <strong>Tuning the TTL threshold:</strong> The fixed threshold of 2.0 seconds is suitable for SWE-Bench traces where most tool calls are fast shell commands. For workloads with different tool-call distributions (e.g., API calls with network latency), you may want to modify <code>FIXED_THRESHOLD_CONTINUUM</code> in <code>vllm/v1/core/estimate_with_func.py</code>. As the README notes, "You can use this as a base-repo to tune KV cache pin logic on different workloads."
+  </div>
+</section>
+
+</div> <!-- /container -->
+
+<!-- Footer -->
+<div style="background:var(--dark); color:#888; text-align:center; padding:24px; font-size:0.85em;">
+  Technical analysis of arXiv:2511.02230. Repository: vllm-continuum (vLLM fork with Continuum scheduling).
+  <br>Analysis based on source code inspection and included benchmark results.
+</div>
+
+</body>
+</html>

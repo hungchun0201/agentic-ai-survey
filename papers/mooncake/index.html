@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mooncake: KVCache-centric Disaggregated Architecture for LLM Serving -- Technical Analysis</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --card: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent-blue: #58a6ff;
+    --accent-purple: #bc8cff;
+    --accent-green: #3fb950;
+    --accent-orange: #f0883e;
+    --accent-red: #f85149;
+    --accent-cyan: #39d2c0;
+    --accent-gold: #e3b341;
+    --hero-start: #16213e;
+    --hero-end: #0f3460;
+    --code-bg: #1e1e2e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.7; }
+
+  /* Sticky Nav */
+  nav { position: sticky; top: 0; z-index: 1000; background: rgba(13,17,23,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 0.6rem 2rem; display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
+  nav a { color: var(--text-muted); text-decoration: none; font-size: 0.85rem; font-weight: 500; transition: color 0.2s; }
+  nav a:hover { color: var(--accent-blue); }
+  nav .nav-brand { color: var(--accent-gold); font-weight: 700; font-size: 1rem; margin-right: 1rem; }
+
+  /* Hero */
+  .hero { background: linear-gradient(135deg, var(--hero-start) 0%, var(--hero-end) 50%, #1a1a2e 100%); padding: 4rem 2rem 3.5rem; text-align: center; position: relative; overflow: hidden; }
+  .hero::before { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle at 30% 40%, rgba(88,166,255,0.06) 0%, transparent 50%), radial-gradient(circle at 70% 60%, rgba(188,140,255,0.05) 0%, transparent 50%); }
+  .hero h1 { font-size: 2.6rem; font-weight: 800; margin-bottom: 0.8rem; position: relative; background: linear-gradient(135deg, #e6edf3, #a8c7fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero .subtitle { color: var(--text-muted); font-size: 1.15rem; margin-bottom: 1.5rem; position: relative; }
+  .badge-row { display: flex; justify-content: center; gap: 0.8rem; flex-wrap: wrap; position: relative; margin-bottom: 1rem; }
+  .badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.9rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
+  .badge-gold { background: linear-gradient(135deg, #e3b341, #d4972a); color: #1c1c1c; }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); border: 1px solid rgba(188,140,255,0.3); }
+
+  /* Container */
+  .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+  section { margin-bottom: 3rem; }
+  h2 { font-size: 1.7rem; font-weight: 700; margin-bottom: 1.2rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--border); }
+  h3 { font-size: 1.2rem; font-weight: 600; margin: 1.5rem 0 0.8rem; color: var(--accent-blue); }
+  p { margin-bottom: 1rem; color: var(--text); }
+
+  /* Cards */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; margin-bottom: 1.2rem; border-left: 4px solid var(--accent-blue); }
+  .card.green { border-left-color: var(--accent-green); }
+  .card.purple { border-left-color: var(--accent-purple); }
+  .card.orange { border-left-color: var(--accent-orange); }
+  .card.red { border-left-color: var(--accent-red); }
+  .card.cyan { border-left-color: var(--accent-cyan); }
+  .card.gold { border-left-color: var(--accent-gold); }
+  .card h4 { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.6rem; }
+
+  /* Code Blocks */
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.6; }
+  code { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; }
+  pre code { color: #cdd6f4; }
+  .kw { color: #cba6f7; }
+  .fn { color: #89b4fa; }
+  .cm { color: #6c7086; font-style: italic; }
+  .st { color: #a6e3a1; }
+  .nu { color: #fab387; }
+  .ty { color: #f9e2af; }
+  .op { color: #89dceb; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th { background: #21262d; color: var(--accent-blue); padding: 0.7rem 1rem; text-align: left; font-weight: 600; border-bottom: 2px solid var(--accent-blue); }
+  td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(88,166,255,0.04); }
+
+  /* Callouts */
+  .callout { border-radius: 8px; padding: 1.2rem 1.4rem; margin: 1.2rem 0; }
+  .callout-blue { background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); }
+  .callout-green { background: rgba(63,185,80,0.08); border: 1px solid rgba(63,185,80,0.25); }
+  .callout-orange { background: rgba(240,136,62,0.08); border: 1px solid rgba(240,136,62,0.25); }
+  .callout-purple { background: rgba(188,140,255,0.08); border: 1px solid rgba(188,140,255,0.25); }
+  .callout-red { background: rgba(248,81,73,0.08); border: 1px solid rgba(248,81,73,0.25); }
+  .callout-title { font-weight: 700; margin-bottom: 0.4rem; }
+  .callout-blue .callout-title { color: var(--accent-blue); }
+  .callout-green .callout-title { color: var(--accent-green); }
+  .callout-orange .callout-title { color: var(--accent-orange); }
+  .callout-purple .callout-title { color: var(--accent-purple); }
+  .callout-red .callout-title { color: var(--accent-red); }
+
+  /* Grid layouts */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.2rem; text-align: center; }
+  .stat-card .stat-value { font-size: 2rem; font-weight: 800; margin-bottom: 0.3rem; }
+  .stat-card .stat-label { font-size: 0.85rem; color: var(--text-muted); }
+
+  /* ---- Architecture Diagram Styles ---- */
+  .arch-diagram { background: linear-gradient(135deg, #0d1117 0%, #161b22 100%); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; margin: 1.5rem 0; overflow-x: auto; }
+  .arch-row { display: flex; gap: 1.2rem; align-items: stretch; margin-bottom: 1.2rem; justify-content: center; flex-wrap: wrap; }
+  .arch-box { border-radius: 8px; padding: 0.8rem 1rem; font-size: 0.8rem; font-weight: 600; text-align: center; min-width: 100px; display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; }
+  .arch-conductor { background: linear-gradient(135deg, #2d1b69, #1a1a4e); border: 2px solid #bc8cff; color: #e2d0ff; min-width: 160px; padding: 1rem; }
+  .arch-prefill { background: linear-gradient(135deg, #1b3a2d, #142e1e); border: 2px solid var(--accent-green); color: #b7f0c8; }
+  .arch-decode { background: linear-gradient(135deg, #3a2a1b, #2e2014); border: 2px solid var(--accent-orange); color: #f0d4b7; }
+  .arch-gpu { background: linear-gradient(135deg, #1b2d3a, #142230); border: 2px solid var(--accent-blue); color: #b7d4f0; }
+  .arch-store { background: linear-gradient(135deg, #2d3a1b, #222e14); border: 2px solid var(--accent-cyan); color: #b7f0e8; }
+  .arch-te { background: linear-gradient(135deg, #3a1b2d, #301528); border: 2px solid #f85149; color: #f0b7d4; }
+  .arch-cpu { background: linear-gradient(135deg, #252830, #1e2028); border: 2px solid #8b949e; color: #cdd6f4; }
+
+  .arch-label { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.3rem; font-weight: 400; }
+  .arch-title { font-size: 0.9rem; font-weight: 700; text-align: center; margin-bottom: 1rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+
+  .arch-arrow { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 1.4rem; min-width: 30px; }
+  .arch-arrow-down { text-align: center; color: var(--text-muted); font-size: 1.2rem; padding: 0.3rem 0; }
+  .arch-group { border: 1px dashed var(--border); border-radius: 10px; padding: 1rem; flex: 1; min-width: 280px; }
+  .arch-group-title { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.8rem; text-align: center; }
+
+  .arch-inner-row { display: flex; gap: 0.6rem; margin-bottom: 0.6rem; justify-content: center; flex-wrap: wrap; }
+  .arch-small { font-size: 0.7rem; padding: 0.4rem 0.7rem; min-width: 70px; border-width: 1px; }
+
+  /* Connector line styles */
+  .connector-h { height: 3px; flex: 1; min-width: 20px; border-radius: 2px; }
+  .connector-v { width: 3px; height: 20px; border-radius: 2px; margin: 0 auto; }
+  .conn-purple { background: linear-gradient(90deg, #bc8cff, #8b5cf6); }
+  .conn-green { background: linear-gradient(90deg, #3fb950, #22863a); }
+  .conn-blue { background: linear-gradient(90deg, #58a6ff, #388bfd); }
+  .conn-red { background: linear-gradient(90deg, #f85149, #da3633); }
+  .conn-cyan { background: linear-gradient(90deg, #39d2c0, #2ea89e); }
+
+  .metric-bar { height: 22px; border-radius: 4px; margin: 0.3rem 0; display: flex; align-items: center; padding-left: 8px; font-size: 0.75rem; font-weight: 600; }
+
+  /* File tree */
+  .file-tree { font-family: monospace; font-size: 0.83rem; color: var(--text-muted); line-height: 1.8; }
+  .file-tree .dir { color: var(--accent-blue); font-weight: 600; }
+  .file-tree .file { color: var(--text); }
+  .file-tree .desc { color: var(--text-muted); font-size: 0.78rem; }
+
+  @media (max-width: 768px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 1.8rem; }
+    .arch-row { flex-direction: column; align-items: center; }
+    .arch-group { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav>
+  <span class="nav-brand">Mooncake</span>
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#repo">Repo Analysis</a>
+  <a href="#mechanisms">Core Mechanisms</a>
+  <a href="#production">Production Scale</a>
+  <a href="#integration">Integration</a>
+  <a href="#performance">Performance</a>
+  <a href="#comparison">Paper vs Impl</a>
+</nav>
+
+<!-- Hero Section -->
+<div class="hero">
+  <h1>Mooncake</h1>
+  <div class="subtitle">A KVCache-centric Disaggregated Architecture for LLM Serving</div>
+  <div class="badge-row">
+    <span class="badge badge-gold">FAST'25 Best Paper Award</span>
+    <span class="badge badge-blue">arXiv:2407.00079</span>
+    <span class="badge badge-green">Production: Kimi / Moonshot AI</span>
+    <span class="badge badge-purple">PyTorch Ecosystem (Feb 2026)</span>
+  </div>
+  <div class="badge-row" style="margin-top: 0.5rem;">
+    <span class="badge badge-blue">Qin et al. -- Moonshot AI &amp; Tsinghua University</span>
+  </div>
+  <p style="color: var(--text-muted); font-size: 0.9rem; position: relative; max-width: 700px; margin: 1rem auto 0;">
+    Trading more storage for less computation. The serving platform behind Kimi, processing 100B+ tokens daily
+    across thousands of nodes, with up to 498% throughput gains over baselines.
+  </p>
+</div>
+
+<div class="container">
+
+<!-- Section 1: Overview -->
+<section id="overview">
+  <h2>1. Overview</h2>
+
+  <p>
+    Mooncake is the production serving platform for <strong>Kimi</strong>, a leading LLM chatbot by
+    <strong>Moonshot AI</strong>. The paper, awarded <strong>Best Paper at FAST'25</strong> (23rd USENIX Conference
+    on File and Storage Technologies), presents a KVCache-centric disaggregated architecture that
+    fundamentally rethinks how LLM inference clusters manage their most precious intermediate
+    state: the KV cache.
+  </p>
+
+  <div class="grid-3">
+    <div class="stat-card">
+      <div class="stat-value" style="color: var(--accent-gold);">100B+</div>
+      <div class="stat-label">Tokens processed daily</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color: var(--accent-green);">498%</div>
+      <div class="stat-label">Max throughput gain over baselines</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" style="color: var(--accent-blue);">87 GB/s</div>
+      <div class="stat-label">Transfer Engine on 4x200Gbps RoCE</div>
+    </div>
+  </div>
+
+  <div class="card green">
+    <h4>Key Insight: More Storage for Less Computation</h4>
+    <p style="margin-bottom: 0;">
+      Modern GPU clusters have significant underutilized <strong>CPU, DRAM, SSD, and NIC</strong> resources.
+      Mooncake pools these into a distributed KV cache that enables aggressive prefix cache reuse,
+      cutting redundant prefill computation. The global cache achieves up to <strong>136% higher hit
+      rates</strong> than node-local caching and reduces prefill GPU time by up to <strong>48%</strong>.
+      Mathematically, the paper proves that when <code>B/G > 2ds / (gqa * (apd + bd^2))</code>,
+      cache reuse is beneficial for TTFT -- a condition easily met with modern RDMA networks.
+    </p>
+  </div>
+
+  <div class="card purple">
+    <h4>Disaggregated Architecture</h4>
+    <p style="margin-bottom:0;">
+      Unlike coupled systems (e.g., vanilla vLLM), Mooncake separates <strong>prefill</strong> and
+      <strong>decoding</strong> into independent clusters, each with distinct optimization objectives.
+      A central <strong>Conductor</strong> scheduler orchestrates request routing with KV-cache-aware
+      prefill scheduling and load-balanced decoding assignment. This separation avoids the
+      prefill-decoding interference that plagues long-context serving.
+    </p>
+  </div>
+</section>
+
+<!-- Section 2: Architecture Diagram -->
+<section id="architecture">
+  <h2>2. System Architecture</h2>
+
+  <div class="arch-diagram">
+    <div class="arch-title">Mooncake KVCache-Centric Disaggregated Architecture</div>
+
+    <!-- Top Row: Conductor -->
+    <div class="arch-row">
+      <div class="arch-conductor" style="min-width: 500px;">
+        <div style="font-size: 1rem; margin-bottom: 0.5rem;">KVCache-centric Conductor</div>
+        <div class="arch-inner-row">
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.2); border: 1px solid #bc8cff; color: #e2d0ff;">Cache-aware Prefill Scheduler</div>
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.2); border: 1px solid #bc8cff; color: #e2d0ff;">KVCache Balance Scheduler</div>
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.2); border: 1px solid #bc8cff; color: #e2d0ff;">Load-balance Decode Scheduler</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arch-row" style="justify-content: center; gap: 2rem;">
+      <div class="connector-v conn-purple" style="height: 25px;"></div>
+      <div style="width: 200px;"></div>
+      <div class="connector-v conn-purple" style="height: 25px;"></div>
+    </div>
+
+    <!-- Middle Row: Prefill Pool + Mooncake Store + Decoding Pool -->
+    <div class="arch-row" style="gap: 0.8rem;">
+      <!-- Prefill Instance -->
+      <div class="arch-group" style="border-color: var(--accent-green);">
+        <div class="arch-group-title" style="color: var(--accent-green);">Prefill Pool</div>
+        <div class="arch-box arch-prefill" style="width: 100%; margin-bottom: 0.5rem;">
+          <div>Prefill Instance</div>
+          <div class="arch-label">Chunked Pipeline Prefill</div>
+        </div>
+        <div class="arch-inner-row">
+          <div class="arch-box arch-gpu arch-small">GPU / VRAM</div>
+          <div class="arch-box arch-small" style="background: rgba(63,185,80,0.15); border: 1px solid var(--accent-green); color: #b7f0c8;">Paged KVCache</div>
+        </div>
+        <div style="margin: 0.4rem 0;">
+          <div class="connector-v conn-green" style="height: 12px;"></div>
+        </div>
+        <div class="arch-box arch-cpu" style="width: 100%;">
+          <div>CPU / DRAM / SSD</div>
+          <div class="arch-label">Distributed KVCache Pool</div>
+        </div>
+      </div>
+
+      <!-- Mooncake Store (center) -->
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 140px; gap: 0.5rem;">
+        <div class="arch-box arch-store" style="min-width: 140px;">
+          <div style="font-size: 0.85rem;">Mooncake Store</div>
+          <div class="arch-label">Distributed KVCache</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.3rem;">
+          <span style="color: var(--accent-cyan);">&#9664;</span>
+          <div class="connector-h conn-cyan" style="min-width: 50px;"></div>
+          <span style="color: var(--accent-cyan);">&#9654;</span>
+        </div>
+        <div class="arch-box arch-te" style="min-width: 140px;">
+          <div style="font-size: 0.85rem;">Transfer Engine</div>
+          <div class="arch-label">RDMA / TCP / NVMe-oF</div>
+        </div>
+        <div style="font-size: 0.65rem; color: var(--text-muted); text-align: center; margin-top: 0.3rem;">
+          87 GB/s @ 4x200Gbps<br>190 GB/s @ 8x400Gbps
+        </div>
+      </div>
+
+      <!-- Decoding Instance -->
+      <div class="arch-group" style="border-color: var(--accent-orange);">
+        <div class="arch-group-title" style="color: var(--accent-orange);">Decoding Pool</div>
+        <div class="arch-box arch-decode" style="width: 100%; margin-bottom: 0.5rem;">
+          <div>Decoding Instance</div>
+          <div class="arch-label">Continuous Batching</div>
+        </div>
+        <div class="arch-inner-row">
+          <div class="arch-box arch-gpu arch-small">GPU / VRAM</div>
+          <div class="arch-box arch-small" style="background: rgba(240,136,62,0.15); border: 1px solid var(--accent-orange); color: #f0d4b7;">Paged KVCache</div>
+        </div>
+        <div style="margin: 0.4rem 0;">
+          <div class="connector-v" style="height: 12px; background: var(--accent-orange);"></div>
+        </div>
+        <div class="arch-box arch-cpu" style="width: 100%;">
+          <div>CPU / DRAM / SSD</div>
+          <div class="arch-label">Distributed KVCache Pool</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Optimization Goals -->
+    <div class="arch-row" style="margin-top: 1.2rem;">
+      <div style="flex: 1; background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); border-radius: 8px; padding: 0.8rem; font-size: 0.78rem;">
+        <div style="color: var(--accent-green); font-weight: 700; margin-bottom: 0.3rem;">Prefill Optimization Goal</div>
+        <code style="color: #a6e3a1;">max</code> Cache Reuse &nbsp; <code style="color: #cdd6f4;">s.t.</code> TTFT SLO, MFU Lower Bound, KVCache &lt; DRAM
+      </div>
+      <div style="flex: 1; background: rgba(240,136,62,0.06); border: 1px solid rgba(240,136,62,0.2); border-radius: 8px; padding: 0.8rem; font-size: 0.78rem;">
+        <div style="color: var(--accent-orange); font-weight: 700; margin-bottom: 0.3rem;">Decoding Optimization Goal</div>
+        <code style="color: #fab387;">max</code> Throughput &nbsp; <code style="color: #cdd6f4;">s.t.</code> TBT SLO, KVCache &lt; VRAM
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout-blue">
+    <div class="callout-title">Request Lifecycle (4 Steps)</div>
+    <strong>1) KVCache Reuse:</strong> Prefill instance loads reusable prefix cache from Mooncake Store into GPU memory.<br>
+    <strong>2) Incremental Prefill:</strong> Prefill completes on uncached tokens; new KVCache is stored back to CPU/DRAM.<br>
+    <strong>3) KVCache Transfer:</strong> Transfer Engine streams KVCache layer-by-layer to the decoding node's CPU memory, overlapped with prefill.<br>
+    <strong>4) Decoding:</strong> Decoding instance loads full KVCache and joins the continuous batching loop.
+  </div>
+</section>
+
+<!-- Section 3: Repository Analysis -->
+<section id="repo">
+  <h2>3. Repository Analysis</h2>
+  <p>
+    The open-source repository at <a href="https://github.com/kvcache-ai/Mooncake" style="color: var(--accent-blue);">github.com/kvcache-ai/Mooncake</a>
+    implements the core components described in the paper. The codebase is primarily C++ with Python bindings, totaling
+    tens of thousands of lines across several well-organized modules.
+  </p>
+
+  <div class="card">
+    <h4>Project Structure</h4>
+    <div class="file-tree">
+      <span class="dir">mooncake-transfer-engine/</span> <span class="desc">-- Core Transfer Engine (C++, RDMA/TCP/NVMe-oF/CXL)</span><br>
+      &nbsp;&nbsp;<span class="dir">include/transport/</span> <span class="desc">-- rdma_transport, tcp_transport, nvmeof_transport, cxl_transport, ...</span><br>
+      &nbsp;&nbsp;<span class="dir">src/</span> <span class="desc">-- Implementation: topology, transfer_engine, multi_transport</span><br>
+      &nbsp;&nbsp;<span class="dir">tent/</span> <span class="desc">-- Next-gen Transfer Engine ("TENT") rewrite</span><br>
+      <span class="dir">mooncake-store/</span> <span class="desc">-- Distributed KVCache Store (master/client architecture)</span><br>
+      &nbsp;&nbsp;<span class="file">include/master_service.h</span> <span class="desc">-- MasterService: segment management, allocation, eviction</span><br>
+      &nbsp;&nbsp;<span class="file">include/client_service.h</span> <span class="desc">-- Client: Put/Get/Query/Remove with replication</span><br>
+      &nbsp;&nbsp;<span class="file">include/replica.h</span> <span class="desc">-- Replica types: MEMORY, DISK, LOCAL_DISK</span><br>
+      <span class="dir">mooncake-integration/</span> <span class="desc">-- vLLM, SGLang, LMCache connectors</span><br>
+      <span class="dir">mooncake-ep/</span> <span class="desc">-- Elastic Expert Parallelism for MoE models</span><br>
+      <span class="dir">mooncake-p2p-store/</span> <span class="desc">-- P2P object sharing (checkpoints)</span><br>
+      <span class="dir">mooncake-pg/</span> <span class="desc">-- Process group backends</span><br>
+      <span class="dir">FAST25-release/</span> <span class="desc">-- Paper PDF and open-source request traces</span><br>
+    </div>
+  </div>
+
+  <h3>Transfer Engine API</h3>
+  <p>
+    The <code>TransferEngine</code> class in <code>transfer_engine.h</code> provides the unified interface for all
+    data movement. The design uses a segment-based abstraction where memory regions are registered, then batch
+    transfer requests are submitted and tracked asynchronously.
+  </p>
+
+  <pre><code><span class="kw">class</span> <span class="ty">TransferEngine</span> {
+<span class="kw">public</span>:
+    <span class="cm">// Initialize with metadata service connection (etcd/redis/http)</span>
+    <span class="kw">int</span> <span class="fn">init</span>(<span class="kw">const</span> std::string&amp; metadata_conn_string,
+             <span class="kw">const</span> std::string&amp; local_server_name, ...);
+
+    <span class="cm">// Install protocol-specific transport (rdma, tcp, nvmeof, cxl, ...)</span>
+    Transport* <span class="fn">installTransport</span>(<span class="kw">const</span> std::string&amp; proto, <span class="kw">void</span>** args);
+
+    <span class="cm">// Register local memory for remote access (RDMA-registered)</span>
+    <span class="kw">int</span> <span class="fn">registerLocalMemory</span>(<span class="kw">void</span>* addr, <span class="ty">size_t</span> length,
+                            <span class="kw">const</span> std::string&amp; location = <span class="st">"*"</span>);
+
+    <span class="cm">// Batch transfer submission and status</span>
+    <span class="ty">BatchID</span> <span class="fn">allocateBatchID</span>(<span class="ty">size_t</span> batch_size);
+    Status <span class="fn">submitTransfer</span>(<span class="ty">BatchID</span> batch_id,
+                          <span class="kw">const</span> std::vector&lt;TransferRequest&gt;&amp; entries);
+    Status <span class="fn">getTransferStatus</span>(<span class="ty">BatchID</span> batch_id, <span class="ty">size_t</span> task_id,
+                             TransferStatus&amp; status);
+};</code></pre>
+
+  <h3>Mooncake Store Client</h3>
+  <p>
+    The <code>Client</code> class in <code>client_service.h</code> provides the high-level object-based API
+    for distributed KV cache operations, including multi-replica support and lease-based consistency.
+  </p>
+
+  <pre><code><span class="kw">class</span> <span class="ty">Client</span> {
+<span class="kw">public</span>:
+    <span class="cm">// Factory method with HA support</span>
+    <span class="kw">static</span> std::optional&lt;std::shared_ptr&lt;Client&gt;&gt; <span class="fn">Create</span>(
+        <span class="kw">const</span> std::string&amp; local_hostname,
+        <span class="kw">const</span> std::string&amp; metadata_connstring,
+        <span class="kw">const</span> std::string&amp; protocol, ...);
+
+    <span class="cm">// Core cache operations</span>
+    tl::expected&lt;<span class="kw">void</span>, ErrorCode&gt; <span class="fn">Get</span>(<span class="kw">const</span> std::string&amp; key, std::vector&lt;Slice&gt;&amp; slices);
+    tl::expected&lt;<span class="kw">void</span>, ErrorCode&gt; <span class="fn">Put</span>(<span class="kw">const</span> ObjectKey&amp; key, std::vector&lt;Slice&gt;&amp; slices,
+                                       <span class="kw">const</span> ReplicateConfig&amp; config);
+    tl::expected&lt;QueryResult, ErrorCode&gt; <span class="fn">Query</span>(<span class="kw">const</span> std::string&amp; key);
+
+    <span class="cm">// Segment management</span>
+    tl::expected&lt;<span class="kw">void</span>, ErrorCode&gt; <span class="fn">MountSegment</span>(<span class="kw">const void</span>* buf, <span class="ty">size_t</span> sz, ...);
+
+    <span class="cm">// Local hot cache with frequency-based admission</span>
+    <span class="kw">bool</span> <span class="fn">ShouldAdmitToHotCache</span>(<span class="kw">const</span> std::string&amp; key, <span class="kw">bool</span> cache_used);
+};</code></pre>
+
+  <h3>Memory Allocator Subsystem</h3>
+  <p>
+    The store's memory management is built on two allocator strategies. The <code>CachelibBufferAllocator</code>
+    wraps Facebook's CacheLib slab allocator, providing efficient fixed-size allocation with 4MB-aligned
+    pools. The <code>OffsetBufferAllocator</code> offers bin-based allocation with precise free-region tracking
+    for variable-sized objects. Both implement a common <code>BufferAllocatorBase</code> interface with
+    <code>allocate</code>, <code>deallocate</code>, and <code>getLargestFreeRegion</code> methods.
+  </p>
+
+  <pre><code><span class="cm">// Buffer allocator hierarchy (allocator.h)</span>
+<span class="kw">class</span> <span class="ty">BufferAllocatorBase</span> {
+    <span class="kw">virtual</span> std::unique_ptr&lt;AllocatedBuffer&gt; <span class="fn">allocate</span>(<span class="ty">size_t</span> size) = <span class="nu">0</span>;
+    <span class="kw">virtual</span> <span class="kw">void</span> <span class="fn">deallocate</span>(AllocatedBuffer* handle) = <span class="nu">0</span>;
+    <span class="kw">virtual</span> <span class="ty">size_t</span> <span class="fn">capacity</span>() <span class="kw">const</span> = <span class="nu">0</span>;
+    <span class="kw">virtual</span> <span class="ty">size_t</span> <span class="fn">getLargestFreeRegion</span>() <span class="kw">const</span> = <span class="nu">0</span>;
+};
+
+<span class="cm">// AllocatedBuffer carries RAII ownership and transfer descriptors</span>
+<span class="kw">struct</span> <span class="ty">AllocatedBuffer::Descriptor</span> {
+    <span class="ty">uint64_t</span> size_;
+    <span class="ty">uintptr_t</span> buffer_address_;
+    std::string protocol_;          <span class="cm">// "rdma", "tcp", "cxl"</span>
+    std::string transport_endpoint_; <span class="cm">// "ip:port" for remote access</span>
+};</code></pre>
+
+  <h3>Transport Abstraction Layer</h3>
+  <p>
+    The <code>Transport</code> base class defines a protocol-agnostic interface. Concrete implementations
+    exist for RDMA (InfiniBand/RoCEv2/eRDMA), TCP, NVMe-oF, CXL, NVLink, Ascend, HIP, EFA, and more.
+    Each transport implements memory registration, transfer submission, and status polling. The
+    <code>Slice</code> struct is the fundamental transfer unit, containing source/destination addresses,
+    RDMA keys, and completion tracking with lock-free atomic counters.
+  </p>
+
+  <pre><code><span class="kw">struct</span> <span class="ty">TransferRequest</span> {
+    <span class="kw">enum</span> OpCode { <span class="nu">READ</span>, <span class="nu">WRITE</span> };
+    OpCode opcode;
+    <span class="kw">void</span>* source;           <span class="cm">// local memory address</span>
+    SegmentID target_id;     <span class="cm">// remote segment handle</span>
+    <span class="kw">uint64_t</span> target_offset;  <span class="cm">// offset within remote segment</span>
+    <span class="ty">size_t</span> length;           <span class="cm">// transfer size</span>
+};
+
+<span class="cm">// Topology-aware NIC selection</span>
+<span class="kw">struct</span> <span class="ty">TopologyEntry</span> {
+    std::string name;                    <span class="cm">// e.g., "cpu:0", "cuda:0"</span>
+    std::vector&lt;std::string&gt; preferred_hca; <span class="cm">// NUMA-local NICs</span>
+    std::vector&lt;std::string&gt; avail_hca;     <span class="cm">// fallback NICs</span>
+};</code></pre>
+</section>
+
+<!-- Section 4: Core Mechanisms -->
+<section id="mechanisms">
+  <h2>4. Core Mechanisms</h2>
+
+  <div class="callout callout-blue">
+    <div class="callout-title">Mathematical Foundation (Section 2.2 of Paper)</div>
+    The paper provides a formal condition under which KVCache reuse is beneficial. Given GPU computation throughput
+    <code>G</code>, NIC bandwidth <code>B</code>, model dimension <code>d</code>, GQA heads <code>gqa</code>,
+    element size <code>s</code>, and matched prefix length <code>p</code>, reuse reduces TTFT when:
+    <code style="display: block; margin: 0.5rem 0; padding: 0.5rem; background: var(--code-bg); border-radius: 4px;">
+      B/G > 2ds / (gqa * (apd + bd<sup>2</sup>))
+    </code>
+    For LLaMA3-70B on 8xA800 (G = 8x312 TFLOPS), this yields a minimum required bandwidth of
+    only <strong>6 GB/s</strong> -- easily met by a single 100 Gbps NIC. On 8xH800, the requirement
+    rises to 19 GB/s, still well within a single NIC's capacity. This proves that distributed KV cache
+    is not just feasible but highly advantageous for production serving.
+  </div>
+
+  <h3>4.1 KV Cache Pool Management</h3>
+  <div class="card cyan">
+    <h4>Paged Block Storage</h4>
+    <p>
+      KV caches are stored as <strong>paged blocks</strong> in the distributed cache pool. Block sizes are
+      determined by model dimensions and network granularity, typically 16-512 tokens per block (256 KB at
+      the default block size of 256 per the paper's testbed). Each block has a hash key derived from its
+      prefix content for deduplication. The paper notes that for LLaMA3-70B, a single token requires
+      <strong>320 KB</strong> of KVCache storage (2 bytes x 2 x d/gqa x layers).
+    </p>
+    <p style="margin-bottom:0;">
+      The implementation uses Facebook's <strong>CacheLib</strong> slab allocator for memory management
+      (<code>CachelibBufferAllocator</code>) alongside an <code>OffsetBufferAllocator</code> for finer-grained
+      control. LRU eviction reclaims blocks when the pool is full, unless the block has an active lease.
+    </p>
+  </div>
+
+  <div class="card green">
+    <h4>Multi-Replica Support</h4>
+    <p style="margin-bottom:0;">
+      Hot KVCache blocks are automatically replicated across multiple nodes by the Conductor's
+      cache load-balancing strategy. The <code>Replica</code> system supports three types:
+      <strong>MEMORY</strong> (DRAM/VRAM), <strong>DISK</strong> (distributed file system), and
+      <strong>LOCAL_DISK</strong> (node-local SSD). The paper's experiments show that the top-100 hottest
+      cache keys in conversation workloads end up with replicas on nearly every prefill instance,
+      while the synthetic workload with dispersed hotspots shows fewer replicas per key.
+    </p>
+  </div>
+
+  <h3>4.2 Transfer Engine</h3>
+
+  <div class="arch-diagram" style="padding: 1.5rem;">
+    <div class="arch-title">Transfer Engine -- Topology-Aware Path Selection</div>
+    <div class="arch-row">
+      <!-- Node diagram -->
+      <div style="flex: 1; min-width: 300px;">
+        <div style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem; background: rgba(88,166,255,0.03);">
+          <div style="font-size: 0.75rem; font-weight: 700; color: var(--accent-blue); margin-bottom: 0.6rem; text-align: center;">Server Node (e.g., 8xA800 HGX)</div>
+          <div class="arch-inner-row" style="gap: 0.4rem;">
+            <div class="arch-box arch-small" style="background: rgba(88,166,255,0.15); border: 1px solid #58a6ff; color: #b7d4f0; flex:1;">mlx5_0</div>
+            <div class="arch-box arch-small" style="background: rgba(88,166,255,0.15); border: 1px solid #58a6ff; color: #b7d4f0; flex:1;">mlx5_1</div>
+            <div class="arch-box arch-small" style="background: rgba(63,185,80,0.15); border: 1px solid var(--accent-green); color: #b7f0c8; flex:1;">GPU 0</div>
+            <div class="arch-box arch-small" style="background: rgba(63,185,80,0.15); border: 1px solid var(--accent-green); color: #b7f0c8; flex:1;">GPU 1</div>
+          </div>
+          <div style="display: flex; justify-content: center; margin: 0.4rem 0;">
+            <div style="background: var(--accent-blue); height: 2px; width: 80%; border-radius: 1px;"></div>
+          </div>
+          <div style="text-align: center; font-size: 0.7rem; color: var(--text-muted);">PCIe Switch &nbsp; | &nbsp; CPU 0 (NUMA 0)</div>
+          <div style="display: flex; justify-content: center; margin: 0.5rem 0;">
+            <div style="background: var(--text-muted); height: 2px; width: 40%; border-radius: 1px;"></div>
+          </div>
+          <div style="text-align: center; font-size: 0.7rem; color: var(--text-muted);">Interconnect (16 GT/s)</div>
+          <div style="display: flex; justify-content: center; margin: 0.5rem 0;">
+            <div style="background: var(--text-muted); height: 2px; width: 40%; border-radius: 1px;"></div>
+          </div>
+          <div style="text-align: center; font-size: 0.7rem; color: var(--text-muted);">PCIe Switch &nbsp; | &nbsp; CPU 1 (NUMA 1)</div>
+          <div style="display: flex; justify-content: center; margin: 0.4rem 0;">
+            <div style="background: var(--accent-orange); height: 2px; width: 80%; border-radius: 1px;"></div>
+          </div>
+          <div class="arch-inner-row" style="gap: 0.4rem;">
+            <div class="arch-box arch-small" style="background: rgba(240,136,62,0.15); border: 1px solid var(--accent-orange); color: #f0d4b7; flex:1;">mlx5_2</div>
+            <div class="arch-box arch-small" style="background: rgba(240,136,62,0.15); border: 1px solid var(--accent-orange); color: #f0d4b7; flex:1;">mlx5_3</div>
+            <div class="arch-box arch-small" style="background: rgba(63,185,80,0.15); border: 1px solid var(--accent-green); color: #b7f0c8; flex:1;">GPU 2</div>
+            <div class="arch-box arch-small" style="background: rgba(63,185,80,0.15); border: 1px solid var(--accent-green); color: #b7f0c8; flex:1;">GPU 3</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Topology Matrix -->
+      <div style="flex: 1; min-width: 260px;">
+        <div style="font-size: 0.78rem; font-weight: 600; color: var(--accent-cyan); margin-bottom: 0.6rem;">Topology Matrix (JSON)</div>
+        <pre style="font-size: 0.75rem; margin: 0;"><code>{
+  <span class="st">"cpu:0"</span>: [[<span class="st">"mlx5_0"</span>, <span class="st">"mlx5_1"</span>],
+            [<span class="st">"mlx5_2"</span>, <span class="st">"mlx5_3"</span>]],
+  <span class="st">"cpu:1"</span>: [[<span class="st">"mlx5_2"</span>, <span class="st">"mlx5_3"</span>],
+            [<span class="st">"mlx5_0"</span>, <span class="st">"mlx5_1"</span>]],
+  <span class="st">"cuda:0"</span>: [[<span class="st">"mlx5_0"</span>],
+             [<span class="st">"mlx5_1"</span>, <span class="st">"mlx5_2"</span>]]
+}</code></pre>
+        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.6rem;">
+          <strong>Preferred list:</strong> NUMA-local NICs selected first<br>
+          <strong>Secondary list:</strong> cross-NUMA fallback on failure<br>
+          <strong>Granularity:</strong> 16 KB slices across all NICs<br>
+          <strong>Endpoint pooling:</strong> SIEVE eviction algorithm
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card red">
+    <h4>Failure Handling and Resilience</h4>
+    <p style="margin-bottom: 0;">
+      In multi-NIC environments, temporary NIC failures are common. The Transfer Engine automatically
+      detects unavailable connections, identifies alternative paths from the topology matrix, and
+      resubmits the 16 KB slice to a different RDMA NIC device. It can also detect problems with RDMA
+      contexts and completion queues, temporarily blacklisting faulty resources until recovery.
+      The implementation includes a <code>WorkerPool</code> for managing RDMA worker threads,
+      an <code>EndpointStore</code> with on-demand connection establishment, and retry logic
+      with configurable <code>max_retry_cnt</code> per slice.
+    </p>
+  </div>
+
+  <h3>4.3 Conductor Scheduling</h3>
+  <div class="card purple">
+    <h4>KVCache-centric Scheduling Algorithm</h4>
+    <p>
+      The Conductor runs Algorithm 1 from the paper for every incoming request. For each prefill instance,
+      it compares block keys to find the best prefix match length, then estimates TTFT as the sum of:
+    </p>
+    <ul style="margin-left: 1.5rem; margin-bottom: 0.8rem;">
+      <li><strong>T_queue</strong> -- estimated queue wait on that instance</li>
+      <li><strong>T_transfer</strong> -- KVCache transfer time (size and network congestion)</li>
+      <li><strong>T_prefill</strong> -- GPU computation for uncached tokens (polynomial regression model)</li>
+    </ul>
+    <p style="margin-bottom:0;">
+      If a remote cache hit is long but the local instance is overloaded, the algorithm may prefer a
+      shorter local prefix plus local computation over a remote transfer. The <code>kvcache_balancing_threshold</code>
+      controls when hotspot migration is triggered: if a remote prefix match is sufficiently longer than
+      the local match (by this multiplicative threshold), the cache is proactively replicated.
+    </p>
+  </div>
+
+  <pre><code><span class="cm">// Algorithm 1: KVCache-centric Scheduling (pseudocode from paper)</span>
+<span class="kw">for</span> instance <span class="kw">in</span> prefill_pool:
+    best_len, best_instance = <span class="fn">FindBestPrefixMatch</span>(P, block_keys)
+    <span class="kw">if</span> instance.prefix_len / best_len > kvcache_balancing_threshold:
+        prefix_len = best_len                 <span class="cm">// use remote cache</span>
+        transfer_len = best_len - instance.prefix_len
+        T_transfer = <span class="fn">EstimateKVCacheTransferTime</span>(transfer_len)
+    <span class="kw">else</span>:
+        prefix_len = instance.prefix_len      <span class="cm">// use local cache</span>
+        T_transfer = <span class="nu">0</span>
+    T_queue = <span class="fn">EstimatePrefillQueueTime</span>(instance)
+    T_prefill = <span class="fn">EstimatePrefillExecutionTime</span>(R, prefix_len)
+    TTFT = T_transfer + T_queue + T_prefill
+    <span class="kw">if</span> TTFT &lt; best_TTFT: update(p, TTFT)
+<span class="kw">if</span> TTFT > TTFT_SLO: <span class="fn">reject</span>(R)  <span class="cm">// early rejection</span></code></pre>
+</section>
+
+<!-- Section 5: Production Scale -->
+<section id="production">
+  <h2>5. Production Scale</h2>
+
+  <div class="callout callout-green">
+    <div class="callout-title">Kimi Production Deployment</div>
+    Mooncake is the serving platform for Kimi, Moonshot AI's flagship LLM chatbot. It runs across
+    <strong>thousands of GPU nodes</strong>, processing over <strong>100 billion tokens per day</strong>.
+    According to the paper, Mooncake enables Kimi to handle <strong>115% more requests</strong> on
+    NVIDIA A800 clusters and <strong>107% more requests</strong> on H800 clusters compared to the
+    previous serving systems.
+  </div>
+
+  <div class="grid-2">
+    <div class="card gold">
+      <h4>Scale Metrics</h4>
+      <table>
+        <tr><td>Daily Token Volume</td><td style="font-weight:700; color: var(--accent-gold);">&gt;100 Billion</td></tr>
+        <tr><td>GPU Cluster</td><td>Thousands of nodes (A800/H800)</td></tr>
+        <tr><td>KVCache Block Size</td><td>256 tokens (testbed)</td></tr>
+        <tr><td>Network</td><td>4x200 Gbps / 8x400 Gbps RoCE</td></tr>
+        <tr><td>RDMA NICs per Node</td><td>4 (A800) / 8 (H800)</td></tr>
+        <tr><td>Cache Pool per Node</td><td>CPU DRAM + SSD (petabyte-level)</td></tr>
+      </table>
+    </div>
+    <div class="card orange">
+      <h4>Workload Characteristics</h4>
+      <table>
+        <tr><td>Conversation (real trace)</td><td>avg 12k tokens, 40% cache ratio</td></tr>
+        <tr><td>Tool&amp;Agent (real trace)</td><td>avg 8.6k tokens, 59% cache ratio</td></tr>
+        <tr><td>Synthetic (combined)</td><td>avg 15k tokens, 66% cache ratio</td></tr>
+        <tr><td>Context Range</td><td>Up to 128k tokens</td></tr>
+        <tr><td>Request Volume (1hr trace)</td><td>12k-24k requests</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3>Chunked Pipeline Prefill (CPP)</h3>
+  <div class="card">
+    <p>
+      For long-context requests, Mooncake groups every X nodes in the prefill cluster into a
+      <strong>pipelined prefill node group</strong>. Input tokens are partitioned into chunks
+      (no larger than <code>prefill_chunk</code>), processed simultaneously by different nodes.
+      CPP offers two key advantages over sequence parallelism (SP): <strong>1)</strong> it requires
+      cross-node communication only at pipeline stage boundaries (not all-reduce per layer), leading
+      to better MFU; <strong>2)</strong> it naturally handles both short and long contexts without
+      dynamic partitioning overhead. The paper notes this is the first application of pipeline-based
+      acceleration for inference (previously explored only in training).
+    </p>
+  </div>
+
+  <!-- CPP Diagram -->
+  <div class="arch-diagram" style="padding: 1.5rem;">
+    <div class="arch-title">Chunked Pipeline Prefill (CPP) vs. Sequence Parallelism (SP)</div>
+    <div class="arch-row" style="gap: 2rem;">
+      <div style="flex: 1; min-width: 240px;">
+        <div style="font-size: 0.8rem; font-weight: 700; color: var(--accent-green); margin-bottom: 0.8rem; text-align: center;">CPP: Pipeline Parallelism</div>
+        <div style="display: flex; gap: 0.3rem; margin-bottom: 0.3rem;">
+          <div style="flex:1; background: rgba(63,185,80,0.3); border: 1px solid var(--accent-green); border-radius: 4px; padding: 0.3rem; text-align: center; font-size: 0.7rem; color: #b7f0c8;">Chunk 1<br><span style="font-size:0.6rem;">Node A</span></div>
+          <div style="flex:1; background: rgba(63,185,80,0.15); border: 1px solid rgba(63,185,80,0.4); border-radius: 4px; padding: 0.3rem; text-align: center; font-size: 0.7rem; color: #8bd4a0;">Chunk 2<br><span style="font-size:0.6rem;">Node B</span></div>
+          <div style="flex:1; background: rgba(63,185,80,0.08); border: 1px solid rgba(63,185,80,0.3); border-radius: 4px; padding: 0.3rem; text-align: center; font-size: 0.7rem; color: #6ab88a;">Chunk 3<br><span style="font-size:0.6rem;">Node A</span></div>
+        </div>
+        <div style="font-size: 0.65rem; color: var(--text-muted); text-align: center;">Communication only at stage boundaries</div>
+        <div style="font-size: 0.65rem; color: var(--accent-green); text-align: center; margin-top: 0.2rem;">Higher MFU | Less network contention</div>
+      </div>
+      <div style="flex: 1; min-width: 240px;">
+        <div style="font-size: 0.8rem; font-weight: 700; color: var(--accent-orange); margin-bottom: 0.8rem; text-align: center;">SP: Sequence Parallelism</div>
+        <div style="display: flex; gap: 0.3rem; margin-bottom: 0.3rem;">
+          <div style="flex:1; background: rgba(240,136,62,0.2); border: 1px solid var(--accent-orange); border-radius: 4px; padding: 0.3rem; text-align: center; font-size: 0.7rem; color: #f0d4b7;">Half Seq<br><span style="font-size:0.6rem;">Node A</span></div>
+          <div style="flex:1; background: rgba(240,136,62,0.2); border: 1px solid var(--accent-orange); border-radius: 4px; padding: 0.3rem; text-align: center; font-size: 0.7rem; color: #f0d4b7;">Half Seq<br><span style="font-size:0.6rem;">Node B</span></div>
+        </div>
+        <div style="font-size: 0.65rem; color: var(--text-muted); text-align: center;">All-reduce per layer between nodes</div>
+        <div style="font-size: 0.65rem; color: var(--accent-orange); text-align: center; margin-top: 0.2rem;">Lower MFU | Competes with KV transfer</div>
+      </div>
+    </div>
+  </div>
+
+  <h3>P/D Ratio Optimization</h3>
+  <div class="card">
+    <p style="margin-bottom:0;">
+      The paper explores the optimal ratio of prefill (P) to decoding (D) nodes. Increasing prefill
+      nodes reduces TTFT but increases TBT (fewer decoders). The experiments show that a <strong>~1:1
+      P/D ratio</strong> maximizes effective request capacity (around 87-89% effective ratio), as the
+      workloads of prefill and decoding clusters become balanced. In production, Mooncake fixes the
+      P/D ratio and only switches node roles when significant load fluctuations are detected, since
+      online traffic statistics remain generally stable.
+    </p>
+  </div>
+</section>
+
+<!-- Section 6: Integration Ecosystem -->
+<section id="integration">
+  <h2>6. Integration Ecosystem</h2>
+
+  <p>
+    Mooncake has become a foundational infrastructure component in the LLM serving ecosystem, with
+    official integrations into all major inference frameworks.
+  </p>
+
+  <div class="grid-2">
+    <div class="card green">
+      <h4>vLLM Integration</h4>
+      <p style="margin-bottom:0.3rem;">Official <strong>KV Connector</strong> since Dec 2024 (<code>MooncakeStoreConnector</code>
+        and <code>MooncakeTransferEngineConnector</code>). Replaces gloo/nccl for inter-node KVCache
+        transfer in P/D disaggregated setups. Mean TTFT is up to <strong>25% lower</strong> than TCP-based transports. Also integrated with vLLM-Ascend for Huawei NPUs and vLLM-Omni for multi-modal pipelines.</p>
+    </div>
+    <div class="card purple">
+      <h4>SGLang Integration</h4>
+      <p style="margin-bottom:0.3rem;">Serves as <strong>HiCache storage backend</strong> for SGLang's hierarchical KV caching (Sept 2025),
+        extending RadixAttention across device/host/remote tiers. Also supports <strong>EPD disaggregation</strong>
+        (Encode-Prefill-Decode) for decoupling multimodal encoders. Integrated expert parallelism kernels
+        enable fault-tolerant MoE inference. Ant Group reports <strong>84% TTFT reduction</strong> via cache hits.</p>
+    </div>
+    <div class="card orange">
+      <h4>TensorRT-LLM Integration</h4>
+      <p style="margin-bottom:0.3rem;">
+        Integrated since Dec 2025 as <code>mooncake_utils</code> in TensorRT-LLM's cache transmission layer
+        for KVCache transfer in P/D disaggregated inference. Also supported as a plugin by NVIDIA's
+        <strong>NIXL</strong> communication library.
+      </p>
+    </div>
+    <div class="card">
+      <h4>LMCache &amp; Broader Ecosystem</h4>
+      <p style="margin-bottom:0.3rem;">
+        <strong>LMCache</strong> supports Mooncake Store as a remote connector (Apr 2025).
+        <strong>PyTorch Ecosystem</strong> member since Feb 2026.
+        <strong>TorchSpec</strong> uses Mooncake to decouple inference and training for speculative decoding.
+        <strong>FlexKV</strong> (Tencent/NVIDIA) and <strong>xLLM</strong> (JD) build hybrid KV cache management on Mooncake.
+        <strong>LightX2V</strong> uses it for disaggregated video model deployment.
+        <strong>checkpoint-engine</strong> (Moonshot AI) updated Kimi-K2 (1T params) across thousands of GPUs in ~20s.
+      </p>
+    </div>
+  </div>
+
+  <!-- Integration Architecture Diagram -->
+  <div class="arch-diagram" style="padding: 1.5rem;">
+    <div class="arch-title">Mooncake Integration Architecture</div>
+    <div class="arch-row">
+      <!-- Top layer: Inference Frameworks -->
+      <div style="flex: 1; border: 1px dashed rgba(188,140,255,0.4); border-radius: 8px; padding: 0.8rem;">
+        <div style="font-size: 0.7rem; font-weight: 700; color: var(--accent-purple); text-transform: uppercase; margin-bottom: 0.6rem; text-align: center;">LLM Inference Frameworks</div>
+        <div class="arch-inner-row" style="gap: 0.5rem;">
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.15); border: 1px solid var(--accent-purple); color: #e2d0ff; flex:1;">vLLM</div>
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.15); border: 1px solid var(--accent-purple); color: #e2d0ff; flex:1;">SGLang</div>
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.15); border: 1px solid var(--accent-purple); color: #e2d0ff; flex:1;">TensorRT-LLM</div>
+          <div class="arch-box arch-small" style="background: rgba(188,140,255,0.15); border: 1px solid var(--accent-purple); color: #e2d0ff; flex:1;">LMCache</div>
+        </div>
+      </div>
+    </div>
+    <div class="arch-arrow-down" style="font-size: 0.8rem;">KV Connectors / HiCache Backend / NIXL Plugin</div>
+    <div class="connector-v conn-purple" style="height: 15px;"></div>
+    <div class="arch-row">
+      <!-- Middle layer: Mooncake Components -->
+      <div style="flex: 1; border: 1px dashed rgba(57,210,192,0.4); border-radius: 8px; padding: 0.8rem;">
+        <div style="font-size: 0.7rem; font-weight: 700; color: var(--accent-cyan); text-transform: uppercase; margin-bottom: 0.6rem; text-align: center;">Mooncake Core Components</div>
+        <div class="arch-inner-row" style="gap: 0.5rem;">
+          <div class="arch-box arch-small arch-store" style="flex: 1;">Mooncake Store</div>
+          <div class="arch-box arch-small arch-te" style="flex: 1;">Transfer Engine</div>
+          <div class="arch-box arch-small" style="flex: 1; background: rgba(227,179,65,0.15); border: 1px solid var(--accent-gold); color: #f0dfa0;">P2P Store</div>
+          <div class="arch-box arch-small" style="flex: 1; background: rgba(88,166,255,0.15); border: 1px solid var(--accent-blue); color: #b7d4f0;">Mooncake EP</div>
+        </div>
+      </div>
+    </div>
+    <div class="connector-v conn-cyan" style="height: 15px;"></div>
+    <div class="arch-row">
+      <!-- Bottom layer: Transport protocols -->
+      <div style="flex: 1; border: 1px dashed rgba(139,148,158,0.4); border-radius: 8px; padding: 0.8rem;">
+        <div style="font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.6rem; text-align: center;">Transport Protocols</div>
+        <div class="arch-inner-row" style="gap: 0.4rem;">
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">RDMA</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">TCP</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">NVMe-oF</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">CXL</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">NVLink</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">EFA</div>
+          <div class="arch-box arch-small" style="background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: #b7d4f0; flex:1; font-size: 0.65rem;">Ascend</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout-purple">
+    <div class="callout-title">Supported Transport Protocols</div>
+    <strong>RDMA:</strong> InfiniBand, RoCEv2, eRDMA, NVIDIA GPUDirect &nbsp;|&nbsp;
+    <strong>Network:</strong> TCP, EFA (AWS) &nbsp;|&nbsp;
+    <strong>Storage:</strong> NVMe over Fabric &nbsp;|&nbsp;
+    <strong>Intra-node:</strong> NVLink, CXL, Shared Memory, HIP &nbsp;|&nbsp;
+    <strong>Accelerator:</strong> Ascend (Huawei), MUSA (Moore Threads)
+  </div>
+
+  <h3>Installation</h3>
+  <pre><code><span class="cm"># Install via pip (CUDA < 13.0)</span>
+pip install mooncake-transfer-engine
+
+<span class="cm"># Install via pip (CUDA >= 13.0)</span>
+pip install mooncake-transfer-engine-cuda13
+
+<span class="cm"># Build from source</span>
+git clone https://github.com/kvcache-ai/Mooncake.git
+<span class="kw">cd</span> Mooncake && bash dependencies.sh
+mkdir build && <span class="kw">cd</span> build && cmake .. && make -j
+sudo make install</code></pre>
+</section>
+
+<!-- Section 7: Performance -->
+<section id="performance">
+  <h2>7. Performance Results</h2>
+
+  <h3>7.1 Effective Request Capacity</h3>
+  <p>
+    The paper evaluates Mooncake against vLLM (v0.5.1), vLLM with prefix caching, and vLLM with
+    chunked prefill on a 16-node cluster of 8xA800 GPUs with 4x200 Gbps RDMA NICs.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Workload</th>
+        <th>TBT Threshold</th>
+        <th>Mooncake vs. vLLM</th>
+        <th>Mooncake vs. Best Baseline</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Conversation</strong></td>
+        <td>100 ms (Threshold I)</td>
+        <td style="color: var(--accent-green); font-weight: 700;">+498%</td>
+        <td style="color: var(--accent-green);">+498% (vs. vLLM)</td>
+      </tr>
+      <tr>
+        <td><strong>Conversation</strong></td>
+        <td>300 ms (Threshold II)</td>
+        <td style="color: var(--accent-green); font-weight: 700;">+157%</td>
+        <td style="color: var(--accent-green);">+157% (vs. vLLM)</td>
+      </tr>
+      <tr>
+        <td><strong>Conversation</strong></td>
+        <td>1000 ms (Threshold III)</td>
+        <td style="color: var(--accent-green);">+59%</td>
+        <td style="color: var(--accent-green);">+59% (vs. vLLM)</td>
+      </tr>
+      <tr>
+        <td><strong>Tool&amp;Agent</strong></td>
+        <td>100 ms</td>
+        <td style="color: var(--accent-green);">+64%</td>
+        <td style="color: var(--accent-green);">+42% (vs. prefix caching)</td>
+      </tr>
+      <tr>
+        <td><strong>Synthetic</strong></td>
+        <td>200 ms</td>
+        <td style="color: var(--accent-green);">+62%</td>
+        <td style="color: var(--accent-green);">+40% (vs. vLLM)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>7.2 Transfer Engine Bandwidth</h3>
+
+  <div class="grid-2">
+    <div class="stat-card" style="border-top: 3px solid var(--accent-blue);">
+      <div class="stat-value" style="color: var(--accent-blue);">87 GB/s</div>
+      <div class="stat-label">4 x 200 Gbps RoCE (2.4x faster than TCP)</div>
+      <div style="margin-top: 0.8rem;">
+        <div class="metric-bar" style="width: 100%; background: linear-gradient(90deg, #58a6ff, #388bfd);">Transfer Engine: 87 GB/s</div>
+        <div class="metric-bar" style="width: 42%; background: linear-gradient(90deg, #8b949e, #6e7681);">TCP: ~36 GB/s</div>
+        <div class="metric-bar" style="width: 30%; background: linear-gradient(90deg, #6e7681, #484f58);">Gloo: ~26 GB/s</div>
+      </div>
+    </div>
+    <div class="stat-card" style="border-top: 3px solid var(--accent-green);">
+      <div class="stat-value" style="color: var(--accent-green);">190 GB/s</div>
+      <div class="stat-label">8 x 400 Gbps RoCE (4.6x faster than TCP)</div>
+      <div style="margin-top: 0.8rem;">
+        <div class="metric-bar" style="width: 100%; background: linear-gradient(90deg, #3fb950, #22863a);">Transfer Engine: 190 GB/s</div>
+        <div class="metric-bar" style="width: 22%; background: linear-gradient(90deg, #8b949e, #6e7681);">TCP: ~41 GB/s</div>
+        <div class="metric-bar" style="width: 15%; background: linear-gradient(90deg, #6e7681, #484f58);">Gloo: ~29 GB/s</div>
+      </div>
+    </div>
+  </div>
+
+  <h3>7.3 Global Cache Advantage</h3>
+
+  <div class="card cyan">
+    <h4>Global vs. Local Cache Performance</h4>
+    <p>
+      The paper's quantitative analysis (Section 5.3) demonstrates that a local DRAM cache on each node
+      (3M tokens capacity) achieves only <strong>up to 50%</strong> of the theoretical maximum hit rate.
+      The global Mooncake Store pool achieves near-100% of theoretical maximum when capacity reaches 50M
+      tokens (pooling ~20 nodes' DRAM).
+    </p>
+    <table>
+      <thead>
+        <tr><th>Metric</th><th>Conversation</th><th>Tool&amp;Agent</th><th>Synthetic</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Global vs. Local cache hit rate improvement</td>
+          <td style="color: var(--accent-green); font-weight: 700;">+1.38x</td>
+          <td style="color: var(--accent-green); font-weight: 700;">+2.36x</td>
+          <td style="color: var(--accent-green); font-weight: 700;">+1.38x</td>
+        </tr>
+        <tr>
+          <td>Prefill GPU time reduction</td>
+          <td style="color: var(--accent-green);">36%</td>
+          <td style="color: var(--accent-green);">53%</td>
+          <td style="color: var(--accent-green);">64%</td>
+        </tr>
+        <tr>
+          <td>Prefill GPU time vs. vLLM w/ prefix caching</td>
+          <td style="color: var(--accent-green);">1.43x lower</td>
+          <td style="color: var(--accent-green);">1.40x lower</td>
+          <td style="color: var(--accent-green);">2.59x lower</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>7.4 End-to-End Latency Breakdown</h3>
+  <p>
+    At 128k input tokens with 95% prefix cache ratio, TTFT is dominated by Transfer and Load Cache
+    phases rather than Prefill computation. Prefix caching reduces prefill time by <strong>92%</strong>.
+    The Schedule, Transfer, and Load Cache steps proceed asynchronously with inference, so their overhead
+    does not block Mooncake throughput. Even accounting for all overhead, prefix caching in Mooncake
+    reduces TTFT by <strong>86%</strong> for 128k-token inputs.
+  </p>
+
+  <h3>7.5 Scheduling Algorithm Effectiveness</h3>
+  <div class="card purple">
+    <h4>Prefill Scheduling Comparison</h4>
+    <p>
+      The paper evaluates four scheduling strategies on a 16-node cluster replaying conversation traces.
+      The global cache-aware algorithm reduces average TTFT by <strong>14%</strong> compared to local
+      cache-aware scheduling, which itself is substantially better than random or load-balancing alone.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Strategy</th><th>Avg TTFT</th><th>Median TTFT</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="color: var(--accent-green); font-weight: 700;">Global Cache-Aware</td>
+          <td>3.07s</td><td>~2.5s</td>
+          <td>Full Algorithm 1 with cross-node cache matching + hotspot migration</td>
+        </tr>
+        <tr>
+          <td>Local Cache-Aware</td>
+          <td>3.58s</td><td>~3.0s</td>
+          <td>Only considers caches on the same node</td>
+        </tr>
+        <tr>
+          <td>Load Balancing</td>
+          <td>5.27s</td><td>~4.0s</td>
+          <td>Routes to instance with lightest load</td>
+        </tr>
+        <tr>
+          <td>Random</td>
+          <td>19.65s</td><td>~15s</td>
+          <td>Random instance selection</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>7.6 Bandwidth Requirements</h3>
+  <p>
+    The paper studies how system performance degrades under constrained bandwidth. When total communication
+    bandwidth exceeds <strong>100 Gbps</strong>, average TTFT remains below 2s (well under the recomputation
+    baseline). Below 100 Gbps, TTFT increases sharply and transfer times diverge from theoretical
+    predictions due to network congestion. Mooncake recommends a minimum of 100 Gbps per node for
+    optimal performance, a threshold easily met by a single modern RDMA NIC.
+  </p>
+</section>
+
+<!-- Section 8: Paper vs. Implementation -->
+<section id="comparison">
+  <h2>8. Paper vs. Implementation Comparison</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 22%;">Paper Claim</th>
+        <th style="width: 28%;">Paper Description</th>
+        <th style="width: 28%;">Implementation Status</th>
+        <th style="width: 22%;">Assessment</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Transfer Engine</strong></td>
+        <td>Unified batched data transfer across RDMA NICs with topology-aware path selection, 16 KB slice granularity, endpoint pooling with SIEVE eviction</td>
+        <td><code>TransferEngine</code>, <code>RdmaTransport</code>, <code>Topology</code> classes fully implemented. Supports RDMA, TCP, NVMe-oF, CXL, NVLink, Ascend, EFA, HIP, and more. New "TENT" rewrite underway.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Matches and exceeds</td>
+      </tr>
+      <tr>
+        <td><strong>Mooncake Store</strong></td>
+        <td>Distributed KVCache pool with object-based APIs (put/get/change_replica), paged blocks, LRU eviction, multi-replica support</td>
+        <td><code>MasterService</code> and <code>Client</code> fully implement the described API. Uses CacheLib slab allocator. Adds HA (high availability) with leader election, snapshots, and oplog replay not described in paper.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Matches and exceeds</td>
+      </tr>
+      <tr>
+        <td><strong>Conductor Scheduler</strong></td>
+        <td>KVCache-centric scheduling with cache-aware prefill routing, load-balanced decode selection, early rejection policy</td>
+        <td>The Conductor/scheduler is <strong>not open-sourced</strong>. This is proprietary production infrastructure at Moonshot AI. The scheduling algorithm is described in Algorithm 1 but the implementation is internal.</td>
+        <td style="color: var(--accent-orange); font-weight: 700;">Not open-sourced</td>
+      </tr>
+      <tr>
+        <td><strong>CPP (Chunked Pipeline Prefill)</strong></td>
+        <td>Pipeline parallelism for long-context prefill across multiple nodes, communicating only at stage boundaries</td>
+        <td>CPP mechanism is part of the internal serving infrastructure. The open-source repo provides integration hooks (via Transfer Engine) but not the full pipeline orchestration.</td>
+        <td style="color: var(--accent-orange); font-weight: 700;">Partial -- integration only</td>
+      </tr>
+      <tr>
+        <td><strong>87 GB/s bandwidth</strong></td>
+        <td>On 4x200 Gbps RoCE with 40 GB data (128k tokens of LLaMA3-70B KVCache)</td>
+        <td>Transfer Engine benchmarks are included in the repo (<code>mooncake-transfer-engine/benchmark/</code>). The README confirms this figure along with 190 GB/s on 8x400 Gbps. Independently verifiable.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Verifiable</td>
+      </tr>
+      <tr>
+        <td><strong>Metadata service</strong></td>
+        <td>Paper mentions etcd for metadata coordination</td>
+        <td>Supports <strong>etcd, Redis, and HTTP</strong> metadata backends. P2P handshake mode also available. This flexibility exceeds the paper's description.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Exceeds</td>
+      </tr>
+      <tr>
+        <td><strong>Protocol support</strong></td>
+        <td>Paper focuses on RDMA (RoCEv2) for KVCache transfer</td>
+        <td>Implementation supports <strong>11+ transport protocols</strong>: RDMA, TCP, NVMe-oF, CXL, NVLink, EFA, HIP, Ascend, MNNVL, Shared Memory, and BareX. Significantly broader than paper scope.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Far exceeds</td>
+      </tr>
+      <tr>
+        <td><strong>Trace data</strong></td>
+        <td>Three trace datasets (conversation, tool&amp;agent, synthetic) from production</td>
+        <td>Available in <code>FAST25-release/traces/</code> as JSONL files. Updated Feb 2025 with the FAST'25 version. Fields: timestamp, input_length, output_length, hash_ids.</td>
+        <td style="color: var(--accent-green); font-weight: 700;">Fully available</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-orange">
+    <div class="callout-title">Key Gaps</div>
+    The primary gap between the paper and the open-source implementation is the <strong>Conductor
+    scheduler</strong> -- the global KVCache-centric scheduling component that is central to Mooncake's
+    production deployment. This is proprietary to Moonshot AI. However, the core data-plane components
+    (Transfer Engine and Mooncake Store) are fully open-sourced and have been adopted by all major
+    inference frameworks. The integration with vLLM, SGLang, and TensorRT-LLM effectively allows
+    third parties to build their own scheduling layers on top of these components.
+  </div>
+
+  <div class="callout callout-green">
+    <div class="callout-title">Beyond the Paper</div>
+    The open-source repository has evolved significantly beyond the FAST'25 paper scope:
+    <strong>Elastic Expert Parallelism</strong> for MoE models (mooncake-ep),
+    <strong>high availability</strong> with leader election and snapshotting,
+    <strong>local hot cache</strong> with Count-Min Sketch frequency admission,
+    <strong>SSD/file-backed storage</strong> with offloading,
+    <strong>disk replica support</strong> for persistent caching,
+    <strong>TENT</strong> (next-gen Transfer Engine rewrite),
+    and the <strong>P2P Store</strong> for distributed checkpoint management (used to update Kimi-K2 at 1T parameters).
+    The project has also grown from RDMA-only to supporting 11+ transport protocols.
+  </div>
+</section>
+
+<!-- Final summary -->
+<section>
+  <h2>Summary</h2>
+  <div class="card gold">
+    <p style="margin-bottom: 0;">
+      Mooncake represents a significant contribution to LLM systems research and production practice.
+      Its core insight -- that KV cache management is the central bottleneck in LLM serving -- is validated
+      by both rigorous mathematical analysis and production deployment at massive scale. The open-source
+      release of the Transfer Engine and Mooncake Store has catalyzed adoption across the entire LLM serving
+      ecosystem, with integrations into vLLM, SGLang, TensorRT-LLM, LMCache, and the PyTorch Ecosystem.
+      While the Conductor scheduler remains proprietary, the data-plane components are production-grade,
+      well-engineered, and represent the state of the art in distributed KV cache transfer.
+      The FAST'25 Best Paper Award is well-deserved recognition of work that bridges the gap between
+      systems research and real-world deployment at 100B+ tokens per day.
+    </p>
+  </div>
+</section>
+
+</div>
+
+<footer style="text-align: center; padding: 2rem; color: var(--text-muted); font-size: 0.8rem; border-top: 1px solid var(--border);">
+  Technical analysis of arXiv:2407.00079 | Repository: <a href="https://github.com/kvcache-ai/Mooncake" style="color: var(--accent-blue);">github.com/kvcache-ai/Mooncake</a>
+  | FAST'25 Best Paper | Generated for research reference
+</footer>
+
+</body>
+</html>

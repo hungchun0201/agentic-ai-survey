@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NACL - A General and Effective KV Cache Eviction Framework</title>
+<style>
+  :root {
+    --bg-primary: #0a0d14;
+    --bg-secondary: #0f1420;
+    --bg-card: #151b2c;
+    --bg-code: #1e1e2e;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-blue: #89b4fa;
+    --accent-green: #a6e3a1;
+    --accent-mauve: #cba6f7;
+    --accent-peach: #fab387;
+    --accent-red: #f38ba8;
+    --accent-teal: #94e2d5;
+    --accent-yellow: #f9e2af;
+    --border-color: #1e2d44;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(10,13,20,0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0.6rem 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  nav .logo {
+    color: var(--accent-green);
+    font-weight: 700;
+    font-size: 1rem;
+    margin-right: 0.5rem;
+  }
+  nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+  }
+  nav a:hover {
+    color: var(--accent-green);
+    border-bottom-color: var(--accent-green);
+  }
+  .hero {
+    background: linear-gradient(135deg, #16213e, #0f3460);
+    padding: 4.5rem 2rem 3.5rem;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 30% 20%, rgba(166,227,161,0.1) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 80%, rgba(137,180,250,0.08) 0%, transparent 55%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.2rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #a6e3a1, #94e2d5, #89b4fa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.6rem;
+    position: relative;
+  }
+  .hero .venue {
+    color: var(--accent-peach);
+    font-weight: 600;
+    font-size: 1rem;
+    margin-bottom: 0.3rem;
+    position: relative;
+  }
+  .hero .authors {
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    max-width: 48rem;
+    margin: 0 auto 1rem;
+    position: relative;
+  }
+  .hero .links {
+    display: flex;
+    gap: 0.8rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    position: relative;
+  }
+  .hero .arxiv {
+    display: inline-block;
+    background: rgba(166,227,161,0.15);
+    color: var(--accent-green);
+    padding: 0.4rem 1.2rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    border: 1px solid rgba(166,227,161,0.3);
+  }
+  .hero .gh {
+    display: inline-block;
+    background: rgba(137,180,250,0.15);
+    color: var(--accent-blue);
+    padding: 0.4rem 1.2rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    border: 1px solid rgba(137,180,250,0.3);
+  }
+  .hero .tags {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+    position: relative;
+  }
+  .hero .tag {
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+  .section {
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 3rem 2rem;
+  }
+  .section h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border-color);
+  }
+  .section h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+  p { margin-bottom: 0.8rem; }
+  .card {
+    background: var(--bg-card);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin-bottom: 1.2rem;
+    border: 1px solid var(--border-color);
+  }
+  .card-blue { border-left: 4px solid var(--accent-blue); }
+  .card-green { border-left: 4px solid var(--accent-green); }
+  .card-mauve { border-left: 4px solid var(--accent-mauve); }
+  .card-peach { border-left: 4px solid var(--accent-peach); }
+  .card-teal { border-left: 4px solid var(--accent-teal); }
+  .card-red { border-left: 4px solid var(--accent-red); }
+  .card-yellow { border-left: 4px solid var(--accent-yellow); }
+  .card h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+  }
+  .code-block { background:#1e1e2e; color:#cdd6f4; border-radius:8px; padding:1.2rem; margin:1rem 0; font-family:'Cascadia Code','Fira Code',monospace; font-size:0.82rem; overflow-x:auto; line-height:1.6; border:1px solid #313244; }
+  .kw { color:#cba6f7; } .fn { color:#89b4fa; } .cm { color:#6c7086; } .st { color:#a6e3a1; } .nu { color:#fab387; }
+  table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:0.85rem; }
+  th { background:#16213e; color:#fff; padding:0.7rem 0.8rem; text-align:left; font-weight:600; }
+  td { padding:0.55rem 0.8rem; border-bottom:1px solid var(--border-color); }
+  tr:hover { background:rgba(137,180,250,0.05); }
+  .note { background:rgba(166,227,161,0.08); border-left:4px solid var(--accent-green); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .warn { background:rgba(249,226,175,0.08); border-left:4px solid var(--accent-yellow); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .info { background:rgba(137,180,250,0.08); border-left:4px solid var(--accent-blue); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; font-size:0.9rem; }
+  .grid-2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:1.2rem; }
+  .grid-3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1rem; }
+  .arch-diagram { background:var(--bg-secondary); border-radius:12px; padding:2rem; margin:1.5rem 0; border:1px solid var(--border-color); }
+  .arch-row { display:flex; align-items:center; justify-content:center; gap:1rem; margin:1rem 0; flex-wrap:wrap; }
+  .arch-box { padding:0.7rem 1.2rem; border-radius:8px; font-size:0.82rem; font-weight:600; text-align:center; min-width:110px; }
+  .arch-arrow-down { width:2px; height:28px; background:var(--text-muted); margin:0 auto; position:relative; }
+  .arch-arrow-down::after { content:''; position:absolute; bottom:-1px; left:-4px; border:5px solid transparent; border-top:6px solid var(--text-muted); }
+  .arch-arrow-right { width:30px; height:2px; background:var(--text-muted); position:relative; display:inline-block; }
+  .arch-arrow-right::after { content:''; position:absolute; right:-1px; top:-4px; border:5px solid transparent; border-left:6px solid var(--text-muted); }
+  .metric-strip { display:flex; gap:1rem; flex-wrap:wrap; margin:1.5rem 0; justify-content:center; }
+  .metric-box { background:var(--bg-card); border-radius:10px; padding:1.2rem 1.5rem; text-align:center; border:1px solid var(--border-color); min-width:140px; flex:1; }
+  .metric-box .val { font-size:1.8rem; font-weight:800; } .metric-box .lbl { font-size:0.78rem; color:var(--text-secondary); margin-top:0.2rem; }
+  ul, ol { padding-left:1.3rem; margin:0.5rem 0 0.8rem; }
+  li { margin-bottom:0.3rem; }
+  .formula { background:var(--bg-card); border-radius:8px; padding:0.8rem 1.2rem; margin:0.8rem 0; font-family:'Cascadia Code','Fira Code',monospace; font-size:0.88rem; text-align:center; border:1px solid var(--border-color); overflow-x:auto; }
+  @media (max-width:768px) { .hero h1 { font-size:1.6rem; } .section { padding:2rem 1rem; } .grid-2,.grid-3 { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">NACL</span>
+  <a href="#overview">Overview</a>
+  <a href="#observations">Observations</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#proxy-tokens">Proxy Tokens</a>
+  <a href="#random-eviction">Random Eviction</a>
+  <a href="#algorithm">Algorithm</a>
+  <a href="#short-text">Short-Text</a>
+  <a href="#long-text">Long-Text</a>
+  <a href="#ablation">Ablation</a>
+  <a href="#analysis">Analysis</a>
+  <a href="#significance">Significance</a>
+</nav>
+
+<div class="hero">
+  <div class="venue">ACL 2024</div>
+  <h1>NACL: A General and Effective KV Cache Eviction Framework for LLMs at Inference Time</h1>
+  <p class="authors">Yilong Chen, Guoxia Wang, Junyuan Shang, Shiyao Cui, Zhenyu Zhang, Tingwen Liu, Shuohuan Wang, Yu Sun, Dianhai Yu, Hua Wu<br>Chinese Academy of Sciences &amp; Baidu Inc.</p>
+  <div class="links">
+    <a class="arxiv" href="https://arxiv.org/abs/2408.03675" target="_blank">arXiv:2408.03675</a>
+    <a class="gh" href="https://github.com/PaddlePaddle/Research/tree/master/NLP/ACL2024-NACL" target="_blank">PaddlePaddle/Research</a>
+  </div>
+  <div class="tags">
+    <span class="tag" style="background:rgba(166,227,161,0.15);color:var(--accent-green);">KV Cache Eviction</span>
+    <span class="tag" style="background:rgba(137,180,250,0.15);color:var(--accent-blue);">Proxy-Token Scoring</span>
+    <span class="tag" style="background:rgba(203,166,247,0.15);color:var(--accent-mauve);">Head-Wise Random Eviction</span>
+    <span class="tag" style="background:rgba(250,179,135,0.15);color:var(--accent-peach);">5x KV Reduction</span>
+    <span class="tag" style="background:rgba(148,226,213,0.15);color:var(--accent-teal);">Training-Free</span>
+  </div>
+</div>
+
+<!-- ======================== OVERVIEW ======================== -->
+<div class="section" id="overview">
+  <h2>Overview</h2>
+  <div class="card card-green">
+    <h3>The Problem: Biased Eviction Scores in Long-Context Inference</h3>
+    <p>Hosting LLMs with extended context windows is cost-prohibitive due to the O(l * n_h * d_h) memory consumption of KV caches. A 7B model with batch size 4 at 32K sequence length requires 64GB of KV cache -- 4.7x larger than the model weights.</p>
+    <p>Existing eviction methods (H2O, Attention Sink, MSRNN, Scissorhands) rely on accumulated or local attention scores to determine token importance. These scores suffer from <strong>attention bias</strong>: recent tokens receive disproportionately high attention scores, while mid-context tokens are undervalued. Furthermore, the attention score distribution becomes progressively flattened with increasing text length, making score-based methods less capable of identifying truly important tokens.</p>
+    <p>These biased methods report good perplexity numbers but fail on real generation tasks, especially long-context tasks where pivotal information may appear anywhere in the input.</p>
+  </div>
+  <div class="card card-blue">
+    <h3>NACL: A Two-Part Hybrid Solution</h3>
+    <p>NACL (a general and effective KV Cache eviction framework for LLMs at inference time) proposes a hybrid eviction strategy that combines two complementary mechanisms:</p>
+    <ol>
+      <li><strong>Proxy-Tokens Eviction:</strong> Uses a small subset of task-relevant proxy tokens (typically from the user's question) to compute unbiased importance scores via global attention statistics</li>
+      <li><strong>Random Eviction:</strong> Head-wise random sampling from the attention score distribution with different seeds per head and layer, providing probabilistic information preservation guarantees</li>
+    </ol>
+    <p>NACL achieves 80% and 75% performance improvement on short- and long-text tasks respectively over existing methods with 50% KV cache reduction, and 5x total KV reduction with over 95% performance maintenance.</p>
+  </div>
+</div>
+
+<!-- ======================== OBSERVATIONS ======================== -->
+<div class="section" id="observations">
+  <h2>Key Observations Motivating NACL</h2>
+  <div class="grid-2">
+    <div class="card card-red">
+      <h3>Observation 1: Evaluation Metrics Are Misleading</h3>
+      <p>Current eviction methods are evaluated primarily using perplexity (PPL) on short texts. PPL emphasizes textual fluency but does not capture the ability to generate correct answers for comprehension tasks. Methods like Attention Sink claim infinite-length support but fail on tasks requiring the model to actually generate from long-context information (see Table 1 in the paper).</p>
+      <p>NACL re-evaluates all methods using both lm-eval-harness (few-shot reasoning) and LongBench (generation from long documents), providing a more honest assessment.</p>
+    </div>
+    <div class="card card-yellow">
+      <h3>Observation 2: Attention Bias Corrupts Scoring</h3>
+      <p>Visualizing attention score distributions reveals the <strong>attention bias problem</strong>: at each generation step, tokens directly preceding the current token receive disproportionately high attention, while earlier tokens are comparatively diminished. This leads to:</p>
+      <ul>
+        <li>H2O overemphasizes initial and recent tokens, creating a triangular retained pattern</li>
+        <li>MSRNN uses only the current token's attention, neglecting global context</li>
+        <li>Both methods fail to retain pivotal mid-context tokens (e.g., passkeys)</li>
+      </ul>
+      <p>NACL's proxy-token approach uses a carefully selected subset to compute scores, avoiding this bias by focusing on task-relevant attention patterns.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== ARCHITECTURE ======================== -->
+<div class="section" id="architecture">
+  <h2>NACL Architecture: Two-Phase Eviction</h2>
+
+  <div class="arch-diagram">
+    <div style="text-align:center;font-size:0.95rem;font-weight:700;color:var(--accent-green);margin-bottom:1.2rem;">NACL Hybrid Eviction Pipeline</div>
+
+    <!-- Phase 1: Encoding -->
+    <div class="arch-row">
+      <div class="arch-box" style="background:rgba(137,180,250,0.15);color:var(--accent-blue);border:1px solid rgba(137,180,250,0.3);min-width:250px;">
+        Full Prompt Processing (Encoding Phase)<br>
+        <span style="font-size:0.7rem;">All p tokens processed layer-by-layer, computing full attention A_prompt</span>
+      </div>
+    </div>
+    <div class="arch-arrow-down"></div>
+
+    <!-- Eviction Decision -->
+    <div class="arch-row" style="gap:1.5rem;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:0.6rem;padding:1.2rem;background:rgba(166,227,161,0.05);border-radius:10px;border:1px dashed rgba(166,227,161,0.25);min-width:200px;">
+        <div style="font-size:0.82rem;font-weight:700;color:var(--accent-green);">Proxy-Tokens Eviction</div>
+        <div class="arch-box" style="background:rgba(166,227,161,0.12);color:var(--accent-green);border:1px solid rgba(166,227,161,0.2);font-size:0.7rem;padding:0.5rem;width:100%;">
+          F_score = Sum_{x_p in P} Softmax(A(x_p, *))<br>
+          <span style="font-size:0.62rem;">P = proxy tokens (question tokens)</span>
+        </div>
+        <div class="arch-box" style="background:rgba(249,226,175,0.12);color:var(--accent-yellow);border:1px solid rgba(249,226,175,0.2);font-size:0.7rem;padding:0.4rem;width:100%;">
+          S_score = argmax top-C_p tokens by F_score<br>
+          <span style="font-size:0.62rem;">Union with proxy tokens (always retained)</span>
+        </div>
+      </div>
+
+      <div style="font-size:1.2rem;color:var(--accent-teal);font-weight:800;display:flex;align-items:center;">+</div>
+
+      <div style="display:flex;flex-direction:column;align-items:center;gap:0.6rem;padding:1.2rem;background:rgba(203,166,247,0.05);border-radius:10px;border:1px dashed rgba(203,166,247,0.25);min-width:200px;">
+        <div style="font-size:0.82rem;font-weight:700;color:var(--accent-mauve);">Random Eviction</div>
+        <div class="arch-box" style="background:rgba(203,166,247,0.12);color:var(--accent-mauve);border:1px solid rgba(203,166,247,0.2);font-size:0.7rem;padding:0.5rem;width:100%;">
+          P_prompt = Softmax(F_random(A, C_r))<br>
+          <span style="font-size:0.62rem;">Score-weighted probability distribution</span>
+        </div>
+        <div class="arch-box" style="background:rgba(250,179,135,0.12);color:var(--accent-peach);border:1px solid rgba(250,179,135,0.2);font-size:0.7rem;padding:0.4rem;width:100%;">
+          S_random ~ P_prompt, |S_random| = C_r<br>
+          <span style="font-size:0.62rem;">Different seed per head and layer</span>
+        </div>
+      </div>
+    </div>
+    <div class="arch-arrow-down"></div>
+
+    <!-- Merged Cache -->
+    <div class="arch-row">
+      <div class="arch-box" style="background:rgba(148,226,213,0.15);color:var(--accent-teal);border:1px solid rgba(148,226,213,0.3);min-width:280px;">
+        Compressed KV Cache: S_encoding = S_score | S_random<br>
+        <span style="font-size:0.7rem;">Total budget C = C_p + C_r (one-time global optimal eviction)</span>
+      </div>
+    </div>
+    <div class="arch-arrow-down"></div>
+
+    <!-- Phase 2: Generation -->
+    <div class="arch-row">
+      <div class="arch-box" style="background:rgba(250,179,135,0.15);color:var(--accent-peach);border:1px solid rgba(250,179,135,0.3);min-width:250px;">
+        Generation Phase (Decoding)<br>
+        <span style="font-size:0.7rem;">Eviction every m steps using current token's attention scores + budget C</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="info">
+    <strong>Complexity advantage:</strong> Existing greedy eviction methods perform step-by-step eviction during encoding, coupling the eviction window size to the prompt length and resulting in O(p^2) complexity. NACL performs eviction only once during encoding (globally optimal) and T/m times during generation. Overall amortized complexity: O(p + T), where p is prompt length and T is generation length.
+  </div>
+</div>
+
+<!-- ======================== PROXY TOKENS ======================== -->
+<div class="section" id="proxy-tokens">
+  <h2>Mechanism 1: Proxy-Tokens Eviction</h2>
+
+  <div class="card card-green">
+    <h3>The Proxy Tokens Hypothesis</h3>
+    <p>Within the input prompt x_prompt, there exists a small subset of tokens P (the <strong>proxy tokens</strong>) whose attention patterns most precisely estimate the importance of all other tokens for the task at hand. In practice, the proxy tokens are typically the user's question tokens, which appear at the end of the prompt.</p>
+    <p>The scoring function uses only the proxy tokens' attention rows:</p>
+    <div class="formula">F_score(A, C) = Sum_{x_p in P} Softmax(A(x_p, *))</div>
+    <p>This produces a column-wise importance score for each token in the KV cache. The top-C_p tokens by this score are retained, along with the proxy tokens themselves (always protected).</p>
+  </div>
+
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>Why Proxy Tokens Work</h3>
+      <p>When computing attention for a question token x_p, the model naturally attends most strongly to the context tokens most relevant to answering that question. By summing the softmax-normalized attention scores across all proxy tokens, NACL obtains a task-specific importance signal that is:</p>
+      <ul>
+        <li>Free from the recency bias that affects all-token accumulation</li>
+        <li>Focused on tokens relevant to the downstream task</li>
+        <li>Computed from global attention statistics (not greedy step-by-step)</li>
+      </ul>
+    </div>
+    <div class="card card-peach">
+      <h3>Special Cases and Budget</h3>
+      <p>The proxy token framework subsumes existing methods:</p>
+      <ul>
+        <li>When P = all tokens: NACL reduces to <strong>H2O</strong> (accumulating all attention scores)</li>
+        <li>When P = {current token}: NACL reduces to <strong>MSRNN</strong> (using only current attention)</li>
+        <li>Optimal budget: ~<strong>10%</strong> of prompt tokens as proxy tokens</li>
+      </ul>
+      <p>Setting the proxy budget too low (0%) loses important scoring context; too high (100%) reintroduces the redundant information that causes attention bias. The paper finds 10% strikes the optimal balance.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Eviction as optimization:</strong> NACL formulates the encoding-phase eviction as a combinatorial optimization problem: S_t = argmax_{S_t subset R} Sum_{x in S_t} F_score(A, C_p), subject to |S_t| = C_p, where R = x_prompt \ P. This global view outperforms greedy step-by-step eviction by 1.4 points on average.
+  </div>
+</div>
+
+<!-- ======================== RANDOM EVICTION ======================== -->
+<div class="section" id="random-eviction">
+  <h2>Mechanism 2: Head-Wise Random Eviction</h2>
+
+  <div class="card card-mauve">
+    <h3>Diversified Randomness for Robustness</h3>
+    <p>Pure score-based eviction, even with proxy tokens, can still miss important tokens whose attention signal is weak. NACL introduces a random eviction component that samples tokens from a score-weighted probability distribution, independently per attention head with different random seeds.</p>
+    <div class="formula">S_random ~ Softmax(F_score), &nbsp; |S_random| = C_r</div>
+    <p>Each head n in each layer i uses a different random seed: seed = hash(layer_i, head_n). This ensures that different heads retain different subsets of tokens, creating a diversified coverage across the model.</p>
+  </div>
+
+  <div class="arch-diagram">
+    <div style="text-align:center;font-size:0.9rem;font-weight:700;color:var(--accent-mauve);margin-bottom:1rem;">Head-Wise Diversified Eviction</div>
+    <div style="display:flex;justify-content:center;gap:0.8rem;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:3px;align-items:center;">
+        <div style="font-size:0.7rem;font-weight:600;color:var(--accent-blue);">Head 1</div>
+        <div style="display:flex;gap:2px;">
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;" title="retained"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;" title="evicted"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(203,166,247,0.5);border-radius:2px;" title="random"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;align-items:center;">
+        <div style="font-size:0.7rem;font-weight:600;color:var(--accent-blue);">Head 2</div>
+        <div style="display:flex;gap:2px;">
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(203,166,247,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;align-items:center;">
+        <div style="font-size:0.7rem;font-weight:600;color:var(--accent-blue);">Head 3</div>
+        <div style="display:flex;gap:2px;">
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(203,166,247,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>
+          <div style="width:18px;height:18px;background:rgba(203,166,247,0.5);border-radius:2px;"></div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:1rem;justify-content:center;font-size:0.7rem;margin-top:0.8rem;">
+      <div style="display:flex;align-items:center;gap:4px;"><div style="width:12px;height:12px;background:rgba(166,227,161,0.5);border-radius:2px;"></div>Score-retained (C_p)</div>
+      <div style="display:flex;align-items:center;gap:4px;"><div style="width:12px;height:12px;background:rgba(203,166,247,0.5);border-radius:2px;"></div>Random-retained (C_r)</div>
+      <div style="display:flex;align-items:center;gap:4px;"><div style="width:12px;height:12px;background:rgba(100,116,139,0.15);border-radius:2px;"></div>Evicted</div>
+    </div>
+    <div style="text-align:center;font-size:0.72rem;color:var(--text-secondary);margin-top:0.5rem;">Each head independently samples different tokens, maximizing information coverage across the model.</div>
+  </div>
+
+  <div class="card card-teal">
+    <h3>Probabilistic Guarantee: Near-Certain Token Retention</h3>
+    <p>For LLaMA-7B with 32 layers and 32 heads per layer:</p>
+    <ul>
+      <li>At C = 20% budget: the probability of any token being retained in at least one head's KV cache is <strong>99.92%</strong></li>
+      <li>At C = 1% budget: the probability of retention in at least one layer is 1 - (C^h)^l = 1 - (0.01^32)^32, which is <strong>>99.99%</strong></li>
+    </ul>
+    <p>This means that even under aggressive eviction, virtually every token's information is preserved somewhere in the model, eliminating the catastrophic information loss that deterministic methods can cause.</p>
+  </div>
+</div>
+
+<!-- ======================== ALGORITHM ======================== -->
+<div class="section" id="algorithm">
+  <h2>Complete NACL Algorithm</h2>
+
+  <div class="code-block">
+<span class="cm"># Algorithm 1: NACL Complete Pipeline</span>
+<span class="kw">def</span> <span class="fn">nacl_encoding</span>(prompt, C_p, C_r, proxy_tokens P):
+    <span class="st">"""One-time global eviction during encoding phase"""</span>
+    <span class="kw">for</span> layer_i <span class="kw">in</span> model.layers:
+        <span class="kw">for</span> head_n <span class="kw">in</span> layer_i.heads:
+            <span class="cm"># Compute full attention scores</span>
+            A = <span class="fn">compute_attention</span>(prompt, layer_i, head_n)  <span class="cm"># A in R^{p x p}</span>
+
+            <span class="cm"># Proxy-Tokens scoring: use only proxy rows</span>
+            F_score = <span class="fn">sum</span>(<span class="fn">softmax</span>(A[x_p, :]) <span class="kw">for</span> x_p <span class="kw">in</span> P)
+
+            <span class="cm"># Deterministic eviction: keep top-C_p by score + protect proxy</span>
+            R = x_prompt \ P                              <span class="cm"># candidate tokens</span>
+            u_score = <span class="fn">top_k</span>(F_score[R], C_p) | P        <span class="cm"># always retain proxy</span>
+
+            <span class="cm"># Random eviction: sample C_r tokens from score distribution</span>
+            P_prompt = <span class="fn">softmax</span>(F_score)                   <span class="cm"># probability dist</span>
+            u_random = <span class="fn">sample</span>(P_prompt, C_r, seed=<span class="fn">hash</span>(layer_i, head_n))
+
+            <span class="cm"># Merge retained sets</span>
+            S_encoding[layer_i][head_n] = u_score | u_random
+    <span class="kw">return</span> S_encoding
+
+<span class="kw">def</span> <span class="fn">nacl_generation</span>(S_encoding, max_length, m):
+    <span class="st">"""Incremental eviction every m steps during generation"""</span>
+    S = S_encoding
+    <span class="kw">for</span> t <span class="kw">in</span> <span class="fn">range</span>(<span class="nu">1</span>, max_length):
+        <span class="kw">for</span> layer_i <span class="kw">in</span> model.layers:
+            <span class="kw">for</span> head_n <span class="kw">in</span> layer_i.heads:
+                <span class="cm"># Append new token's KV to cache</span>
+                K[layer_i][head_n] = <span class="fn">concat</span>(K_prev, z_t * W_K)
+                V[layer_i][head_n] = <span class="fn">concat</span>(V_prev, z_t * W_V)
+
+                <span class="cm"># Periodic eviction using current token's attention</span>
+                <span class="kw">if</span> t % m == <span class="nu">0</span>:
+                    A = <span class="fn">compute_attention</span>(z_t, layer_i, head_n)
+                    S[layer_i][head_n] = <span class="fn">Eviction</span>(A, C)  <span class="cm"># same NACL policy</span>
+        z_t = <span class="fn">sample</span>(model.predict(z_t))
+  </div>
+
+  <div class="info">
+    <strong>FlashAttention-2 compatibility:</strong> NACL provides a custom CUDA kernel that recomputes full attention scores from FlashAttention-2's log-sum-exp output. This enables NACL to work with FA2-accelerated models at 128K context using only 15GB memory at 20% eviction rate, without requiring access to the full attention matrix during forward pass.
+  </div>
+</div>
+
+<!-- ======================== SHORT-TEXT ======================== -->
+<div class="section" id="short-text">
+  <h2>Short-Text Performance (lm-eval-harness)</h2>
+
+  <div class="metric-strip">
+    <div class="metric-box"><div class="val" style="color:var(--accent-green);">63.8</div><div class="lbl">5-Shot Avg (20% budget)</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-blue);">53.2</div><div class="lbl">25-Shot Avg (20% budget)</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-mauve);">-0.8</div><div class="lbl">Delta vs Full Cache (5-shot)</div></div>
+    <div class="metric-box"><div class="val" style="color:var(--accent-peach);">80%</div><div class="lbl">Improvement over H2O</div></div>
+  </div>
+
+  <h3>N-shot evaluation on LLaMA2-7B-base (7 benchmarks)</h3>
+  <table>
+    <thead><tr><th>Model</th><th>Budget</th><th>PiQA</th><th>COPA</th><th>Open.</th><th>Wino.</th><th>SciQ</th><th>ARC-E</th><th>ARC-C</th><th>Avg</th><th>Delta</th></tr></thead>
+    <tbody>
+      <tr><td>Full Cache (5-shot)</td><td>100%</td><td>78.8</td><td>83.0</td><td>44.8</td><td>73.7</td><td>80.9</td><td>78.8</td><td>50.8</td><td>64.6</td><td>--</td></tr>
+      <tr><td>Attention Sink</td><td>20%</td><td>54.0</td><td>55.0</td><td>30.2</td><td>49.1</td><td>22.3</td><td>25.4</td><td>23.0</td><td>35.9</td><td>-28.7</td></tr>
+      <tr><td>H2O</td><td>20%</td><td>77.6</td><td>81.0</td><td>41.0</td><td>67.0</td><td>75.8</td><td>70.4</td><td>44.0</td><td>60.3</td><td>-4.3</td></tr>
+      <tr><td>MSRNN</td><td>20%</td><td>77.6</td><td>78.0</td><td>43.0</td><td>67.8</td><td>76.5</td><td>71.6</td><td>45.3</td><td>60.6</td><td>-4.0</td></tr>
+      <tr><td style="color:var(--accent-green);font-weight:700;">NACL</td><td>20%</td><td style="color:var(--accent-green);font-weight:700;">77.9</td><td>79.0</td><td style="color:var(--accent-green);font-weight:700;">43.8</td><td style="color:var(--accent-green);font-weight:700;">71.5</td><td style="color:var(--accent-green);font-weight:700;">80.0</td><td style="color:var(--accent-green);font-weight:700;">74.9</td><td style="color:var(--accent-green);font-weight:700;">48.8</td><td style="color:var(--accent-green);font-weight:700;">63.8</td><td style="color:var(--accent-green);font-weight:700;">-0.8</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>25-shot setting:</strong> With more examples (1014 tokens for PiQA), all methods degrade due to increased information redundancy, but NACL still achieves 53.2 average (vs. 53.8 full cache), outperforming H2O (52.8) and MSRNN (52.9) while matching or exceeding full cache on COPA (87.0 vs 87.0).
+  </div>
+</div>
+
+<!-- ======================== LONG-TEXT ======================== -->
+<div class="section" id="long-text">
+  <h2>Long-Text Performance (LongBench)</h2>
+
+  <h3>LLaMA2-7B-Chat on 4K-length long-text tasks</h3>
+  <table>
+    <thead><tr><th>Method</th><th>Budget</th><th>PR-Zh</th><th>PR-En</th><th>Repo-P</th><th>HotpotQA</th><th>NarQA</th><th>TriviaQA</th><th>QMSum</th><th>Avg</th><th>Delta</th></tr></thead>
+    <tbody>
+      <tr><td>Full Cache</td><td>100%</td><td>8.0</td><td>10.1</td><td>52.3</td><td>27.7</td><td>18.6</td><td>83.3</td><td>20.6</td><td>31.5</td><td>--</td></tr>
+      <tr><td>Scissorhands</td><td>30%</td><td>4.0</td><td>2.6</td><td>51.8</td><td>17.2</td><td>12.5</td><td>79.2</td><td>19.6</td><td>26.7</td><td>-4.8</td></tr>
+      <tr><td>H2O</td><td>30%</td><td>3.7</td><td>5.0</td><td>50.9</td><td>27.1</td><td>15.5</td><td>81.6</td><td>20.2</td><td>29.1</td><td>-2.4</td></tr>
+      <tr><td>MSRNN</td><td>30%</td><td>5.5</td><td>4.5</td><td>50.3</td><td>26.1</td><td>16.4</td><td>82.9</td><td>20.9</td><td>29.5</td><td>-2.0</td></tr>
+      <tr><td style="color:var(--accent-green);font-weight:700;">NACL</td><td>30%</td><td style="color:var(--accent-green);font-weight:700;">6.8</td><td style="color:var(--accent-green);font-weight:700;">9.0</td><td style="color:var(--accent-green);font-weight:700;">52.5</td><td style="color:var(--accent-green);font-weight:700;">27.9</td><td style="color:var(--accent-green);font-weight:700;">16.4</td><td>83.1</td><td>21.5</td><td style="color:var(--accent-green);font-weight:700;">31.0</td><td style="color:var(--accent-green);font-weight:700;">-0.5</td></tr>
+      <tr style="border-top:2px solid var(--border-color);"><td style="color:var(--accent-green);font-weight:700;">NACL</td><td>20%</td><td>7.0</td><td>9.4</td><td>51.6</td><td>27.2</td><td>17.1</td><td>82.5</td><td>20.8</td><td>30.8</td><td>-0.7</td></tr>
+      <tr><td style="color:var(--accent-green);font-weight:700;">NACL</td><td>10%</td><td>6.8</td><td>7.0</td><td>49.2</td><td>25.5</td><td>15.0</td><td>81.7</td><td>20.4</td><td>29.4</td><td>-2.1</td></tr>
+    </tbody>
+  </table>
+
+  <div class="warn">
+    <strong>Passkey retrieval:</strong> H2O and MSRNN completely fail on passkeys located in the middle of long contexts, because their attention bias toward initial and recent tokens causes mid-context information to be evicted. NACL misses only 2 passkeys across all settings (PR-Zh and PR-En), demonstrating its ability to preserve mid-context information through the combination of proxy-token focusing and head-wise random diversity.
+  </div>
+
+  <div class="card card-green">
+    <h3>Memory Reduction Comparison</h3>
+    <p>At comparable accuracy to H2O (20% budget), NACL achieves the same performance with only 10% budget -- a 3x additional KV cache reduction. In absolute terms, NACL at 10% budget reduces the KV cache to 10% of original size (a 10x reduction) while maintaining 29.4 average accuracy vs H2O's 28.6 at 20%.</p>
+    <p>For LLaMA-7B with batch size 4 at 32K sequence length in bf16 precision: full cache = 62.5 GB, H2O (20%) = 12.5 GB, NACL (10%) = 6.25 GB.</p>
+  </div>
+</div>
+
+<!-- ======================== ABLATION ======================== -->
+<div class="section" id="ablation">
+  <h2>Ablation Studies</h2>
+
+  <h3>Component Contribution Analysis (20% budget)</h3>
+  <table>
+    <thead><tr><th>Configuration</th><th>Short-Text ACC</th><th>Long-Text ACC</th></tr></thead>
+    <tbody>
+      <tr><td style="color:var(--accent-green);font-weight:700;">Full NACL</td><td style="color:var(--accent-green);font-weight:700;">63.8</td><td style="color:var(--accent-green);font-weight:700;">30.8</td></tr>
+      <tr><td>- Eviction w. Proxy Tokens (no proxy)</td><td>35.7 (-28.1)</td><td>24.8 (-6.0)</td></tr>
+      <tr><td>- Random Eviction (no randomness)</td><td>62.6 (-1.2)</td><td>21.7 (-9.2)</td></tr>
+      <tr><td>- Probability Sampling (uniform instead)</td><td>63.0 (-0.8)</td><td>29.7 (-1.1)</td></tr>
+      <tr><td>- Global Eviction (greedy step-by-step)</td><td>62.5 (-1.3)</td><td>29.3 (-1.5)</td></tr>
+      <tr><td>- Head-wise Eviction (uniform across heads)</td><td>61.7 (-2.1)</td><td>28.1 (-2.7)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid-2">
+    <div class="card card-green">
+      <h3>Proxy Token Budget Sensitivity</h3>
+      <p>The proxy token budget (as % of prompt tokens) shows clear sweet spot behavior:</p>
+      <ul>
+        <li><strong>0% proxy:</strong> Degenerates to MSRNN -- insufficient scoring context</li>
+        <li><strong>10% proxy:</strong> Optimal -- captures task-relevant attention without redundancy</li>
+        <li><strong>100% proxy:</strong> Degenerates to H2O -- introduces redundant information that corrupts scoring</li>
+      </ul>
+      <p>Performance peaks at ~10% and declines monotonically above that.</p>
+    </div>
+    <div class="card card-mauve">
+      <h3>Random Budget Ratio</h3>
+      <p>Increasing the random budget from 10% to 70% yields 2.25% to 8.17% average accuracy improvement over 0% random budget. Performance peaks at 70% random ratio. Beyond 90%, pure randomness without score-based selection causes decline.</p>
+      <p>The balance between deterministic scoring (Proxy-Tokens) and stochastic diversity (Random) is essential: neither alone matches their combination.</p>
+    </div>
+  </div>
+
+  <div class="info">
+    <strong>Sampling distribution choice:</strong> Sampling based on global statistical attention scores (softmax of F_score) outperforms uniform random sampling. The attention scores provide an informative reference for randomness, biasing the sampling toward more likely-important tokens while maintaining diversity. This score-guided randomness is a key design choice.
+  </div>
+</div>
+
+<!-- ======================== ANALYSIS ======================== -->
+<div class="section" id="analysis">
+  <h2>Analysis</h2>
+
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>KV Cache Memory Scaling</h3>
+      <p>At comparable accuracy to H2O (20% budget), NACL (10% budget) reduces the linearly-growing KV cache to 10% of original size across all sequence lengths. At 32K tokens, this means 6.25 GB instead of 62.5 GB -- fitting comfortably on a single A100 40GB GPU that would otherwise be memory-limited.</p>
+      <p>The memory reduction is more significant for longer sequences: at 1K tokens, all methods perform similarly; at 32K, the gap between NACL and baselines widens substantially.</p>
+    </div>
+    <div class="card card-teal">
+      <h3>Interpretable Eviction Patterns</h3>
+      <p>Visualizing the attention score matrices after eviction reveals distinct patterns:</p>
+      <ul>
+        <li><strong>H2O:</strong> Triangular pattern -- retains only initial and recent tokens</li>
+        <li><strong>MSRNN:</strong> Similar triangular bias with slight variation</li>
+        <li><strong>NACL:</strong> More uniform coverage -- proxy tokens guide sampling toward mid-context, while head-wise randomness fills gaps. Initial and recent tokens are still protected, but critical mid-context information is also preserved.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card card-peach">
+    <h3>Perplexity vs Generation Quality</h3>
+    <p>An important finding: all eviction methods achieve comparable log-PPL at 20% budget (H2O: 6.4, MSRNN: 4.0, NACL: 4.0 on 5-shot; ~3.2-3.3 on 25-shot). However, their generation quality differs drastically (35.9 vs 60.3 vs 63.8 average accuracy). This confirms the paper's argument that perplexity is an unreliable metric for evaluating KV cache eviction methods, especially for long-context tasks. Generation-based benchmarks like LongBench are essential for honest evaluation.</p>
+  </div>
+</div>
+
+<!-- ======================== SIGNIFICANCE ======================== -->
+<div class="section" id="significance">
+  <h2>Significance and Limitations</h2>
+
+  <div class="grid-2">
+    <div class="card card-green">
+      <h3>Training-Free, Plug-and-Play</h3>
+      <p>NACL requires no retraining, fine-tuning, or model modification. It operates purely at inference time, making it immediately applicable to any decoder-only LLM in production. The approach is compatible with FlashAttention-2 via a custom CUDA kernel.</p>
+    </div>
+    <div class="card card-mauve">
+      <h3>Principled Randomness with Guarantees</h3>
+      <p>Head-wise random eviction provides mathematical probabilistic guarantees: >99.92% token retention at 20% budget, >99.99% at 1%. This is the first eviction method to offer formal preservation bounds through diversified sampling.</p>
+    </div>
+    <div class="card card-blue">
+      <h3>Unifying Framework</h3>
+      <p>NACL subsumes H2O and MSRNN as special cases (100% and 0% proxy budgets respectively). It provides a principled design space with clear configuration knobs: proxy budget, random budget, eviction interval m, and sampling distribution.</p>
+    </div>
+    <div class="card card-peach">
+      <h3>Honest Evaluation Standard</h3>
+      <p>The paper establishes that perplexity is insufficient for evaluating eviction methods and introduces evaluation on both short-text (lm-eval-harness, 7 tasks) and long-text (LongBench, 7 tasks) generation benchmarks. This sets a higher bar for future work.</p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong>Limitations:</strong> (1) Due to resource constraints, NACL has not been extensively tested across various large-scale models (70B+) or ultra-long contexts (128K+). (2) The selection of proxy tokens currently relies on heuristics (choosing question tokens at the end of the prompt). Automatically and adaptively determining optimal proxy tokens from the model itself remains an open challenge. (3) The eviction interval m during generation is a fixed hyperparameter; adaptive eviction scheduling could further improve efficiency.
+  </div>
+</div>
+
+<!-- ======================== RELATED WORK ======================== -->
+<div class="section" id="related">
+  <h2>Related Work and Context</h2>
+
+  <div class="grid-2">
+    <div class="card card-red">
+      <h3>Prior Eviction Methods</h3>
+      <p><strong>Attention Sink</strong> (Xiao et al. 2023): Keeps initial tokens (attention sinks) plus recent tokens, enabling infinite-length processing. However, it completely discards mid-context information, failing catastrophically on tasks that require comprehension beyond the recent window.</p>
+      <p><strong>H2O</strong> (Zhang et al. 2023): Uses the summation of accumulated attention scores for greedy eviction, retaining a balance of recent and "heavy hitter" tokens. While achieving fair results, H2O's reliance on biased local statistics leads to 4.3-point degradation on short tasks and 2.9 on long tasks.</p>
+      <p><strong>MSRNN</strong> (Oren et al. 2024): Uses only the current token's attention score for eviction decisions. This avoids accumulation bias but neglects global context, resulting in similar performance to H2O.</p>
+      <p><strong>Scissorhands</strong> (Liu et al. 2023): Tracks tokens whose attention scores fall above average within a history window. Performance is sensitive to window size and struggles with long-context tasks where pivotal tokens may be distant.</p>
+    </div>
+    <div class="card card-yellow">
+      <h3>Complementary Approaches</h3>
+      <p><strong>Architecture Modification:</strong> MQA (Shazeer 2019), GQA (Ainslie et al. 2023), and MLA (DeepSeek-AI 2024) reduce KV cache at the architecture level. These require retraining and are complementary to NACL, which operates at inference time without model changes.</p>
+      <p><strong>Learnable Eviction:</strong> Anagnostidis et al. (2023) propose learning which tokens to prune, but this requires additional training. NACL achieves comparable results training-free.</p>
+      <p><strong>Length Extrapolation:</strong> Position interpolation (Chen et al. 2023), Attention Sink (Xiao et al. 2023), and LM-Infinite (Han et al. 2023) extend context windows but do not address memory footprint. NACL directly reduces KV cache size.</p>
+    </div>
+  </div>
+
+  <div class="card card-teal">
+    <h3>NACL as a Unifying Framework</h3>
+    <p>NACL provides a principled design space that encompasses existing methods as special cases and introduces new mechanisms (proxy-token scoring, head-wise randomness, global one-time eviction) that consistently outperform prior art. The framework offers clear configuration knobs:</p>
+    <table>
+      <thead><tr><th>Knob</th><th>Controls</th><th>Default</th><th>Extreme Values</th></tr></thead>
+      <tbody>
+        <tr><td>Proxy Budget (% of prompt)</td><td>Scoring precision vs redundancy</td><td>~10%</td><td>0% = MSRNN, 100% = H2O</td></tr>
+        <tr><td>Random Budget Ratio</td><td>Diversity vs determinism</td><td>~70%</td><td>0% = pure score, 100% = pure random</td></tr>
+        <tr><td>Eviction Interval m</td><td>Generation-phase granularity</td><td>varies</td><td>1 = every step, inf = encoding-only</td></tr>
+        <tr><td>Total Budget C</td><td>Memory vs accuracy tradeoff</td><td>20%</td><td>10% = aggressive, 100% = full cache</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ======================== IMPLEMENTATION DETAILS ======================== -->
+<div class="section" id="impl-details">
+  <h2>Implementation Details</h2>
+
+  <div class="grid-2">
+    <div class="card card-blue">
+      <h3>Experimental Setup</h3>
+      <p>All experiments conducted on a single NVIDIA A100 (80GB) GPU using representative open-sourced LLMs: LLaMA2-7B-base and LLaMA2-7B-Chat (Touvron et al. 2023). Results averaged over various seeds for reliability.</p>
+      <p><strong>Short-text evaluation:</strong> Seven tasks from lm-eval-harness (Gao et al. 2021): PiQA, COPA, OpenBookQA, Winogrande, SciQ, ARC-E, and ARC-C. Perplexity reported on OpenBookQA for generalization assessment.</p>
+      <p><strong>Long-text evaluation:</strong> Seven tasks from LongBench (Bai et al. 2023): PassageRetrieval-Zh, PassageRetrieval-En, RepoBench-P, HotpotQA, NarrativeQA, TriviaQA, and QMSum. Context window set to 4K length.</p>
+    </div>
+    <div class="card card-green">
+      <h3>FlashAttention-2 Integration</h3>
+      <p>NACL's custom CUDA kernel recovers attention scores from FlashAttention-2's log-sum-exp (LSE) output. FA2 does not materialize the full attention matrix during forward pass; instead, it outputs the LSE values that can be used to reconstruct the necessary scoring information. This makes NACL compatible with memory-efficient attention implementations used in production, supporting 128K context with only 15GB memory at 20% eviction rate.</p>
+      <p>The kernel computes the proxy-token subset of attention scores using the LSE values, avoiding the O(n^2) memory cost of materializing the full attention matrix.</p>
+    </div>
+  </div>
+
+  <div class="card card-mauve">
+    <h3>Proxy Token Selection in Practice</h3>
+    <p>The proxy tokens P are selected from the end of the input prompt, where the user's question or instruction typically resides. This heuristic works well because:</p>
+    <ul>
+      <li>In conversational settings (LLaMA2-Chat), the user's latest question directly indicates what information is task-relevant</li>
+      <li>In RAG settings, the query appended after the retrieved context focuses attention on the most important passages</li>
+      <li>In few-shot learning, the final example and question are the most informative proxy for scoring</li>
+    </ul>
+    <p>The choice of proxy tokens can be flexibly adapted to various application scenarios based on task orientation. For instance, in summarization tasks, the instruction tokens ("Summarize the following document:") serve as effective proxies.</p>
+  </div>
+</div>
+
+<!-- ======================== FUTURE WORK ======================== -->
+<div class="section" id="future">
+  <h2>Future Directions</h2>
+
+  <div class="grid-2">
+    <div class="card card-peach">
+      <h3>Adaptive Proxy Selection</h3>
+      <p>Automatically identifying optimal proxy tokens from the model's internal representations, rather than relying on position-based heuristics, could further improve eviction quality. Potential approaches include using the model's own attention patterns in early layers to identify task-critical tokens, or training a lightweight classifier to select proxies.</p>
+    </div>
+    <div class="card card-teal">
+      <h3>Ultra-Long Context Support</h3>
+      <p>Testing NACL on 128K+ context models (GPT-4 class, Llama3-128K) would validate its scalability. At these lengths, the attention bias problem is even more severe, and NACL's proxy-token + randomness combination should provide even larger advantages. The key challenge is efficient attention score computation at these scales.</p>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

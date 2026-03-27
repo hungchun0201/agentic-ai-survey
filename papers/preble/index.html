@@ -1,0 +1,1660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Preble: Efficient Distributed Prompt Scheduling for LLM Serving - Technical Analysis</title>
+<style>
+:root {
+  --dark: #16213e;
+  --mid: #0f3460;
+  --primary: #e94560;
+  --accent1: #533483;
+  --accent2: #0ea5e9;
+  --accent3: #10b981;
+  --accent4: #f59e0b;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --card-bg: #1a2744;
+  --code-bg: #1e1e2e;
+  --border: #2d3f5f;
+  --surface: #1e2d4a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--dark);
+  color: var(--text);
+  line-height: 1.7;
+}
+
+/* Sticky Navigation */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(22, 33, 62, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0;
+}
+nav .nav-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0 2rem;
+  overflow-x: auto;
+}
+nav a {
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  padding: 0.3rem 0;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+nav a:hover, nav a.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+nav .brand {
+  font-weight: 700;
+  color: var(--primary);
+  font-size: 1rem;
+  margin-right: 1rem;
+}
+
+/* Hero Section */
+.hero {
+  background: linear-gradient(135deg, var(--dark) 0%, var(--mid) 40%, #1a1a4e 70%, var(--dark) 100%);
+  padding: 5rem 2rem 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle at 30% 50%, rgba(233, 69, 96, 0.08) 0%, transparent 50%),
+              radial-gradient(circle at 70% 30%, rgba(14, 165, 233, 0.06) 0%, transparent 50%);
+  pointer-events: none;
+}
+.hero-content { position: relative; max-width: 900px; margin: 0 auto; }
+.hero .venue {
+  display: inline-block;
+  background: linear-gradient(135deg, var(--primary), #c0392b);
+  color: white;
+  padding: 0.3rem 1rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+  letter-spacing: 0.05em;
+}
+.hero h1 {
+  font-size: 2.6rem;
+  font-weight: 800;
+  line-height: 1.2;
+  margin-bottom: 1rem;
+  background: linear-gradient(135deg, #fff 0%, #e2e8f0 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.hero .subtitle {
+  font-size: 1.15rem;
+  color: var(--text-dim);
+  margin-bottom: 1.5rem;
+}
+.hero .authors {
+  font-size: 0.95rem;
+  color: var(--accent2);
+  margin-bottom: 0.5rem;
+}
+.hero .affiliation {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+.hero-badges {
+  display: flex;
+  justify-content: center;
+  gap: 0.8rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+.hero-badges .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1.2rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: rgba(30, 45, 74, 0.6);
+  color: var(--text);
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.hero-badges .badge:hover {
+  border-color: var(--primary);
+  background: rgba(233, 69, 96, 0.1);
+}
+
+/* Main Content */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+section {
+  padding: 3rem 0;
+}
+section h2 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 3px solid var(--primary);
+  display: inline-block;
+}
+section h3 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.8rem;
+  color: var(--accent2);
+}
+section h4 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1.2rem 0 0.5rem;
+  color: var(--accent3);
+}
+
+p { margin-bottom: 1rem; color: var(--text); }
+
+/* Cards */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  transition: border-color 0.2s;
+}
+.card:hover { border-color: var(--accent2); }
+.card.primary-border { border-left: 4px solid var(--primary); }
+.card.accent-border { border-left: 4px solid var(--accent2); }
+.card.green-border { border-left: 4px solid var(--accent3); }
+.card.yellow-border { border-left: 4px solid var(--accent4); }
+.card.purple-border { border-left: 4px solid var(--accent1); }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 1.5rem;
+  margin: 1.5rem 0;
+}
+
+.card h4 {
+  margin-top: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Metric Cards */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.metric-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.2rem;
+  text-align: center;
+}
+.metric-card .metric-value {
+  font-size: 2rem;
+  font-weight: 800;
+  margin: 0.3rem 0;
+}
+.metric-card .metric-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+.metric-card.red .metric-value { color: var(--primary); }
+.metric-card.blue .metric-value { color: var(--accent2); }
+.metric-card.green .metric-value { color: var(--accent3); }
+.metric-card.yellow .metric-value { color: var(--accent4); }
+.metric-card.purple .metric-value { color: var(--accent1); }
+
+/* Code Blocks */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.2rem 1.5rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 1rem 0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+code {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85em;
+}
+.inline-code {
+  background: var(--code-bg);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: #89b4fa;
+  border: 1px solid var(--border);
+}
+.kw { color: #cba6f7; font-weight: 600; }
+.fn { color: #89b4fa; }
+.cm { color: #6c7086; font-style: italic; }
+.st { color: #a6e3a1; }
+.nu { color: #fab387; }
+.op { color: #89dceb; }
+.ty { color: #f9e2af; }
+.vr { color: #cdd6f4; }
+.dc { color: #f38ba8; }
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+thead {
+  background: linear-gradient(135deg, var(--mid), var(--accent1));
+}
+th {
+  padding: 0.8rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  color: white;
+  border-bottom: 2px solid var(--primary);
+}
+td {
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+tr:hover td {
+  background: rgba(14, 165, 233, 0.05);
+}
+tbody tr:nth-child(even) td {
+  background: rgba(30, 45, 74, 0.3);
+}
+
+/* Callouts */
+.callout {
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+  margin: 1rem 0;
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  font-size: 0.95rem;
+}
+.callout .callout-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+}
+.callout.note {
+  background: rgba(14, 165, 233, 0.1);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  border-left: 4px solid var(--accent2);
+}
+.callout.warn {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-left: 4px solid var(--accent4);
+}
+.callout.info {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-left: 4px solid var(--accent3);
+}
+
+/* Architecture Diagrams */
+.diagram-container {
+  margin: 2rem 0;
+  padding: 2rem;
+  background: linear-gradient(135deg, rgba(15, 52, 96, 0.3), rgba(22, 33, 62, 0.5));
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.diagram-title {
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--accent2);
+  margin-bottom: 1.5rem;
+}
+
+/* Cluster Diagram */
+.cluster-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  min-width: 700px;
+}
+.diagram-box {
+  border-radius: 10px;
+  padding: 0.8rem 1.2rem;
+  text-align: center;
+  font-weight: 600;
+  font-size: 0.85rem;
+  position: relative;
+  border: 2px solid;
+}
+.box-request {
+  background: linear-gradient(135deg, #2d1b4e, #1a1a4e);
+  border-color: #a78bfa;
+  color: #c4b5fd;
+  padding: 0.5rem 2rem;
+}
+.box-tokenizer {
+  background: linear-gradient(135deg, #1a3a4e, #0f3460);
+  border-color: var(--accent2);
+  color: #7dd3fc;
+  padding: 0.5rem 1.5rem;
+}
+.box-global-sched {
+  background: linear-gradient(135deg, #3b1028, #4c0f30);
+  border-color: var(--primary);
+  color: #fca5a5;
+  padding: 1rem 2.5rem;
+  min-width: 280px;
+}
+.box-radix-tree {
+  background: linear-gradient(135deg, #1a3344, #0d2837);
+  border-color: #22d3ee;
+  color: #67e8f9;
+  padding: 0.8rem 1.5rem;
+}
+.box-gpu {
+  background: linear-gradient(135deg, #1a3329, #0d2618);
+  border-color: var(--accent3);
+  color: #86efac;
+  padding: 0.6rem 1rem;
+  font-size: 0.8rem;
+}
+.box-local-sched {
+  background: linear-gradient(135deg, #332b00, #2a2200);
+  border-color: var(--accent4);
+  color: #fde68a;
+  padding: 0.6rem 1rem;
+  font-size: 0.8rem;
+}
+.arrow-down {
+  width: 2px;
+  height: 28px;
+  background: var(--text-dim);
+  position: relative;
+}
+.arrow-down::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid var(--text-dim);
+}
+.arrow-label {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  position: absolute;
+  left: 12px;
+  top: 2px;
+  white-space: nowrap;
+}
+.diagram-row {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  justify-content: center;
+  width: 100%;
+}
+.diagram-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+.gpu-cluster {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.gpu-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+}
+.gpu-node .gpu-label {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+.connector-h {
+  width: 50px;
+  height: 2px;
+  background: var(--text-dim);
+  position: relative;
+}
+.connector-h.dashed {
+  background: none;
+  border-top: 2px dashed var(--text-dim);
+}
+.bracket-container {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.dispatch-lines {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  width: 100%;
+  padding: 0 2rem;
+  position: relative;
+}
+.dispatch-line {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Flow arrows */
+.flow-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* E2 Algorithm Diagram */
+.e2-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.8rem;
+  min-width: 600px;
+}
+.decision-diamond {
+  background: linear-gradient(135deg, #3b1028, #4c0f30);
+  border: 2px solid var(--primary);
+  color: #fca5a5;
+  padding: 0.8rem 1.5rem;
+  transform: rotate(0deg);
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  width: 220px;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: center;
+}
+.branch-row {
+  display: flex;
+  gap: 3rem;
+  align-items: flex-start;
+  justify-content: center;
+}
+.branch-box {
+  border-radius: 10px;
+  padding: 1rem;
+  text-align: center;
+  font-size: 0.82rem;
+  max-width: 250px;
+}
+.branch-exploit {
+  background: linear-gradient(135deg, #1a3329, #0d2618);
+  border: 2px solid var(--accent3);
+  color: #86efac;
+}
+.branch-explore {
+  background: linear-gradient(135deg, #1a3344, #0d2837);
+  border: 2px solid var(--accent2);
+  color: #7dd3fc;
+}
+
+/* Tags */
+.tag {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin: 0.1rem;
+}
+.tag-red { background: rgba(233, 69, 96, 0.2); color: var(--primary); border: 1px solid rgba(233, 69, 96, 0.4); }
+.tag-blue { background: rgba(14, 165, 233, 0.2); color: var(--accent2); border: 1px solid rgba(14, 165, 233, 0.4); }
+.tag-green { background: rgba(16, 185, 129, 0.2); color: var(--accent3); border: 1px solid rgba(16, 185, 129, 0.4); }
+.tag-yellow { background: rgba(245, 158, 11, 0.2); color: var(--accent4); border: 1px solid rgba(245, 158, 11, 0.4); }
+.tag-purple { background: rgba(83, 52, 131, 0.2); color: #a78bfa; border: 1px solid rgba(83, 52, 131, 0.4); }
+
+/* File tree */
+.file-tree {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+  line-height: 1.8;
+  padding: 1rem;
+  background: var(--code-bg);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.file-tree .dir { color: var(--accent2); font-weight: 600; }
+.file-tree .file { color: var(--text-dim); }
+.file-tree .highlight { color: var(--primary); font-weight: 600; }
+.file-tree .indent { padding-left: 1.2rem; }
+
+/* Lists */
+ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+li { margin-bottom: 0.3rem; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .hero h1 { font-size: 1.8rem; }
+  .card-grid { grid-template-columns: 1fr; }
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+  nav .nav-inner { gap: 1rem; }
+  .hero { padding: 3rem 1rem 2rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav>
+  <div class="nav-inner">
+    <span class="brand">Preble</span>
+    <a href="#overview">Overview</a>
+    <a href="#repo">Repository</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#e2-algorithm">E2 Algorithm</a>
+    <a href="#implementation">Implementation</a>
+    <a href="#performance">Performance</a>
+    <a href="#paper-vs-impl">Paper vs Impl</a>
+  </div>
+</nav>
+
+<!-- Hero Section -->
+<section class="hero">
+  <div class="hero-content">
+    <div class="venue">ICLR 2025</div>
+    <h1>Preble: Efficient Distributed Prompt Scheduling for LLM Serving</h1>
+    <p class="subtitle">
+      The first distributed LLM serving platform that co-optimizes KV state reuse and computation load balancing
+      across GPU clusters through a novel Exploitation + Exploration (E2) scheduling algorithm.
+    </p>
+    <p class="authors">Vikranth Srivatsa*, Zijian He*, Reyna Abhyankar, Dongming Li, Yiying Zhang</p>
+    <p class="affiliation">University of California, San Diego</p>
+    <div class="hero-badges">
+      <a href="https://arxiv.org/abs/2407.00023" class="badge">arXiv:2407.00023</a>
+      <a href="https://github.com/WukLab/preble" class="badge">GitHub Repository</a>
+      <span class="badge">1.5-14.5x Avg Latency</span>
+      <span class="badge">2-10x P99 Latency</span>
+    </div>
+  </div>
+</section>
+
+<div class="container">
+
+<!-- Overview Section -->
+<section id="overview">
+  <h2>Overview</h2>
+
+  <p>
+    Modern LLM workloads are characterized by two trends: prompts are significantly longer than generated outputs
+    (37x to 2494x), and 85-97% of prompt tokens are shared across requests. Existing prefix caching solutions (SGLang, vLLM)
+    operate within a single GPU, but production LLM serving systems are distributed by nature. Preble bridges this gap
+    by extending prefix caching to the cluster level with a hierarchical scheduling architecture and the E2 algorithm.
+  </p>
+
+  <div class="metric-grid">
+    <div class="metric-card red">
+      <div class="metric-label">Avg Latency Improvement</div>
+      <div class="metric-value">1.5-14.5x</div>
+      <div class="metric-label">over SGLang baseline</div>
+    </div>
+    <div class="metric-card blue">
+      <div class="metric-label">P99 Latency Improvement</div>
+      <div class="metric-value">2-10x</div>
+      <div class="metric-label">over SGLang baseline</div>
+    </div>
+    <div class="metric-card green">
+      <div class="metric-label">Prompt Sharing Rate</div>
+      <div class="metric-value">85-97%</div>
+      <div class="metric-label">across five workloads</div>
+    </div>
+    <div class="metric-card yellow">
+      <div class="metric-label">Scheduler Throughput</div>
+      <div class="metric-value">2931</div>
+      <div class="metric-label">req/s (VideoQA workload)</div>
+    </div>
+    <div class="metric-card purple">
+      <div class="metric-label">Scalability</div>
+      <div class="metric-value">70-391</div>
+      <div class="metric-label">concurrent GPUs per scheduler</div>
+    </div>
+  </div>
+
+  <h3>Key Contributions</h3>
+  <div class="card-grid">
+    <div class="card primary-border">
+      <h4>Workload Study</h4>
+      <p>First comprehensive study of five real LLM workloads (tool use, embodied agent, programming, video QA, long document QA)
+        plus the Azure LLM trace, revealing that prompts are 37x-2494x longer than outputs and that 85-97% of tokens are shared.</p>
+    </div>
+    <div class="card accent-border">
+      <h4>E2 Scheduling Algorithm</h4>
+      <p>A new distributed request scheduling algorithm based on <strong>Exploitation + Exploration</strong>.
+        E2 co-optimizes KV cache reuse (exploitation) and computation load balancing (exploration) using a
+        prompt-aware load metric that accounts for historical load, eviction cost, and new request cost.</p>
+    </div>
+    <div class="card green-border">
+      <h4>Preble Serving System</h4>
+      <p>The first distributed LLM serving platform targeting long and shared prompts.
+        Features a two-level scheduling hierarchy (global request-level + per-GPU iteration-level),
+        post-assignment load rebalancing, auto-scaling, and prefill-decoding balancing.</p>
+    </div>
+    <div class="card yellow-border">
+      <h4>Comprehensive Evaluation</h4>
+      <p>Evaluation on two LLMs (Mistral 7B, Llama-3 70B), five workloads, and two GPU clusters
+        (4x A6000, 8x H100) demonstrating significant improvements over SGLang and vLLM.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Repository Analysis Section -->
+<section id="repo">
+  <h2>Repository Analysis</h2>
+
+  <p>
+    Preble is implemented as a standalone layer on top of SGLang with modifications for prefix-aware distributed scheduling.
+    The repository is a fork of SGLang, adding a <span class="inline-code">preble/</span> directory that contains the core
+    cluster-level scheduling logic, while the <span class="inline-code">python/sglang/</span> tree holds the modified local
+    runtime with chunked prefill and radix cache extensions.
+  </p>
+
+  <div class="card purple-border">
+    <h4>Project Structure</h4>
+    <div class="file-tree">
+      <span class="dir">preble/</span> <span class="cm">-- Core Preble system (cluster-level scheduling)</span><br>
+      <span class="indent"><span class="highlight">global_scheduler_with_time.py</span></span> <span class="cm">-- GlobalSchedulerWithTime: E2 algorithm implementation</span><br>
+      <span class="indent"><span class="highlight">global_scheduler_with_time_perf.py</span></span> <span class="cm">-- Performance-optimized E2 variant</span><br>
+      <span class="indent"><span class="highlight">global_lru_cache.py</span></span> <span class="cm">-- LPRadixCache + TreeNode: global prefix tree</span><br>
+      <span class="indent"><span class="highlight">data_parallel_request_cache.py</span></span> <span class="cm">-- DataParallelRequestRouter: routing policies</span><br>
+      <span class="indent"><span class="highlight">model_runtime_manager.py</span></span> <span class="cm">-- ModelDetails: runtime lifecycle + async dispatch</span><br>
+      <span class="indent"><span class="highlight">ttft_overload_detector.py</span></span> <span class="cm">-- TTFTWindowedOverloadedDetector: TTFT-based overload signal</span><br>
+      <span class="indent"><span class="file">simulator.py</span></span> <span class="cm">-- ServerRuntimeSimulator: offline simulation</span><br>
+      <span class="indent"><span class="file">ssh_runtime.py / vllm_runtime.py</span></span> <span class="cm">-- Multi-node deployment</span><br>
+      <span class="indent"><span class="dir">server/</span></span><br>
+      <span class="indent"><span class="indent"><span class="highlight">server.py</span></span></span> <span class="cm">-- FastAPI server: entry point, CLI, request routing</span><br>
+      <span class="indent"><span class="dir">tests/</span></span> <span class="cm">-- Test suite for routing, profiling, scheduling</span><br>
+      <span class="dir">python/sglang/srt/</span> <span class="cm">-- Modified SGLang runtime</span><br>
+      <span class="indent"><span class="dir">managers/router/</span></span><br>
+      <span class="indent"><span class="indent"><span class="highlight">radix_cache.py</span></span></span> <span class="cm">-- Local RadixCache with eviction tracking</span><br>
+      <span class="indent"><span class="indent"><span class="file">scheduler.py</span></span></span> <span class="cm">-- Local iteration-level scheduler with priority queues</span><br>
+      <span class="indent"><span class="indent"><span class="file">model_rpc.py / model_runner.py</span></span></span> <span class="cm">-- GPU execution layer</span><br>
+      <span class="dir">benchmark/</span> <span class="cm">-- 15+ benchmark workloads (toolbench, video QA, etc.)</span><br>
+      <span class="dir">nsdi_plots/</span> <span class="cm">-- Plotting utilities for evaluation</span><br>
+    </div>
+  </div>
+
+  <h3>Core Module Dependencies</h3>
+  <div class="card accent-border">
+    <p>The data flow between modules follows a clear hierarchy:</p>
+    <ol>
+      <li><strong>Server (server.py)</strong> receives HTTP requests and pushes them into an async queue</li>
+      <li><strong>DataParallelRequestRouter</strong> selects a routing policy (round-robin, LOR, or custom E2)</li>
+      <li><strong>GlobalSchedulerWithTime</strong> implements E2: inserts tokens into the global <span class="inline-code">LPRadixCache</span>,
+          computes exploitation vs exploration, calculates prompt-aware load via <span class="inline-code">SlidingWindowHistogram</span></li>
+      <li><strong>ModelDetails / EndpointRuntimeInterface</strong> dispatches the request to the selected GPU's SGLang/vLLM endpoint</li>
+      <li><strong>Local RadixCache + Scheduler</strong> performs iteration-level scheduling with priority-based wait queue ordering</li>
+    </ol>
+  </div>
+
+  <h3>Key Classes Summary</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Class</th>
+        <th>File</th>
+        <th>Role</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="inline-code">GlobalSchedulerWithTime</span></td>
+        <td>global_scheduler_with_time.py</td>
+        <td>E2 algorithm: exploitation/exploration decision, load calculation, rebalancing, autoscaling</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">SlidingWindowHistogram</span></td>
+        <td>global_scheduler_with_time.py</td>
+        <td>Tracks per-GPU prefill/decode cost over a 3-minute sliding window (history H)</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">LPRadixCache</span></td>
+        <td>global_lru_cache.py</td>
+        <td>Global prefix radix tree: insert, match, split nodes, track allocated sizes per GPU</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">TreeNode</span></td>
+        <td>global_lru_cache.py</td>
+        <td>Radix tree node: per-GPU ref counters, cached/evicted GPU sets, context length, decode lengths</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">DataParallelRequestRouter</span></td>
+        <td>data_parallel_request_cache.py</td>
+        <td>Policy dispatcher: RANDOM, ROUND_ROBIN, LEAST_OUTSTANDING, or CUSTOM (E2)</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">TTFTWindowedOverloadedDetector</span></td>
+        <td>ttft_overload_detector.py</td>
+        <td>Detects overloaded nodes by comparing TTFT in first/second half of the window</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">ModelDetails</span></td>
+        <td>model_runtime_manager.py</td>
+        <td>Runtime lifecycle management, async request dispatch, hit-ratio polling</td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">RadixCache</span> (local)</td>
+        <td>sglang/srt/.../radix_cache.py</td>
+        <td>Per-GPU KV cache management with eviction tracking reported back to global scheduler</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Architecture Section -->
+<section id="architecture">
+  <h2>System Architecture</h2>
+
+  <p>
+    Preble uses a <strong>two-level hierarchical scheduling architecture</strong>. A centralized global scheduler performs
+    coarse-grained, request-level scheduling across GPUs, while per-GPU local schedulers perform fine-grained,
+    iteration-level scheduling. This design provides a centralized view for E2 decision-making while allowing each
+    GPU to adapt quickly to local conditions.
+  </p>
+
+  <!-- Cluster Architecture Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">Preble Cluster Architecture</div>
+    <div class="cluster-diagram">
+
+      <!-- Incoming Requests -->
+      <div class="diagram-box box-request" style="min-width: 180px;">
+        Incoming Requests
+      </div>
+
+      <div class="arrow-down" style="height: 24px;"></div>
+
+      <!-- Tokenizer -->
+      <div class="diagram-box box-tokenizer" style="min-width: 200px;">
+        Parallel Tokenizer
+        <div style="font-size: 0.72rem; font-weight: 400; color: #94a3b8; margin-top: 2px;">text -&gt; token IDs</div>
+      </div>
+
+      <div class="arrow-down" style="height: 24px;"></div>
+
+      <!-- Global Scheduler + Radix Tree Row -->
+      <div class="diagram-row">
+        <div class="diagram-box box-global-sched">
+          <div style="font-size: 1rem;">Global Scheduler</div>
+          <div style="font-size: 0.75rem; font-weight: 400; color: #fca5a5; margin-top: 4px;">
+            E2 Algorithm<br>
+            Rebalancing + Autoscaling<br>
+            Prefill-Decode Balancing
+          </div>
+        </div>
+
+        <div class="connector-h dashed" style="width: 40px;"></div>
+
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
+          <div class="diagram-box box-radix-tree" style="min-width: 220px;">
+            <div>Global Prefix Radix Tree</div>
+            <div style="font-size: 0.72rem; font-weight: 400; color: #94a3b8; margin-top: 2px;">
+              Per-node: #tokens, GPU set, req count in H
+            </div>
+          </div>
+          <div style="display: flex; gap: 0.5rem;">
+            <div class="diagram-box" style="background: rgba(30,45,74,0.6); border-color: #475569; color: #94a3b8; padding: 0.3rem 0.6rem; font-size: 0.7rem;">
+              SlidingWindowHistogram
+            </div>
+            <div class="diagram-box" style="background: rgba(30,45,74,0.6); border-color: #475569; color: #94a3b8; padding: 0.3rem 0.6rem; font-size: 0.7rem;">
+              OverloadDetector
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dispatch Lines -->
+      <div style="display: flex; width: 100%; justify-content: center; position: relative; height: 40px;">
+        <svg width="600" height="40" viewBox="0 0 600 40" style="overflow: visible;">
+          <line x1="300" y1="0" x2="75" y2="38" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4"/>
+          <line x1="300" y1="0" x2="225" y2="38" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4"/>
+          <line x1="300" y1="0" x2="375" y2="38" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4"/>
+          <line x1="300" y1="0" x2="525" y2="38" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4"/>
+          <polygon points="75,38 70,30 80,30" fill="#94a3b8"/>
+          <polygon points="225,38 220,30 230,30" fill="#94a3b8"/>
+          <polygon points="375,38 370,30 380,30" fill="#94a3b8"/>
+          <polygon points="525,38 520,30 530,30" fill="#94a3b8"/>
+        </svg>
+      </div>
+
+      <!-- GPU Nodes Row -->
+      <div class="gpu-cluster">
+        <!-- GPU 0 -->
+        <div class="gpu-node">
+          <div class="diagram-box box-local-sched" style="min-width: 120px;">
+            Local Scheduler
+            <div style="font-size: 0.65rem; font-weight: 400; color: #d4a373; margin-top: 2px;">
+              Priority Queue<br>Wait Queue
+            </div>
+          </div>
+          <div class="arrow-down" style="height: 14px;"></div>
+          <div class="diagram-box box-gpu">
+            GPU 0
+            <div style="font-size: 0.65rem; font-weight: 400; color: #94a3b8;">(model copy 1)</div>
+          </div>
+          <div class="gpu-label">Local Radix Tree</div>
+        </div>
+
+        <!-- GPU 1 -->
+        <div class="gpu-node">
+          <div class="diagram-box box-local-sched" style="min-width: 120px;">
+            Local Scheduler
+            <div style="font-size: 0.65rem; font-weight: 400; color: #d4a373; margin-top: 2px;">
+              Priority Queue<br>Wait Queue
+            </div>
+          </div>
+          <div class="arrow-down" style="height: 14px;"></div>
+          <div class="diagram-box box-gpu">
+            GPU 1
+            <div style="font-size: 0.65rem; font-weight: 400; color: #94a3b8;">(model copy 1)</div>
+          </div>
+          <div class="gpu-label">Local Radix Tree</div>
+        </div>
+
+        <!-- GPU 2-3 (TP) -->
+        <div class="gpu-node">
+          <div class="diagram-box box-local-sched" style="min-width: 120px;">
+            Local Scheduler
+            <div style="font-size: 0.65rem; font-weight: 400; color: #d4a373; margin-top: 2px;">
+              Chunked Prefill<br>Priority Queue
+            </div>
+          </div>
+          <div class="arrow-down" style="height: 14px;"></div>
+          <div style="display: flex; gap: 0.3rem;">
+            <div class="diagram-box box-gpu" style="padding: 0.4rem 0.6rem;">GPU 2</div>
+            <div class="diagram-box box-gpu" style="padding: 0.4rem 0.6rem;">GPU 3</div>
+          </div>
+          <div class="gpu-label">model parallelism</div>
+        </div>
+
+        <!-- GPU 4 -->
+        <div class="gpu-node">
+          <div class="diagram-box box-local-sched" style="min-width: 120px;">
+            Local Scheduler
+            <div style="font-size: 0.65rem; font-weight: 400; color: #d4a373; margin-top: 2px;">
+              Priority Queue<br>Wait Queue
+            </div>
+          </div>
+          <div class="arrow-down" style="height: 14px;"></div>
+          <div class="diagram-box box-gpu">
+            GPU 4
+            <div style="font-size: 0.65rem; font-weight: 400; color: #94a3b8;">(model copy 3)</div>
+          </div>
+          <div class="gpu-label">Local Radix Tree</div>
+        </div>
+      </div>
+
+      <!-- Feedback arrow -->
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
+        <div style="width: 8px; height: 8px; border-left: 2px solid #94a3b8; border-bottom: 2px solid #94a3b8; transform: rotate(45deg);"></div>
+        <span style="font-size: 0.72rem; color: var(--text-dim);">Async eviction + completion feedback to Global Scheduler</span>
+        <div style="width: 8px; height: 8px; border-right: 2px solid #94a3b8; border-bottom: 2px solid #94a3b8; transform: rotate(-45deg);"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-grid">
+    <div class="card primary-border">
+      <h4>Global Scheduler Benefits</h4>
+      <ul>
+        <li>Centralized global view of cluster load and prompt caching state</li>
+        <li>Coarse-grained request-level scheduling scales to hundreds of GPUs</li>
+        <li>Lock-free radix tree access (read-only except GPU assignment + ref count)</li>
+        <li>Background threads for rebalancing and eviction bookkeeping</li>
+      </ul>
+    </div>
+    <div class="card accent-border">
+      <h4>Local Scheduler Benefits</h4>
+      <ul>
+        <li>Fine-grained iteration-level scheduling adapts to real-time GPU conditions</li>
+        <li>Maintains per-GPU radix tree and priority-based wait queue</li>
+        <li>Chunked prefill for long prompts (budget = 512 tokens per chunk)</li>
+        <li>Reports eviction events asynchronously to global scheduler</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- E2 Algorithm Section -->
+<section id="e2-algorithm">
+  <h2>E2 Scheduling Algorithm</h2>
+
+  <p>
+    E2 stands for <strong>Exploitation + Exploration</strong>. The core insight is that greedily maximizing prefix cache hits
+    can lead to load imbalance, while purely balancing load ignores cache reuse opportunities.
+    E2 dynamically chooses between exploiting existing cached prefixes and exploring new GPUs based on a
+    principled cost comparison.
+  </p>
+
+  <!-- E2 Decision Flow Diagram -->
+  <div class="diagram-container">
+    <div class="diagram-title">E2 Scheduling Decision Flow</div>
+    <div class="e2-diagram">
+
+      <div class="diagram-box box-request" style="min-width: 300px;">
+        New Request R<sub>k</sub> arrives with token sequence
+      </div>
+      <div class="arrow-down"></div>
+      <div class="diagram-box box-radix-tree" style="min-width: 320px;">
+        Match prefix in Global Radix Tree<br>
+        <span style="font-size: 0.75rem; color: #94a3b8;">matched_tokens vs remaining_tokens</span>
+      </div>
+      <div class="arrow-down"></div>
+
+      <!-- Decision Point -->
+      <div style="background: linear-gradient(135deg, #3b1028, #2a0b1e); border: 2px solid var(--primary); border-radius: 12px; padding: 1rem 2rem; text-align: center; min-width: 340px;">
+        <div style="color: #fca5a5; font-weight: 700; font-size: 0.95rem;">matched_tokens &gt; remaining_tokens?</div>
+        <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 4px;">Is recomputation saved &gt; new computation?</div>
+      </div>
+
+      <!-- Branches -->
+      <div style="display: flex; width: 100%; justify-content: center; position: relative; height: 30px;">
+        <svg width="500" height="30" viewBox="0 0 500 30" style="overflow: visible;">
+          <line x1="250" y1="0" x2="120" y2="28" stroke="#10b981" stroke-width="2"/>
+          <line x1="250" y1="0" x2="380" y2="28" stroke="#0ea5e9" stroke-width="2"/>
+          <polygon points="120,28 115,20 125,20" fill="#10b981"/>
+          <polygon points="380,28 375,20 385,20" fill="#0ea5e9"/>
+          <text x="140" y="16" fill="#10b981" font-size="11" font-weight="600">YES</text>
+          <text x="330" y="16" fill="#0ea5e9" font-size="11" font-weight="600">NO</text>
+        </svg>
+      </div>
+
+      <div class="branch-row">
+        <div class="branch-box branch-exploit">
+          <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">EXPLOIT</div>
+          <div>Send to GPU caching the longest matched prefix</div>
+          <div style="margin-top: 0.5rem; font-size: 0.78rem; color: #94a3b8;">
+            If multiple GPUs cache it, pick the one with lowest load
+          </div>
+        </div>
+
+        <div class="branch-box branch-explore">
+          <div style="font-weight: 700; font-size: 1rem; margin-bottom: 0.5rem;">EXPLORE</div>
+          <div>Pick GPU with lowest prompt-aware load cost</div>
+          <div style="margin-top: 0.5rem; font-size: 0.78rem; color: #94a3b8;">
+            Cost = L<sub>i</sub> + M<sub>i</sub> + P<sub>i</sub>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>Prompt-Aware Load Metric (Exploration Mode)</h3>
+
+  <p>
+    When E2 explores, it selects the GPU with the <strong>lowest total cost</strong>, defined as:
+  </p>
+
+  <div class="card primary-border">
+    <h4>Total Cost = L<sub>i</sub> + M<sub>i</sub> + P<sub>i</sub></h4>
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Definition</th>
+          <th>Implementation Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>L<sub>i</sub></strong> - Historical Load</td>
+          <td>Overall GPU computation load in the history window H (default 3 minutes). Sum of estimated prefill + decode time for all requests in H.</td>
+          <td>Tracked in <span class="inline-code">SlidingWindowHistogram</span>. Prefill estimated via regression on non-matching tokens. Decode estimated via observed average TPOT.</td>
+        </tr>
+        <tr>
+          <td><strong>M<sub>i</sub></strong> - Eviction Cost</td>
+          <td>Recomputation cost of evicting KV cache entries to make room for the new request. Weighted by hit rate and sharing count of evicted nodes.</td>
+          <td>Computed by <span class="inline-code">virtual_evict_for_routing()</span> which simulates LRU eviction without actually evicting.</td>
+        </tr>
+        <tr>
+          <td><strong>P<sub>i</sub></strong> - New Request Cost</td>
+          <td>Prefill time for the non-cached (missed) tokens of the new request R<sub>k</sub> on GPU<sub>i</sub>.</td>
+          <td>Estimated via profiled regression function <span class="inline-code">prefill_time(num_tokens, context_length)</span>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout note">
+    <div class="callout-icon">i</div>
+    <div>
+      <strong>Key insight:</strong> All three cost components are calculated as GPU computation time using
+      profiled regression functions rather than raw token counts. This unifies prefill cost, decode cost,
+      and eviction cost into a single comparable metric. Shared prompt tokens are treated as zero cost
+      (since their KV is already cached), naturally accounting for prefix sharing potential.
+    </div>
+  </div>
+
+  <h3>Implementation of the E2 Decision</h3>
+
+  <pre><code><span class="kw">def</span> <span class="fn">runtime_selector</span>(<span class="vr">self</span>, text, request_id, input_ids, sampling_params, ...):
+    <span class="cm"># 1. Insert into global radix tree and find matching prefix</span>
+    leaf_node = <span class="vr">self</span>.cache.<span class="fn">insert</span>(<span class="fn">tuple</span>(input_ids), split_nodes=split_nodes)
+    important_node = <span class="vr">self</span>.<span class="fn">get_important_node</span>(leaf_node)
+
+    <span class="cm"># 2. EXPLOITATION: matched prefix > remaining tokens</span>
+    <span class="kw">if</span> leaf_node.num_tokens < leaf_node.context_so_far:
+        <span class="cm"># Get GPUs that cache the parent prefix</span>
+        gpu_selected = <span class="vr">self</span>.<span class="fn">get_parent_gpu_allocation</span>(leaf_node)
+        <span class="kw">if</span> <span class="fn">len</span>(gpu_selected) > <span class="nu">1</span>:
+            <span class="cm"># Among caching GPUs, pick lowest load</span>
+            runtime_idx = <span class="vr">self</span>.<span class="fn">calculate_min_load_cost</span>(leaf_node, gpu_selected)
+        <span class="kw">else</span>:
+            runtime_idx = <span class="fn">list</span>(gpu_selected)[<span class="nu">0</span>]
+
+    <span class="cm"># 3. EXPLORATION: remaining tokens dominate, search all GPUs</span>
+    <span class="kw">else</span>:
+        runtime_idx = <span class="vr">self</span>.<span class="fn">calculate_min_load_cost</span>(
+            leaf_node, selected_gpus=<span class="fn">range</span>(<span class="vr">self</span>.num_gpus))
+
+    <span class="cm"># 4. Update GPU allocations and histogram</span>
+    <span class="vr">self</span>.<span class="fn">update_gpu_allocation_for_parent</span>(leaf_node, {runtime_idx})
+    <span class="vr">self</span>.cache.<span class="fn">update_allocated_size</span>(leaf_node, runtime_idx)
+    <span class="vr">self</span>.histogram.<span class="fn">update</span>(<span class="fn">datetime.now</span>(), important_node, leaf_node, runtime_idx, ...)
+
+    <span class="cm"># 5. Post-assignment: eviction + rebalancing</span>
+    <span class="kw">if</span> <span class="vr">self</span>.enable_eviction:
+        <span class="vr">self</span>.<span class="fn">handle_eviction</span>(runtime_idx)
+    <span class="kw">if</span> <span class="vr">self</span>.enable_rebalancing:
+        <span class="vr">self</span>.<span class="fn">handle_important_node_stealing</span>(runtime_idx)
+    <span class="kw">return</span> runtime_idx</code></pre>
+
+  <h3>Post-Assignment Load Adjustment</h3>
+
+  <div class="card-grid">
+    <div class="card yellow-border">
+      <h4>Load Rebalancing (Node Stealing)</h4>
+      <p>When the most loaded GPU exceeds <strong>1.5x</strong> the lightest GPU's load, the scheduler
+        migrates prefix subtrees from heavy to light GPUs. It uses a min-heap of node costs and greedily
+        steals the cheapest nodes until balance is restored.</p>
+      <pre><code><span class="cm">// Trigger condition:</span>
+<span class="kw">if</span> larger_cost > <span class="nu">1.5</span> * smaller_cost:
+    <span class="cm">// Steal smallest-cost nodes first</span>
+    <span class="kw">while</span> larger - cost > smaller + cost:
+        <span class="fn">migrate</span>(node, heavy_gpu, light_gpu)</code></pre>
+    </div>
+    <div class="card green-border">
+      <h4>Autoscaling (Prefix Replication)</h4>
+      <p>When a single prefix's load exceeds what one GPU can handle (detected by TTFT doubling
+        between the first and second half of the monitoring window), the scheduler <strong>replicates</strong>
+        the prefix to an additional GPU, splitting future requests between them.</p>
+      <pre><code><span class="cm">// TTFTWindowedOverloadedDetector</span>
+<span class="kw">if</span> avg_second_half >= <span class="nu">2</span> * avg_first_half:
+    <span class="cm">// Node is overloaded: replicate</span>
+    gpu_allocations[node].<span class="fn">add</span>(light_gpu)
+    <span class="cm">// Future requests split across GPUs</span></code></pre>
+    </div>
+  </div>
+
+  <h3>Prefill-Decode Balancing</h3>
+
+  <div class="card accent-border">
+    <p>
+      Preble leverages the insight that a fully cached request acts as a <strong>decode-only</strong> unit,
+      while an uncached request acts as a <strong>prefill-heavy</strong> unit. By mixing requests with
+      different sharing levels, the global scheduler naturally balances the prefill-to-decode ratio
+      on each GPU. If a GPU is heavily loaded with decode-phase requests, the scheduler directs new
+      exploration requests to it (since they incur prefill computation that uses idle compute capacity).
+    </p>
+  </div>
+</section>
+
+<!-- Implementation Details Section -->
+<section id="implementation">
+  <h2>Implementation Deep Dive</h2>
+
+  <h3>Global Prefix Radix Tree</h3>
+
+  <p>
+    The <span class="inline-code">LPRadixCache</span> extends a standard radix tree with distributed metadata.
+    Each <span class="inline-code">TreeNode</span> tracks per-GPU reference counters, cached/evicted GPU sets,
+    and context-length information necessary for the E2 cost calculation.
+  </p>
+
+  <pre><code><span class="kw">class</span> <span class="ty">TreeNode</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="vr">self</span>, num_nodes):
+        <span class="vr">self</span>.id = <span class="fn">uuid4</span>()
+        <span class="vr">self</span>.children = <span class="fn">defaultdict</span>(<span class="ty">TreeNode</span>)    <span class="cm"># radix children</span>
+        <span class="vr">self</span>.parent = <span class="kw">None</span>
+        <span class="vr">self</span>.value = <span class="kw">None</span>                       <span class="cm"># token IDs in this node</span>
+        <span class="vr">self</span>.ref_counter = [<span class="nu">0</span>] * num_nodes     <span class="cm"># per-GPU active ref count</span>
+        <span class="vr">self</span>.evicted_gpus = <span class="fn">set</span>()              <span class="cm"># GPUs that evicted this node</span>
+        <span class="vr">self</span>.cached_gpus = <span class="fn">set</span>()               <span class="cm"># GPUs currently caching this node</span>
+        <span class="vr">self</span>.decode_length = <span class="fn">deque</span>()           <span class="cm"># observed decode lengths</span>
+        <span class="vr">self</span>.context_length = <span class="nu">0</span>               <span class="cm"># total tokens from root to here</span>
+        <span class="vr">self</span>.depth = <span class="nu">0</span>                          <span class="cm"># depth in the tree</span>
+
+    <span class="dc">@property</span>
+    <span class="kw">def</span> <span class="fn">context_so_far</span>(<span class="vr">self</span>):              <span class="cm"># tokens from ancestors (matched prefix)</span>
+        <span class="kw">return</span> <span class="vr">self</span>.context_length - <span class="vr">self</span>.num_tokens</code></pre>
+
+  <h3>Sliding Window Histogram</h3>
+
+  <p>
+    The <span class="inline-code">SlidingWindowHistogram</span> maintains per-node, per-GPU cost tracking
+    over a configurable window (default 3 minutes). It computes the prompt-aware load metric used in E2's
+    exploration mode.
+  </p>
+
+  <div class="card green-border">
+    <h4>Cost Computation</h4>
+    <pre><code><span class="kw">def</span> <span class="fn">get_node_cost</span>(<span class="vr">self</span>, node, gpu, tpot):
+    <span class="cm"># Prefill cost: miss_rate * request_count * profiled_time / num_sharing_GPUs</span>
+    prefill_cost = <span class="vr">self</span>.prev_mis_rates[node] * \
+                   <span class="vr">self</span>.node_to_count[node] * \
+                   <span class="fn">prefill_time</span>(node.num_tokens, node.context_length) / \
+                   <span class="fn">len</span>(<span class="vr">self</span>.gpu_allocations.<span class="fn">get</span>(node))
+
+    <span class="cm"># Decode cost: active_requests * output_length * time_per_output_token</span>
+    active_requests = node.ref_counter[gpu]
+    decode_cost = active_requests * output_len * tpot
+
+    <span class="kw">return</span> prefill_cost + decode_cost</code></pre>
+  </div>
+
+  <h3>Virtual Eviction for Routing</h3>
+
+  <p>
+    A distinctive feature of Preble is <strong>virtual eviction</strong>: when computing the exploration cost,
+    the scheduler simulates LRU eviction on each GPU without actually modifying the cache state. This estimates
+    the recomputation penalty of evicting existing cached prefixes.
+  </p>
+
+  <pre><code><span class="kw">def</span> <span class="fn">virtual_evict_for_routing</span>(<span class="vr">self</span>, leaf_node, runtime_selected):
+    <span class="cm"># Heuristic: eviction size = new leaf's tokens (GPU memory assumed full)</span>
+    num_to_evict = leaf_node.num_tokens
+    evicted_nodes = <span class="vr">self</span>.cache.<span class="fn">virtual_lru_eviction</span>(num_to_evict, runtime_selected)
+    eviction_cost = <span class="nu">0</span>
+    <span class="kw">for</span> victim <span class="kw">in</span> evicted_nodes:
+        <span class="cm"># Cost = miss_rate * ref_count * prefill_time (for important/large nodes only)</span>
+        eviction_cost += <span class="vr">self</span>.histogram.<span class="fn">get_eviction_prefill_cost</span>(
+            victim, runtime_selected, <span class="vr">self</span>.<span class="fn">is_large_node</span>(victim))
+    <span class="kw">return</span> eviction_cost</code></pre>
+
+  <h3>Important Node Concept</h3>
+
+  <div class="card yellow-border">
+    <p>
+      Preble distinguishes between <strong>"important" (large) nodes</strong> and small nodes in the radix tree.
+      A node is considered "important" when its own token count exceeds the context from its ancestors:
+    </p>
+    <pre><code><span class="kw">def</span> <span class="fn">is_large_node</span>(<span class="vr">self</span>, node):
+    <span class="kw">return</span> node.num_tokens > node.context_so_far
+    <span class="cm"># Equivalently: this node's tokens > all ancestor tokens combined</span></code></pre>
+    <p>
+      Important nodes represent the "key portion" of a prompt -- the segment that dominates computation.
+      Rebalancing and autoscaling decisions operate at the granularity of important nodes, and eviction
+      cost is only computed for important nodes (small nodes have zero eviction cost).
+    </p>
+  </div>
+
+  <h3>Server Entry Point</h3>
+  <p>
+    The <span class="inline-code">preble/server/server.py</span> exposes a FastAPI server that serializes
+    request scheduling through an async queue. A single background coroutine processes the queue, calling
+    <span class="inline-code">request_router.select_runtime()</span> for each request to ensure thread-safe
+    access to the global radix tree.
+  </p>
+
+  <pre><code><span class="cm"># server.py - Simplified flow</span>
+<span class="kw">async def</span> <span class="fn">process_runtime_selection</span>():
+    <span class="kw">while</span> <span class="kw">True</span>:
+        obj, request_id = <span class="kw">await</span> runtime_request_queue.<span class="fn">get</span>()
+        runtime_id = request_router.<span class="fn">select_runtime</span>(
+            text=obj.text,
+            input_ids=obj.input_ids,
+            sampling_params=obj.sampling_params.dict(),
+            ...
+        )
+        <span class="cm"># Signal the waiting request handler with the selected GPU</span>
+        runtime_events[request_id][<span class="nu">0</span>].<span class="fn">set</span>()</code></pre>
+</section>
+
+<!-- Performance Section -->
+<section id="performance">
+  <h2>Performance Evaluation</h2>
+
+  <h3>Workload Characteristics</h3>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Workload</th>
+        <th>Prompt Len (mean)</th>
+        <th>Output Len (mean)</th>
+        <th>Shared Prefix</th>
+        <th>Key Portion</th>
+        <th>Req Sharing</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Toolbench</td>
+        <td>1,835</td>
+        <td>43</td>
+        <td>85%</td>
+        <td>76%</td>
+        <td>39-64 req</td>
+      </tr>
+      <tr>
+        <td>Embodied Agent</td>
+        <td>2,285</td>
+        <td>16</td>
+        <td>97%</td>
+        <td>76%</td>
+        <td>48-8 req</td>
+      </tr>
+      <tr>
+        <td>Programming</td>
+        <td>3,871</td>
+        <td>190</td>
+        <td>97%</td>
+        <td>78%</td>
+        <td>126-2157 req</td>
+      </tr>
+      <tr>
+        <td>Video QA</td>
+        <td>9,865</td>
+        <td>4</td>
+        <td>88%</td>
+        <td>99%</td>
+        <td>8.6-2 req</td>
+      </tr>
+      <tr>
+        <td>LooGLE</td>
+        <td>23,474</td>
+        <td>16</td>
+        <td>91%</td>
+        <td>94%</td>
+        <td>18-8.6 req</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <div class="callout-icon">i</div>
+    <div>
+      Prompts are <strong>37x to 2494x</strong> longer than outputs. This means the prefill phase dominates
+      end-to-end latency, and optimizing prefix reuse has outsized impact compared to decoding optimizations.
+    </div>
+  </div>
+
+  <h3>End-to-End Results</h3>
+
+  <div class="card-grid">
+    <div class="card primary-border">
+      <h4>Mistral 7B on 2x A6000</h4>
+      <ul>
+        <li><strong>Toolbench:</strong> 3.1x avg, 4.5x p99 improvement</li>
+        <li><strong>Embodied Agent:</strong> 3.5x avg, 6.2x p99 improvement</li>
+        <li><strong>Video QA:</strong> 8.2x avg, 8.5x p99 improvement</li>
+        <li><strong>LooGLE:</strong> 14.5x avg, 10x p99 improvement</li>
+      </ul>
+    </div>
+    <div class="card accent-border">
+      <h4>Mistral 7B on 4x A6000</h4>
+      <ul>
+        <li>Relative improvement consistent when scaling 2 to 4 GPUs</li>
+        <li>Preble maintains similar absolute latency while RPS doubles</li>
+        <li>Programming workload: 1.56-1.8x avg, 3-4x p99 (decode-dominated)</li>
+        <li>Strong scalability demonstrated</li>
+      </ul>
+    </div>
+    <div class="card green-border">
+      <h4>Llama-3 70B on 8x H100</h4>
+      <ul>
+        <li>4-GPU tensor parallelism + 2-way data parallelism</li>
+        <li>Larger model amplifies Preble's advantages</li>
+        <li>Improvements increase compared to Mistral 7B setup</li>
+        <li>Demonstrates compatibility with model parallelism</li>
+      </ul>
+    </div>
+    <div class="card yellow-border">
+      <h4>Azure Trace (Mixed Workload)</h4>
+      <ul>
+        <li>Real-world request arrival pattern (non-Poisson)</li>
+        <li>Tool + Video workloads mixed on 4x A6000</li>
+        <li><strong>6.02x</strong> avg latency, <strong>4.61x</strong> p99 latency improvement</li>
+        <li><strong>5.6x</strong> avg TTFT, <strong>2.42x</strong> avg TPOT improvement</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Ablation Study</h3>
+
+  <p>Incremental contribution of each Preble component on the Toolbench workload (Zipf-1.1 skew, 4x A6000):</p>
+
+  <!-- Ablation bar chart as CSS -->
+  <div class="card purple-border">
+    <table>
+      <thead>
+        <tr>
+          <th>Configuration</th>
+          <th>Relative Improvement (cumulative)</th>
+          <th>Primary Benefit</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>SGLang Round-Robin (baseline)</td>
+          <td>1.0x</td>
+          <td>--</td>
+        </tr>
+        <tr>
+          <td>+ E2 per-request policy</td>
+          <td style="color: var(--accent3);">~2x avg, ~1.5x p99</td>
+          <td>Dynamic load partitioning via exploitation/exploration</td>
+        </tr>
+        <tr>
+          <td>+ Post-assignment rebalancing + autoscaling</td>
+          <td style="color: var(--accent3);">~2.5x avg, ~3x p99</td>
+          <td>Corrects load drift; handles hot prefixes</td>
+        </tr>
+        <tr>
+          <td>+ Prefill/decode balancing</td>
+          <td style="color: var(--accent3);">~3x avg, ~3.5x p99</td>
+          <td>Better GPU utilization by mixing compute types</td>
+        </tr>
+        <tr>
+          <td>+ Priority wait-queue (full Preble)</td>
+          <td style="color: var(--accent3);">~3x avg, ~4x p99</td>
+          <td>Fairness improvement, mainly reduces tail latency</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Global Scheduler Scalability</h3>
+
+  <div class="card-grid">
+    <div class="card accent-border">
+      <h4>Processing Rates</h4>
+      <ul>
+        <li><strong>Toolbench:</strong> 245 req/s (most complex prefix tree)</li>
+        <li><strong>VideoQA:</strong> 2,931 req/s (simpler prefix structure)</li>
+        <li>Prefix tree search is the dominant cost</li>
+        <li>Network processing is not the bottleneck</li>
+      </ul>
+    </div>
+    <div class="card green-border">
+      <h4>GPU Scaling Capacity</h4>
+      <ul>
+        <li>Peak GPU decode rate: 30-150 tokens/s (Mistral 7B on A100)</li>
+        <li>One Preble scheduler can sustain <strong>70-391 concurrent A100 GPUs</strong></li>
+        <li>Bigger models or prefill-heavy workloads allow even more GPUs</li>
+        <li>Multiple Preble clusters for data-center scale</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Paper vs Implementation Section -->
+<section id="paper-vs-impl">
+  <h2>Paper vs Implementation</h2>
+
+  <p>
+    A close comparison between the ICLR 2025 paper and the open-source implementation reveals both faithful
+    reproductions and practical divergences. The core E2 algorithm is well-implemented, while some paper
+    features are present in alternative forms or partially implemented.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Paper Feature</th>
+        <th>Implementation Status</th>
+        <th>Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>E2 Exploitation/Exploration decision</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td>Faithfully implemented in <span class="inline-code">runtime_selector()</span>. Uses <span class="inline-code">leaf_node.num_tokens &lt; leaf_node.context_so_far</span> as the decision boundary.</td>
+      </tr>
+      <tr>
+        <td>Global prefix radix tree</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">LPRadixCache</span> with split, insert, match, per-GPU ref counters, and allocated size tracking.</td>
+      </tr>
+      <tr>
+        <td>Prompt-aware load metric (L<sub>i</sub> + M<sub>i</sub> + P<sub>i</sub>)</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">calculate_min_load_cost()</span> combines histogram-based allocation cost with virtual eviction cost.</td>
+      </tr>
+      <tr>
+        <td>3-minute sliding window (H)</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">SlidingWindowHistogram(window_duration=timedelta(minutes=3))</span>. Entries expire automatically.</td>
+      </tr>
+      <tr>
+        <td>Virtual eviction for routing</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">virtual_lru_eviction()</span> simulates eviction without modifying cache state. Assumes GPU memory is always full.</td>
+      </tr>
+      <tr>
+        <td>Post-assignment load rebalancing</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">handle_important_node_stealing()</span> with threshold <span class="inline-code">HIGH_LOAD_THRESHOLD = 1.5</span> and recursive multi-GPU balancing.</td>
+      </tr>
+      <tr>
+        <td>Autoscaling (prefix replication)</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td><span class="inline-code">TTFTWindowedOverloadedDetector</span> checks if TTFT doubled in the second half of the window. Triggers only when a single dominant node exists.</td>
+      </tr>
+      <tr>
+        <td>Prefill-decode balancing</td>
+        <td><span class="tag tag-yellow">Partial</span></td>
+        <td>Mentioned in the paper as directing exploration requests to decode-heavy GPUs. The implementation includes decode cost tracking in the histogram but does not have explicit prefill/decode ratio checks in the global scheduler. The local scheduler uses chunked prefill.</td>
+      </tr>
+      <tr>
+        <td>Priority-based wait queue (P groups)</td>
+        <td><span class="tag tag-yellow">Partial</span></td>
+        <td>The local scheduler in the modified SGLang supports <span class="inline-code">fcfs-mpq</span> (multi-priority queue) scheduling heuristic but the P-group proportional selection described in the paper is not fully exposed.</td>
+      </tr>
+      <tr>
+        <td>Lock-free radix tree access</td>
+        <td><span class="tag tag-yellow">Partial</span></td>
+        <td>The paper claims lock-free read access with atomic GPU assignment and ref-count updates. The implementation uses a <span class="inline-code">threading.Lock()</span> for the entire <span class="inline-code">runtime_selector()</span> call. The perf variant (<span class="inline-code">GlobalSchedulerWithTimePerf</span>) removes the lock.</td>
+      </tr>
+      <tr>
+        <td>Profiled regression functions</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td>Hardware-specific profiling via <span class="inline-code">LP_mistral_7b_A6000_sglang_extend_flashinfer</span> and Llama-3 70B H100 variants. Imported from <span class="inline-code">model_equations</span>.</td>
+      </tr>
+      <tr>
+        <td>Iterative eviction feedback</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td>Local <span class="inline-code">RadixCache</span> tracks <span class="inline-code">EvictionData</span> per iteration, reported asynchronously to global scheduler via ZMQ. Toggleable via <span class="inline-code">enable_iterative_eviction</span>.</td>
+      </tr>
+      <tr>
+        <td>Multi-backend support (SGLang + vLLM)</td>
+        <td><span class="tag tag-green">Implemented</span></td>
+        <td>Abstracted via <span class="inline-code">EndpointRuntimeInterface</span> with concrete classes for SGLang, vLLM, SSH, URL, and Simulation backends.</td>
+      </tr>
+      <tr>
+        <td>Hardcoded model / GPU assumptions</td>
+        <td><span class="tag tag-red">Limitation</span></td>
+        <td>The global scheduler hardcodes <span class="inline-code">max_tokens_gpu = [198516]</span> and initializes TPOT at 0.15s. Prefill regression imports are model-specific. Changing models requires code edits.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Notable Implementation Observations</h3>
+
+  <div class="card-grid">
+    <div class="card primary-border">
+      <h4>Two Scheduler Variants</h4>
+      <p>
+        The repository contains two versions of the global scheduler:
+        <span class="inline-code">GlobalSchedulerWithTime</span> (with threading lock) and
+        <span class="inline-code">GlobalSchedulerWithTimePerf</span> (performance-optimized, lock-free).
+        The perf variant also includes an inline <span class="inline-code">TTFTWindowedOverloadedDetector</span>
+        and uses incremental cost tracking (<span class="inline-code">per_node_per_gpu_allocation_cost</span>)
+        instead of recomputing full allocation costs.
+      </p>
+    </div>
+    <div class="card accent-border">
+      <h4>Exploration Policy Breadth</h4>
+      <p>
+        The <span class="inline-code">CustomPolicyType</span> enum reveals an extensive experimental history
+        with 20+ scheduling variants tested during development: from basic memory schedulers to histogram-based
+        approaches, LP-based schedulers, oracle policies, and the final GlobalScheduler variants.
+        This suggests significant iteration before arriving at E2.
+      </p>
+    </div>
+    <div class="card yellow-border">
+      <h4>Hit Ratio Feedback Loop</h4>
+      <p>
+        The <span class="inline-code">ModelDetails</span> class includes a background loop that polls each
+        GPU's <span class="inline-code">/windowed_prefix_hit_ratio</span> endpoint every 0.5 seconds.
+        When the highest hit ratio exceeds 0.7, the system uses it as a hint for the E2 decision
+        (<span class="inline-code">runtime_id_with_highest_hit_rate</span>). This runtime feedback mechanism
+        is not discussed in the paper.
+      </p>
+    </div>
+    <div class="card green-border">
+      <h4>Simulation Infrastructure</h4>
+      <p>
+        A full <span class="inline-code">ServerRuntimeSimulator</span> and <span class="inline-code">Simulation</span>
+        class enable offline evaluation without GPUs. Combined with <span class="inline-code">eventsim.py</span>
+        and <span class="inline-code">sim.py</span>, this provides a complete simulation environment for
+        algorithm development and testing -- a significant engineering investment not mentioned in the paper.
+      </p>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <div class="callout-icon">!</div>
+    <div>
+      <strong>Deployment consideration:</strong> The implementation has hardcoded references to
+      <span class="inline-code">mistralai/Mistral-7B-v0.1</span> as the default tokenizer and model-specific
+      profiling functions. Deploying with a different model requires updating the prefill regression imports
+      in <span class="inline-code">global_scheduler_with_time.py</span> and potentially re-profiling.
+      The <span class="inline-code">max_tokens_gpu</span> capacity is also hardcoded at 198,516 tokens.
+    </div>
+  </div>
+
+  <h3>Code Quality Assessment</h3>
+
+  <div class="card purple-border">
+    <table>
+      <thead>
+        <tr>
+          <th>Aspect</th>
+          <th>Assessment</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Algorithm Fidelity</td>
+          <td>High. The E2 algorithm's exploitation/exploration split, three-component load metric, rebalancing, and autoscaling all match the paper's description.</td>
+        </tr>
+        <tr>
+          <td>Code Organization</td>
+          <td>Moderate. Clear separation between global scheduling (<span class="inline-code">preble/</span>) and local runtime (<span class="inline-code">python/sglang/</span>), but some code duplication between scheduler variants and commented-out experimental code.</td>
+        </tr>
+        <tr>
+          <td>Configurability</td>
+          <td>Low-Moderate. Key parameters (window duration, load threshold, chunk budget) are configurable, but model-specific profiling and GPU memory limits require code changes.</td>
+        </tr>
+        <tr>
+          <td>Testing</td>
+          <td>Present. Test files exist for routing, GPU profiling, LP scheduling, and multi-node loading. The simulation infrastructure enables reproducible offline testing.</td>
+        </tr>
+        <tr>
+          <td>Documentation</td>
+          <td>Basic. README covers installation and CLI usage. No detailed API documentation, but code comments explain key design decisions.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Summary</h3>
+
+  <p>
+    Preble makes a strong contribution by identifying and solving the cluster-level prefix caching problem
+    for distributed LLM serving. The E2 algorithm's exploitation/exploration framework is well-motivated
+    by the workload study and elegantly balances cache reuse against load distribution. The prompt-aware
+    load metric, which unifies historical load, eviction cost, and new request cost into GPU computation
+    time, is a principled approach that avoids the pitfalls of simpler heuristics.
+  </p>
+  <p>
+    The implementation faithfully captures the paper's core contributions, with the global radix tree,
+    E2 decision logic, sliding window histogram, rebalancing, and autoscaling all present. The addition
+    of a simulation infrastructure, multiple backend support, and a FastAPI-based server makes the system
+    practical for both research and deployment. Areas for improvement include reducing model-specific
+    hardcoding, improving the lock granularity for better scalability, and more fully implementing
+    the priority-based wait queue scheduling described in the paper.
+  </p>
+</section>
+
+</div>
+
+<!-- Footer -->
+<div style="text-align: center; padding: 3rem 2rem; border-top: 1px solid var(--border); margin-top: 2rem;">
+  <p style="color: var(--text-dim); font-size: 0.85rem;">
+    Technical analysis of "Preble: Efficient Distributed Prompt Scheduling for LLM Serving"
+    (Srivatsa et al., ICLR 2025, arXiv:2407.00023).<br>
+    Repository: <a href="https://github.com/WukLab/preble" style="color: var(--accent2);">github.com/WukLab/preble</a>
+  </p>
+</div>
+
+</body>
+</html>

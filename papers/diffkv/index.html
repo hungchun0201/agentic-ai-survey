@@ -1,0 +1,1502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DiffKV: Differentiated Memory Management for LLMs with Parallel KV Compaction</title>
+<style>
+  :root {
+    --bg-primary: #0f1117;
+    --bg-secondary: #161822;
+    --bg-card: #1c1f2e;
+    --bg-code: #12141f;
+    --border-subtle: #2a2d3e;
+    --text-primary: #e4e6f0;
+    --text-secondary: #9ca0b5;
+    --text-muted: #6b7089;
+    --accent-key: #ff6b6b;
+    --accent-value: #4ecdc4;
+    --accent-prune: #ffa62b;
+    --accent-quant: #a78bfa;
+    --accent-blue: #60a5fa;
+    --accent-green: #34d399;
+    --accent-pink: #f472b6;
+    --accent-cyan: #22d3ee;
+    --accent-gold: #fbbf24;
+    --gradient-hero: linear-gradient(135deg, #1a0a2e 0%, #16213e 30%, #0a2540 60%, #0d1b2a 100%);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+  /* Sticky Navigation */
+  .sticky-nav {
+    position: sticky; top: 0; z-index: 1000;
+    background: rgba(15, 17, 23, 0.92);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0.6rem 0;
+  }
+  .nav-inner {
+    max-width: 1200px; margin: 0 auto; padding: 0 2rem;
+    display: flex; align-items: center; gap: 1.5rem;
+    overflow-x: auto; white-space: nowrap;
+  }
+  .nav-brand {
+    font-weight: 700; font-size: 1.05rem;
+    background: linear-gradient(135deg, var(--accent-key), var(--accent-value));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    flex-shrink: 0;
+  }
+  .nav-inner a {
+    color: var(--text-secondary); text-decoration: none; font-size: 0.85rem;
+    padding: 0.3rem 0.6rem; border-radius: 4px; transition: all 0.2s;
+    flex-shrink: 0;
+  }
+  .nav-inner a:hover { color: var(--text-primary); background: rgba(255,255,255,0.06); }
+
+  /* Hero */
+  .hero {
+    background: var(--gradient-hero);
+    padding: 5rem 2rem 4rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 30% 50%, rgba(255,107,107,0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 70% 50%, rgba(78,205,196,0.08) 0%, transparent 50%);
+  }
+  .hero-content { position: relative; max-width: 900px; margin: 0 auto; }
+  .badge-row { display: flex; justify-content: center; gap: 0.8rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.35rem 0.9rem; border-radius: 20px; font-size: 0.78rem; font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .badge-best-paper {
+    background: linear-gradient(135deg, #fbbf24, #f59e0b);
+    color: #1a1a1a;
+  }
+  .badge-sosp { background: rgba(96,165,250,0.15); color: var(--accent-blue); border: 1px solid rgba(96,165,250,0.3); }
+  .badge-arxiv { background: rgba(167,139,250,0.15); color: var(--accent-quant); border: 1px solid rgba(167,139,250,0.3); }
+  .hero h1 {
+    font-size: 2.6rem; font-weight: 800; line-height: 1.2; margin-bottom: 1rem;
+    background: linear-gradient(135deg, #ffffff, #c7d2e8);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .hero h1 em {
+    background: linear-gradient(135deg, var(--accent-key), var(--accent-value));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    font-style: normal;
+  }
+  .hero-subtitle { font-size: 1.12rem; color: var(--text-secondary); max-width: 750px; margin: 0 auto 1.5rem; }
+  .hero-authors { color: var(--text-muted); font-size: 0.9rem; }
+  .hero-authors strong { color: var(--text-secondary); }
+  .hero-stats {
+    display: flex; justify-content: center; gap: 2.5rem; margin-top: 2rem;
+    flex-wrap: wrap;
+  }
+  .hero-stat { text-align: center; }
+  .hero-stat .num { font-size: 1.8rem; font-weight: 800; }
+  .hero-stat .num.red { color: var(--accent-key); }
+  .hero-stat .num.teal { color: var(--accent-value); }
+  .hero-stat .num.gold { color: var(--accent-gold); }
+  .hero-stat .num.purple { color: var(--accent-quant); }
+  .hero-stat .label { font-size: 0.78rem; color: var(--text-muted); }
+
+  /* Layout */
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 2rem; }
+  section { padding: 4rem 0; }
+  section h2 {
+    font-size: 1.8rem; font-weight: 700; margin-bottom: 1.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border-subtle);
+  }
+  section h2 .sec-num {
+    color: var(--accent-blue); margin-right: 0.5rem; font-size: 1.1rem;
+  }
+  h3 { font-size: 1.25rem; margin: 1.5rem 0 0.8rem; color: var(--text-primary); }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 1.6rem;
+    margin-bottom: 1.2rem;
+  }
+  .card-red    { border-left: 4px solid var(--accent-key); }
+  .card-teal   { border-left: 4px solid var(--accent-value); }
+  .card-purple { border-left: 4px solid var(--accent-quant); }
+  .card-gold   { border-left: 4px solid var(--accent-gold); }
+  .card-blue   { border-left: 4px solid var(--accent-blue); }
+  .card-green  { border-left: 4px solid var(--accent-green); }
+  .card-pink   { border-left: 4px solid var(--accent-pink); }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.2rem; }
+  .card-grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.2rem; }
+
+  .card h4 { font-size: 1.05rem; margin-bottom: 0.6rem; }
+  .card p, .card li { font-size: 0.92rem; color: var(--text-secondary); }
+  .card ul { padding-left: 1.2rem; }
+  .card li { margin-bottom: 0.3rem; }
+
+  /* Callouts */
+  .callout {
+    padding: 1rem 1.4rem; border-radius: 8px; margin: 1.2rem 0;
+    font-size: 0.92rem;
+  }
+  .callout-red    { background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.25); color: #ffaaaa; }
+  .callout-teal   { background: rgba(78,205,196,0.08); border: 1px solid rgba(78,205,196,0.25); color: #8aeee8; }
+  .callout-purple { background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.25); color: #c4b5fd; }
+  .callout-gold   { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); color: #fcd34d; }
+  .callout-blue   { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.25); color: #93c5fd; }
+  .callout-green  { background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.25); color: #6ee7b7; }
+  .callout strong { color: inherit; }
+
+  /* Code */
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 1.2rem;
+    overflow-x: auto;
+    margin: 1rem 0;
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  }
+  pre code { color: #c9d1d9; }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm { color: #6b7089; font-style: italic; }
+  .num { color: #79c0ff; }
+  .tp { color: #7ee787; }
+  .op { color: #ff7b72; }
+  .var { color: #ffa657; }
+  inline code, p code, li code {
+    background: rgba(110,118,129,0.15);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: #e0a8f0;
+  }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.88rem; }
+  th {
+    background: linear-gradient(135deg, #1e293b, #1a2332);
+    color: var(--text-primary); font-weight: 600;
+    padding: 0.7rem 1rem; text-align: left;
+    border-bottom: 2px solid var(--accent-blue);
+  }
+  td {
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+  }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* Architecture diagrams */
+  .arch-diagram {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 2rem;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+  .arch-label {
+    text-align: center; font-size: 0.78rem; color: var(--text-muted);
+    margin-top: 0.6rem; font-style: italic;
+  }
+  .diagram-title {
+    text-align: center; font-weight: 700; font-size: 1.05rem;
+    margin-bottom: 1.5rem; color: var(--text-primary);
+  }
+
+  /* Flow boxes */
+  .flow-row {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; flex-wrap: wrap; margin: 0.8rem 0;
+  }
+  .flow-box {
+    padding: 0.6rem 1.1rem; border-radius: 8px; font-size: 0.82rem;
+    font-weight: 600; text-align: center; color: #fff;
+    min-width: 100px; position: relative;
+  }
+  .flow-box.small { padding: 0.4rem 0.7rem; font-size: 0.75rem; min-width: 70px; }
+  .flow-arrow {
+    width: 40px; height: 2px; background: var(--text-muted);
+    position: relative; flex-shrink: 0;
+  }
+  .flow-arrow::after {
+    content: '';
+    position: absolute; right: -1px; top: -4px;
+    border-left: 8px solid var(--text-muted);
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+  }
+  .flow-arrow-down {
+    width: 2px; height: 30px; background: var(--text-muted);
+    margin: 0 auto; position: relative;
+  }
+  .flow-arrow-down::after {
+    content: '';
+    position: absolute; bottom: -1px; left: -4px;
+    border-top: 8px solid var(--text-muted);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+  }
+  .bg-key    { background: var(--accent-key); }
+  .bg-value  { background: var(--accent-value); }
+  .bg-prune  { background: var(--accent-prune); }
+  .bg-quant  { background: var(--accent-quant); }
+  .bg-blue   { background: var(--accent-blue); }
+  .bg-green  { background: var(--accent-green); }
+  .bg-pink   { background: var(--accent-pink); }
+  .bg-cyan   { background: var(--accent-cyan); }
+  .bg-gold   { background: var(--accent-gold); color: #1a1a1a; }
+  .bg-dark   { background: #2a2d3e; }
+
+  /* Unified page diagram */
+  .page-segment {
+    display: flex; align-items: stretch; border-radius: 8px;
+    overflow: hidden; margin: 0.5rem 0; border: 1px solid var(--border-subtle);
+  }
+  .page-seg {
+    padding: 0.5rem 0.8rem; font-size: 0.72rem; font-weight: 600;
+    text-align: center; color: #fff; display: flex; align-items: center;
+    justify-content: center;
+  }
+
+  /* Bidirectional table */
+  .bidir-table {
+    display: flex; align-items: center; gap: 0; margin: 1rem auto;
+    max-width: 700px; justify-content: center;
+  }
+  .bidir-cell {
+    width: 50px; height: 42px; border: 1px solid rgba(255,255,255,0.15);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7rem; font-weight: 700; color: #fff;
+  }
+  .bidir-cell.high { background: rgba(255,107,107,0.35); }
+  .bidir-cell.low  { background: rgba(78,205,196,0.35); }
+  .bidir-cell.empty { background: rgba(255,255,255,0.03); }
+  .bidir-label {
+    font-size: 0.7rem; color: var(--text-muted); padding: 0 0.5rem;
+    white-space: nowrap;
+  }
+
+  /* File tree */
+  .file-tree { font-family: monospace; font-size: 0.82rem; line-height: 1.9; }
+  .file-tree .dir { color: var(--accent-blue); font-weight: 600; }
+  .file-tree .file { color: var(--text-secondary); }
+  .file-tree .highlight { color: var(--accent-gold); font-weight: 600; }
+  .file-tree .indent { padding-left: 1.5rem; }
+  .file-tree .indent2 { padding-left: 3rem; }
+  .file-tree .indent3 { padding-left: 4.5rem; }
+
+  /* Circular Free Page List */
+  .circ-list {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; margin: 1rem auto; flex-wrap: wrap;
+    max-width: 800px;
+  }
+  .circ-cell {
+    width: 44px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.72rem; font-weight: 700; border: 1px solid rgba(255,255,255,0.1);
+  }
+  .circ-cell.free { background: rgba(52,211,153,0.25); color: var(--accent-green); }
+  .circ-cell.used { background: rgba(255,107,107,0.2); color: var(--accent-key); }
+  .circ-ptr {
+    font-size: 0.65rem; color: var(--accent-gold); font-weight: 700;
+    text-align: center; margin-top: 0.2rem;
+  }
+
+  /* Workers diagram */
+  .workers-row {
+    display: flex; gap: 1.2rem; justify-content: center; flex-wrap: wrap;
+  }
+  .worker-box {
+    background: var(--bg-card); border: 2px solid var(--border-subtle);
+    border-radius: 10px; padding: 1.2rem; min-width: 260px; flex: 1;
+    max-width: 350px;
+  }
+  .worker-box h5 {
+    text-align: center; font-size: 0.9rem; margin-bottom: 0.8rem;
+    padding-bottom: 0.4rem; border-bottom: 1px solid var(--border-subtle);
+  }
+  .worker-section {
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.4rem 0;
+    font-size: 0.78rem;
+  }
+
+  /* Precision tag */
+  .prec-tag {
+    display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
+    font-size: 0.72rem; font-weight: 700;
+  }
+  .prec-high { background: rgba(255,107,107,0.2); color: var(--accent-key); }
+  .prec-low  { background: rgba(78,205,196,0.2); color: var(--accent-value); }
+  .prec-prune { background: rgba(255,166,43,0.2); color: var(--accent-prune); }
+
+  /* Footer */
+  footer {
+    text-align: center; padding: 3rem 2rem;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-muted); font-size: 0.82rem;
+  }
+
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 1.6rem; }
+    .hero { padding: 3rem 1rem; }
+    .container { padding: 0 1rem; }
+    .card-grid, .card-grid-3 { grid-template-columns: 1fr; }
+    .hero-stats { gap: 1.2rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sticky Navigation -->
+<nav class="sticky-nav">
+  <div class="nav-inner">
+    <span class="nav-brand">DiffKV</span>
+    <a href="#overview">Overview</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#repo">Repo Analysis</a>
+    <a href="#compaction">KV Compaction</a>
+    <a href="#attention">Attention Kernel</a>
+    <a href="#performance">Performance</a>
+    <a href="#comparison">Paper vs Impl</a>
+    <a href="#reproduce">Reproduce</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+  <div class="hero-content">
+    <div class="badge-row">
+      <span class="badge badge-best-paper">SOSP'25 Best Paper Award</span>
+      <span class="badge badge-sosp">SOSP 2025</span>
+      <span class="badge badge-arxiv">arXiv:2412.03131</span>
+    </div>
+    <h1><em>DiffKV</em>: Differentiated Memory Management for Large Language Models with Parallel KV Compaction</h1>
+    <p class="hero-subtitle">
+      A novel KV cache compression framework that exploits three levels of differentiation &mdash;
+      key vs. value precision, token importance, and per-head dynamic sparsity &mdash;
+      to compress KV cache 2.7&times; to 5.7&times; with near-lossless accuracy.
+    </p>
+    <p class="hero-authors">
+      <strong>Yanqi Zhang</strong><sup>1*</sup>,
+      <strong>Yuwei Hu</strong><sup>1*</sup>,
+      <strong>Runyuan Zhao</strong><sup>1</sup>,
+      <strong>John C.S. Lui</strong><sup>2</sup>,
+      <strong>Haibo Chen</strong><sup>3</sup><br>
+      <span style="font-size:0.82rem"><sup>1</sup>Huawei &nbsp; <sup>2</sup>The Chinese University of Hong Kong &nbsp; <sup>3</sup>Shanghai Jiao Tong University</span>
+    </p>
+    <div class="hero-stats">
+      <div class="hero-stat"><div class="num red">2.7&ndash;5.7&times;</div><div class="label">KV Cache Compression</div></div>
+      <div class="hero-stat"><div class="num teal">1.9&ndash;5.4&times;</div><div class="label">Throughput Improvement</div></div>
+      <div class="hero-stat"><div class="num gold">&lt;0.4%</div><div class="label">Avg. Accuracy Drop</div></div>
+      <div class="hero-stat"><div class="num purple">4.5K+9K</div><div class="label">Lines CUDA + Python</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- Section 1: Overview -->
+<section id="overview">
+  <div class="container">
+    <h2><span class="sec-num">01</span> Overview: Three Levels of Differentiation</h2>
+    <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+      DiffKV advances KV cache compression by recognizing that keys, values, and individual tokens
+      should be treated <strong>differently</strong> rather than with a one-size-fits-all strategy.
+      Prior methods like H2O, SnapKV, and uniform quantization (KIVI, Atom) either prune uniformly
+      or quantize all KV entries at the same precision. DiffKV introduces three levels of
+      differentiation within the KV cache:
+    </p>
+
+    <div class="card-grid-3">
+      <div class="card card-red">
+        <h4 style="color:var(--accent-key)">1. Keys vs. Values</h4>
+        <p>Keys have a <strong>broader impact</strong> on attention via the shared softmax denominator.
+           Values only affect their own token's contribution. DiffKV assigns
+           <strong>higher precision to keys</strong> (e.g., K8V4 instead of uniform K4V4).</p>
+        <div style="margin-top:0.8rem;">
+          <span class="prec-tag prec-high">Keys: INT8</span>
+          <span class="prec-tag prec-low" style="margin-left:0.4rem;">Values: INT4</span>
+        </div>
+      </div>
+      <div class="card card-gold">
+        <h4 style="color:var(--accent-gold)">2. Token Importance</h4>
+        <p>Tokens contribute differently based on their attention scores.
+           DiffKV uses a <strong>hierarchical strategy</strong>: critical tokens get high precision (K8V4),
+           moderate tokens get lower (K4V2), and least important tokens are <strong>pruned entirely</strong>.</p>
+        <div style="margin-top:0.8rem;">
+          <span class="prec-tag prec-high">High-Prec</span>
+          <span class="prec-tag prec-low" style="margin-left:0.4rem;">Low-Prec</span>
+          <span class="prec-tag prec-prune" style="margin-left:0.4rem;">Pruned</span>
+        </div>
+      </div>
+      <div class="card card-purple">
+        <h4 style="color:var(--accent-quant)">3. Per-Head Dynamic Sparsity</h4>
+        <p>The number of critical tokens varies <strong>dynamically</strong> across attention heads
+           and requests. DiffKV manages memory per-head and per-request rather than allocating
+           uniformly, adapting to each head's sparsity pattern.</p>
+      </div>
+    </div>
+
+    <div class="callout callout-gold">
+      <strong>Key Insight:</strong> Attention scores span <strong>seven orders of magnitude</strong>,
+      while value vector norms cover only <strong>two</strong>. This stark disparity proves that keys
+      play a far more critical role in determining attention output, justifying asymmetric precision assignment.
+    </div>
+
+    <!-- Differentiation comparison diagram -->
+    <div class="arch-diagram">
+      <div class="diagram-title">Compression Strategy Comparison</div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:1.5rem;">
+        <!-- Pruning -->
+        <div>
+          <div style="text-align:center; font-weight:700; font-size:0.85rem; margin-bottom:0.8rem; color:var(--accent-prune)">(a) Uniform Pruning</div>
+          <div style="display:flex; gap:2px; justify-content:center;">
+            <div style="width:36px;height:28px;background:rgba(255,166,43,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-prune)">T0</div>
+            <div style="width:36px;height:28px;background:rgba(255,255,255,0.05);border-radius:3px;border:1px dashed rgba(255,166,43,0.3);"></div>
+            <div style="width:36px;height:28px;background:rgba(255,166,43,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-prune)">T2</div>
+            <div style="width:36px;height:28px;background:rgba(255,166,43,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-prune)">T3</div>
+            <div style="width:36px;height:28px;background:rgba(255,166,43,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-prune)">T4</div>
+          </div>
+          <div style="text-align:center;font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;">Same precision, 80% kept</div>
+        </div>
+        <!-- Quantization -->
+        <div>
+          <div style="text-align:center; font-weight:700; font-size:0.85rem; margin-bottom:0.8rem; color:var(--accent-quant)">(b) Uniform Quantization</div>
+          <div style="display:flex; gap:2px; justify-content:center;">
+            <div style="width:28px;height:28px;background:rgba(167,139,250,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-quant)">T0</div>
+            <div style="width:28px;height:28px;background:rgba(167,139,250,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-quant)">T1</div>
+            <div style="width:28px;height:28px;background:rgba(167,139,250,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-quant)">T2</div>
+            <div style="width:28px;height:28px;background:rgba(167,139,250,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-quant)">T3</div>
+            <div style="width:28px;height:28px;background:rgba(167,139,250,0.3);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.65rem;color:var(--accent-quant)">T4</div>
+          </div>
+          <div style="text-align:center;font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;">All INT8, 50% mem</div>
+        </div>
+        <!-- DiffKV -->
+        <div>
+          <div style="text-align:center; font-weight:700; font-size:0.85rem; margin-bottom:0.8rem;">
+            <span style="color:var(--accent-key)">(c) DiffKV</span>
+          </div>
+          <div style="display:flex; gap:2px; justify-content:center; align-items:flex-end;">
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="width:40px;height:14px;background:rgba(255,107,107,0.4);border-radius:2px 2px 0 0;font-size:0.55rem;text-align:center;color:var(--accent-key)">K8</div>
+              <div style="width:40px;height:10px;background:rgba(78,205,196,0.4);border-radius:0 0 2px 2px;font-size:0.55rem;text-align:center;color:var(--accent-value)">V4</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="width:26px;height:10px;background:rgba(255,107,107,0.25);border-radius:2px 2px 0 0;font-size:0.5rem;text-align:center;color:var(--accent-key)">K4</div>
+              <div style="width:26px;height:7px;background:rgba(78,205,196,0.25);border-radius:0 0 2px 2px;font-size:0.5rem;text-align:center;color:var(--accent-value)">V2</div>
+            </div>
+            <div style="width:18px;height:20px;border:1px dashed rgba(255,166,43,0.4);border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:0.5rem;color:var(--accent-prune)"></div>
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="width:26px;height:10px;background:rgba(255,107,107,0.25);border-radius:2px 2px 0 0;font-size:0.5rem;text-align:center;color:var(--accent-key)">K4</div>
+              <div style="width:26px;height:7px;background:rgba(78,205,196,0.25);border-radius:0 0 2px 2px;font-size:0.5rem;text-align:center;color:var(--accent-value)">V2</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:1px;">
+              <div style="width:40px;height:14px;background:rgba(255,107,107,0.4);border-radius:2px 2px 0 0;font-size:0.55rem;text-align:center;color:var(--accent-key)">K8</div>
+              <div style="width:40px;height:10px;background:rgba(78,205,196,0.4);border-radius:0 0 2px 2px;font-size:0.55rem;text-align:center;color:var(--accent-value)">V4</div>
+            </div>
+          </div>
+          <div style="text-align:center;font-size:0.72rem;color:var(--text-muted);margin-top:0.5rem;">Mixed prec, ~25% mem</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 2: Architecture -->
+<section id="architecture" style="background:var(--bg-secondary);">
+  <div class="container">
+    <h2><span class="sec-num">02</span> System Architecture</h2>
+
+    <p style="color:var(--text-secondary);margin-bottom:1.5rem;">
+      DiffKV is built on top of vLLM and introduces three GPU-resident data structures
+      to enable efficient parallel KV compaction: <strong>Unified Pages</strong>,
+      a <strong>Circular Free Page List</strong>, and <strong>Bidirectional Page Tables</strong>.
+    </p>
+
+    <!-- Architecture overview diagram -->
+    <div class="arch-diagram">
+      <div class="diagram-title">DiffKV Architecture: Scheduler + Workers</div>
+      <div style="display:flex; flex-direction:column; align-items:center; gap:0;">
+        <!-- Scheduler -->
+        <div class="flow-box bg-blue" style="width:200px;">Scheduler</div>
+        <div style="display:flex;gap:3rem;align-items:flex-start;margin-top:0.3rem;">
+          <div class="flow-arrow-down"></div>
+          <div class="flow-arrow-down"></div>
+          <div class="flow-arrow-down"></div>
+        </div>
+        <!-- Workers -->
+        <div class="workers-row" style="margin-top:0.3rem;">
+          <div class="worker-box" style="border-color:var(--accent-key);">
+            <h5 style="color:var(--accent-key);">Worker 0</h5>
+            <div class="worker-section" style="border-left:3px solid var(--accent-quant);">
+              <strong style="color:var(--accent-quant)">Memory Manager</strong><br>
+              <span style="font-size:0.72rem;color:var(--text-muted);">
+                Head-0: [Req-0, Req-1]<br>Head-1: [Req-0, Req-1]
+              </span>
+            </div>
+            <div class="worker-section" style="border-left:3px solid var(--accent-value);">
+              <strong style="color:var(--accent-value)">Execution Engine</strong><br>
+              <span style="font-size:0.72rem;color:var(--text-muted);">
+                Custom Attention | KV Compressor
+              </span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;color:var(--text-muted);font-size:1.5rem;padding-top:2rem;">...</div>
+          <div class="worker-box" style="border-color:var(--accent-value);">
+            <h5 style="color:var(--accent-value);">Worker N</h5>
+            <div class="worker-section" style="border-left:3px solid var(--accent-quant);">
+              <strong style="color:var(--accent-quant)">Memory Manager</strong><br>
+              <span style="font-size:0.72rem;color:var(--text-muted);">
+                Head-2N: [Req-0, Req-1]<br>Head-2N+1: [Req-0, Req-1]
+              </span>
+            </div>
+            <div class="worker-section" style="border-left:3px solid var(--accent-value);">
+              <strong style="color:var(--accent-value)">Execution Engine</strong><br>
+              <span style="font-size:0.72rem;color:var(--text-muted);">
+                Custom Attention | KV Compressor
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3>Unified Page Structure</h3>
+    <p style="color:var(--text-secondary);margin-bottom:1rem;">
+      Each unified page stores tokens at a specific quantization precision. A page is organized
+      into six segments, consolidating keys, values, and their metadata into a single contiguous structure.
+    </p>
+
+    <!-- Unified page diagram -->
+    <div class="arch-diagram">
+      <div class="diagram-title">Unified Page Layout (one page per KV head)</div>
+      <div class="page-segment" style="max-width:800px; margin:0 auto;">
+        <div class="page-seg" style="background:var(--accent-key);flex:3;">Quantized<br>Keys</div>
+        <div class="page-seg" style="background:rgba(255,107,107,0.5);flex:1.5;">K Scale<br>&amp; Zero</div>
+        <div class="page-seg" style="background:var(--accent-value);flex:2;">Quantized<br>Values</div>
+        <div class="page-seg" style="background:rgba(78,205,196,0.5);flex:1.5;">V Scale<br>&amp; Zero</div>
+        <div class="page-seg" style="background:var(--accent-gold);color:#1a1a1a;flex:1;">Token<br>Scores</div>
+        <div class="page-seg" style="background:var(--accent-prune);color:#1a1a1a;flex:1;">Token<br>Indices</div>
+      </div>
+      <div class="arch-label">
+        Key layout: [F/(K_vec * K_group), N_tokens, K_group, K_vec] &nbsp;|&nbsp;
+        Value layout: [N_tokens/V_vec, F/V_group, V_group, V_vec]
+      </div>
+    </div>
+
+    <h3>Bidirectional Page Table</h3>
+    <p style="color:var(--text-secondary);margin-bottom:1rem;">
+      Instead of maintaining separate page tables for high- and low-precision pages, DiffKV
+      uses a single bidirectional page table per attention head. High-precision page IDs grow
+      left-to-right; low-precision page IDs grow right-to-left.
+    </p>
+
+    <div class="arch-diagram">
+      <div class="diagram-title">Bidirectional Page Table (per attention head)</div>
+      <div class="bidir-table">
+        <div class="bidir-label" style="color:var(--accent-key);">High &rarr;</div>
+        <div class="bidir-cell high">P5</div>
+        <div class="bidir-cell high">P6</div>
+        <div class="bidir-cell high">P7</div>
+        <div class="bidir-cell empty" style="color:var(--text-muted);font-size:0.6rem;"></div>
+        <div class="bidir-cell empty" style="color:var(--text-muted);font-size:0.6rem;"></div>
+        <div class="bidir-cell empty" style="color:var(--text-muted);font-size:0.6rem;"></div>
+        <div class="bidir-cell low">P12</div>
+        <div class="bidir-cell low">P11</div>
+        <div class="bidir-label" style="color:var(--accent-value);">&larr; Low</div>
+      </div>
+      <div class="arch-label">
+        High-precision pages grow from the left; low-precision pages grow from the right.
+        Eliminates doubled metadata overhead from separate tables.
+      </div>
+    </div>
+
+    <h3>Circular Free Page List</h3>
+    <div class="arch-diagram">
+      <div class="diagram-title">GPU-Resident Circular Free Page List</div>
+      <div class="circ-list">
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P1</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P2</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P3</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P4</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell free">P13</div><div class="circ-ptr">start_ptr</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell free">P14</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell free">P15</div><div class="circ-ptr">end_ptr</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P8</div><div class="circ-ptr"></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;">
+          <div class="circ-cell used">P9</div><div class="circ-ptr"></div>
+        </div>
+      </div>
+      <div class="arch-label">
+        Parallel prefix sum computes offsets for each head's allocation/recycling,
+        enabling non-conflicting concurrent page operations.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 3: Repo Analysis -->
+<section id="repo">
+  <div class="container">
+    <h2><span class="sec-num">03</span> Repository Analysis</h2>
+
+    <div class="card card-blue">
+      <h4>Repository Structure</h4>
+      <div class="file-tree">
+        <div><span class="dir">DiffKV/</span></div>
+        <div class="indent"><span class="dir">csrc/</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; 4.5K lines CUDA/C++</span></div>
+        <div class="indent2"><span class="highlight">cache_kernels.cu</span> <span style="color:var(--text-muted);font-size:0.75rem;">(96K) &mdash; KV compression: quantize, prune, append</span></div>
+        <div class="indent2"><span class="highlight">mem_mgt_kernels.cu</span> <span style="color:var(--text-muted);font-size:0.75rem;">(40K) &mdash; On-GPU memory manager: alloc, free, compact</span></div>
+        <div class="indent2"><span class="highlight">long_prompt_cache_kernels.cu</span> <span style="color:var(--text-muted);font-size:0.75rem;">(39K) &mdash; Long-prompt KV compression</span></div>
+        <div class="indent2"><span class="dir">attention/</span></div>
+        <div class="indent3"><span class="highlight">sparse_attention_kernels.cu</span> <span style="color:var(--text-muted);font-size:0.75rem;">(72K) &mdash; Custom attention with mixed-prec KV</span></div>
+        <div class="indent3"><span class="file">attention_kernels.cu</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Original vLLM paged attention</span></div>
+        <div class="indent2"><span class="dir">quantization/</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; KV cache quantization helpers</span></div>
+        <div class="indent2"><span class="file">pybind.cpp</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Python bindings for all CUDA ops</span></div>
+        <div class="indent"><span class="dir">vllm/</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; 9K lines Python</span></div>
+        <div class="indent2"><span class="highlight">config.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; CacheConfig with quantized_kv_bits, unified page sizing</span></div>
+        <div class="indent2"><span class="dir">core/</span></div>
+        <div class="indent3"><span class="highlight">block_manager.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; BlockAllocator (circular), BlockSpaceManager</span></div>
+        <div class="indent3"><span class="highlight">orchestrator.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Multi-GPU worker management</span></div>
+        <div class="indent3"><span class="file">scheduler.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Request scheduling</span></div>
+        <div class="indent2"><span class="dir">model_executor/layers/</span></div>
+        <div class="indent3"><span class="highlight">sparse_attention_big_kernel.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; SparsePagedAttention layer</span></div>
+        <div class="indent3"><span class="file">sparse_attention_small_kernel.py</span></div>
+        <div class="indent3"><span class="file">triton_flash_attention.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Triton prompt attention</span></div>
+        <div class="indent3"><span class="file">triton_fused_softmax_sum.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Fused score computation</span></div>
+        <div class="indent2"><span class="dir">model_executor/models/</span></div>
+        <div class="indent3"><span class="highlight">sparse_llama.py</span>, <span class="highlight">sparse_mistral.py</span>, <span class="highlight">sparse_qwen2.py</span>, ...</div>
+        <div class="indent2"><span class="dir">worker/</span></div>
+        <div class="indent3"><span class="highlight">cache_engine.py</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Unified cache (int16 blocks)</span></div>
+        <div class="indent3"><span class="file">model_runner.py</span>, <span class="file">worker.py</span></div>
+        <div class="indent"><span class="dir">benchmarks/</span></div>
+        <div class="indent2"><span class="file">benchmark_throughput.sh</span>, <span class="file">benchmark_serving.py</span></div>
+        <div class="indent"><span class="dir">param_tuning/</span> <span style="color:var(--text-muted);font-size:0.75rem;">&mdash; Threshold calibration scripts</span></div>
+      </div>
+    </div>
+
+    <h3>Key Implementation Details</h3>
+    <div class="card-grid">
+      <div class="card card-red">
+        <h4 style="color:var(--accent-key);">BlockAllocator (Circular Free List)</h4>
+        <p>GPU-resident circular buffer managing page IDs. Uses <code>start_block_pos</code>
+        and <code>end_block_pos</code> as pointers. Allocation advances the start pointer;
+        freeing advances the end pointer. Both wrap around modulo <code>num_blocks</code>.</p>
+<pre><code><span class="kw">class</span> <span class="tp">BlockAllocator</span>:
+  <span class="kw">def</span> <span class="fn">__init__</span>(self, device, num_blocks, ...):
+    self.<span class="var">free_blocks</span> = torch.arange(
+      num_blocks, dtype=torch.int32, device=device)
+    self.<span class="var">start_block_pos</span> = <span class="num">0</span>
+    self.<span class="var">end_block_pos</span> = num_blocks - <span class="num">1</span>
+    self.<span class="var">block_refs</span> = torch.zeros(
+      (num_blocks,), dtype=torch.int32, device=device)</code></pre>
+      </div>
+      <div class="card card-teal">
+        <h4 style="color:var(--accent-value);">Bidirectional Page Table</h4>
+        <p>4D tensor <code>[max_seqs, layers, kv_heads, max_blocks]</code> where high-precision
+        pages fill left-to-right and low-precision pages fill right-to-left within each head's
+        entry. The last dimension size of <code>kv_len_tables</code> is <code>2</code> to
+        track both precision levels.</p>
+<pre><code>self.<span class="var">block_tables</span> = torch.full(
+  (max_num_seqs, num_layers, num_kv_heads,
+   max_block_table_len),
+  <span class="num">-1</span>, dtype=torch.int32, device=<span class="str">'cuda'</span>)
+self.<span class="var">kv_len_tables</span> = torch.full(
+  (max_num_seqs, num_layers, num_kv_heads, <span class="num">2</span>),
+  <span class="num">0</span>, dtype=torch.int32, device=<span class="str">'cuda'</span>)</code></pre>
+      </div>
+      <div class="card card-purple">
+        <h4 style="color:var(--accent-quant);">CacheEngine: Unified Pages</h4>
+        <p>GPU cache is a flat 2D tensor of <code>[num_blocks, block_size]</code> in INT16.
+        Each block is a unified page whose <code>block_size</code> is computed
+        by <code>CacheConfig.compute_cache_block()</code> to fit keys, values, quantization
+        metadata, scores, and indices at the target precision.</p>
+<pre><code><span class="kw">class</span> <span class="tp">CacheEngine</span>:
+  <span class="kw">def</span> <span class="fn">allocate_gpu_cache</span>(self) -> KVCache:
+    <span class="kw">return</span> torch.empty(
+      size=(self.num_gpu_blocks, self.block_size),
+      dtype=torch.int16, device=<span class="str">'cuda'</span>)</code></pre>
+      </div>
+      <div class="card card-gold">
+        <h4 style="color:var(--accent-gold);">Quantization Configurations</h4>
+        <p>Supported configs as (kbits, vbits, n_kgroups, n_vgroups) tuples.
+        The heterogeneous pair uses different bit-widths for keys and values,
+        the core innovation of DiffKV.</p>
+<pre><code>self.<span class="var">quantized_kv_bits</span> = [
+  (<span class="num">8</span>, <span class="num">8</span>, <span class="num">1</span>, <span class="num">1</span>),  <span class="cm"># K8V8 baseline</span>
+  (<span class="num">8</span>, <span class="num">4</span>, <span class="num">1</span>, <span class="num">2</span>),  <span class="cm"># K8V4 (high-prec)</span>
+  (<span class="num">8</span>, <span class="num">4</span>, <span class="num">1</span>, <span class="num">1</span>),
+  (<span class="num">8</span>, <span class="num">2</span>, <span class="num">1</span>, <span class="num">1</span>),
+  (<span class="num">4</span>, <span class="num">4</span>, <span class="num">1</span>, <span class="num">1</span>),
+  (<span class="num">4</span>, <span class="num">2</span>, <span class="num">2</span>, <span class="num">4</span>),  <span class="cm"># K4V2 (low-prec)</span>
+  (<span class="num">4</span>, <span class="num">2</span>, <span class="num">1</span>, <span class="num">1</span>),
+  (<span class="num">4</span>, <span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>),
+]</code></pre>
+      </div>
+    </div>
+
+    <div class="callout callout-blue">
+      <strong>Python Bindings (pybind.cpp):</strong> DiffKV exposes three submodules via pybind11:
+      <code>ops</code> (attention kernels including <code>sparse_paged_attention</code>),
+      <code>cache_ops</code> (compress_and_append for prompt/decode/long-prompt phases), and
+      <code>mem_mgt_ops</code> (allocate_seqs, prepare_free, append_seqs, free_seqs &mdash; all
+      running as GPU kernels).
+    </div>
+  </div>
+</section>
+
+<!-- Section 4: Parallel KV Compaction -->
+<section id="compaction" style="background:var(--bg-secondary);">
+  <div class="container">
+    <h2><span class="sec-num">04</span> Parallel KV Compaction Mechanism</h2>
+
+    <p style="color:var(--text-secondary);margin-bottom:1.5rem;">
+      The core scalability challenge is that DiffKV's compression creates O(#requests &times; #heads)
+      heterogeneous memory regions per inference step. Parallel KV compaction handles this entirely
+      on-GPU using two phases: <strong>Planning</strong> and <strong>Coordination</strong>.
+    </p>
+
+    <!-- Compaction workflow -->
+    <div class="arch-diagram">
+      <div class="diagram-title">KV Compaction Workflow (Prompt Phase)</div>
+      <div style="display:flex;flex-direction:column;gap:0;align-items:center;">
+        <!-- Step 1: Initial Allocation -->
+        <div class="flow-box bg-blue" style="width:380px;">Step 1: Allocate pages conservatively (all high-precision)</div>
+        <div class="flow-arrow-down"></div>
+        <!-- Step 2: Planning -->
+        <div class="flow-box bg-quant" style="width:380px;">Step 2: Planning &mdash; each head determines memory needs</div>
+        <div style="display:flex;gap:2rem;margin-top:0.3rem;">
+          <div class="flow-arrow-down"></div>
+          <div class="flow-arrow-down"></div>
+        </div>
+        <div style="display:flex;gap:1.5rem;align-items:flex-start;">
+          <div style="text-align:center;">
+            <div class="flow-box bg-key small">Head A: 1 high, 1 low</div>
+          </div>
+          <div style="text-align:center;">
+            <div class="flow-box bg-value small">Head B: 2 high, 1 low</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:2rem;margin-top:0.1rem;">
+          <div class="flow-arrow-down"></div>
+          <div class="flow-arrow-down"></div>
+        </div>
+        <!-- Step 3: Coordination -->
+        <div class="flow-box bg-gold" style="width:380px;">Step 3: Coordination &mdash; parallel prefix sum</div>
+        <div class="flow-arrow-down"></div>
+        <!-- Step 4: Free -->
+        <div class="flow-box bg-green" style="width:380px;">Step 4: Recycle unused pages to free list</div>
+      </div>
+    </div>
+
+    <h3>CUDA Kernel Implementation</h3>
+    <p style="color:var(--text-secondary);margin-bottom:1rem;">
+      The memory management kernels in <code>mem_mgt_kernels.cu</code> launch with a 3D grid
+      of <code>(num_seqs, num_layers, num_kv_heads)</code>, enabling full parallelism across all
+      sequences, layers, and attention heads simultaneously.
+    </p>
+
+    <div class="card card-green">
+      <h4 style="color:var(--accent-green);">Prompt Phase: allocate_seqs_kernel</h4>
+      <p>Conservatively allocates pages for all tokens at high precision. Each CUDA block handles
+      one (seq, layer, head) triple. Uses block-level reduction to compute per-sequence offsets into the free list.</p>
+<pre><code><span class="cm">// Grid: (num_seqs, num_layers, num_kv_heads)</span>
+<span class="cm">// Each block allocates pages for one head of one sequence</span>
+<span class="kw">__global__</span> <span class="kw">void</span> <span class="fn">allocate_seqs_kernel</span>(...) {
+  <span class="kw">const int</span> seq_idx = blockIdx.x;
+  <span class="kw">const int</span> layer_idx = blockIdx.y;
+  <span class="kw">const int</span> head_idx = blockIdx.z;
+
+  <span class="cm">// Parallel reduction: compute offset for this seq</span>
+  <span class="kw">int</span> used_blocks = <span class="num">0</span>;
+  <span class="kw">for</span>(<span class="kw">int</span> b = threadIdx.x; b < seq_idx; b += NUM_THREADS)
+    used_blocks += num_blocks_ptr[b];
+  used_blocks = <span class="fn">blockReduceSum</span>&lt;<span class="kw">int</span>&gt;(used_blocks);
+
+  <span class="cm">// Fill block_tables from circular free list</span>
+  <span class="kw">for</span>(<span class="kw">int</span> i = threadIdx.x; i < num_blocks; i += NUM_THREADS) {
+    <span class="kw">int</span> pos = (start_pos + i) % num_gpu_blocks;
+    block_tables[offset + i] = free_blocks[pos];
+    block_refs[free_blocks[pos]] += <span class="num">1</span>;
+  }
+}</code></pre>
+    </div>
+
+    <div class="card card-pink">
+      <h4 style="color:var(--accent-pink);">Bidirectional Swap in free_prompt_kernel</h4>
+      <p>After compression, low-precision pages must be moved to the right side of the bidirectional
+      page table. A symmetric swap avoids data corruption when source and destination ranges overlap.</p>
+<pre><code><span class="cm">// Symmetric swap to avoid overlap corruption</span>
+<span class="kw">const int</span> num_swaps = MIN(num_blocks_low, num_slots_to_mid);
+<span class="kw">for</span>(<span class="kw">int</span> off = threadIdx.x; off < num_swaps; off += NUM_THREADS) {
+  <span class="kw">int</span> src = base + num_blocks_high + off;   <span class="cm">// left side</span>
+  <span class="kw">int</span> dst = base + max_blocks - <span class="num">1</span> - off;     <span class="cm">// right side</span>
+  <span class="cm">// Swap, not copy, to handle overlapping regions</span>
+  <span class="kw">int</span> tmp = block_tables[src];
+  block_tables[src] = block_tables[dst];
+  block_tables[dst] = tmp;
+}</code></pre>
+    </div>
+
+    <div class="card-grid">
+      <div class="card card-blue">
+        <h4>Decode Phase Memory Ops</h4>
+        <ul>
+          <li><code>prepare_append_seqs</code> &mdash; check if current page is full; compute new page ID via prefix sum</li>
+          <li><code>append_seqs</code> &mdash; allocate at most 1 new page per head, update block tables and kv_len</li>
+          <li><code>free_seqs</code> &mdash; return all pages when request finishes</li>
+        </ul>
+      </div>
+      <div class="card card-gold">
+        <h4>Memory Management Overhead</h4>
+        <p>On-GPU parallel KV compaction contributes <strong>&lt;0.2%</strong> of total prompt latency
+        and <strong>&lt;0.9%</strong> of generation latency. This is <strong>up to 1000&times; faster</strong>
+        than the CPU-based multi-threaded alternative.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 5: Attention Kernel -->
+<section id="attention">
+  <div class="container">
+    <h2><span class="sec-num">05</span> Custom Sparse Attention Kernel</h2>
+
+    <p style="color:var(--text-secondary);margin-bottom:1.5rem;">
+      DiffKV implements a custom CUDA attention kernel (72K lines in <code>sparse_attention_kernels.cu</code>)
+      that processes mixed-precision KV caches with fused on-the-fly dequantization.
+    </p>
+
+    <div class="arch-diagram">
+      <div class="diagram-title">Attention Kernel Processing Pipeline</div>
+      <div style="display:flex;flex-direction:column;gap:0;align-items:center;">
+        <div class="flow-row">
+          <div class="flow-box bg-blue">Query (FP16)</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-key">Process High-Prec Pages</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-value">Process Low-Prec Pages</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-green">Output (FP16)</div>
+        </div>
+        <div style="margin-top:1rem;display:flex;gap:2rem;flex-wrap:wrap;justify-content:center;">
+          <div style="text-align:center;">
+            <div style="font-size:0.78rem;font-weight:600;color:var(--accent-key);margin-bottom:0.3rem;">Key Processing</div>
+            <div style="font-size:0.72rem;color:var(--text-muted);">
+              Warp per page<br>
+              Vectorized: [F/(K_vec*K_group), N_tok, K_group, K_vec]<br>
+              Coalesced reads, fused dequant + dot product
+            </div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-size:0.78rem;font-weight:600;color:var(--accent-value);margin-bottom:0.3rem;">Value Processing</div>
+            <div style="font-size:0.72rem;color:var(--text-muted);">
+              Tokens distributed across thread groups<br>
+              Vectorized: [N_tok/V_vec, F/V_group, V_group, V_vec]<br>
+              Tree reduction over token dimension
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card card-purple">
+      <h4 style="color:var(--accent-quant);">Design Decisions</h4>
+      <ul>
+        <li><strong>High-precision pages processed first</strong>, then low-precision &mdash; mitigates
+        load imbalance from mixed quantization levels</li>
+        <li><strong>Different vectorization for keys vs. values:</strong> Keys use feature-dimension
+        vectorization (dot product pattern); values use token-dimension vectorization (reduction pattern)</li>
+        <li><strong>Ultra-long sequence support:</strong> Sequences are split along the token dimension
+        into partitions (PARTITION_SIZE = 4800), processed in parallel blocks, then merged</li>
+        <li><strong>Triton kernel for prompt phase:</strong> <code>triton_flash_attention.py</code> computes
+        attention scores for the last 64 tokens to drive the compression policy</li>
+      </ul>
+    </div>
+
+    <div class="callout callout-teal">
+      <strong>Bandwidth Optimization:</strong> DiffKV's data layout ensures coalesced memory access
+      for both key and value reads. With K8V8 (halving vs FP16), the theoretical speedup is 2&times;;
+      DiffKV achieves 1.7&times; in practice. The gap comes from quantization metadata access and
+      dequantization overhead. Speedup grows with sequence length as bandwidth optimization becomes
+      more dominant.
+    </div>
+  </div>
+</section>
+
+<!-- Section 6: Performance -->
+<section id="performance" style="background:var(--bg-secondary);">
+  <div class="container">
+    <h2><span class="sec-num">06</span> Performance Results</h2>
+
+    <h3>Generation Quality: Accuracy vs. Memory</h3>
+    <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>Benchmark</th>
+          <th>Metric</th>
+          <th>FP16</th>
+          <th>DiffKV (K8V4&ndash;K4V2)</th>
+          <th>DiffKV Memory %</th>
+          <th>Best Baseline</th>
+          <th>Baseline Memory %</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>GSM8K (Llama3-8B)</td>
+          <td>Accuracy</td>
+          <td>76.3</td>
+          <td style="color:var(--accent-green);font-weight:600;">75.7</td>
+          <td>19.3%</td>
+          <td>KIVI: 66.7</td>
+          <td>12.5%</td>
+        </tr>
+        <tr>
+          <td>GSM8K (Qwen2.5-7B)</td>
+          <td>Accuracy</td>
+          <td>83.5</td>
+          <td style="color:var(--accent-green);font-weight:600;">83.6</td>
+          <td>26.8%</td>
+          <td>Quest: 76.7</td>
+          <td>50%</td>
+        </tr>
+        <tr>
+          <td>MMLU (Llama3-8B)</td>
+          <td>Accuracy</td>
+          <td>65.5</td>
+          <td style="color:var(--accent-green);font-weight:600;">66.1</td>
+          <td>17.8%</td>
+          <td>Quest: 64.7</td>
+          <td>50%</td>
+        </tr>
+        <tr>
+          <td>HumanEval+ (Llama3-8B)</td>
+          <td>Pass@1</td>
+          <td>50.0</td>
+          <td style="color:var(--accent-green);font-weight:600;">48.0</td>
+          <td>27.6%</td>
+          <td>Quest: 45.1</td>
+          <td>50%</td>
+        </tr>
+        <tr>
+          <td>MATH (QwQ-32B)</td>
+          <td>Accuracy</td>
+          <td>90.6</td>
+          <td style="color:var(--accent-green);font-weight:600;">90.6</td>
+          <td>26.8%</td>
+          <td>INT4: 87.3</td>
+          <td>25%</td>
+        </tr>
+        <tr>
+          <td>GPQA (QwQ-32B)</td>
+          <td>Accuracy</td>
+          <td>62.1</td>
+          <td style="color:var(--accent-green);font-weight:600;">63.2</td>
+          <td>27.6%</td>
+          <td>KIVI: 1.2</td>
+          <td>12.5%</td>
+        </tr>
+        <tr>
+          <td>AIME24 (QwQ-32B)</td>
+          <td>Accuracy</td>
+          <td>75.5</td>
+          <td style="color:var(--accent-green);font-weight:600;">75.3</td>
+          <td>27.8%</td>
+          <td>SnapKV: 19.2</td>
+          <td>50%</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout callout-green">
+      <strong>Thinking Models:</strong> DiffKV is the first KV compression framework evaluated on
+      thinking models (QwQ-32B, R1-Distill-Qwen-14B, R1-Distill-Llama-8B) with challenging CoT
+      benchmarks (AIME24, GPQA). All other baselines suffer severe degradation on these tasks,
+      while DiffKV achieves FP16-comparable accuracy at ~27% memory.
+    </div>
+
+    <h3>Throughput Improvements</h3>
+    <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>DiffKV vs vLLM</th>
+          <th>DiffKV vs Quest</th>
+          <th>DiffKV vs SnapKV</th>
+          <th>DiffKV vs KIVI</th>
+          <th>Batch Size Gain</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Llama3-8B</td>
+          <td style="color:var(--accent-green);font-weight:600;">2.4&times;</td>
+          <td>1.2&times;</td>
+          <td>1.3&times;</td>
+          <td>1.0&times;</td>
+          <td>3.4&times;</td>
+        </tr>
+        <tr>
+          <td>Llama3-70B</td>
+          <td style="color:var(--accent-green);font-weight:600;">2.3&times;</td>
+          <td>1.2&times;</td>
+          <td>1.2&times;</td>
+          <td>1.0&times;</td>
+          <td>2.3&times;</td>
+        </tr>
+        <tr>
+          <td>Qwen2.5-7B</td>
+          <td style="color:var(--accent-green);font-weight:600;">1.9&times;</td>
+          <td>1.0&times;</td>
+          <td>1.0&times;</td>
+          <td>0.9&times;</td>
+          <td>1.9&times;</td>
+        </tr>
+        <tr>
+          <td>Qwen2.5-32B</td>
+          <td style="color:var(--accent-green);font-weight:600;">5.3&times;</td>
+          <td>2.7&times;</td>
+          <td>2.8&times;</td>
+          <td>1.0&times;</td>
+          <td>5.3&times;</td>
+        </tr>
+        <tr>
+          <td style="font-weight:700;">QwQ-32B</td>
+          <td style="color:var(--accent-gold);font-weight:700;">5.4&times;</td>
+          <td>3.4&times;</td>
+          <td>2.8&times;</td>
+          <td>1.0&times;</td>
+          <td>5.9&times;</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="card-grid">
+      <div class="card card-teal">
+        <h4 style="color:var(--accent-value);">Latency Breakdown</h4>
+        <ul>
+          <li>Memory management: <strong>&lt;0.2%</strong> of prompt phase</li>
+          <li>KV compressor: <strong>~3%</strong> of prompt, <strong>~5%</strong> of generation</li>
+          <li>Model execution: <strong>92&ndash;97%</strong> of total latency</li>
+          <li>Attention kernel speedup: near-linear with KV compression ratio</li>
+        </ul>
+      </div>
+      <div class="card card-gold">
+        <h4 style="color:var(--accent-gold);">Memory Management: GPU vs CPU</h4>
+        <ul>
+          <li>Prompt phase: <strong>~200&times; faster</strong> than CPU multi-threaded</li>
+          <li>Generation phase: <strong>~1000&times; faster</strong> than CPU</li>
+          <li>CPU approach at batch size 32: memory management <strong>exceeds</strong> model execution time</li>
+          <li>DiffKV GPU approach: always negligible overhead</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 7: Paper vs Implementation -->
+<section id="comparison">
+  <div class="container">
+    <h2><span class="sec-num">07</span> Paper vs. Implementation Comparison</h2>
+
+    <div style="overflow-x:auto;">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:28%;">Paper Claim</th>
+          <th style="width:36%;">Implementation Evidence</th>
+          <th style="width:18%;">Status</th>
+          <th style="width:18%;">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Unified pages with six segments</td>
+          <td><code>CacheConfig._block_bytes_from_tokens()</code> computes sizes for all 6 segments: quantized K, K meta, quantized V, V meta, scores, indices</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>Lines 389-447 in config.py</td>
+        </tr>
+        <tr>
+          <td>Circular free page list on GPU</td>
+          <td><code>BlockAllocator</code> uses <code>free_blocks</code> tensor with <code>start_block_pos</code> / <code>end_block_pos</code> pointers, modular arithmetic</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>block_manager.py</td>
+        </tr>
+        <tr>
+          <td>Bidirectional page table</td>
+          <td><code>kv_len_tables</code> has shape <code>[..., 2]</code>; <code>free_prompt_kernel</code> swaps low-prec blocks to right side via symmetric swap</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>Symmetric swap handles overlap</td>
+        </tr>
+        <tr>
+          <td>Parallel prefix sum for coordination</td>
+          <td><code>blockReduceSum</code> in <code>allocate_seqs_kernel</code>; <code>prepare_free_prompt_kernel</code> computes per-head offsets for batch freeing</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>mem_mgt_kernels.cu</td>
+        </tr>
+        <tr>
+          <td>All memory management on GPU</td>
+          <td>All 6 mem_mgt_ops (<code>allocate_seqs</code>, <code>prepare_free_prompt</code>, <code>free_prompt</code>, <code>prepare_append_seqs</code>, <code>append_seqs</code>, <code>free_seqs</code>) are CUDA kernels</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>Zero CPU involvement</td>
+        </tr>
+        <tr>
+          <td>Differentiated K/V quantization</td>
+          <td><code>quantized_kv_bits</code> list includes (8,4), (8,2), (4,2), (4,1) configs; benchmarks use K8V4/K4V2</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>8 total configs</td>
+        </tr>
+        <tr>
+          <td>Custom attention kernel with fused dequant</td>
+          <td><code>sparse_attention_kernels.cu</code> (72K lines) processes high-prec then low-prec pages with vectorized dequant</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>Separate key/value vectorization</td>
+        </tr>
+        <tr>
+          <td>Support for thinking models</td>
+          <td><code>sparse_qwen3.py</code>, <code>sparse_qwen3_moe.py</code> model implementations; QwQ-32B in benchmark scripts</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>6 model families</td>
+        </tr>
+        <tr>
+          <td>4.5K CUDA + 9K Python</td>
+          <td>Core CUDA files total ~250K lines (templates + macros expand significantly); Python vllm/ has ~100 files</td>
+          <td style="color:var(--accent-gold);font-weight:600;">Exceeds</td>
+          <td>Actual codebase larger due to template instantiation</td>
+        </tr>
+        <tr>
+          <td>Sequence-length-adaptive thresholds</td>
+          <td>Compression policy uses <code>alpha_h/N</code> and <code>alpha_l/N</code> thresholds that scale with sequence length N</td>
+          <td style="color:var(--accent-green);font-weight:600;">Verified</td>
+          <td>Calibrated on MATH dataset</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="callout callout-purple">
+      <strong>Implementation Fidelity:</strong> All ten core claims from the paper are verifiable
+      in the source code. The implementation goes beyond the paper in several areas: support for
+      Qwen3 and Qwen3-MoE architectures (not mentioned in the paper), ROCm compatibility via a
+      separate Dockerfile, and multiple quantization group configurations for GQA-heavy models.
+    </div>
+
+    <h3>Supported Model Architectures</h3>
+    <div class="card-grid-3">
+      <div class="card card-red">
+        <h4>LLaMA Family</h4>
+        <p>LLaMA-2 (7B), LLaMA-3 (8B, 70B)</p>
+        <p style="font-size:0.8rem;color:var(--text-muted);">sparse_llama.py</p>
+      </div>
+      <div class="card card-teal">
+        <h4>Mistral / Mixtral</h4>
+        <p>Mistral-7B, Mixtral-8x7B</p>
+        <p style="font-size:0.8rem;color:var(--text-muted);">sparse_mistral.py, sparse_mixtral.py</p>
+      </div>
+      <div class="card card-purple">
+        <h4>Qwen Family</h4>
+        <p>Qwen2.5 (7B, 32B), Qwen3, Qwen3-MoE, QwQ-32B</p>
+        <p style="font-size:0.8rem;color:var(--text-muted);">sparse_qwen2.py, sparse_qwen3.py, sparse_qwen3_moe.py</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 8: KV Compression Policy -->
+<section id="policy" style="background:var(--bg-secondary);">
+  <div class="container">
+    <h2><span class="sec-num">08</span> KV Compression Policy (Algorithm 1)</h2>
+
+    <p style="color:var(--text-secondary);margin-bottom:1.5rem;">
+      DiffKV's compression policy operates identically in both prompt and generation phases, applying
+      hierarchical classification per token based on attention score significance.
+    </p>
+
+    <div class="arch-diagram">
+      <div class="diagram-title">Token Classification Flow (Generation Phase)</div>
+      <div style="display:flex;flex-direction:column;gap:0;align-items:center;">
+        <div class="flow-box bg-cyan" style="width:260px;">New token t_c arrives</div>
+        <div class="flow-arrow-down"></div>
+        <div class="flow-box bg-dark" style="width:340px;border:1px solid var(--border-subtle);">
+          Compute Score(t_c) relative to alpha_h/N
+        </div>
+        <div style="display:flex;gap:3rem;margin-top:0.2rem;">
+          <div style="text-align:center;">
+            <div class="flow-arrow-down"></div>
+            <div style="font-size:0.7rem;color:var(--accent-green);margin-bottom:0.2rem;">Score >= alpha_h/N</div>
+            <div class="flow-box bg-key small" style="min-width:130px;">Add to KV_high<br>(K8V4)</div>
+            <div class="flow-arrow-down" style="height:15px;"></div>
+            <div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:0.2rem;">Evict victim t_v from KV_high</div>
+            <div style="display:flex;gap:0.5rem;justify-content:center;">
+              <div style="text-align:center;">
+                <div style="font-size:0.62rem;color:var(--accent-value);">Score(t_v) >= alpha_l/N</div>
+                <div class="flow-box bg-value small" style="min-width:80px;font-size:0.68rem;">Demote to<br>KV_low</div>
+              </div>
+              <div style="text-align:center;">
+                <div style="font-size:0.62rem;color:var(--accent-prune);">Score(t_v) < alpha_l/N</div>
+                <div class="flow-box bg-prune small" style="min-width:80px;font-size:0.68rem;">Prune</div>
+              </div>
+            </div>
+          </div>
+          <div style="text-align:center;">
+            <div class="flow-arrow-down"></div>
+            <div style="font-size:0.7rem;color:var(--accent-gold);margin-bottom:0.2rem;">Score >= alpha_l/N</div>
+            <div class="flow-box bg-value small" style="min-width:130px;">Add to KV_low<br>(K4V2)</div>
+            <div class="flow-arrow-down" style="height:15px;"></div>
+            <div style="font-size:0.68rem;color:var(--text-muted);margin-bottom:0.2rem;">Evict victim t_v from KV_low</div>
+            <div style="font-size:0.62rem;color:var(--accent-prune);">Score(t_v) < alpha_l/N</div>
+            <div class="flow-box bg-prune small" style="min-width:80px;font-size:0.68rem;">Prune</div>
+          </div>
+          <div style="text-align:center;">
+            <div class="flow-arrow-down"></div>
+            <div style="font-size:0.7rem;color:var(--accent-key);margin-bottom:0.2rem;">Score < alpha_l/N</div>
+            <div class="flow-box bg-prune small" style="min-width:130px;">Prune t_c</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-grid">
+      <div class="card card-gold">
+        <h4 style="color:var(--accent-gold);">Threshold Calibration</h4>
+        <p>Parameters <code>alpha_h</code> and <code>alpha_l</code> are calibrated on the MATH
+        training split. The thresholds are model-specific:</p>
+        <table style="font-size:0.82rem;margin-top:0.5rem;">
+          <tr><td>Llama3-8B</td><td>alpha_h=1, alpha_l=0.02</td></tr>
+          <tr><td>Llama3-70B</td><td>alpha_h=1, alpha_l=0.0</td></tr>
+          <tr><td>Qwen2.5-7B</td><td>alpha_h=3, alpha_l=0.04</td></tr>
+          <tr><td>Qwen2.5-32B</td><td>alpha_h=3, alpha_l=0.0</td></tr>
+          <tr><td>QwQ-32B</td><td>alpha_h=3, alpha_l=0.0</td></tr>
+        </table>
+      </div>
+      <div class="card card-green">
+        <h4 style="color:var(--accent-green);">Buffer Window</h4>
+        <p>The most recent <code>W</code> tokens (default W=64, called <code>kv_buffer_size</code>
+        in the code) are <strong>always kept at high precision</strong> to prevent premature
+        compression. This buffer is defined by <code>NUM_TOKENS_SCORE = 64</code> in both
+        Python and CUDA.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 9: Reproduce -->
+<section id="reproduce">
+  <div class="container">
+    <h2><span class="sec-num">09</span> How to Reproduce</h2>
+
+    <div class="card card-blue">
+      <h4>Prerequisites</h4>
+      <ul>
+        <li>Python >= 3.10</li>
+        <li>NVIDIA GPUs with Ada, Hopper, or newer architectures (L40, A100, H100, etc.)</li>
+        <li>CUDA toolkit compatible with PyTorch 2.x</li>
+      </ul>
+    </div>
+
+    <h3>Step 1: Install from Source</h3>
+<pre><code><span class="cm"># Clone the repository</span>
+git clone https://github.com/zyqCSL/DiffKV.git
+<span class="kw">cd</span> DiffKV
+
+<span class="cm"># Install (compiles CUDA extensions)</span>
+pip install -e .
+
+<span class="cm"># Set PYTHONPATH</span>
+<span class="kw">export</span> PYTHONPATH=$PWD:$PYTHONPATH</code></pre>
+
+    <h3>Step 2: Quick Functional Verification</h3>
+<pre><code><span class="cm"># Create logs directory</span>
+mkdir -p logs
+
+<span class="cm"># Run small model verification</span>
+<span class="kw">cd</span> param_tuning
+./try_small_models.sh
+
+<span class="cm"># Parse and summarize results</span>
+python read_small_models_results.py
+<span class="cm"># Output saved to: logs/per_token_thresh_compress_summary/</span></code></pre>
+
+    <h3>Step 3: Throughput Benchmark</h3>
+<pre><code><span class="cm"># Example: Llama3-8B on single GPU</span>
+python benchmarks/benchmark_throughput.py \
+  --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --num-requests <span class="num">512</span> \
+  --max-output-len <span class="num">4096</span> \
+  --kbits-high <span class="num">8</span> --vbits-high <span class="num">4</span> \
+  --kbits-low <span class="num">4</span> --vbits-low <span class="num">2</span> \
+  --kv-prune-thresh <span class="num">0.02</span> --kv-quant-thresh <span class="num">1.0</span> \
+  --max-batch-size <span class="num">128</span>
+
+<span class="cm"># QwQ-32B thinking model (2 GPUs, up to 5.4x throughput)</span>
+python benchmarks/benchmark_throughput.py \
+  --model Qwen/QwQ-32B \
+  --tensor-parallel-size <span class="num">2</span> \
+  --num-requests <span class="num">512</span> \
+  --max-output-len <span class="num">16384</span> \
+  --kbits-high <span class="num">8</span> --vbits-high <span class="num">4</span> \
+  --kbits-low <span class="num">4</span> --vbits-low <span class="num">2</span> \
+  --kv-prune-thresh <span class="num">0.0</span> --kv-quant-thresh <span class="num">3.0</span> \
+  --max-batch-size <span class="num">16</span></code></pre>
+
+    <h3>Step 4: Online Serving Benchmark</h3>
+<pre><code><span class="cm"># Start the server</span>
+python -m vllm.entrypoints.api_server \
+  --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --port <span class="num">8000</span> \
+  --kv-buffer-size <span class="num">64</span>
+
+<span class="cm"># Run the client (in another terminal)</span>
+python benchmarks/benchmark_serving.py \
+  --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --port <span class="num">8000</span> \
+  --request-rate <span class="num">1.0</span> \
+  --kv-prune-thresh <span class="num">0.02</span> \
+  --kv-quant-thresh <span class="num">1.0</span></code></pre>
+
+    <div class="callout callout-red">
+      <strong>Hardware Requirements:</strong> Single-GPU models (Llama3-8B, Qwen2.5-7B) need one
+      L40/A100 GPU with 48 GB. Llama3-70B requires 4 GPUs. Qwen2.5-32B and QwQ-32B require 2 GPUs.
+      All benchmarks in the paper were run on NVIDIA L40 GPUs with 48 GB memory.
+    </div>
+
+    <h3>Adding Custom Quantization Configs</h3>
+    <p style="color:var(--text-secondary);margin-bottom:0.8rem;">
+      To add a new (kbits, vbits, n_kgroups, n_vgroups) configuration, five files must be
+      updated in lockstep:
+    </p>
+    <div class="card-grid-3" style="margin-bottom:1rem;">
+      <div class="card card-red">
+        <h4 style="font-size:0.9rem;">1. config.py</h4>
+        <p>Add tuple to <code>quantized_kv_bits</code> list and update <code>compute_cache_block()</code></p>
+      </div>
+      <div class="card card-teal">
+        <h4 style="font-size:0.9rem;">2. cache_kernels.cu</h4>
+        <p>Register in <code>CALL_PROMPT_PHASE_CACHE_LAUNCHER_QUANT_CONFIG</code> and <code>CALL_DECODE_PHASE_...</code> macros</p>
+      </div>
+      <div class="card card-purple">
+        <h4 style="font-size:0.9rem;">3. long_prompt_cache_kernels.cu</h4>
+        <p>Same pattern as cache_kernels.cu for long-prompt variant</p>
+      </div>
+      <div class="card card-gold">
+        <h4 style="font-size:0.9rem;">4. sparse_attention_kernels.cu</h4>
+        <p>Register in <code>CALL_LAUNCHER_QUANT_CONFIG</code> macro</p>
+      </div>
+      <div class="card card-blue">
+        <h4 style="font-size:0.9rem;">5. param_tuning/util/util.py</h4>
+        <p>Update <code>BITS_TO_QUANT_GROUPS</code> mapping</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 10: Summary -->
+<section style="background:var(--bg-secondary);">
+  <div class="container">
+    <h2><span class="sec-num">10</span> Summary and Impact</h2>
+
+    <div class="arch-diagram">
+      <div class="diagram-title">DiffKV End-to-End Pipeline</div>
+      <div style="display:flex;flex-direction:column;gap:0;align-items:center;">
+        <div class="flow-row">
+          <div class="flow-box bg-blue">Input Tokens</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-pink">Model Forward<br>(QKV Projection)</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-gold">KV Compressor<br>(Score + Quantize)</div>
+        </div>
+        <div class="flow-arrow-down" style="height:20px;"></div>
+        <div class="flow-row">
+          <div class="flow-box bg-quant">GPU Memory<br>Manager</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-key" style="min-width:130px;">Unified Pages<br>(Mixed Precision)</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-value">Custom Sparse<br>Attention Kernel</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-box bg-green">Output</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-grid">
+      <div class="card card-green">
+        <h4 style="color:var(--accent-green);">Contributions</h4>
+        <ul>
+          <li>First KV cache compression framework for thinking models with CoT capabilities</li>
+          <li>Differentiated K/V quantization: K8V4 matches FP16 accuracy</li>
+          <li>Hierarchical token classification: high-prec, low-prec, or pruned</li>
+          <li>On-GPU parallel KV compaction: three novel data structures</li>
+          <li>Custom attention kernel with bandwidth-optimized data layouts</li>
+        </ul>
+      </div>
+      <div class="card card-gold">
+        <h4 style="color:var(--accent-gold);">Key Results</h4>
+        <ul>
+          <li>2.7&times; to 5.7&times; KV cache compression with &lt;0.4% avg accuracy drop</li>
+          <li>1.9&times; to 5.4&times; throughput improvement over vLLM</li>
+          <li>Memory management overhead: &lt;1% of inference time</li>
+          <li>Near-linear attention speedup with compression ratio</li>
+          <li>SOSP 2025 Best Paper Award</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>
+      <strong>DiffKV</strong>: Differentiated Memory Management for Large Language Models with Parallel KV Compaction<br>
+      Yanqi Zhang, Yuwei Hu, Runyuan Zhao, John C.S. Lui, Haibo Chen<br>
+      SOSP 2025 &bull; Best Paper Award &bull;
+      <a href="https://arxiv.org/abs/2412.03131" style="color:var(--accent-blue);">arXiv:2412.03131</a> &bull;
+      <a href="https://github.com/zyqCSL/DiffKV" style="color:var(--accent-blue);">GitHub</a>
+    </p>
+    <p style="margin-top:0.5rem;">Technical analysis generated for the Agentic AI Survey project.</p>
+  </div>
+</footer>
+
+</body>
+</html>

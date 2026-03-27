@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEO: Saving GPU Memory Crisis with CPU Offloading for Online LLM Inference</title>
+<style>
+:root {
+  --bg-primary: #0f0f1a;
+  --bg-secondary: #1a1a2e;
+  --bg-card: #16213e;
+  --bg-code: #1e1e2e;
+  --text-primary: #e0e0e0;
+  --text-secondary: #b0b0c0;
+  --accent-1: #00d2ff;
+  --accent-2: #7b2ff7;
+  --accent-3: #ff6b6b;
+  --accent-4: #ffd93d;
+  --accent-5: #6bcb77;
+  --gradient-hero: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+  --border-color: #2a2a4a;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.7; }
+a { color: var(--accent-1); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Sticky Nav */
+.navbar { position: sticky; top: 0; z-index: 1000; background: rgba(15,15,26,0.95); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border-color); padding: 0.6rem 2rem; display: flex; align-items: center; gap: 2rem; }
+.navbar .logo { font-weight: 700; font-size: 1.1rem; color: var(--accent-1); white-space: nowrap; }
+.navbar nav { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+.navbar nav a { color: var(--text-secondary); font-size: 0.85rem; transition: color 0.2s; }
+.navbar nav a:hover { color: var(--accent-1); text-decoration: none; }
+
+/* Hero */
+.hero { background: var(--gradient-hero); padding: 5rem 2rem 4rem; text-align: center; position: relative; overflow: hidden; }
+.hero::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 80px; background: linear-gradient(transparent, var(--bg-primary)); }
+.hero h1 { font-size: 2.8rem; font-weight: 800; margin-bottom: 0.5rem; background: linear-gradient(90deg, var(--accent-1), var(--accent-2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.hero .venue { display: inline-block; background: linear-gradient(135deg, var(--accent-2), var(--accent-3)); color: #fff; padding: 0.3rem 1.2rem; border-radius: 20px; font-weight: 600; font-size: 0.9rem; margin: 0.8rem 0; }
+.hero .authors { color: var(--text-secondary); margin: 1rem 0; font-size: 0.95rem; }
+.hero .links { display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem; flex-wrap: wrap; }
+.hero .links a { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1.4rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem; transition: transform 0.2s, box-shadow 0.2s; }
+.hero .links a:hover { transform: translateY(-2px); text-decoration: none; }
+.btn-paper { background: var(--accent-2); color: #fff; }
+.btn-code { background: var(--accent-5); color: #000; }
+.btn-arxiv { background: var(--accent-3); color: #fff; }
+
+/* Section */
+.section { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
+.section h2 { font-size: 1.8rem; font-weight: 700; margin-bottom: 1.5rem; padding-bottom: 0.5rem; border-bottom: 3px solid var(--accent-2); display: inline-block; }
+.section h3 { font-size: 1.3rem; color: var(--accent-1); margin: 1.5rem 0 0.8rem; }
+
+/* Cards */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; margin: 1.5rem 0; }
+.card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 1.5rem; transition: transform 0.2s, box-shadow 0.2s; }
+.card:hover { transform: translateY(-4px); box-shadow: 0 8px 30px rgba(0,210,255,0.1); }
+.card .card-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+.card h4 { color: var(--accent-1); font-size: 1.1rem; margin-bottom: 0.5rem; }
+
+/* Callout */
+.callout { border-left: 4px solid var(--accent-4); background: rgba(255,217,61,0.08); padding: 1rem 1.5rem; border-radius: 0 8px 8px 0; margin: 1.5rem 0; }
+.callout.info { border-left-color: var(--accent-1); background: rgba(0,210,255,0.08); }
+.callout.success { border-left-color: var(--accent-5); background: rgba(107,203,119,0.08); }
+.callout .callout-title { font-weight: 700; color: var(--accent-4); margin-bottom: 0.3rem; }
+.callout.info .callout-title { color: var(--accent-1); }
+.callout.success .callout-title { color: var(--accent-5); }
+
+/* Code */
+pre { background: var(--bg-code); border: 1px solid var(--border-color); border-radius: 10px; padding: 1.2rem 1.5rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.6; }
+code { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; }
+.kw { color: #c678dd; }
+.fn { color: #61afef; }
+.str { color: #98c379; }
+.cm { color: #5c6370; font-style: italic; }
+.num { color: #d19a66; }
+.typ { color: #e5c07b; }
+.op { color: #56b6c2; }
+
+/* Table */
+.table-wrap { overflow-x: auto; margin: 1.5rem 0; }
+table { width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: 10px; overflow: hidden; }
+th { background: linear-gradient(135deg, var(--accent-2), #5b21b6); color: #fff; padding: 0.8rem 1rem; text-align: left; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.5px; }
+td { padding: 0.7rem 1rem; border-bottom: 1px solid var(--border-color); font-size: 0.9rem; }
+tr:hover td { background: rgba(0,210,255,0.05); }
+.highlight-cell { color: var(--accent-5); font-weight: 700; }
+
+/* Diagram */
+.diagram-container { margin: 2rem 0; background: var(--bg-card); border-radius: 14px; padding: 2rem; border: 1px solid var(--border-color); }
+.diagram-title { text-align: center; font-weight: 700; color: var(--accent-1); margin-bottom: 1.5rem; font-size: 1.1rem; }
+
+/* SVG styles */
+.diagram-container svg { width: 100%; height: auto; display: block; }
+
+/* Metric */
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.2rem; margin: 1.5rem 0; }
+.metric { text-align: center; background: var(--bg-card); border-radius: 12px; padding: 1.5rem 1rem; border: 1px solid var(--border-color); }
+.metric .value { font-size: 2.2rem; font-weight: 800; background: linear-gradient(135deg, var(--accent-1), var(--accent-2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.metric .label { color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.3rem; }
+
+/* Footer */
+footer { background: var(--bg-secondary); border-top: 1px solid var(--border-color); padding: 2rem; text-align: center; color: var(--text-secondary); font-size: 0.85rem; margin-top: 3rem; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .hero h1 { font-size: 1.8rem; }
+  .navbar { flex-direction: column; gap: 0.5rem; padding: 0.5rem 1rem; }
+  .section { padding: 2rem 1rem; }
+}
+</style>
+</head>
+<body>
+
+<!-- Navbar -->
+<div class="navbar">
+  <div class="logo">NEO</div>
+  <nav>
+    <a href="#overview">Overview</a>
+    <a href="#motivation">Motivation</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#pipelining">Pipelining</a>
+    <a href="#scheduling">Scheduling</a>
+    <a href="#implementation">Implementation</a>
+    <a href="#results">Results</a>
+    <a href="#code">Code</a>
+  </nav>
+</div>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>NEO: Saving GPU Memory Crisis with CPU Offloading for Online LLM Inference</h1>
+  <div class="venue">MLSys 2025</div>
+  <p class="authors">Xuanlin Jiang, Yang Zhou, Shiyi Cao, Ion Stoica, Minlan Yu</p>
+  <p style="color: var(--text-secondary); max-width: 700px; margin: 1rem auto; font-size: 0.95rem;">
+    An online LLM inference system that offloads attention compute and KV cache to the host CPU, increasing GPU batch size and throughput by up to 7.5x on memory-constrained GPUs.
+  </p>
+  <div class="links">
+    <a href="https://arxiv.org/abs/2411.01142" class="btn-arxiv">arXiv 2411.01142</a>
+    <a href="https://yangzhou1997.github.io/paper/neo_mlsys25.pdf" class="btn-paper">Paper PDF</a>
+    <a href="https://github.com/interestingLSY/swiftLLM" class="btn-code">GitHub Repo</a>
+  </div>
+</div>
+
+<!-- Overview -->
+<div class="section" id="overview">
+  <h2>Overview</h2>
+  <p>
+    Modern LLM inference engines rely on request batching to improve throughput on expensive GPUs. However, GPU memory is severely limited: models like LLaMA-3.1-70B consume dozens of GB just for weights, and KV caches grow linearly with sequence length. This GPU memory crisis leaves significant GPU compute resources wasted.
+  </p>
+  <p style="margin-top: 1rem;">
+    <strong>NEO</strong> is the first CPU offloading system for <em>online</em> LLM inference that achieves performance gains over GPU-only approaches on the same hardware. It offloads decoding attention computation and KV cache states from the GPU to the local host CPU, effectively increasing the GPU batch size and thus inference throughput, without compromising accuracy or latency.
+  </p>
+
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="value">7.5x</div>
+      <div class="label">Max throughput gain on T4 GPU</div>
+    </div>
+    <div class="metric">
+      <div class="value">26%</div>
+      <div class="label">Throughput gain on A10G</div>
+    </div>
+    <div class="metric">
+      <div class="value">14%</div>
+      <div class="label">Throughput gain on H100</div>
+    </div>
+    <div class="metric">
+      <div class="value">79.3%</div>
+      <div class="label">Max gain with more CPU cores</div>
+    </div>
+  </div>
+</div>
+
+<!-- Motivation -->
+<div class="section" id="motivation">
+  <h2>Motivation: The GPU Memory Bottleneck</h2>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>GPU Memory is Scarce</h4>
+      <p>A T4 GPU has only 16 GB VRAM. After loading LLaMA-2-7B weights (~14 GB), barely any memory remains for KV cache, limiting the batch size to a handful of requests.</p>
+    </div>
+    <div class="card">
+      <h4>Batch Size Limits Throughput</h4>
+      <p>Throughput increases almost linearly with batch size on modern GPUs (A10, V100, H100). Small batch sizes leave massive GPU compute resources unused.</p>
+    </div>
+    <div class="card">
+      <h4>CPU Memory is Abundant</h4>
+      <p>Host CPUs come "free" with GPU instances: an AWS g5.4xlarge has 64 GB of CPU memory alongside a single A10G GPU. NEO exploits this asymmetry.</p>
+    </div>
+  </div>
+
+  <h3>Why CPU Offloading Works for Attention</h3>
+  <p>
+    The decoding attention operation is memory-bandwidth-bound on both GPU and CPU due to low arithmetic intensity. Crucially, the memory bandwidth gap between GPUs and CPUs is much smaller than their compute gap:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Hardware</th><th>Compute (TFLOPS)</th><th>Memory BW (GB/s)</th><th>BW / Compute Ratio</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A10G GPU</td><td>125</td><td>600</td><td>4.8</td></tr>
+        <tr><td>x86 CPU Server</td><td>~1.2</td><td>~200</td><td>167</td></tr>
+        <tr><td>AWS Graviton4 ARM</td><td>~2</td><td>537</td><td>269</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout info">
+    <div class="callout-title">Key Insight</div>
+    Since decoding attention is memory-bandwidth-bound, the actual performance gap between GPU and CPU for this specific operation is only ~3x (600 vs. 200 GB/s), not 100x as the raw FLOPS would suggest. This makes CPU offloading viable for attention.
+  </div>
+</div>
+
+<!-- Architecture -->
+<div class="section" id="architecture">
+  <h2>System Architecture</h2>
+
+  <div class="diagram-container">
+    <div class="diagram-title">NEO Architecture Overview</div>
+    <svg viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+      <!-- Background regions -->
+      <rect x="30" y="30" width="250" height="360" rx="12" fill="#1a1a3e" stroke="#7b2ff7" stroke-width="2"/>
+      <text x="155" y="60" text-anchor="middle" fill="#c678dd" font-size="14" font-weight="700">Scheduler (CPU Control Plane)</text>
+
+      <rect x="320" y="30" width="260" height="170" rx="12" fill="#1a2e1a" stroke="#6bcb77" stroke-width="2"/>
+      <text x="450" y="58" text-anchor="middle" fill="#6bcb77" font-size="14" font-weight="700">GPU Worker</text>
+
+      <rect x="320" y="220" width="260" height="170" rx="12" fill="#2e1a1a" stroke="#ff6b6b" stroke-width="2"/>
+      <text x="450" y="248" text-anchor="middle" fill="#ff6b6b" font-size="14" font-weight="700">CPU Worker</text>
+
+      <rect x="630" y="30" width="240" height="360" rx="12" fill="#1a2e2e" stroke="#00d2ff" stroke-width="2"/>
+      <text x="750" y="58" text-anchor="middle" fill="#00d2ff" font-size="14" font-weight="700">KV Cache System</text>
+
+      <!-- Scheduler components -->
+      <rect x="50" y="80" width="210" height="40" rx="6" fill="#302b63"/>
+      <text x="155" y="105" text-anchor="middle" fill="#fff" font-size="12">Prefilling Wait Queue</text>
+
+      <rect x="50" y="140" width="210" height="40" rx="6" fill="#2a4a2a"/>
+      <text x="155" y="165" text-anchor="middle" fill="#6bcb77" font-size="12">GPU Decoding RunQueue</text>
+
+      <rect x="50" y="200" width="210" height="40" rx="6" fill="#4a2a2a"/>
+      <text x="155" y="225" text-anchor="middle" fill="#ff6b6b" font-size="12">CPU Decoding RunQueue</text>
+
+      <rect x="50" y="270" width="210" height="50" rx="6" fill="#1a1a3e" stroke="#ffd93d" stroke-width="1.5"/>
+      <text x="155" y="292" text-anchor="middle" fill="#ffd93d" font-size="11" font-weight="600">Load-Aware Scheduler</text>
+      <text x="155" y="308" text-anchor="middle" fill="#b0b0c0" font-size="10">Greedy + Balancing + Hiding</text>
+
+      <rect x="50" y="340" width="210" height="35" rx="6" fill="#1a1a3e" stroke="#56b6c2" stroke-width="1"/>
+      <text x="155" y="362" text-anchor="middle" fill="#56b6c2" font-size="11">Performance Predictor</text>
+
+      <!-- GPU components -->
+      <rect x="340" y="78" width="220" height="35" rx="6" fill="#2a4a2a"/>
+      <text x="450" y="100" text-anchor="middle" fill="#98c379" font-size="11">Pre-projection + FFN (Linear)</text>
+
+      <rect x="340" y="123" width="220" height="35" rx="6" fill="#2a5a2a"/>
+      <text x="450" y="145" text-anchor="middle" fill="#6bcb77" font-size="11">Prefill Attn + GPU Decode Attn</text>
+
+      <rect x="340" y="168" width="220" height="22" rx="4" fill="#1a3a1a"/>
+      <text x="450" y="183" text-anchor="middle" fill="#4a8a4a" font-size="9">Post-projection + Post-layer</text>
+
+      <!-- CPU components -->
+      <rect x="340" y="268" width="220" height="35" rx="6" fill="#4a2a2a"/>
+      <text x="450" y="290" text-anchor="middle" fill="#ff9999" font-size="11">PACPU: Paged Attn on CPU</text>
+
+      <rect x="340" y="313" width="105" height="30" rx="6" fill="#3a1a1a"/>
+      <text x="393" y="333" text-anchor="middle" fill="#ff6b6b" font-size="10">ISPC Kernels</text>
+
+      <rect x="455" y="313" width="105" height="30" rx="6" fill="#3a1a1a"/>
+      <text x="508" y="333" text-anchor="middle" fill="#ff6b6b" font-size="10">SIMD (AVX2)</text>
+
+      <rect x="340" y="353" width="220" height="27" rx="4" fill="#2a1a1a"/>
+      <text x="450" y="371" text-anchor="middle" fill="#cc8888" font-size="10">Flash-Decoding-style parallelism</text>
+
+      <!-- KV Cache components -->
+      <rect x="650" y="80" width="200" height="70" rx="6" fill="#1a3a3a" stroke="#6bcb77" stroke-width="1"/>
+      <text x="750" y="104" text-anchor="middle" fill="#6bcb77" font-size="12" font-weight="600">GPU KV Cache (HBM)</text>
+      <text x="750" y="122" text-anchor="middle" fill="#4a9a7a" font-size="10">GPU-request blocks</text>
+      <text x="750" y="138" text-anchor="middle" fill="#4a9a7a" font-size="10">Paged Attention blocks</text>
+
+      <rect x="650" y="170" width="200" height="40" rx="6" fill="#1a2a3a" stroke="#00d2ff" stroke-width="1"/>
+      <text x="750" y="195" text-anchor="middle" fill="#00d2ff" font-size="11">Intermediate GPU Buffer</text>
+
+      <rect x="650" y="240" width="200" height="70" rx="6" fill="#3a1a1a" stroke="#ff6b6b" stroke-width="1"/>
+      <text x="750" y="264" text-anchor="middle" fill="#ff6b6b" font-size="12" font-weight="600">CPU KV Cache (DRAM)</text>
+      <text x="750" y="282" text-anchor="middle" fill="#cc7777" font-size="10">CPU-request blocks</text>
+      <text x="750" y="298" text-anchor="middle" fill="#cc7777" font-size="10">Up to 120 GB on g5.16xlarge</text>
+
+      <rect x="650" y="330" width="200" height="45" rx="6" fill="#2a2a1a" stroke="#ffd93d" stroke-width="1"/>
+      <text x="750" y="350" text-anchor="middle" fill="#ffd93d" font-size="11" font-weight="600">Block Manager</text>
+      <text x="750" y="366" text-anchor="middle" fill="#b0a060" font-size="9">GPU + CPU block allocation</text>
+
+      <!-- Arrows: Scheduler to workers -->
+      <line x1="260" y1="160" x2="340" y2="110" stroke="#6bcb77" stroke-width="2" marker-end="url(#arrowG)"/>
+      <line x1="260" y1="220" x2="340" y2="280" stroke="#ff6b6b" stroke-width="2" marker-end="url(#arrowR)"/>
+
+      <!-- Arrows: Workers to KV Cache -->
+      <line x1="560" y1="140" x2="650" y2="115" stroke="#6bcb77" stroke-width="1.5" marker-end="url(#arrowG)"/>
+      <line x1="560" y1="290" x2="650" y2="275" stroke="#ff6b6b" stroke-width="1.5" marker-end="url(#arrowR)"/>
+
+      <!-- PCIe arrow -->
+      <line x1="680" y1="150" x2="680" y2="240" stroke="#ffd93d" stroke-width="2.5" stroke-dasharray="6,4"/>
+      <text x="695" y="200" fill="#ffd93d" font-size="10" font-weight="600">PCIe</text>
+
+      <!-- Swap arrows -->
+      <line x1="260" y1="145" x2="260" y2="215" stroke="#56b6c2" stroke-width="1.5" marker-end="url(#arrowC)"/>
+      <text x="275" y="178" fill="#56b6c2" font-size="9">swap</text>
+      <line x1="240" y1="215" x2="240" y2="145" stroke="#56b6c2" stroke-width="1.5" marker-end="url(#arrowC)"/>
+
+      <!-- Arrow markers -->
+      <defs>
+        <marker id="arrowG" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#6bcb77"/></marker>
+        <marker id="arrowR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#ff6b6b"/></marker>
+        <marker id="arrowC" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#56b6c2"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <p>
+    NEO consists of a <strong>request scheduler</strong> on the CPU control plane that maintains three queues (prefilling waitqueue, GPU decoding runqueue, CPU decoding runqueue), a <strong>GPU worker</strong> executing linear operations and prefill attention, and a <strong>CPU worker</strong> running the PACPU (Paged-Attention-for-CPU) library. The scheduler makes iteration-level adaptive decisions on whether to run incoming requests on GPU or CPU. NEO features two key techniques:
+  </p>
+  <ol style="margin: 1rem 0 1rem 1.5rem; color: var(--text-secondary);">
+    <li><strong>Asymmetric GPU-CPU pipelining</strong> to fully leverage both GPU and CPU compute within each iteration</li>
+    <li><strong>Load-aware scheduling</strong> to handle dynamically-changing workloads across iterations</li>
+  </ol>
+</div>
+
+<!-- Pipelining -->
+<div class="section" id="pipelining">
+  <h2>Asymmetric Pipelining</h2>
+
+  <p>NEO's core innovation is <strong>asymmetric pipelining</strong>, which divides work between GPU and CPU in a carefully unbalanced way that maximizes throughput. This design emerged from analyzing two strawman approaches:</p>
+
+  <div class="card-grid">
+    <div class="card" style="border-top: 3px solid var(--accent-3);">
+      <h4>Strawman 1: Simple Offloading</h4>
+      <p>Offloads all decoding attention and KV cache to CPU. Problem: CPU is always idle during GPU linear operations, wasting compute.</p>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--accent-4);">
+      <h4>Strawman 2: Symmetric Pipelining</h4>
+      <p>Splits decoding batch into two equal halves, overlapping linear (GPU) and attention (CPU). Problems: GPU memory underutilization, unbalanced overlap, impractical equal splitting.</p>
+    </div>
+    <div class="card" style="border-top: 3px solid var(--accent-5);">
+      <h4>NEO: Asymmetric Pipelining</h4>
+      <p>Forms two deliberately unequal sub-batches. Batch-0 is large (prefill + GPU decode), batch-1 is attention-heavy (CPU decode). Complementary structure minimizes idle periods.</p>
+    </div>
+  </div>
+
+  <div class="diagram-container">
+    <div class="diagram-title">Asymmetric Pipeline Execution Timeline</div>
+    <svg viewBox="0 0 880 300" xmlns="http://www.w3.org/2000/svg">
+      <!-- Labels -->
+      <text x="30" y="60" fill="#6bcb77" font-size="13" font-weight="700">GPU</text>
+      <text x="30" y="140" fill="#ff6b6b" font-size="13" font-weight="700">CPU</text>
+      <text x="18" y="210" fill="#ffd93d" font-size="12" font-weight="700">PCIe</text>
+
+      <!-- Time axis -->
+      <line x1="80" y1="250" x2="850" y2="250" stroke="#555" stroke-width="1.5" marker-end="url(#arrowTime)"/>
+      <text x="860" y="255" fill="#888" font-size="11">time</text>
+      <defs><marker id="arrowTime" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#888"/></marker></defs>
+
+      <!-- Layer boundary labels -->
+      <text x="230" y="270" fill="#666" font-size="10" text-anchor="middle">Layer i</text>
+      <text x="525" y="270" fill="#666" font-size="10" text-anchor="middle">Layer i+1</text>
+      <text x="800" y="270" fill="#666" font-size="10" text-anchor="middle">Layer i+2</text>
+      <line x1="380" y1="35" x2="380" y2="250" stroke="#444" stroke-width="1" stroke-dasharray="4,4"/>
+      <line x1="670" y1="35" x2="670" y2="250" stroke="#444" stroke-width="1" stroke-dasharray="4,4"/>
+
+      <!-- GPU timeline: Batch-0 (large, with prefill) -->
+      <!-- Layer i -->
+      <rect x="80" y="40" width="60" height="30" rx="4" fill="#2a6a2a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="110" y="60" text-anchor="middle" fill="#cfc" font-size="9">pr_1</text>
+
+      <rect x="140" y="40" width="100" height="30" rx="4" fill="#3a7a3a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="190" y="60" text-anchor="middle" fill="#cfc" font-size="9">po_0 + FFN_0</text>
+
+      <rect x="240" y="40" width="60" height="30" rx="4" fill="#2a6a2a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="270" y="60" text-anchor="middle" fill="#cfc" font-size="9">pr_0</text>
+
+      <!-- GPU attention small block (batch-0 has few GPU attn) -->
+      <rect x="300" y="40" width="35" height="30" rx="4" fill="#1a5a1a" stroke="#4a9a4a" stroke-width="1"/>
+      <text x="318" y="60" text-anchor="middle" fill="#afa" font-size="8">ga_0</text>
+
+      <rect x="335" y="40" width="45" height="30" rx="4" fill="#2a6a2a" stroke="#6bcb77" stroke-width="1"/>
+      <text x="358" y="60" text-anchor="middle" fill="#cfc" font-size="9">pr_1</text>
+
+      <!-- Layer i+1 -->
+      <rect x="380" y="40" width="100" height="30" rx="4" fill="#3a7a3a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="430" y="60" text-anchor="middle" fill="#cfc" font-size="9">po_0 + FFN_0</text>
+
+      <rect x="480" y="40" width="60" height="30" rx="4" fill="#2a6a2a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="510" y="60" text-anchor="middle" fill="#cfc" font-size="9">pr_0</text>
+
+      <rect x="540" y="40" width="35" height="30" rx="4" fill="#1a5a1a" stroke="#4a9a4a" stroke-width="1"/>
+      <text x="558" y="60" text-anchor="middle" fill="#afa" font-size="8">ga_0</text>
+
+      <rect x="575" y="40" width="45" height="30" rx="4" fill="#2a6a2a" stroke="#6bcb77" stroke-width="1"/>
+      <text x="598" y="60" text-anchor="middle" fill="#cfc" font-size="9">po_1</text>
+
+      <rect x="620" y="40" width="50" height="30" rx="4" fill="#3a7a3a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="645" y="60" text-anchor="middle" fill="#cfc" font-size="9">pr_1</text>
+
+      <!-- Layer i+2 -->
+      <rect x="670" y="40" width="100" height="30" rx="4" fill="#3a7a3a" stroke="#6bcb77" stroke-width="1.5"/>
+      <text x="720" y="60" text-anchor="middle" fill="#cfc" font-size="9">po_0 + FFN_0</text>
+
+      <!-- Batch-1: GPU part (short linear) -->
+      <rect x="190" y="80" width="50" height="25" rx="4" fill="#4a2a6a" stroke="#c678dd" stroke-width="1"/>
+      <text x="215" y="97" text-anchor="middle" fill="#daf" font-size="8">po_1</text>
+
+      <rect x="486" y="80" width="50" height="25" rx="4" fill="#4a2a6a" stroke="#c678dd" stroke-width="1"/>
+      <text x="511" y="97" text-anchor="middle" fill="#daf" font-size="8">po_1</text>
+
+      <!-- CPU timeline: Batch-1 (mostly CPU attention) -->
+      <rect x="100" y="120" width="180" height="35" rx="4" fill="#5a2a2a" stroke="#ff6b6b" stroke-width="1.5"/>
+      <text x="190" y="142" text-anchor="middle" fill="#fcc" font-size="10">CPU Attn batch-1 (ca_1)</text>
+
+      <rect x="350" y="120" width="50" height="35" rx="4" fill="#4a2020" stroke="#cc5555" stroke-width="1"/>
+      <text x="375" y="142" text-anchor="middle" fill="#faa" font-size="9">ca_0</text>
+
+      <rect x="400" y="120" width="180" height="35" rx="4" fill="#5a2a2a" stroke="#ff6b6b" stroke-width="1.5"/>
+      <text x="490" y="142" text-anchor="middle" fill="#fcc" font-size="10">CPU Attn batch-1 (ca_1)</text>
+
+      <rect x="640" y="120" width="50" height="35" rx="4" fill="#4a2020" stroke="#cc5555" stroke-width="1"/>
+      <text x="665" y="142" text-anchor="middle" fill="#faa" font-size="9">ca_0</text>
+
+      <rect x="690" y="120" width="140" height="35" rx="4" fill="#5a2a2a" stroke="#ff6b6b" stroke-width="1.5"/>
+      <text x="760" y="142" text-anchor="middle" fill="#fcc" font-size="10">CPU Attn (ca_1)</text>
+
+      <!-- PCIe transfers -->
+      <rect x="280" y="195" width="70" height="22" rx="4" fill="#4a4a1a" stroke="#ffd93d" stroke-width="1"/>
+      <text x="315" y="210" text-anchor="middle" fill="#ffd93d" font-size="8">swap out</text>
+
+      <rect x="575" y="195" width="65" height="22" rx="4" fill="#4a4a1a" stroke="#ffd93d" stroke-width="1"/>
+      <text x="608" y="210" text-anchor="middle" fill="#ffd93d" font-size="8">swap out</text>
+
+      <!-- Legend -->
+      <rect x="80" y="280" width="14" height="10" rx="2" fill="#3a7a3a"/>
+      <text x="100" y="289" fill="#999" font-size="9">Batch-0 (GPU: prefill + decode)</text>
+      <rect x="310" y="280" width="14" height="10" rx="2" fill="#5a2a2a"/>
+      <text x="330" y="289" fill="#999" font-size="9">Batch-1 (CPU: decode attention)</text>
+      <rect x="540" y="280" width="14" height="10" rx="2" fill="#4a2a6a"/>
+      <text x="560" y="289" fill="#999" font-size="9">Batch-1 GPU linear (short)</text>
+      <rect x="730" y="280" width="14" height="10" rx="2" fill="#4a4a1a"/>
+      <text x="750" y="289" fill="#999" font-size="9">KV swap-out via PCIe</text>
+    </svg>
+  </div>
+
+  <div class="callout success">
+    <div class="callout-title">Why Asymmetric?</div>
+    <p>Batch-0 consolidates all prefilling requests and GPU decoding requests -- it has a long linear stage with little CPU attention. Batch-1 holds mostly CPU decoding requests -- it has a short linear stage but long CPU attention. The two batches are <em>complementary</em>: when GPU processes batch-0's linear ops, CPU computes batch-1's attention, and vice versa. This "long-short alternation" minimizes pipeline bubbles.</p>
+  </div>
+
+  <h3>Layer-Wise Swapping</h3>
+  <p>
+    NEO leverages <strong>layer-wise swapping</strong>: since KV values of newly prefilled requests are computed layer by layer, PCIe transmission of KV cache to CPU can begin immediately after each layer rather than waiting for the entire iteration. This overlaps communication with computation.
+  </p>
+</div>
+
+<!-- Scheduling -->
+<div class="section" id="scheduling">
+  <h2>Load-Aware Scheduling</h2>
+
+  <p>
+    Real-world inference workloads are dynamically changing with variable input/output lengths. NEO's scheduler follows four key principles:
+  </p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>Greedy</h4>
+      <p>Compare GPU-only schedule vs. two-batch asymmetric pipelining; pick whichever has higher estimated throughput (T/x ratio).</p>
+    </div>
+    <div class="card">
+      <h4>Balancing</h4>
+      <p>Minimize pipeline bubbles by ensuring estimated CPU busy time and GPU busy time are as close as possible: T_l0 >= T_ca1 and T_l1 + T_ga0 >= T_ca0.</p>
+    </div>
+    <div class="card">
+      <h4>Hiding CPU</h4>
+      <p>Ensure the CPU is never busy while the GPU is idle. The CPU attention should always overlap with GPU linear operations.</p>
+    </div>
+    <div class="card">
+      <h4>Maximizing GPU</h4>
+      <p>Pack as many requests as possible into the GPU (from waitqueue and via swap-in), to maximize GPU memory utilization.</p>
+    </div>
+  </div>
+
+  <h3>Scheduling Algorithm (Per Iteration)</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Step</th><th>Action</th><th>Principle</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>Schedule GPU decoding requests into batch-0; swap out if GPU memory exceeded</td><td>Maximizing GPU</td></tr>
+        <tr><td>2</td><td>Swap in requests from CPU queue if GPU has space</td><td>Maximizing GPU</td></tr>
+        <tr><td>3</td><td>Pop prefilling waitqueue into batch-0; place KV cache on GPU if room, else CPU</td><td>Maximizing GPU</td></tr>
+        <tr><td>4</td><td>Distribute CPU decoding requests to batch-0 or batch-1, maintaining balance inequations</td><td>Balancing + Hiding</td></tr>
+        <tr><td>5</td><td>Remove prefilling requests that would cause CPU idle time</td><td>Hiding CPU</td></tr>
+        <tr><td>6</td><td>Compare pipelined vs. GPU-only throughput; pick the winner</td><td>Greedy</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <pre><code><span class="cm"># Simplified scheduling logic from swiftllm/server/scheduler.py</span>
+<span class="kw">class</span> <span class="typ">Scheduler</span>:
+    <span class="kw">def</span> <span class="fn">get_next_batch</span>(<span class="op">self</span>) -> <span class="typ">tuple</span>[<span class="typ">list</span>[<span class="typ">SubBatch</span>], ...]:
+        <span class="cm"># If always_use_gpu mode, use traditional scheduling</span>
+        <span class="kw">if</span> <span class="op">self</span>.engine_config.always_use_gpu:
+            <span class="kw">return</span> <span class="op">self</span>._get_next_batch_old()
+        <span class="cm"># Otherwise, use NEO's asymmetric pipelining scheduler</span>
+        <span class="kw">return</span> <span class="op">self</span>._get_next_batch_new()
+
+    <span class="kw">def</span> <span class="fn">_decide_mode_and_gen_batch</span>(<span class="op">self</span>, gpu_pref, cpu_pref, budget):
+        batches = [<span class="typ">SubBatch</span>(<span class="op">self</span>.predictor) <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(<span class="num">2</span>)]
+        gpu_only_batch = <span class="typ">SubBatch</span>(<span class="op">self</span>.predictor)
+
+        <span class="cm"># Step 1: Put all prefill + GPU decode into batch-0</span>
+        <span class="kw">for</span> req <span class="kw">in</span> gpu_pref: batches[<span class="num">0</span>].add_pref(req, is_gpu=<span class="num">True</span>)
+        <span class="kw">for</span> req <span class="kw">in</span> cpu_pref: batches[<span class="num">0</span>].add_pref(req, is_gpu=<span class="num">False</span>)
+        <span class="kw">for</span> req <span class="kw">in</span> <span class="op">self</span>.gpu_decoding_q: batches[<span class="num">0</span>].add_gdec(req)
+
+        <span class="cm"># Step 3: Split CPU decoding requests across batches</span>
+        <span class="kw">for</span> req <span class="kw">in</span> <span class="op">self</span>.cpu_decoding_q:
+            batches[next_batch_idx].add_cdec(req)
+            remains = <span class="op">self</span>._get_remains(batches)
+            <span class="kw">if</span> <span class="fn">min</span>(remains) < <span class="num">0</span>: <span class="kw">continue</span>  <span class="cm"># skip if overloaded</span>
+            next_batch_idx = remains[<span class="num">1</span>] > remains[<span class="num">0</span>]  <span class="cm"># pick less loaded</span>
+
+        <span class="cm"># Step 5: Compare pipelined vs sequential throughput</span>
+        sequential_rate = <span class="fn">len</span>(gpu_only_batch) / sequential_time
+        pipelined_rate = <span class="fn">sum</span>(<span class="fn">len</span>(b) <span class="kw">for</span> b <span class="kw">in</span> batches) / pipelined_time
+        <span class="kw">return</span> batches <span class="kw">if</span> pipelined_rate > sequential_rate <span class="kw">else</span> [gpu_only_batch]</code></pre>
+</div>
+
+<!-- Implementation -->
+<div class="section" id="implementation">
+  <h2>Implementation Details</h2>
+
+  <p>NEO is built on <strong>SwiftLLM</strong>, a lightweight LLM inference engine (~4K lines Python + 1.5K lines C++) that provides vLLM-equivalent performance on a single GPU. Key implementation highlights:</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>PACPU: CPU Attention Kernels</h4>
+      <p>A custom C++ torch extension library called Paged-Attention-for-CPU. It calls multi-threaded C++ code that internally uses ISPC (Intel SPMD Program Compiler) for vectorized SIMD instructions (AVX2, AVX512, ARM Neon).</p>
+    </div>
+    <div class="card">
+      <h4>Paged KV Cache</h4>
+      <p>PACPU uses the same paged memory layout as vLLM's PagedAttention on GPU, with block-granularity allocation to avoid fragmentation on both CPU and GPU memory.</p>
+    </div>
+    <div class="card">
+      <h4>Flash-Decoding on CPU</h4>
+      <p>For each request, computation is partitioned into tasks along the request dimension. Each thread handles equal numbers of blocks, with outputs aggregated via a parallel reduction.</p>
+    </div>
+    <div class="card">
+      <h4>CUDA C++ Kernels</h4>
+      <p>Replaced Triton-JIT kernels with hand-written CUDA C++ to reduce kernel launch overhead. This is critical since Python's GIL prevents parallel CPU and GPU kernel launches.</p>
+    </div>
+  </div>
+
+  <h3>GPU Paged Attention Kernel (Triton)</h3>
+  <pre><code><span class="cm"># From swiftllm/worker/kernels/paged_attn.py</span>
+<span class="kw">@triton.jit</span>
+<span class="kw">def</span> <span class="fn">_fwd_paged_attention_phase1</span>(
+    mid_o,           <span class="cm"># [num_seqs, num_q_heads, num_seq_blocks, head_dim]</span>
+    mid_o_logexpsum, <span class="cm"># [num_seqs, num_q_heads, num_seq_blocks]</span>
+    q, k, v,         <span class="cm"># Query, Key, Value tensors</span>
+    k_cache, v_cache,<span class="cm"># [num_layers, num_blocks, num_kv_heads, block_size, head_dim]</span>
+    block_table,     <span class="cm"># Maps sequence IDs to physical block IDs</span>
+    softmax_scale,
+    ...
+):
+    <span class="cm"># Grid: [num_decoding_seqs, num_q_heads, num_seq_blocks]</span>
+    my_batch_id = tl.program_id(<span class="num">0</span>)
+    my_q_head_id = tl.program_id(<span class="num">1</span>)
+    my_seq_block_id = tl.program_id(<span class="num">2</span>)
+
+    <span class="cm"># Online softmax with numerically stable exp2</span>
+    <span class="kw">for</span> block_i <span class="kw">in</span> <span class="fn">range</span>(<span class="num">0</span>, my_num_blocks):
+        attn_score = tl.sum(my_q * k_block, axis=<span class="num">1</span>) * softmax_scale
+        cur_max = tl.max(attn_score)
+        new_max = tl.maximum(max_score, cur_max)
+        exp_score = tl.math.exp2(attn_score - new_max)
+        acc = acc * tl.math.exp2(max_score - new_max) + tl.sum(exp_score[:, <span class="num">None</span>] * v_block)
+        sum_exp = sum_exp * tl.math.exp2(max_score - new_max) + tl.sum(exp_score)</code></pre>
+
+  <h3>Block Manager: Dual-Device Memory Control</h3>
+  <pre><code><span class="cm"># From swiftllm/server/block_manager.py</span>
+<span class="kw">class</span> <span class="typ">BlockManager</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="op">self</span>, engine_config, model_config):
+        <span class="op">self</span>.gpu_block_manager = <span class="typ">DeviceBlockManager</span>(<span class="str">"cuda"</span>, engine_config)
+        <span class="op">self</span>.cpu_block_manager = <span class="typ">DeviceBlockManager</span>(<span class="str">"cpu"</span>, engine_config)
+
+    <span class="kw">def</span> <span class="fn">_initiate_swap</span>(<span class="op">self</span>, reqs, is_swap_out, use_itm=<span class="num">False</span>):
+        <span class="cm">"""Swap KV cache blocks between GPU and CPU."""</span>
+        src_mgr = <span class="op">self</span>.gpu_block_manager <span class="kw">if</span> is_swap_out <span class="kw">else</span> <span class="op">self</span>.cpu_block_manager
+        dst_mgr = <span class="op">self</span>.cpu_block_manager <span class="kw">if</span> is_swap_out <span class="kw">else</span> <span class="op">self</span>.gpu_block_manager
+        src_pids = src_mgr.free(reqs)       <span class="cm"># Free source blocks</span>
+        dst_vids, dst_pids = dst_mgr.alloc(reqs) <span class="cm"># Allocate destination</span>
+        <span class="kw">return</span> src_pids, dst_vids, dst_pids</code></pre>
+
+  <h3>Performance Predictor</h3>
+  <pre><code><span class="cm"># From swiftllm/perfpredictor.py -- Used for scheduling decisions</span>
+<span class="kw">class</span> <span class="typ">TablePerfPredictor</span>(<span class="typ">PerfPredictor</span>):
+    <span class="cm">"""Uses offline profiling + linear interpolation to estimate:</span>
+<span class="cm">       - get_linr_T(S): GPU linear layer time for iteration width S</span>
+<span class="cm">       - get_pref_T(S): GPU prefill attention time</span>
+<span class="cm">       - get_gdec_T(N): GPU decoding attention time for N tokens</span>
+<span class="cm">       - get_cdec_T(S,N): CPU decoding attention time (bilinear interp)</span>
+<span class="cm">    """</span>
+    <span class="kw">def</span> <span class="fn">get_cdec_T</span>(<span class="op">self</span>, S: <span class="typ">int</span>, N: <span class="typ">int</span>) -> <span class="typ">float</span>:
+        <span class="cm"># Bilinear interpolation across batch size (S) and token count (N)</span>
+        s_idx = <span class="op">self</span>.cdec_S_lb_idx[S]
+        ts1 = <span class="op">self</span>._interp_1d(N, <span class="op">self</span>.cdec_N_list_agg, <span class="op">self</span>.cdec_T_lists[s_idx])
+        ts0 = <span class="op">self</span>._interp_1d(N, <span class="op">self</span>.cdec_N_list_agg, <span class="op">self</span>.cdec_T_lists[s_idx-<span class="num">1</span>])
+        <span class="kw">return</span> <span class="op">self</span>._interp(S, s0, s1, ts0, ts1)</code></pre>
+</div>
+
+<!-- Results -->
+<div class="section" id="results">
+  <h2>Evaluation Results</h2>
+
+  <h3>Experimental Setup</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Instance</th><th>GPU</th><th>CPU</th><th>Memory</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>g5.nxlarge</td><td>A10G (24 GB)</td><td>EPYC 7R32 (2n cores)</td><td>16n GB</td></tr>
+        <tr><td>g4dn.4xlarge</td><td>T4 (16 GB)</td><td>Xeon P-8259CL (8 cores)</td><td>64 GB</td></tr>
+        <tr><td>HGX</td><td>8x H100 (80 GB)</td><td>Xeon 8462Y+ (64 cores)</td><td>2 TB</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Throughput Gains</h3>
+  <div class="diagram-container">
+    <div class="diagram-title">Relative Throughput vs. GPU-Only Baseline Across Workloads</div>
+    <svg viewBox="0 0 800 320" xmlns="http://www.w3.org/2000/svg">
+      <!-- Y axis -->
+      <line x1="80" y1="30" x2="80" y2="270" stroke="#555" stroke-width="1"/>
+      <text x="25" y="155" fill="#888" font-size="11" transform="rotate(-90 25,155)">Relative Throughput</text>
+      <!-- Y labels -->
+      <text x="70" y="270" fill="#888" font-size="10" text-anchor="end">1.0x</text>
+      <text x="70" y="220" fill="#888" font-size="10" text-anchor="end">1.2x</text>
+      <text x="70" y="170" fill="#888" font-size="10" text-anchor="end">1.4x</text>
+      <text x="70" y="120" fill="#888" font-size="10" text-anchor="end">1.6x</text>
+      <text x="70" y="70" fill="#888" font-size="10" text-anchor="end">1.8x</text>
+      <text x="70" y="35" fill="#888" font-size="10" text-anchor="end">7.5x</text>
+      <!-- Y grid -->
+      <line x1="80" y1="270" x2="760" y2="270" stroke="#333" stroke-width="0.5"/>
+      <line x1="80" y1="220" x2="760" y2="220" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <line x1="80" y1="170" x2="760" y2="170" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <line x1="80" y1="120" x2="760" y2="120" stroke="#333" stroke-width="0.5" stroke-dasharray="3,3"/>
+
+      <!-- Baseline -->
+      <line x1="80" y1="270" x2="760" y2="270" stroke="#ff6b6b" stroke-width="1.5" stroke-dasharray="8,4"/>
+      <text x="770" y="275" fill="#ff6b6b" font-size="9">baseline</text>
+
+      <!-- Bars: H100+70B -->
+      <rect x="110" y="235" width="50" height="35" rx="4" fill="url(#grad1)"/>
+      <text x="135" y="230" fill="#00d2ff" font-size="10" text-anchor="middle" font-weight="600">14%</text>
+      <text x="135" y="290" fill="#999" font-size="9" text-anchor="middle">H100</text>
+      <text x="135" y="302" fill="#666" font-size="8" text-anchor="middle">70B</text>
+
+      <!-- Bars: A10G+8B -->
+      <rect x="200" y="205" width="50" height="65" rx="4" fill="url(#grad1)"/>
+      <text x="225" y="200" fill="#00d2ff" font-size="10" text-anchor="middle" font-weight="600">26%</text>
+      <text x="225" y="290" fill="#999" font-size="9" text-anchor="middle">A10G</text>
+      <text x="225" y="302" fill="#666" font-size="8" text-anchor="middle">8B</text>
+
+      <!-- Bars: T4+7B (huge gain, 7.5x -> special) -->
+      <rect x="290" y="42" width="50" height="228" rx="4" fill="url(#grad2)"/>
+      <text x="315" y="37" fill="#ff6b6b" font-size="11" text-anchor="middle" font-weight="700">7.5x</text>
+      <text x="315" y="290" fill="#999" font-size="9" text-anchor="middle">T4</text>
+      <text x="315" y="302" fill="#666" font-size="8" text-anchor="middle">7B</text>
+
+      <!-- CPU sensitivity bars -->
+      <rect x="420" y="240" width="40" height="30" rx="4" fill="url(#grad3)"/>
+      <text x="440" y="235" fill="#6bcb77" font-size="9" text-anchor="middle">12.2%</text>
+      <text x="440" y="302" fill="#666" font-size="8" text-anchor="middle">x2large</text>
+
+      <rect x="475" y="233" width="40" height="37" rx="4" fill="url(#grad3)"/>
+      <text x="495" y="228" fill="#6bcb77" font-size="9" text-anchor="middle">13.3%</text>
+      <text x="495" y="302" fill="#666" font-size="8" text-anchor="middle">x4large</text>
+
+      <rect x="530" y="195" width="40" height="75" rx="4" fill="url(#grad3)"/>
+      <text x="550" y="190" fill="#6bcb77" font-size="9" text-anchor="middle">29.7%</text>
+      <text x="550" y="302" fill="#666" font-size="8" text-anchor="middle">x8large</text>
+
+      <rect x="585" y="135" width="40" height="135" rx="4" fill="url(#grad3)"/>
+      <text x="605" y="128" fill="#6bcb77" font-size="10" text-anchor="middle" font-weight="600">79.3%</text>
+      <text x="605" y="302" fill="#666" font-size="8" text-anchor="middle">x16large</text>
+
+      <!-- Group labels -->
+      <text x="225" y="318" fill="#00d2ff" font-size="10" text-anchor="middle" font-weight="600">Peak Throughput Gains</text>
+      <text x="520" y="318" fill="#6bcb77" font-size="10" text-anchor="middle" font-weight="600">CPU Capacity Sensitivity (A10G)</text>
+
+      <defs>
+        <linearGradient id="grad1" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#00d2ff"/><stop offset="100%" stop-color="#7b2ff7"/></linearGradient>
+        <linearGradient id="grad2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ff6b6b"/><stop offset="100%" stop-color="#7b2ff7"/></linearGradient>
+        <linearGradient id="grad3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6bcb77"/><stop offset="100%" stop-color="#2a6a2a"/></linearGradient>
+      </defs>
+    </svg>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">T4 GPU: Near 7.5x Throughput</div>
+    <p>The T4 has extremely constrained memory (16 GB), so the GPU-only baseline can barely batch any requests. NEO offloads KV cache to 64 GB of CPU memory, dramatically expanding the effective batch size and unlocking the T4's compute potential.</p>
+  </div>
+
+  <h3>Online Latency Comparison</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Setting</th><th>Model</th><th>NEO vs. vLLM</th><th>Latency Impact</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>2xH100</td><td>LLaMA-3.1-70B</td><td class="highlight-cell">+14.3% throughput</td><td>Same 2s latency target</td></tr>
+        <tr><td>A10G</td><td>LLaMA-3.1-8B</td><td class="highlight-cell">+6.4% throughput</td><td>Same 2s latency target</td></tr>
+        <tr><td>T4</td><td>LLaMA-2-7B</td><td class="highlight-cell">+563% throughput</td><td>Same 1s latency target</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Comparison with FastDecode+</h3>
+  <p>
+    FastDecode+ (which offloads <em>all</em> decoding attention to CPU) suffers from inflexibility with dynamic workloads. When there are many CPU decode requests but few prefilling requests, FastDecode+ cannot launch GPU batches, while NEO's greedy scheduler can always fall back to GPU-only mode. As output lengths grow, FastDecode+ drops to less than 60% of baseline, while NEO remains strictly above baseline.
+  </p>
+</div>
+
+<!-- Code -->
+<div class="section" id="code">
+  <h2>Repository Structure</h2>
+
+  <pre><code>NEO/
+  swiftllm/
+    server/
+      scheduler.py       <span class="cm"># Load-aware scheduler with asymmetric pipelining</span>
+      block_manager.py   <span class="cm"># Dual-device (GPU/CPU) block allocation</span>
+      engine.py          <span class="cm"># Main inference engine loop</span>
+      executor.py        <span class="cm"># GPU+CPU execution orchestration</span>
+      api_server.py      <span class="cm"># FastAPI-based serving endpoint</span>
+    worker/
+      kernels/
+        paged_attn.py    <span class="cm"># GPU paged attention (Triton)</span>
+        prefill_attn.py  <span class="cm"># GPU prefill attention kernel</span>
+        kvcache_mgmt.py  <span class="cm"># KV cache operations</span>
+    perfpredictor.py     <span class="cm"># Performance profiling & prediction</span>
+    engine_config.py     <span class="cm"># Configuration dataclass</span>
+  pacpu/                 <span class="cm"># CPU attention library (ISPC + C++)</span>
+    build.sh             <span class="cm"># Build script per model/TP degree</span>
+  csrc/                  <span class="cm"># CUDA C++ auxiliary operators</span>
+  evaluation/            <span class="cm"># Benchmark scripts & reproduction</span>
+    reproduce-fig6c.py   <span class="cm"># Load-latency curves</span>
+    reproduce-fig10a.py  <span class="cm"># CPU sensitivity study</span></code></pre>
+
+  <h3>Quick Start</h3>
+  <pre><code><span class="cm"># Install dependencies</span>
+pip install -r requirements.txt
+pip install -e .
+pip install -e csrc
+
+<span class="cm"># Build CPU kernels for LLaMA-2-7B, single GPU</span>
+cd pacpu && bash build.sh llama2_7b <span class="num">1</span> && cd ..
+
+<span class="cm"># Run offline inference example</span>
+python examples/example.py \
+    --model-path /path/to/Llama-2-7b-hf \
+    --model-name llama2_7b</code></pre>
+</div>
+
+<!-- Agentic Relevance -->
+<div class="section" id="agentic">
+  <h2>Relevance to Agentic AI Systems</h2>
+
+  <p>
+    NEO is directly relevant to the infrastructure requirements of agentic AI. Autonomous agents powered by LLMs require continuous, low-latency inference with large context windows. As agents maintain long conversation histories, tool-use logs, and reasoning traces, KV cache pressure grows rapidly, making GPU memory the primary bottleneck.
+  </p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>Multi-Agent Sessions</h4>
+      <p>NEO's CPU offloading enables significantly more concurrent agent sessions on the same GPU hardware. By storing KV caches in CPU memory (up to 120 GB on g5.16xlarge), the effective batch size increases dramatically, directly translating to more agents per GPU.</p>
+    </div>
+    <div class="card">
+      <h4>Cost Efficiency</h4>
+      <p>Agent workloads are often memory-bound rather than compute-bound. NEO uses the CPU that already ships with GPU instances (at no extra cost) to absorb the memory-bandwidth-bound attention computation, delivering free throughput gains.</p>
+    </div>
+    <div class="card">
+      <h4>Latency Preservation</h4>
+      <p>Unlike quantization-based approaches, NEO preserves full model accuracy and maintains comparable per-token latency to GPU-only inference. This is critical for reasoning-intensive agent tasks where accuracy cannot be traded for throughput.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">Complementary with MLA</div>
+    <p>NEO's CPU offloading approach is complementary to architectural innovations like Multi-Head Latent Attention (MLA) used in DeepSeek-V2/V3/R1. While MLA reduces the KV cache size at the model level, NEO provides a system-level solution that works with <em>any</em> existing model architecture. Combining both approaches could yield multiplicative benefits: smaller KV caches (MLA) distributed across more memory (NEO).</p>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer>
+  <p>NEO: Saving GPU Memory Crisis with CPU Offloading for Online LLM Inference</p>
+  <p>arXiv:2411.01142 | MLSys 2025 | Jiang, Zhou, Cao, Stoica, Yu</p>
+  <p style="margin-top: 0.5rem;">Page generated for the Agentic AI Systems survey.</p>
+</footer>
+
+</body>
+</html>
