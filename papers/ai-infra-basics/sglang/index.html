@@ -1,0 +1,1817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Life of a Request in SGLang - End-to-End Architecture Deep Dive</title>
+<style>
+  /* ===== Reset & Base ===== */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', Inter, system-ui, -apple-system, sans-serif;
+    background: #0a0e1a;
+    color: #d0d4e4;
+    line-height: 1.7;
+    font-size: 16px;
+  }
+  a { color: #64b5f6; text-decoration: none; transition: color 0.2s; }
+  a:hover { color: #90caf9; text-decoration: underline; }
+
+  /* ===== Sticky Nav ===== */
+  .sticky-nav {
+    position: sticky; top: 0; z-index: 1000;
+    background: rgba(10, 14, 26, 0.92);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid rgba(100, 181, 246, 0.15);
+    padding: 0 2rem;
+    display: flex; align-items: center; gap: 0.2rem;
+    overflow-x: auto; white-space: nowrap;
+  }
+  .sticky-nav a {
+    padding: 0.85rem 0.9rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: #8892b0;
+    border-bottom: 2px solid transparent;
+    transition: all 0.25s;
+  }
+  .sticky-nav a:hover, .sticky-nav a.active {
+    color: #64b5f6;
+    border-bottom-color: #64b5f6;
+    text-decoration: none;
+  }
+  .nav-logo {
+    font-weight: 700; font-size: 0.95rem;
+    color: #e8eaf6 !important;
+    margin-right: 1rem;
+    letter-spacing: 0.5px;
+  }
+
+  /* ===== Hero ===== */
+  .hero {
+    background: linear-gradient(135deg, #16213e 0%, #0f3460 50%, #1a1a5e 100%);
+    padding: 5rem 2rem 4rem;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at 30% 20%, rgba(100,181,246,0.08) 0%, transparent 50%),
+                radial-gradient(circle at 70% 80%, rgba(129,212,250,0.06) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .hero h1 {
+    font-size: 2.8rem;
+    font-weight: 800;
+    color: #e8eaf6;
+    line-height: 1.2;
+    margin-bottom: 1rem;
+    position: relative;
+  }
+  .hero .subtitle {
+    font-size: 1.15rem;
+    color: #90a4ae;
+    max-width: 700px;
+    margin: 0 auto 2rem;
+    position: relative;
+  }
+  .hero .badge {
+    display: inline-block;
+    background: rgba(100,181,246,0.15);
+    border: 1px solid rgba(100,181,246,0.3);
+    border-radius: 999px;
+    padding: 0.3rem 1rem;
+    font-size: 0.85rem;
+    color: #90caf9;
+    margin: 0 0.3rem 0.5rem;
+  }
+
+  /* ===== Content ===== */
+  .content { max-width: 960px; margin: 0 auto; padding: 3rem 1.5rem; }
+  h2 {
+    font-size: 1.75rem; font-weight: 700; color: #e8eaf6;
+    margin: 3rem 0 1.2rem; padding-bottom: 0.5rem;
+    border-bottom: 2px solid rgba(100,181,246,0.2);
+  }
+  h3 {
+    font-size: 1.25rem; font-weight: 600; color: #b0bec5;
+    margin: 2rem 0 0.8rem;
+  }
+  h4 {
+    font-size: 1.05rem; font-weight: 600; color: #80cbc4;
+    margin: 1.5rem 0 0.5rem;
+  }
+  p { margin-bottom: 1rem; }
+
+  /* ===== Code Blocks ===== */
+  pre {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    padding: 1.2rem 1.5rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    margin-bottom: 1.5rem;
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    color: #c9d1d9;
+  }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-size: 0.85em;
+  }
+  :not(pre) > code {
+    background: rgba(100,181,246,0.1);
+    border: 1px solid rgba(100,181,246,0.15);
+    border-radius: 4px;
+    padding: 0.15rem 0.4rem;
+    color: #90caf9;
+  }
+  .comment { color: #6a737d; }
+  .keyword { color: #ff7b72; }
+  .string { color: #a5d6ff; }
+  .class-name { color: #ffa657; }
+  .func { color: #d2a8ff; }
+  .decorator { color: #79c0ff; }
+  .param { color: #c9d1d9; }
+  .type { color: #7ee787; }
+
+  /* ===== Tables ===== */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 0.7rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid rgba(100,181,246,0.1);
+  }
+  th {
+    background: rgba(100,181,246,0.08);
+    color: #90caf9;
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  tr:hover { background: rgba(100,181,246,0.04); }
+
+  /* ===== Architecture Diagram ===== */
+  .arch-diagram {
+    background: linear-gradient(135deg, #0d1117, #161b22);
+    border: 1px solid #21262d;
+    border-radius: 12px;
+    padding: 2rem;
+    margin: 2rem 0;
+    overflow-x: auto;
+  }
+  .arch-diagram svg { display: block; margin: 0 auto; }
+
+  /* ===== Flow Steps ===== */
+  .flow-step {
+    background: linear-gradient(135deg, rgba(16,20,32,0.9), rgba(22,33,62,0.7));
+    border: 1px solid rgba(100,181,246,0.15);
+    border-left: 4px solid;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .flow-step.step-http { border-left-color: #66bb6a; }
+  .flow-step.step-tokenizer { border-left-color: #42a5f5; }
+  .flow-step.step-scheduler { border-left-color: #ab47bc; }
+  .flow-step.step-worker { border-left-color: #ef5350; }
+  .flow-step.step-detokenizer { border-left-color: #ffa726; }
+  .flow-step.step-response { border-left-color: #26c6da; }
+
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    margin-bottom: 0.8rem;
+  }
+  .step-number {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.8rem;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .step-http .step-number { background: #66bb6a; }
+  .step-tokenizer .step-number { background: #42a5f5; }
+  .step-scheduler .step-number { background: #ab47bc; }
+  .step-worker .step-number { background: #ef5350; }
+  .step-detokenizer .step-number { background: #ffa726; }
+  .step-response .step-number { background: #26c6da; }
+  .step-title { font-weight: 700; color: #e8eaf6; font-size: 1.05rem; }
+
+  /* ===== Info Boxes ===== */
+  .info-box {
+    background: rgba(100,181,246,0.06);
+    border: 1px solid rgba(100,181,246,0.2);
+    border-radius: 8px;
+    padding: 1.2rem 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .info-box.innovation {
+    background: rgba(129,199,132,0.06);
+    border-color: rgba(129,199,132,0.25);
+  }
+  .info-box.innovation .info-label { color: #81c784; }
+  .info-box.warning {
+    background: rgba(255,167,38,0.06);
+    border-color: rgba(255,167,38,0.25);
+  }
+  .info-box.warning .info-label { color: #ffa726; }
+  .info-label {
+    font-weight: 700; font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #64b5f6;
+    margin-bottom: 0.5rem;
+  }
+
+  /* ===== File Reference ===== */
+  .file-ref {
+    display: inline-block;
+    background: rgba(121,192,255,0.08);
+    border: 1px solid rgba(121,192,255,0.15);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.78rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: #79c0ff;
+    margin: 0.1rem 0;
+  }
+
+  /* ===== Timeline ===== */
+  .timeline {
+    position: relative;
+    padding-left: 2rem;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(180deg, #66bb6a, #42a5f5, #ab47bc, #ef5350, #ffa726, #26c6da);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 1.5rem;
+    padding-left: 1rem;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -2.35rem;
+    top: 0.5rem;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #64b5f6;
+    border: 2px solid #0a0e1a;
+  }
+
+  /* ===== Separator ===== */
+  .section-sep {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(100,181,246,0.2), transparent);
+    margin: 3rem 0;
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 1.8rem; }
+    .content { padding: 2rem 1rem; }
+    pre { font-size: 0.75rem; padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Sticky Navigation ===== -->
+<nav class="sticky-nav">
+  <a href="../index.html" class="nav-logo">AI Infra</a>
+  <a href="index.html" class="active">Request Lifecycle</a>
+  <a href="scheduler.html">Scheduler</a>
+  <a href="radix-cache.html">RadixCache</a>
+  <a href="model-runner.html">ModelRunner</a>
+  <a href="attention.html">Attention</a>
+</nav>
+
+<!-- ===== Hero Section ===== -->
+<section class="hero">
+  <h1>Life of a Request in SGLang</h1>
+  <p class="subtitle">
+    An end-to-end trace through the SGLang Runtime (SRT), from HTTP ingestion to streamed token delivery,
+    with deep dives into every process, data structure, and innovation along the way.
+  </p>
+  <div>
+    <span class="badge">Multi-Process Architecture</span>
+    <span class="badge">Overlap Scheduling</span>
+    <span class="badge">RadixCache Prefix Sharing</span>
+    <span class="badge">Extend Mode</span>
+  </div>
+</section>
+
+<!-- ===== Main Content ===== -->
+<div class="content">
+
+<!-- ============================================================ -->
+<!-- SECTION: Architecture Overview                                -->
+<!-- ============================================================ -->
+<h2 id="architecture">Multi-Process Architecture</h2>
+
+<p>
+SGLang Runtime organizes itself into distinct processes communicating via <strong>ZeroMQ IPC sockets</strong>.
+The <code>Engine</code> class in <span class="file-ref">entrypoints/engine.py</span> orchestrates the launch
+of all subprocesses. From the docstring of the Engine class itself:
+</p>
+
+<pre><span class="comment"># From engine.py - Engine class docstring</span>
+<span class="keyword">class</span> <span class="class-name">Engine</span>(<span class="class-name">EngineBase</span>):
+    <span class="string">"""
+    The entry point to the inference engine.
+
+    - The engine consists of three components:
+        1. TokenizerManager: Tokenizes the requests and sends them
+           to the scheduler.
+        2. Scheduler (subprocess): Receives requests from the Tokenizer
+           Manager, schedules batches, forwards them, and sends the
+           output tokens to the Detokenizer Manager.
+        3. DetokenizerManager (subprocess): Detokenizes the output
+           tokens and sends the result back to the Tokenizer Manager.
+
+    Note:
+    1. The HTTP server, Engine, and TokenizerManager all run in the
+       main process.
+    2. Inter-process communication is done through IPC (each process
+       uses a different port) via the ZMQ library.
+    """</span></pre>
+
+<p>
+When Data Parallel (DP) mode is enabled, a <strong>Data Parallel Controller</strong> process is launched to
+distribute requests across multiple Scheduler instances, each with its own GPU worker. This gives us up to
+six distinct process roles:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Process</th>
+      <th>Source File</th>
+      <th>Runs In</th>
+      <th>Responsibility</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>HTTP Server</strong></td>
+      <td><span class="file-ref">entrypoints/http_server.py</span></td>
+      <td>Main process</td>
+      <td>FastAPI endpoints, OpenAI-compatible API, request validation</td>
+    </tr>
+    <tr>
+      <td><strong>TokenizerManager</strong></td>
+      <td><span class="file-ref">managers/tokenizer_manager.py</span></td>
+      <td>Main process</td>
+      <td>Tokenization, chat template, multimodal processing, request state tracking</td>
+    </tr>
+    <tr>
+      <td><strong>DP Controller</strong></td>
+      <td><span class="file-ref">managers/data_parallel_controller.py</span></td>
+      <td>Subprocess (optional)</td>
+      <td>Routes requests to DP replicas based on load</td>
+    </tr>
+    <tr>
+      <td><strong>Scheduler</strong></td>
+      <td><span class="file-ref">managers/scheduler.py</span></td>
+      <td>Subprocess (per GPU)</td>
+      <td>Batching, RadixCache, memory management, KV cache allocation</td>
+    </tr>
+    <tr>
+      <td><strong>TpModelWorker</strong></td>
+      <td><span class="file-ref">managers/tp_worker.py</span></td>
+      <td>Same as Scheduler</td>
+      <td>Tensor parallel model forward, sampling</td>
+    </tr>
+    <tr>
+      <td><strong>DetokenizerManager</strong></td>
+      <td><span class="file-ref">managers/detokenizer_manager.py</span></td>
+      <td>Subprocess</td>
+      <td>Token ID to text conversion, incremental decoding</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ===== Architecture Diagram ===== -->
+<div class="arch-diagram">
+<svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', system-ui, sans-serif" font-size="12">
+  <defs>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#66bb6a"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#42a5f5"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ab47bc"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ef5350"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ffa726"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#26c6da"/>
+    </marker>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background labels -->
+  <rect x="20" y="15" width="290" height="490" rx="12" fill="rgba(102,187,106,0.04)" stroke="rgba(102,187,106,0.15)" stroke-dasharray="6,4"/>
+  <text x="35" y="38" fill="#66bb6a" font-weight="700" font-size="11" opacity="0.7">MAIN PROCESS</text>
+
+  <rect x="340" y="15" width="540" height="490" rx="12" fill="rgba(171,71,188,0.04)" stroke="rgba(171,71,188,0.15)" stroke-dasharray="6,4"/>
+  <text x="355" y="38" fill="#ab47bc" font-weight="700" font-size="11" opacity="0.7">SUBPROCESSES (per DP rank)</text>
+
+  <!-- HTTP Server Box -->
+  <rect x="50" y="60" width="230" height="65" rx="8" fill="#1a3a1a" stroke="#66bb6a" stroke-width="1.5"/>
+  <text x="165" y="82" fill="#66bb6a" font-weight="700" font-size="13" text-anchor="middle">HTTP Server (FastAPI)</text>
+  <text x="165" y="100" fill="#a5d6a7" font-size="10" text-anchor="middle">/v1/chat/completions</text>
+  <text x="165" y="115" fill="#81c784" font-size="9" text-anchor="middle">entrypoints/http_server.py</text>
+
+  <!-- TokenizerManager Box -->
+  <rect x="50" y="165" width="230" height="80" rx="8" fill="#1a2a4a" stroke="#42a5f5" stroke-width="1.5"/>
+  <text x="165" y="188" fill="#42a5f5" font-weight="700" font-size="13" text-anchor="middle">TokenizerManager</text>
+  <text x="165" y="205" fill="#90caf9" font-size="10" text-anchor="middle">Tokenize + Chat Template</text>
+  <text x="165" y="220" fill="#90caf9" font-size="10" text-anchor="middle">Multimodal Processing</text>
+  <text x="165" y="236" fill="#64b5f6" font-size="9" text-anchor="middle">managers/tokenizer_manager.py</text>
+
+  <!-- ReqState Box (small) -->
+  <rect x="70" y="290" width="190" height="45" rx="6" fill="#0d1a2e" stroke="#42a5f5" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="165" y="310" fill="#90caf9" font-size="10" text-anchor="middle">ReqState: rid_to_state[rid]</text>
+  <text x="165" y="326" fill="#64b5f6" font-size="9" text-anchor="middle">asyncio.Event for await</text>
+
+  <!-- DP Controller (optional) -->
+  <rect x="370" y="60" width="200" height="55" rx="8" fill="#2a1a3a" stroke="#ce93d8" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="470" y="82" fill="#ce93d8" font-weight="600" font-size="12" text-anchor="middle">DP Controller (optional)</text>
+  <text x="470" y="100" fill="#ba68c8" font-size="10" text-anchor="middle">Load-aware routing to DP ranks</text>
+
+  <!-- Scheduler Box -->
+  <rect x="370" y="150" width="200" height="90" rx="8" fill="#2a1a3a" stroke="#ab47bc" stroke-width="1.5"/>
+  <text x="470" y="172" fill="#ab47bc" font-weight="700" font-size="13" text-anchor="middle">Scheduler</text>
+  <text x="470" y="190" fill="#ce93d8" font-size="10" text-anchor="middle">Batching + RadixCache</text>
+  <text x="470" y="206" fill="#ce93d8" font-size="10" text-anchor="middle">KV Memory Allocation</text>
+  <text x="470" y="222" fill="#ce93d8" font-size="10" text-anchor="middle">event_loop_overlap</text>
+  <text x="470" y="234" fill="#ba68c8" font-size="9" text-anchor="middle">managers/scheduler.py</text>
+
+  <!-- RadixCache (inside scheduler region) -->
+  <rect x="600" y="155" width="140" height="50" rx="6" fill="#1a1a2e" stroke="#7e57c2" stroke-width="1"/>
+  <text x="670" y="175" fill="#b39ddb" font-weight="600" font-size="11" text-anchor="middle">RadixCache</text>
+  <text x="670" y="192" fill="#9575cd" font-size="9" text-anchor="middle">Prefix Sharing Tree</text>
+
+  <!-- TpModelWorker Box -->
+  <rect x="370" y="280" width="200" height="75" rx="8" fill="#3a1a1a" stroke="#ef5350" stroke-width="1.5"/>
+  <text x="470" y="302" fill="#ef5350" font-weight="700" font-size="13" text-anchor="middle">TpModelWorker</text>
+  <text x="470" y="319" fill="#ef9a9a" font-size="10" text-anchor="middle">forward_batch_generation()</text>
+  <text x="470" y="335" fill="#ef9a9a" font-size="10" text-anchor="middle">Sampling + Token Selection</text>
+  <text x="470" y="348" fill="#e57373" font-size="9" text-anchor="middle">managers/tp_worker.py</text>
+
+  <!-- ModelRunner Box -->
+  <rect x="600" y="280" width="140" height="50" rx="6" fill="#2a1010" stroke="#e57373" stroke-width="1"/>
+  <text x="670" y="300" fill="#ef9a9a" font-weight="600" font-size="11" text-anchor="middle">ModelRunner</text>
+  <text x="670" y="318" fill="#e57373" font-size="9" text-anchor="middle">forward() + CUDA Graph</text>
+
+  <!-- GPU Box -->
+  <rect x="770" y="270" width="90" height="70" rx="6" fill="#1a0a0a" stroke="#ff5252" stroke-width="1"/>
+  <text x="815" y="295" fill="#ff8a80" font-weight="700" font-size="11" text-anchor="middle">GPU</text>
+  <text x="815" y="312" fill="#ff8a80" font-size="9" text-anchor="middle">Attention</text>
+  <text x="815" y="326" fill="#ff8a80" font-size="9" text-anchor="middle">MLP + Logits</text>
+
+  <!-- DetokenizerManager Box -->
+  <rect x="370" y="400" width="200" height="70" rx="8" fill="#3a2a0a" stroke="#ffa726" stroke-width="1.5"/>
+  <text x="470" y="422" fill="#ffa726" font-weight="700" font-size="13" text-anchor="middle">DetokenizerManager</text>
+  <text x="470" y="439" fill="#ffcc80" font-size="10" text-anchor="middle">Token IDs -&gt; Text</text>
+  <text x="470" y="455" fill="#ffcc80" font-size="10" text-anchor="middle">Incremental Decoding</text>
+  <text x="470" y="464" fill="#ffb74d" font-size="9" text-anchor="middle">managers/detokenizer_manager.py</text>
+
+  <!-- Arrows: HTTP -> TokenizerManager -->
+  <line x1="165" y1="125" x2="165" y2="163" stroke="#66bb6a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="175" y="148" fill="#66bb6a" font-size="9">request</text>
+
+  <!-- Arrows: TokenizerManager -> Scheduler (ZMQ) -->
+  <line x1="280" y1="205" x2="368" y2="195" stroke="#42a5f5" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="310" y="190" fill="#42a5f5" font-size="9" font-weight="600">ZMQ</text>
+
+  <!-- Arrows: Scheduler <-> RadixCache -->
+  <line x1="570" y1="180" x2="598" y2="180" stroke="#7e57c2" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+
+  <!-- Arrows: Scheduler -> TpModelWorker -->
+  <line x1="470" y1="240" x2="470" y2="278" stroke="#ab47bc" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <text x="480" y="264" fill="#ab47bc" font-size="9">batch</text>
+
+  <!-- Arrows: TpModelWorker -> ModelRunner -->
+  <line x1="570" y1="315" x2="598" y2="308" stroke="#e57373" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+
+  <!-- Arrows: ModelRunner -> GPU -->
+  <line x1="740" y1="305" x2="768" y2="305" stroke="#ff5252" stroke-width="1.5" marker-end="url(#arrowRed)"/>
+
+  <!-- Arrows: Scheduler -> Detokenizer (ZMQ) -->
+  <line x1="470" y1="240" x2="470" y2="398" stroke="#ffa726" stroke-width="2" marker-end="url(#arrowOrange)" stroke-dasharray="5,3"/>
+  <text x="480" y="375" fill="#ffa726" font-size="9" font-weight="600">ZMQ</text>
+
+  <!-- Arrows: Detokenizer -> TokenizerManager (ZMQ) -->
+  <line x1="370" y1="435" x2="165" y2="350" stroke="#26c6da" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <text x="240" y="400" fill="#26c6da" font-size="9" font-weight="600">ZMQ</text>
+
+  <!-- Arrows: TokenizerManager -> HTTP (response) -->
+  <line x1="105" y1="290" x2="105" y2="127" stroke="#26c6da" stroke-width="1.5" marker-end="url(#arrowCyan)" stroke-dasharray="4,3"/>
+  <text x="60" y="210" fill="#26c6da" font-size="9">response</text>
+</svg>
+</div>
+
+<h3>ZMQ IPC Channel Setup</h3>
+
+<p>Each process creates its ZMQ sockets during initialization. The <code>TokenizerManager.init_ipc_channels()</code>
+method shows how the tokenizer connects to both the scheduler and the detokenizer:</p>
+
+<pre><span class="comment"># From tokenizer_manager.py - TokenizerManager.init_ipc_channels()</span>
+<span class="keyword">def</span> <span class="func">init_ipc_channels</span>(<span class="param">self</span>, port_args: PortArgs):
+    context = zmq.asyncio.Context(2)
+    <span class="param">self</span>.recv_from_detokenizer = get_zmq_socket(
+        context, zmq.PULL, port_args.tokenizer_ipc_name, <span class="keyword">True</span>
+    )
+    <span class="param">self</span>.send_to_scheduler = get_zmq_socket(
+        context, zmq.PUSH, port_args.scheduler_input_ipc_name, <span class="keyword">True</span>
+    )</pre>
+
+<p>The Scheduler similarly connects to both tokenizer and detokenizer:</p>
+
+<pre><span class="comment"># From scheduler.py - Scheduler.init_ipc_channels()</span>
+<span class="keyword">def</span> <span class="func">init_ipc_channels</span>(<span class="param">self</span>, port_args: PortArgs):
+    context = zmq.Context(2)
+    <span class="param">self</span>.recv_from_tokenizer = get_zmq_socket(
+        context, zmq.PULL, port_args.scheduler_input_ipc_name, <span class="keyword">False</span>
+    )
+    send_to_detokenizer = get_zmq_socket(
+        context, zmq.PUSH, port_args.detokenizer_ipc_name, <span class="keyword">False</span>
+    )
+    <span class="param">self</span>.send_to_detokenizer = SenderWrapper(send_to_detokenizer)</pre>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Data Structures                                      -->
+<!-- ============================================================ -->
+<h2 id="data-structures">Core Data Structures</h2>
+
+<p>
+A single request transforms through several data structure representations as it traverses
+the pipeline. The <code>schedule_batch.py</code> docstring describes this explicitly:
+</p>
+
+<pre><span class="comment"># From schedule_batch.py - Module docstring</span>
+<span class="string">"""
+The following is the flow of data structures for a batch:
+
+ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
+
+- ScheduleBatch is managed by `scheduler.py::Scheduler`.
+  It contains high-level scheduling data. Most of the data is on CPU.
+- ModelWorkerBatch is managed by `tp_worker.py::TpModelWorker`.
+  It is a subset of ScheduleBatch that only contains data related
+  to the model forward on GPU.
+- ForwardBatch is managed by `model_runner.py::ModelRunner`.
+  It contains low-level tensor data. Most of the data consists of
+  GPU tensors.
+"""</span></pre>
+
+<table>
+  <thead>
+    <tr>
+      <th>Data Structure</th>
+      <th>Owner</th>
+      <th>Location</th>
+      <th>Key Fields</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>GenerateReqInput</code></td>
+      <td>HTTP Server</td>
+      <td><span class="file-ref">io_struct.py</span></td>
+      <td>text, input_ids, sampling_params, image_data, stream</td>
+    </tr>
+    <tr>
+      <td><code>TokenizedGenerateReqInput</code></td>
+      <td>TokenizerManager</td>
+      <td><span class="file-ref">io_struct.py</span></td>
+      <td>input_text, input_ids, mm_inputs, sampling_params</td>
+    </tr>
+    <tr>
+      <td><code>Req</code></td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">schedule_batch.py</span></td>
+      <td>rid, origin_input_ids, output_ids, fill_ids, kv_committed_len</td>
+    </tr>
+    <tr>
+      <td><code>ScheduleBatch</code></td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">schedule_batch.py</span></td>
+      <td>reqs[], forward_mode, input_ids, seq_lens, out_cache_loc</td>
+    </tr>
+    <tr>
+      <td><code>ModelWorkerBatch</code></td>
+      <td>TpModelWorker</td>
+      <td><span class="file-ref">schedule_batch.py</span></td>
+      <td>forward_mode, input_ids, req_pool_indices, seq_lens, out_cache_loc</td>
+    </tr>
+    <tr>
+      <td><code>ForwardBatch</code></td>
+      <td>ModelRunner</td>
+      <td><span class="file-ref">forward_batch_info.py</span></td>
+      <td>GPU tensors for attention computation</td>
+    </tr>
+    <tr>
+      <td><code>BatchTokenIDOutput</code></td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">io_struct.py</span></td>
+      <td>rids[], output_ids[], finished_reasons[]</td>
+    </tr>
+    <tr>
+      <td><code>BatchStrOutput</code></td>
+      <td>DetokenizerManager</td>
+      <td><span class="file-ref">io_struct.py</span></td>
+      <td>rids[], output_strs[], finished_reasons[]</td>
+    </tr>
+    <tr>
+      <td><code>ReqState</code></td>
+      <td>TokenizerManager</td>
+      <td><span class="file-ref">tokenizer_manager.py</span></td>
+      <td>out_list, finished, event (asyncio.Event), text, output_ids</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: End-to-End Request Flow                              -->
+<!-- ============================================================ -->
+<h2 id="request-flow">End-to-End Request Flow</h2>
+
+<!-- Step 1: HTTP -->
+<div class="flow-step step-http">
+  <div class="step-header">
+    <div class="step-number">1</div>
+    <div class="step-title">HTTP Server Receives Request</div>
+  </div>
+  <p><span class="file-ref">entrypoints/http_server.py</span></p>
+  <p>
+    A user sends a POST to <code>/v1/chat/completions</code>. FastAPI deserializes the JSON body into a
+    <code>ChatCompletionRequest</code>, then the serving layer converts it to a <code>GenerateReqInput</code> --
+    the internal lingua franca for all generation requests.
+  </p>
+<pre><span class="comment"># http_server.py</span>
+<span class="decorator">@app.post</span>(<span class="string">"/v1/chat/completions"</span>,
+         dependencies=[Depends(validate_json_request)])
+<span class="keyword">async def</span> <span class="func">openai_v1_chat_completions</span>(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    <span class="string">"""OpenAI-compatible chat completion endpoint."""</span>
+    <span class="keyword">return await</span> raw_request.app.state.openai_serving_chat.handle_request(
+        request, raw_request
+    )</pre>
+  <p>
+    The <code>OpenAIServingChat.handle_request()</code> applies the chat template, converts messages to a
+    prompt string, builds <code>GenerateReqInput</code>, and calls <code>tokenizer_manager.generate_request()</code>.
+  </p>
+</div>
+
+<!-- Step 2: TokenizerManager -->
+<div class="flow-step step-tokenizer">
+  <div class="step-header">
+    <div class="step-number">2</div>
+    <div class="step-title">TokenizerManager: Tokenize and Dispatch</div>
+  </div>
+  <p><span class="file-ref">managers/tokenizer_manager.py</span></p>
+  <p>
+    The <code>generate_request()</code> method is an async generator that orchestrates the entire request
+    lifecycle from the main process perspective:
+  </p>
+<pre><span class="comment"># tokenizer_manager.py - TokenizerManager.generate_request()</span>
+<span class="keyword">async def</span> <span class="func">generate_request</span>(<span class="param">self</span>, obj, request=<span class="keyword">None</span>):
+    <span class="param">self</span>.auto_create_handle_loop()
+
+    <span class="comment"># Normalize the request</span>
+    obj.normalize_batch_and_arguments()
+    <span class="param">self</span>._set_default_priority(obj)
+    <span class="param">self</span>._validate_rid(obj)
+
+    <span class="comment"># ... log, validate lora ...</span>
+
+    <span class="keyword">async with</span> <span class="param">self</span>.model_update_lock.reader_lock:
+        <span class="keyword">await</span> <span class="param">self</span>._validate_and_resolve_lora(obj)
+
+        <span class="comment"># Tokenize the request and send it to the scheduler</span>
+        <span class="keyword">if</span> obj.is_single:
+            tokenized_obj = <span class="keyword">await</span> <span class="param">self</span>._tokenize_one_request(obj)
+            state = <span class="param">self</span>.rid_to_state[obj.rid]
+            <span class="param">self</span>._send_one_request(tokenized_obj)
+            <span class="keyword">async for</span> response <span class="keyword">in</span> <span class="param">self</span>._wait_one_response(obj, state, request):
+                <span class="keyword">yield</span> response</pre>
+
+  <h4>Tokenization Detail</h4>
+  <p>
+    The <code>_tokenize_one_request()</code> method handles three input modalities: text, pre-tokenized IDs,
+    and input embeddings. For text, it calls the HuggingFace tokenizer. For multimodal inputs, it uses
+    <code>AsyncMMDataProcessor</code> to parallelize image/video/audio preprocessing:
+  </p>
+<pre><span class="comment"># tokenizer_manager.py - _tokenize_one_request()</span>
+<span class="keyword">async def</span> <span class="func">_tokenize_one_request</span>(<span class="param">self</span>, obj):
+    <span class="keyword">if</span> obj.input_ids <span class="keyword">is not None</span>:
+        input_ids = obj.input_ids
+    <span class="keyword">else</span>:
+        input_ids, token_type_ids = <span class="keyword">await</span> <span class="param">self</span>._tokenize_texts(
+            input_text, is_cross_encoder_request
+        )
+
+    <span class="keyword">if</span> <span class="param">self</span>.mm_processor <span class="keyword">and</span> obj.contains_mm_input():
+        mm_inputs = <span class="keyword">await</span> <span class="param">self</span>.mm_data_processor.process(
+            image_data=obj.image_data,
+            audio_data=obj.audio_data,
+            input_text_or_ids=(input_text <span class="keyword">or</span> input_ids),
+            request_obj=obj,
+        )</pre>
+
+  <h4>ZMQ Dispatch</h4>
+  <p>
+    The tokenized request is sent to the scheduler via ZMQ PUSH socket as a <code>TokenizedGenerateReqInput</code>.
+    The tokenizer manager then creates a <code>ReqState</code> with an <code>asyncio.Event</code> and
+    awaits responses:
+  </p>
+<pre><span class="comment"># tokenizer_manager.py - _send_one_request()</span>
+<span class="keyword">def</span> <span class="func">_send_one_request</span>(<span class="param">self</span>, tokenized_obj):
+    tokenized_obj.time_stats.set_api_server_dispatch_time()
+    tokenized_obj = wrap_shm_features(tokenized_obj)
+    <span class="param">self</span>.send_to_scheduler.send_pyobj(tokenized_obj)  <span class="comment"># ZMQ IPC</span></pre>
+</div>
+
+<!-- Step 3: Scheduler -->
+<div class="flow-step step-scheduler">
+  <div class="step-header">
+    <div class="step-number">3</div>
+    <div class="step-title">Scheduler: Batch Formation and Memory Allocation</div>
+  </div>
+  <p><span class="file-ref">managers/scheduler.py</span></p>
+  <p>
+    The Scheduler runs an event loop (either <code>event_loop_normal</code> or <code>event_loop_overlap</code>)
+    that continuously: (a) receives incoming requests, (b) builds the next batch, (c) runs the forward pass,
+    and (d) processes results.
+  </p>
+
+  <h4>Request Reception</h4>
+  <p>
+    When a <code>TokenizedGenerateReqInput</code> arrives via ZMQ, the scheduler's dispatcher routes it to
+    <code>handle_generate_request()</code>, which creates a <code>Req</code> object:
+  </p>
+<pre><span class="comment"># scheduler.py - handle_generate_request()</span>
+<span class="keyword">def</span> <span class="func">handle_generate_request</span>(<span class="param">self</span>, recv_req: TokenizedGenerateReqInput):
+    req = Req(
+        recv_req.rid,
+        recv_req.input_text,
+        recv_req.input_ids,
+        recv_req.sampling_params,
+        return_logprob=recv_req.return_logprob,
+        top_logprobs_num=recv_req.top_logprobs_num,
+        stream=recv_req.stream,
+        lora_id=recv_req.lora_id,
+        eos_token_ids=<span class="param">self</span>.model_config.hf_eos_token_id,
+        <span class="comment"># ... more fields ...</span>
+    )</pre>
+
+  <h4>RadixCache Prefix Matching</h4>
+  <p>
+    Before adding a new request to the waiting queue, the scheduler queries the <strong>RadixCache</strong>
+    for an existing prefix match. This is the heart of SGLang's automatic prefix sharing innovation:
+  </p>
+<pre><span class="comment"># radix_cache.py - RadixCache.match_prefix()</span>
+<span class="keyword">def</span> <span class="func">match_prefix</span>(<span class="param">self</span>, params: MatchPrefixParams) -> MatchResult:
+    <span class="string">"""Find the longest cached prefix of key in the radix tree.
+
+    The logical namespace for prefix matching is determined by both
+    the token id sequence and the optional extra_key carried by
+    RadixKey. Entries that share identical leading token ids but
+    have *different* extra_key values are intentionally kept disjoint.
+    """</span>
+    key = params.key
+    key, _ = <span class="param">self</span>.maybe_bigram_convert(key)
+
+    <span class="keyword">if</span> <span class="param">self</span>.disable <span class="keyword">or</span> <span class="keyword">len</span>(key) == 0:
+        <span class="keyword">return</span> empty_match_result()
+
+    <span class="keyword">if</span> <span class="param">self</span>.page_size != 1:
+        page_aligned_len = <span class="keyword">len</span>(key) // <span class="param">self</span>.page_size * <span class="param">self</span>.page_size
+        key = key[:page_aligned_len]</pre>
+
+  <div class="info-box innovation">
+    <div class="info-label">SGLang Innovation: RadixCache</div>
+    <p>
+      The RadixCache stores a <strong>radix tree</strong> where each node holds a segment of token IDs and their
+      associated KV cache pool indices. When a new request arrives, the tree is walked from the root, matching
+      tokens page-by-page. The matched prefix KV cache is reused directly -- the request only needs to compute
+      KV for the unmatched suffix. This is what makes SGLang's "Extend" mode possible: instead of computing
+      the full prompt from scratch (traditional prefill), only the new tokens after the cached prefix need
+      processing.
+    </p>
+    <p>
+      The RadixCache supports multiple eviction policies via a strategy pattern:
+      <code>LRU</code>, <code>LFU</code>, <code>FIFO</code>, <code>MRU</code>, <code>FILO</code>,
+      <code>Priority</code>, and <code>SLRU</code>.
+    </p>
+  </div>
+
+  <h4>Batch Construction: get_next_batch_to_run()</h4>
+  <p>
+    The scheduler merges new requests from the waiting queue with running requests that need another
+    decode step. The <code>PrefillAdder</code> determines how many new requests to admit based on available
+    memory and the configured <code>max_prefill_tokens</code> budget:
+  </p>
+<pre><span class="comment"># scheduler.py - get_next_batch_to_run() (simplified)</span>
+<span class="keyword">def</span> <span class="func">get_next_batch_to_run</span>(<span class="param">self</span>) -> Optional[ScheduleBatch]:
+    <span class="comment"># Merge the prefill batch into the running batch</span>
+    <span class="keyword">if</span> <span class="param">self</span>.last_batch <span class="keyword">and</span> <span class="param">self</span>.last_batch.forward_mode.is_extend():
+        <span class="param">self</span>.last_batch.filter_batch(...)
+        <span class="keyword">if not</span> <span class="param">self</span>.last_batch.is_empty():
+            <span class="keyword">if</span> <span class="param">self</span>.running_batch.is_empty():
+                <span class="param">self</span>.running_batch = <span class="param">self</span>.last_batch
+            <span class="keyword">else</span>:
+                <span class="param">self</span>.running_batch.merge_batch(<span class="param">self</span>.last_batch)
+
+    <span class="comment"># Get next batch from policy</span>
+    batch = <span class="param">self</span>.get_new_batch_prefill()  <span class="comment"># or decode if no new prefills</span>
+    <span class="keyword">return</span> batch</pre>
+
+  <h4>KV Cache Memory Allocation</h4>
+  <p>
+    For each request in a batch, the scheduler allocates KV cache memory from the token pool. Extend requests
+    only allocate for the uncached suffix -- the prefix is already in the RadixCache:
+  </p>
+<pre><span class="comment"># schedule_batch.py / common.py - alloc_for_extend()</span>
+<span class="comment"># Allocates out_cache_loc for only the new (extend) tokens:</span>
+<span class="comment"># extend_num_tokens = total_seq_len - prefix_len (from radix cache match)</span>
+<span class="comment"># This is what makes "extend" different from full "prefill"</span></pre>
+</div>
+
+<!-- Step 4: GPU Forward -->
+<div class="flow-step step-worker">
+  <div class="step-header">
+    <div class="step-number">4</div>
+    <div class="step-title">TpModelWorker and ModelRunner: GPU Forward Pass</div>
+  </div>
+  <p><span class="file-ref">managers/tp_worker.py</span> and <span class="file-ref">model_executor/model_runner.py</span></p>
+  <p>
+    The scheduler calls <code>run_batch()</code>, which prepares a <code>ModelWorkerBatch</code> from the
+    <code>ScheduleBatch</code> and dispatches it to the TpModelWorker:
+  </p>
+<pre><span class="comment"># scheduler.py - run_batch()</span>
+<span class="keyword">def</span> <span class="func">run_batch</span>(<span class="param">self</span>, batch: ScheduleBatch) -> GenerationBatchResult:
+    <span class="param">self</span>.forward_ct += 1
+    <span class="keyword">if</span> <span class="param">self</span>.is_generation:
+        worker_batch_or_batch = batch.get_model_worker_batch()
+        result = <span class="param">self</span>.tp_worker.forward_batch_generation(worker_batch_or_batch)
+    <span class="keyword">return</span> result</pre>
+
+  <p>
+    Inside <code>TpModelWorker.forward_batch_generation()</code>, the <code>ModelWorkerBatch</code> is
+    converted to a <code>ForwardBatch</code> (GPU tensors), then the model runner executes the forward pass:
+  </p>
+<pre><span class="comment"># tp_worker.py - TpModelWorker.forward_batch_generation()</span>
+<span class="keyword">def</span> <span class="func">forward_batch_generation</span>(<span class="param">self</span>, model_worker_batch, ...):
+    <span class="comment"># Convert to ForwardBatch (GPU tensors)</span>
+    forward_batch = ForwardBatch.init_new(
+        model_worker_batch, <span class="param">self</span>.model_runner
+    )
+
+    <span class="comment"># Run model forward</span>
+    out = <span class="param">self</span>.model_runner.forward(forward_batch)
+    logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+
+    batch_result = GenerationBatchResult(
+        logits_output=logits_output,
+        can_run_cuda_graph=can_run_cuda_graph,
+    )
+
+    <span class="comment"># Sample next tokens</span>
+    <span class="keyword">if not</span> <span class="param">self</span>.enable_overlap:
+        batch_result.sample_output = <span class="param">self</span>.model_runner.sample(...)
+    <span class="keyword">return</span> batch_result</pre>
+
+  <h4>ModelRunner.forward() -- CUDA Graph or Eager</h4>
+  <p>
+    The model runner decides whether to use a captured CUDA graph (for decode) or run the model eagerly
+    (for extend/prefill):
+  </p>
+<pre><span class="comment"># model_runner.py - ModelRunner._forward_raw()</span>
+<span class="keyword">def</span> <span class="func">_forward_raw</span>(<span class="param">self</span>, forward_batch, ...):
+    can_run_graph = <span class="keyword">bool</span>(
+        forward_batch.forward_mode.is_cuda_graph()
+        <span class="keyword">and</span> <span class="param">self</span>.graph_runner
+        <span class="keyword">and</span> <span class="param">self</span>.graph_runner.can_run(forward_batch)
+    )
+
+    <span class="keyword">if</span> can_run_graph:
+        ret = <span class="param">self</span>.graph_runner.replay(forward_batch)
+        <span class="keyword">return</span> ModelRunnerOutput(logits_output=ret, can_run_graph=<span class="keyword">True</span>)
+
+    <span class="comment"># Eager forward path (used for extend/prefill)</span>
+    <span class="comment"># Runs full transformer: embedding -> attention -> MLP -> logits</span>
+    ...</pre>
+
+  <div class="info-box innovation">
+    <div class="info-label">SGLang Innovation: Extend Mode vs Standard Prefill</div>
+    <p>
+      Traditional LLM serving engines process each new request by running a full "prefill" pass over all
+      input tokens. SGLang introduces <strong>Extend mode</strong> -- when the RadixCache finds a matching
+      prefix, only the <em>unmatched suffix</em> tokens go through the forward pass. The KV cache for the
+      matched prefix is already in GPU memory and is reused directly.
+    </p>
+    <p>
+      This is implemented through the <code>ForwardMode.EXTEND</code> flag. Both new requests (with partial
+      prefix matches) and continuing decode requests can coexist in the same batch using <strong>ragged
+      tensors</strong> -- each request contributes a different number of tokens to the batch. The attention
+      kernel handles variable-length sequences within the batch via <code>extend_num_tokens</code> and
+      per-request <code>seq_lens</code> metadata.
+    </p>
+  </div>
+</div>
+
+<!-- Step 5: Result Processing -->
+<div class="flow-step step-scheduler">
+  <div class="step-header">
+    <div class="step-number">5</div>
+    <div class="step-title">Scheduler: Process Results and Send Output</div>
+  </div>
+  <p><span class="file-ref">managers/scheduler.py</span></p>
+  <p>
+    After the GPU forward pass returns, the scheduler processes the results: it appends the sampled token to
+    each request's <code>output_ids</code>, checks stop conditions (EOS token, max length, stop strings),
+    and for finished or streaming requests, constructs a <code>BatchTokenIDOutput</code> that is sent to the
+    DetokenizerManager via ZMQ:
+  </p>
+<pre><span class="comment"># scheduler.py - process_batch_result() sends to detokenizer</span>
+<span class="comment"># The batch result contains sampled token IDs for each request.</span>
+<span class="comment"># For streaming or finished requests, a BatchTokenIDOutput is</span>
+<span class="comment"># constructed and sent via ZMQ to the detokenizer:</span>
+<span class="comment">#   self.send_to_detokenizer.send_pyobj(output)</span></pre>
+</div>
+
+<!-- Step 6: Detokenizer -->
+<div class="flow-step step-detokenizer">
+  <div class="step-header">
+    <div class="step-number">6</div>
+    <div class="step-title">DetokenizerManager: Tokens to Text</div>
+  </div>
+  <p><span class="file-ref">managers/detokenizer_manager.py</span></p>
+  <p>
+    The detokenizer runs a simple synchronous event loop, receiving <code>BatchTokenIDOutput</code> objects
+    from the scheduler and converting token IDs to text using the HuggingFace tokenizer:
+  </p>
+<pre><span class="comment"># detokenizer_manager.py - DetokenizerManager.event_loop()</span>
+<span class="keyword">def</span> <span class="func">event_loop</span>(<span class="param">self</span>):
+    <span class="string">"""The event loop that handles requests"""</span>
+    <span class="keyword">while True</span>:
+        <span class="keyword">with</span> <span class="param">self</span>.soft_watchdog.disable():
+            recv_obj = <span class="param">self</span>.recv_from_scheduler.recv_pyobj()
+        output = <span class="param">self</span>._request_dispatcher(recv_obj)
+        <span class="keyword">if</span> output <span class="keyword">is not None</span>:
+            <span class="param">self</span>.send_to_tokenizer.send_pyobj(output)
+        <span class="param">self</span>.soft_watchdog.feed()</pre>
+
+  <p>
+    The <code>handle_batch_token_id_out()</code> method performs incremental detokenization, maintaining a
+    <code>DecodeStatus</code> per request to handle partial UTF-8 sequences and special tokens correctly:
+  </p>
+<pre><span class="comment"># detokenizer_manager.py - handle_batch_token_id_out()</span>
+<span class="keyword">def</span> <span class="func">handle_batch_token_id_out</span>(<span class="param">self</span>, recv_obj: BatchTokenIDOutput):
+    output_strs = <span class="param">self</span>._decode_batch_token_id_output(recv_obj)
+    <span class="keyword">return</span> BatchStrOutput(
+        rids=recv_obj.rids,
+        finished_reasons=recv_obj.finished_reasons,
+        output_strs=output_strs,
+        output_ids=recv_obj.output_ids,
+        prompt_tokens=recv_obj.prompt_tokens,
+        completion_tokens=recv_obj.completion_tokens,
+        cached_tokens=recv_obj.cached_tokens,
+        <span class="comment"># ... logprobs, metrics, etc. ...</span>
+    )</pre>
+
+  <p>The <code>DecodeStatus</code> tracks the state of incremental decoding for each request:</p>
+<pre><span class="comment"># detokenizer_manager.py</span>
+<span class="decorator">@dataclasses.dataclass</span>
+<span class="keyword">class</span> <span class="class-name">DecodeStatus</span>:
+    <span class="string">"""Store the status of incremental decoding."""</span>
+    decoded_text: <span class="type">str</span>
+    decode_ids: List[<span class="type">int</span>]
+    surr_offset: <span class="type">int</span>
+    read_offset: <span class="type">int</span>
+    sent_offset: <span class="type">int</span> = 0</pre>
+</div>
+
+<!-- Step 7: Response -->
+<div class="flow-step step-response">
+  <div class="step-header">
+    <div class="step-number">7</div>
+    <div class="step-title">TokenizerManager: Deliver Response</div>
+  </div>
+  <p><span class="file-ref">managers/tokenizer_manager.py</span></p>
+  <p>
+    The <code>BatchStrOutput</code> arrives back at the TokenizerManager via ZMQ. A background loop matches
+    each response to its <code>ReqState</code> (keyed by <code>rid</code>), updates the state, and signals
+    the <code>asyncio.Event</code>. The <code>_wait_one_response()</code> coroutine that has been awaiting
+    this event wakes up and yields the response to the FastAPI handler, which sends it to the client:
+  </p>
+<pre><span class="comment"># tokenizer_manager.py - ReqState dataclass</span>
+<span class="decorator">@dataclasses.dataclass</span>
+<span class="keyword">class</span> <span class="class-name">ReqState</span>:
+    <span class="string">"""Store the state a request."""</span>
+    out_list: List[Dict]
+    finished: <span class="type">bool</span>
+    event: asyncio.Event      <span class="comment"># Signaled when output arrives</span>
+    obj: Union[GenerateReqInput, EmbeddingReqInput]
+    time_stats: APIServerReqTimeStats
+    text: <span class="type">str</span> = <span class="string">""</span>
+    output_ids: List[<span class="type">int</span>] = field(default_factory=<span class="type">list</span>)
+    <span class="comment"># ... logprobs fields ...</span></pre>
+
+  <p>
+    For <strong>streaming</strong> requests, the tokenizer manager yields partial responses as SSE (Server-Sent Events)
+    each time new tokens arrive. For non-streaming, it waits for the <code>finished</code> flag and returns the
+    complete response as a single JSON object.
+  </p>
+</div>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Overlap Scheduling                                   -->
+<!-- ============================================================ -->
+<h2 id="overlap-scheduling">Overlap Scheduling</h2>
+
+<div class="info-box innovation">
+  <div class="info-label">SGLang Innovation: CPU/GPU Overlap</div>
+  <p>
+    SGLang's overlap scheduling is enabled by default (<code>disable_overlap_schedule=False</code>). It pipelines
+    GPU execution with CPU-side batch preparation, so the CPU work for step N+1 happens while the GPU is
+    computing step N. This hides scheduling, memory management, and sampling overhead behind GPU compute.
+  </p>
+</div>
+
+<h3>Normal Event Loop (Baseline)</h3>
+<p>
+  The non-overlapped loop is sequential: recv -> batch -> forward -> process results -> repeat.
+</p>
+<pre><span class="comment"># scheduler.py - event_loop_normal()</span>
+<span class="keyword">def</span> <span class="func">event_loop_normal</span>(<span class="param">self</span>):
+    <span class="string">"""A normal scheduler loop."""</span>
+    <span class="keyword">while True</span>:
+        <span class="comment"># Receive requests</span>
+        recv_reqs = <span class="param">self</span>.recv_requests()
+        <span class="param">self</span>.process_input_requests(recv_reqs)
+
+        <span class="comment"># Get the next batch to run</span>
+        batch = <span class="param">self</span>.get_next_batch_to_run()
+        <span class="param">self</span>.cur_batch = batch
+
+        <span class="comment"># Launch the current batch</span>
+        <span class="keyword">if</span> batch:
+            result = <span class="param">self</span>.run_batch(batch)
+            <span class="param">self</span>.process_batch_result(batch, result)
+        <span class="keyword">else</span>:
+            <span class="param">self</span>.self_check_during_idle()
+
+        <span class="param">self</span>.last_batch = batch</pre>
+
+<h3>Overlapped Event Loop</h3>
+<p>
+  The overlapped loop uses a <code>result_queue</code> to defer result processing. While the GPU computes
+  the current batch, the CPU processes the <em>previous</em> batch's results (including sampling, stop checking,
+  and ZMQ dispatch to the detokenizer):
+</p>
+<pre><span class="comment"># scheduler.py - event_loop_overlap()</span>
+<span class="keyword">def</span> <span class="func">event_loop_overlap</span>(<span class="param">self</span>):
+    <span class="string">"""A scheduler loop that overlaps CPU processing and GPU computation."""</span>
+    <span class="param">self</span>.result_queue: Deque = deque()
+
+    <span class="keyword">def</span> <span class="func">pop_and_process</span>():
+        tmp_batch, tmp_result = <span class="param">self</span>.result_queue.popleft()
+        <span class="param">self</span>.process_batch_result(tmp_batch, tmp_result)
+
+    <span class="keyword">while True</span>:
+        recv_reqs = <span class="param">self</span>.recv_requests()
+        <span class="param">self</span>.process_input_requests(recv_reqs)
+
+        <span class="comment"># Get the next batch</span>
+        batch = <span class="param">self</span>.get_next_batch_to_run()
+        disable_overlap_for_batch = <span class="param">self</span>.is_disable_overlap_for_batch(batch)
+
+        <span class="comment"># If we must NOT overlap, process last batch NOW</span>
+        <span class="keyword">if</span> disable_overlap_for_batch:
+            pop_and_process()
+
+        <span class="comment"># Launch GPU forward for current batch</span>
+        <span class="keyword">if</span> batch:
+            batch_result = <span class="param">self</span>.run_batch(batch)
+            <span class="param">self</span>.result_queue.append((batch.copy(), batch_result))
+
+        <span class="comment"># Process LAST batch results while GPU runs CURRENT batch</span>
+        <span class="keyword">if</span> <span class="param">self</span>.last_batch:
+            <span class="keyword">if not</span> disable_overlap_for_batch:
+                pop_and_process()
+
+        <span class="comment"># Sample (depends on grammar from last batch)</span>
+        <span class="keyword">if</span> <span class="param">self</span>.is_generation:
+            <span class="param">self</span>.launch_batch_sample_if_needed(batch_result)
+
+        <span class="param">self</span>.last_batch = batch</pre>
+
+<h4>When Overlap is Disabled</h4>
+<p>
+  The scheduler disables overlap for specific scenarios to avoid correctness issues or reduce TTFT:
+</p>
+<pre><span class="comment"># scheduler.py - is_disable_overlap_for_batch()</span>
+<span class="keyword">def</span> <span class="func">is_disable_overlap_for_batch</span>(<span class="param">self</span>, batch):
+    <span class="comment"># For two consecutive prefill batches, disable overlap</span>
+    <span class="comment"># to improve the TTFT of the first batch.</span>
+    batch_is_extend = batch <span class="keyword">and</span> batch.forward_mode.is_extend()
+    last_batch_is_extend = <span class="param">self</span>.last_batch <span class="keyword">and</span> <span class="param">self</span>.last_batch.forward_mode.is_extend()
+
+    disable = (
+        envs.SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP.get()
+        <span class="keyword">and</span> batch_is_extend
+        <span class="keyword">and</span> last_batch_is_extend
+    )</pre>
+
+<h3>Overlap Timing Diagram</h3>
+
+<div class="arch-diagram">
+<svg viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" font-family="'Segoe UI', system-ui, sans-serif" font-size="11">
+  <text x="10" y="30" fill="#8892b0" font-weight="700" font-size="12">Normal (Sequential)</text>
+  <!-- Normal timeline -->
+  <rect x="10" y="42" width="120" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="70" y="60" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Batch N</text>
+  <rect x="135" y="42" width="180" height="28" rx="4" fill="#3a1a1a" stroke="#ef5350"/>
+  <text x="225" y="60" fill="#ef9a9a" text-anchor="middle" font-size="10">GPU: Forward N</text>
+  <rect x="320" y="42" width="100" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="370" y="60" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Process N</text>
+  <rect x="425" y="42" width="120" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="485" y="60" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Batch N+1</text>
+  <rect x="550" y="42" width="180" height="28" rx="4" fill="#3a1a1a" stroke="#ef5350"/>
+  <text x="640" y="60" fill="#ef9a9a" text-anchor="middle" font-size="10">GPU: Forward N+1</text>
+
+  <text x="10" y="110" fill="#8892b0" font-weight="700" font-size="12">Overlap (Pipelined)</text>
+  <!-- Overlap timeline - CPU -->
+  <rect x="10" y="122" width="120" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="70" y="140" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Batch N</text>
+  <rect x="135" y="122" width="180" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="225" y="140" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Process N-1 + Batch N+1</text>
+  <rect x="320" y="122" width="180" height="28" rx="4" fill="#2a1a3a" stroke="#ab47bc"/>
+  <text x="410" y="140" fill="#ce93d8" text-anchor="middle" font-size="10">CPU: Process N + Batch N+2</text>
+
+  <!-- Overlap timeline - GPU -->
+  <rect x="135" y="156" width="180" height="28" rx="4" fill="#3a1a1a" stroke="#ef5350"/>
+  <text x="225" y="174" fill="#ef9a9a" text-anchor="middle" font-size="10">GPU: Forward N</text>
+  <rect x="320" y="156" width="180" height="28" rx="4" fill="#3a1a1a" stroke="#ef5350"/>
+  <text x="410" y="174" fill="#ef9a9a" text-anchor="middle" font-size="10">GPU: Forward N+1</text>
+  <rect x="505" y="156" width="180" height="28" rx="4" fill="#3a1a1a" stroke="#ef5350"/>
+  <text x="595" y="174" fill="#ef9a9a" text-anchor="middle" font-size="10">GPU: Forward N+2</text>
+
+  <!-- Annotation arrows -->
+  <text x="550" y="140" fill="#81c784" font-weight="700" font-size="11">CPU hidden behind GPU</text>
+</svg>
+</div>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: RadixCache Deep Dive                                 -->
+<!-- ============================================================ -->
+<h2 id="radix-cache">RadixCache: Automatic Prefix Sharing</h2>
+
+<p>
+  The RadixCache is a <strong>radix tree</strong> (compressed trie) where each node stores a token sequence
+  segment and a tensor of KV cache pool indices. This data structure enables O(n) prefix matching where
+  n is the length of the common prefix.
+</p>
+
+<h3>TreeNode Structure</h3>
+<pre><span class="comment"># radix_cache.py - TreeNode</span>
+<span class="keyword">class</span> <span class="class-name">TreeNode</span>:
+    <span class="keyword">def</span> <span class="func">__init__</span>(<span class="param">self</span>, id=<span class="keyword">None</span>, priority=0):
+        <span class="param">self</span>.children = defaultdict(TreeNode)
+        <span class="param">self</span>.parent: TreeNode = <span class="keyword">None</span>
+        <span class="param">self</span>.key: RadixKey = <span class="keyword">None</span>       <span class="comment"># Token IDs for this segment</span>
+        <span class="param">self</span>.value: torch.Tensor = <span class="keyword">None</span> <span class="comment"># KV cache pool indices</span>
+        <span class="param">self</span>.lock_ref = 0               <span class="comment"># Reference count (in-use)</span>
+        <span class="param">self</span>.last_access_time = time.monotonic()
+        <span class="param">self</span>.hit_count = 0
+        <span class="param">self</span>.host_value: torch.Tensor = <span class="keyword">None</span>  <span class="comment"># HiCache offload</span>
+        <span class="param">self</span>.hash_value: List[<span class="type">str</span>] = <span class="keyword">None</span>      <span class="comment"># SHA256 page hashes</span>
+        <span class="param">self</span>.priority = priority</pre>
+
+<h3>Key Matching</h3>
+<p>
+  Page-aligned key matching compares tokens in chunks of <code>page_size</code> for memory-efficient
+  allocation:
+</p>
+<pre><span class="comment"># radix_cache.py</span>
+<span class="keyword">def</span> <span class="func">_key_match_paged</span>(key0: RadixKey, key1: RadixKey, page_size: <span class="type">int</span>):
+    _check_extra_key(key0, key1)
+    min_len = <span class="keyword">min</span>(<span class="keyword">len</span>(key0), <span class="keyword">len</span>(key1))
+    i = 0
+    <span class="keyword">while</span> i < min_len:
+        <span class="keyword">if</span> key0.token_ids[i : i + page_size] != key1.token_ids[i : i + page_size]:
+            <span class="keyword">break</span>
+        i += page_size
+    <span class="keyword">return</span> i</pre>
+
+<h3>Eviction Strategies</h3>
+<pre><span class="comment"># radix_cache.py - RadixCache.__init__()</span>
+<span class="keyword">if</span> <span class="param">self</span>.eviction_policy == <span class="string">"lru"</span>:
+    <span class="param">self</span>.eviction_strategy = LRUStrategy()
+<span class="keyword">elif</span> <span class="param">self</span>.eviction_policy == <span class="string">"lfu"</span>:
+    <span class="param">self</span>.eviction_strategy = LFUStrategy()
+<span class="keyword">elif</span> <span class="param">self</span>.eviction_policy == <span class="string">"fifo"</span>:
+    <span class="param">self</span>.eviction_strategy = FIFOStrategy()
+<span class="keyword">elif</span> <span class="param">self</span>.eviction_policy == <span class="string">"priority"</span>:
+    <span class="param">self</span>.eviction_strategy = PriorityStrategy()
+<span class="keyword">elif</span> <span class="param">self</span>.eviction_policy == <span class="string">"slru"</span>:
+    <span class="param">self</span>.eviction_strategy = SLRUStrategy()</pre>
+
+<h3>Extra Key Isolation</h3>
+<p>
+  The <code>RadixKey</code> carries an optional <code>extra_key</code> field that isolates cache entries
+  for different LoRA adapters, cache salts, or other logical namespaces:
+</p>
+<pre><span class="comment"># radix_cache.py - RadixKey</span>
+<span class="keyword">class</span> <span class="class-name">RadixKey</span>:
+    <span class="keyword">def</span> <span class="func">__init__</span>(<span class="param">self</span>, token_ids, extra_key=<span class="keyword">None</span>, is_bigram=<span class="keyword">False</span>):
+        <span class="param">self</span>.token_ids = token_ids      <span class="comment"># Token IDs sequence</span>
+        <span class="param">self</span>.extra_key = extra_key      <span class="comment"># e.g. lora_id, cache_salt</span>
+        <span class="param">self</span>.is_bigram = is_bigram      <span class="comment"># For EAGLE speculative decoding</span></pre>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Req Class Deep Dive                                  -->
+<!-- ============================================================ -->
+<h2 id="req-class">The Req Class: Per-Request State Machine</h2>
+
+<p>
+  Every in-flight request in the scheduler is represented by a <code>Req</code> object. It tracks the full
+  lifecycle from initial token IDs through decode iterations to finish conditions:
+</p>
+
+<pre><span class="comment"># schedule_batch.py - Req class (key fields)</span>
+<span class="keyword">class</span> <span class="class-name">Req</span>(ReqDllmMixin):
+    <span class="string">"""The input and output status of a request."""</span>
+
+    <span class="keyword">def</span> <span class="func">__init__</span>(<span class="param">self</span>, rid, origin_input_text, origin_input_ids,
+                 sampling_params, ...):
+        <span class="comment"># Input and output info</span>
+        <span class="param">self</span>.rid = rid
+        <span class="param">self</span>.origin_input_text = origin_input_text
+        <span class="param">self</span>.origin_input_ids = origin_input_ids
+        <span class="param">self</span>.output_ids = []
+        <span class="param">self</span>.fill_ids = []  <span class="comment"># origin_input_ids + output_ids</span>
+
+        <span class="comment"># KV cache memory management</span>
+        <span class="param">self</span>.kv_committed_len = 0
+        <span class="param">self</span>.kv_allocated_len = 0
+
+        <span class="comment"># Prefix info (set during scheduling)</span>
+        <span class="param">self</span>.prefix_indices = <span class="keyword">None</span>  <span class="comment"># From RadixCache match</span>
+        <span class="param">self</span>.extend_input_len = 0   <span class="comment"># Tokens to process (past prefix)</span>
+
+        <span class="comment"># Finish conditions</span>
+        <span class="param">self</span>.finished_reason = <span class="keyword">None</span>
+        <span class="param">self</span>.sampling_params = sampling_params</pre>
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>rid</code></td><td>str</td><td>Unique request ID (UUID hex)</td></tr>
+    <tr><td><code>origin_input_ids</code></td><td>List[int]</td><td>Full tokenized prompt (after padding for multimodal)</td></tr>
+    <tr><td><code>output_ids</code></td><td>List[int]</td><td>Accumulated generated token IDs</td></tr>
+    <tr><td><code>fill_ids</code></td><td>List[int]</td><td>origin_input_ids + output_ids (for chunked prefill tracking)</td></tr>
+    <tr><td><code>kv_committed_len</code></td><td>int</td><td>How many tokens have committed KV cache entries</td></tr>
+    <tr><td><code>kv_allocated_len</code></td><td>int</td><td>How many KV cache slots are allocated for this request</td></tr>
+    <tr><td><code>prefix_indices</code></td><td>Tensor</td><td>KV cache indices from RadixCache prefix match</td></tr>
+    <tr><td><code>extend_input_len</code></td><td>int</td><td>Number of new tokens to process (total - prefix)</td></tr>
+    <tr><td><code>finished_reason</code></td><td>BaseFinishReason</td><td>None while running; set on EOS/length/stop/abort</td></tr>
+  </tbody>
+</table>
+
+<h3>Finish Conditions</h3>
+<pre><span class="comment"># schedule_batch.py - Finish reason classes</span>
+<span class="keyword">class</span> <span class="class-name">FINISH_MATCHED_TOKEN</span>(BaseFinishReason):  <span class="comment"># EOS or stop token matched</span>
+<span class="keyword">class</span> <span class="class-name">FINISH_MATCHED_STR</span>(BaseFinishReason):    <span class="comment"># Stop string matched</span>
+<span class="keyword">class</span> <span class="class-name">FINISH_LENGTH</span>(BaseFinishReason):         <span class="comment"># max_new_tokens reached</span>
+<span class="keyword">class</span> <span class="class-name">FINISH_ABORT</span>(BaseFinishReason):          <span class="comment"># Error or cancellation</span></pre>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: ScheduleBatch and Forward Modes                      -->
+<!-- ============================================================ -->
+<h2 id="batch-forward">ScheduleBatch and Forward Modes</h2>
+
+<p>
+  The <code>ScheduleBatch</code> is the master batch container that the scheduler manages. It holds lists
+  of requests and all the tensor metadata needed to drive a forward pass:
+</p>
+
+<pre><span class="comment"># schedule_batch.py - ScheduleBatch (key fields)</span>
+<span class="keyword">class</span> <span class="class-name">ScheduleBatch</span>(ScheduleBatchDisaggregationDecodeMixin):
+    <span class="string">"""Store all information of a batch on the scheduler."""</span>
+
+    reqs: List[Req]
+    req_to_token_pool: ReqToTokenPool = <span class="keyword">None</span>
+    token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator = <span class="keyword">None</span>
+    tree_cache: BasePrefixCache = <span class="keyword">None</span>
+
+    <span class="comment"># Batch configs</span>
+    forward_mode: ForwardMode = <span class="keyword">None</span>
+    enable_overlap: <span class="type">bool</span> = <span class="keyword">False</span>
+    batch_is_full: <span class="type">bool</span> = <span class="keyword">False</span>
+
+    <span class="comment"># Batched arguments to model runner</span>
+    input_ids: torch.Tensor = <span class="keyword">None</span>     <span class="comment"># shape: [total_tokens], int64</span>
+    req_pool_indices: torch.Tensor = <span class="keyword">None</span>  <span class="comment"># shape: [batch_size], int64</span>
+    seq_lens: torch.Tensor = <span class="keyword">None</span>     <span class="comment"># shape: [batch_size], int64</span>
+    out_cache_loc: torch.Tensor = <span class="keyword">None</span> <span class="comment"># shape: [total_new_tokens], int64</span></pre>
+
+<h3>ForwardMode Enum</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>When Used</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>EXTEND</code></td>
+      <td>New request (partial or full prompt)</td>
+      <td>Process multiple tokens per request. Ragged batch where each request may contribute
+          a different number of tokens. This is SGLang's "prefill" -- but only for uncached tokens.</td>
+    </tr>
+    <tr>
+      <td><code>DECODE</code></td>
+      <td>Continuing generation</td>
+      <td>Process exactly 1 token per request. All requests produce the next token. CUDA graph
+          eligible for maximum throughput.</td>
+    </tr>
+    <tr>
+      <td><code>IDLE</code></td>
+      <td>No work to do</td>
+      <td>Scheduler loop iteration with no active requests.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Process Launch Sequence                               -->
+<!-- ============================================================ -->
+<h2 id="launch-sequence">Process Launch Sequence</h2>
+
+<p>
+  The <code>Engine._launch_subprocesses()</code> classmethod orchestrates all process creation.
+  The launch order ensures dependencies are satisfied:
+</p>
+
+<pre><span class="comment"># engine.py - Engine._launch_subprocesses() (simplified)</span>
+<span class="decorator">@classmethod</span>
+<span class="keyword">def</span> <span class="func">_launch_subprocesses</span>(cls, server_args, ...):
+    <span class="string">"""Launch TokenizerManager in main process,
+    Scheduler in a subprocess, DetokenizerManager in another."""</span>
+
+    <span class="comment"># 1. Allocate IPC ports</span>
+    port_args = PortArgs.init_new(server_args)
+
+    <span class="comment"># 2. Launch scheduler subprocess(es)</span>
+    <span class="comment">#    - If dp_size > 1, launches DP controller + N schedulers</span>
+    <span class="comment">#    - Each scheduler creates its TpModelWorker internally</span>
+    scheduler_init_result = cls._launch_scheduler_processes(
+        server_args, port_args, run_scheduler_process_func
+    )
+
+    <span class="comment"># 3. Launch detokenizer subprocess</span>
+    detoken_proc = mp.Process(
+        target=run_detokenizer_process_func,
+        args=(server_args, port_args)
+    )
+
+    <span class="comment"># 4. Initialize TokenizerManager in main process</span>
+    tokenizer_manager, template_manager = init_tokenizer_manager_func(
+        server_args, port_args
+    )
+
+    <span class="keyword">return</span> tokenizer_manager, template_manager, port_args, scheduler_init_result</pre>
+
+<div class="timeline">
+  <div class="timeline-item">
+    <strong>Port Allocation:</strong> <code>PortArgs.init_new()</code> allocates unique IPC paths for
+    scheduler-input, tokenizer, detokenizer, and NCCL ports.
+  </div>
+  <div class="timeline-item">
+    <strong>Scheduler Subprocess:</strong> <code>run_scheduler_process()</code> creates the Scheduler,
+    which internally initializes TpModelWorker, ModelRunner, loads model weights, profiles memory,
+    sets up CUDA graphs, and creates the RadixCache.
+  </div>
+  <div class="timeline-item">
+    <strong>Detokenizer Subprocess:</strong> <code>run_detokenizer_process()</code> creates DetokenizerManager
+    with its own tokenizer instance and ZMQ sockets.
+  </div>
+  <div class="timeline-item">
+    <strong>TokenizerManager (Main Process):</strong> <code>init_tokenizer_manager()</code> initializes
+    tokenizer, processor, and ZMQ sockets in the main process alongside the HTTP server.
+  </div>
+  <div class="timeline-item">
+    <strong>HTTP Server:</strong> uvicorn starts the FastAPI app in the same main process as the
+    TokenizerManager.
+  </div>
+</div>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Scheduler Initialization                             -->
+<!-- ============================================================ -->
+<h2 id="scheduler-init">Scheduler Initialization</h2>
+
+<p>
+  The Scheduler constructor performs a complex multi-step initialization that sets up the entire GPU-side
+  infrastructure. Here is the initialization sequence from the actual code:
+</p>
+
+<pre><span class="comment"># scheduler.py - Scheduler.__init__() initialization steps</span>
+<span class="keyword">class</span> <span class="class-name">Scheduler</span>(...):
+    <span class="keyword">def</span> <span class="func">__init__</span>(<span class="param">self</span>, server_args, port_args, gpu_id, tp_rank, ...):
+        <span class="param">self</span>.init_model_config()
+        <span class="param">self</span>.init_metrics(tp_rank, pp_rank, dp_rank)
+        <span class="param">self</span>.init_ipc_channels(port_args)
+        <span class="param">self</span>.init_tokenizer()
+        <span class="param">self</span>.init_moe_gemm_config()
+        <span class="param">self</span>.init_mamba_backend()
+
+        <span class="comment"># This launches TpModelWorker + ModelRunner</span>
+        <span class="param">self</span>.init_model_worker()
+
+        <span class="comment"># Memory pool + RadixCache creation</span>
+        <span class="param">self</span>.init_cache_with_memory_pool()
+
+        <span class="param">self</span>.init_running_status()
+        <span class="param">self</span>.init_chunked_prefill()
+        <span class="param">self</span>.init_schedule_policy()
+        <span class="param">self</span>.init_disaggregation()
+        <span class="param">self</span>.init_overlap()
+        <span class="param">self</span>.init_request_dispatcher()
+
+        <span class="comment"># Constrained generation (grammar-guided decoding)</span>
+        <span class="param">self</span>.grammar_manager = GrammarManager(<span class="param">self</span>)</pre>
+
+<h3>Cache Creation</h3>
+<p>
+  The scheduler selects the appropriate cache implementation based on configuration. The default is
+  <code>RadixCache</code>, with specialized variants for chunked prefill, hierarchical caching, hybrid SWA,
+  and more:
+</p>
+
+<pre><span class="comment"># scheduler.py - init_cache_with_memory_pool() (selection logic)</span>
+<span class="keyword">if</span> chunked_prefill <span class="keyword">and</span> disable_radix_cache:
+    <span class="param">self</span>.tree_cache = ChunkCache(params)
+<span class="keyword">elif</span> enable_hierarchical_cache:
+    <span class="param">self</span>.tree_cache = HiRadixCache(params, server_args)
+<span class="keyword">elif</span> is_hybrid_swa:
+    <span class="param">self</span>.tree_cache = SWARadixCache(params)
+<span class="keyword">elif</span> enable_lmcache:
+    <span class="param">self</span>.tree_cache = LMCRadixCache(params, ...)
+<span class="keyword">else</span>:
+    <span class="param">self</span>.tree_cache = RadixCache(params)  <span class="comment"># Default</span></pre>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: TpModelWorker and ModelRunner                        -->
+<!-- ============================================================ -->
+<h2 id="model-worker">TpModelWorker and ModelRunner</h2>
+
+<p>
+  The <code>TpModelWorker</code> is instantiated inside the Scheduler and owns the <code>ModelRunner</code>.
+  It bridges the scheduler's batch abstraction with the GPU execution layer:
+</p>
+
+<pre><span class="comment"># tp_worker.py - TpModelWorker.__init__()</span>
+<span class="keyword">class</span> <span class="class-name">TpModelWorker</span>(BaseTpWorker):
+    <span class="keyword">def</span> <span class="func">__init__</span>(<span class="param">self</span>, server_args, gpu_id, tp_rank, ...):
+        <span class="param">self</span>._init_model_config()
+        <span class="param">self</span>._init_model_runner()  <span class="comment"># Creates ModelRunner</span>
+
+        <span class="comment"># Profile available tokens</span>
+        <span class="param">self</span>.max_total_num_tokens = <span class="param">self</span>.model_runner.max_total_num_tokens
+        <span class="param">self</span>.max_running_requests = <span class="param">self</span>.model_runner.max_running_requests
+        <span class="param">self</span>.max_req_len = <span class="keyword">min</span>(
+            <span class="param">self</span>.model_config.context_len - 1,
+            <span class="param">self</span>.model_runner.max_token_pool_size - 1,
+        )
+
+    <span class="keyword">def</span> <span class="func">_init_model_runner</span>(<span class="param">self</span>):
+        <span class="param">self</span>._model_runner = ModelRunner(
+            model_config=<span class="param">self</span>.model_config,
+            mem_fraction_static=<span class="param">self</span>.server_args.mem_fraction_static,
+            gpu_id=<span class="param">self</span>.gpu_id,
+            tp_rank=<span class="param">self</span>.tp_rank,
+            tp_size=<span class="param">self</span>.tp_size,
+            <span class="comment"># ... more distributed info ...</span>
+            server_args=<span class="param">self</span>.server_args,
+        )</pre>
+
+<h3>ModelRunner.forward()</h3>
+<p>
+  The ModelRunner's <code>forward()</code> method is the final step before GPU kernels execute. It handles
+  CUDA graph replay for decode (high throughput) and eager execution for extend (variable-length prefill):
+</p>
+
+<pre><span class="comment"># model_runner.py - ModelRunner.forward()</span>
+<span class="keyword">def</span> <span class="func">forward</span>(<span class="param">self</span>, forward_batch, ...) -> ModelRunnerOutput:
+    <span class="param">self</span>.forward_pass_id += 1
+    output = <span class="param">self</span>._forward_raw(forward_batch, ...)
+    <span class="keyword">return</span> output
+
+<span class="keyword">def</span> <span class="func">_forward_raw</span>(<span class="param">self</span>, forward_batch, ...):
+    can_run_graph = <span class="keyword">bool</span>(
+        forward_batch.forward_mode.is_cuda_graph()
+        <span class="keyword">and</span> <span class="param">self</span>.graph_runner
+        <span class="keyword">and</span> <span class="param">self</span>.graph_runner.can_run(forward_batch)
+    )
+
+    <span class="keyword">if</span> can_run_graph:
+        <span class="comment"># CUDA Graph replay: fastest path for decode batches</span>
+        ret = <span class="param">self</span>.graph_runner.replay(forward_batch)
+        <span class="keyword">return</span> ModelRunnerOutput(logits_output=ret, can_run_graph=<span class="keyword">True</span>)
+
+    <span class="comment"># Eager forward: used for extend/prefill with variable lengths</span>
+    <span class="comment"># Runs: Embedding -> N x (Attention + MLP) -> LogitsProcessor</span>
+    ...</pre>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Summary Table                                        -->
+<!-- ============================================================ -->
+<h2 id="summary">Request Lifecycle Summary</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Stage</th>
+      <th>Process</th>
+      <th>Source File</th>
+      <th>Key Method</th>
+      <th>Data In</th>
+      <th>Data Out</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1. HTTP</td>
+      <td>Main</td>
+      <td><span class="file-ref">http_server.py</span></td>
+      <td><code>openai_v1_chat_completions()</code></td>
+      <td>JSON body</td>
+      <td>GenerateReqInput</td>
+    </tr>
+    <tr>
+      <td>2. Tokenize</td>
+      <td>Main</td>
+      <td><span class="file-ref">tokenizer_manager.py</span></td>
+      <td><code>generate_request()</code></td>
+      <td>GenerateReqInput</td>
+      <td>TokenizedGenerateReqInput</td>
+    </tr>
+    <tr>
+      <td>3. Dispatch</td>
+      <td>Main</td>
+      <td><span class="file-ref">tokenizer_manager.py</span></td>
+      <td><code>_send_one_request()</code></td>
+      <td>TokenizedGenerateReqInput</td>
+      <td>ZMQ PUSH</td>
+    </tr>
+    <tr>
+      <td>4. Schedule</td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">scheduler.py</span></td>
+      <td><code>handle_generate_request()</code></td>
+      <td>TokenizedGenerateReqInput</td>
+      <td>Req + waiting_queue</td>
+    </tr>
+    <tr>
+      <td>5. Batch</td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">scheduler.py</span></td>
+      <td><code>get_next_batch_to_run()</code></td>
+      <td>waiting_queue + running_batch</td>
+      <td>ScheduleBatch</td>
+    </tr>
+    <tr>
+      <td>6. Forward</td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">tp_worker.py</span></td>
+      <td><code>forward_batch_generation()</code></td>
+      <td>ModelWorkerBatch</td>
+      <td>GenerationBatchResult</td>
+    </tr>
+    <tr>
+      <td>7. GPU</td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">model_runner.py</span></td>
+      <td><code>forward() / _forward_raw()</code></td>
+      <td>ForwardBatch</td>
+      <td>LogitsProcessorOutput</td>
+    </tr>
+    <tr>
+      <td>8. Sample</td>
+      <td>Scheduler</td>
+      <td><span class="file-ref">model_runner.py</span></td>
+      <td><code>sampler.forward()</code></td>
+      <td>Logits</td>
+      <td>Token IDs</td>
+    </tr>
+    <tr>
+      <td>9. Detokenize</td>
+      <td>Detokenizer</td>
+      <td><span class="file-ref">detokenizer_manager.py</span></td>
+      <td><code>handle_batch_token_id_out()</code></td>
+      <td>BatchTokenIDOutput</td>
+      <td>BatchStrOutput</td>
+    </tr>
+    <tr>
+      <td>10. Respond</td>
+      <td>Main</td>
+      <td><span class="file-ref">tokenizer_manager.py</span></td>
+      <td><code>_wait_one_response()</code></td>
+      <td>BatchStrOutput</td>
+      <td>HTTP JSON / SSE</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Key Innovations Recap                                -->
+<!-- ============================================================ -->
+<h2 id="innovations">Key SGLang Innovations</h2>
+
+<div class="info-box innovation">
+  <div class="info-label">1. Extend Mode (Ragged Tensor Prefill)</div>
+  <p>
+    Instead of the traditional "prefill entire prompt, then decode" two-phase approach, SGLang uses
+    <code>ForwardMode.EXTEND</code> which processes only the uncached suffix of a prompt. The RadixCache
+    provides the prefix KV cache indices, and the extend forward pass computes only the new tokens.
+    This is especially powerful for chat applications where the system prompt and conversation history
+    are frequently reused.
+  </p>
+  <p>
+    The extend batch is a <strong>ragged tensor</strong> -- each request in the batch contributes a different
+    number of tokens. This is handled by the attention backend which uses per-request <code>seq_lens</code>
+    and <code>extend_start_loc</code> metadata.
+  </p>
+</div>
+
+<div class="info-box innovation">
+  <div class="info-label">2. Overlap Scheduling (CPU/GPU Pipelining)</div>
+  <p>
+    The <code>event_loop_overlap()</code> schedules GPU computation for batch N while the CPU processes
+    results from batch N-1. This hides the latency of sampling, stop-condition checking, RadixCache updates,
+    ZMQ dispatch, and new request reception behind GPU compute time. For workloads with small decode batches
+    where GPU compute is fast, this can significantly improve throughput.
+  </p>
+</div>
+
+<div class="info-box innovation">
+  <div class="info-label">3. RadixCache Automatic Prefix Sharing</div>
+  <p>
+    The RadixCache is a compressed trie (radix tree) that automatically identifies and shares KV cache
+    prefixes across requests. When a new request matches a cached prefix, its KV cache is reused with
+    zero recomputation. The tree supports page-aligned matching (for efficient memory allocation),
+    multiple eviction policies (LRU, LFU, FIFO, Priority, SLRU), and namespace isolation via
+    <code>extra_key</code> for LoRA adapters or cache salts.
+  </p>
+</div>
+
+<div class="info-box innovation">
+  <div class="info-label">4. Multi-Process Architecture with ZMQ IPC</div>
+  <p>
+    SGLang separates concerns across processes connected by ZMQ PUSH/PULL sockets:
+    tokenization (I/O bound) runs in the main process with async Python, GPU scheduling and forward
+    passes run in a dedicated subprocess (one per GPU), and detokenization runs in its own subprocess.
+    This isolation prevents CPU-bound tokenization or detokenization from blocking GPU scheduling, and
+    vice versa. For multi-GPU setups, a Data Parallel Controller distributes requests across replicas.
+  </p>
+</div>
+
+<div class="section-sep"></div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Source File Map                                       -->
+<!-- ============================================================ -->
+<h2 id="source-map">Source File Reference</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>File Path (relative to python/sglang/srt/)</th>
+      <th>Lines</th>
+      <th>Role</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>entrypoints/engine.py</code></td>
+      <td>~700</td>
+      <td>Engine class, subprocess launch orchestration</td>
+    </tr>
+    <tr>
+      <td><code>entrypoints/http_server.py</code></td>
+      <td>~1300</td>
+      <td>FastAPI endpoints, OpenAI/Anthropic/Ollama compatibility</td>
+    </tr>
+    <tr>
+      <td><code>managers/tokenizer_manager.py</code></td>
+      <td>~1500</td>
+      <td>Tokenization, multimodal preprocessing, request state</td>
+    </tr>
+    <tr>
+      <td><code>managers/scheduler.py</code></td>
+      <td>~2800</td>
+      <td>Core scheduler loop, batching, memory management</td>
+    </tr>
+    <tr>
+      <td><code>managers/schedule_batch.py</code></td>
+      <td>~2600</td>
+      <td>Req, ScheduleBatch, ModelWorkerBatch data classes</td>
+    </tr>
+    <tr>
+      <td><code>managers/tp_worker.py</code></td>
+      <td>~600</td>
+      <td>TpModelWorker: bridges scheduler to ModelRunner</td>
+    </tr>
+    <tr>
+      <td><code>model_executor/model_runner.py</code></td>
+      <td>~3000</td>
+      <td>ModelRunner: forward pass, CUDA graphs, weight loading</td>
+    </tr>
+    <tr>
+      <td><code>managers/detokenizer_manager.py</code></td>
+      <td>~450</td>
+      <td>Token ID to text, incremental decoding</td>
+    </tr>
+    <tr>
+      <td><code>managers/io_struct.py</code></td>
+      <td>~900</td>
+      <td>All inter-process data structures (GenerateReqInput, etc.)</td>
+    </tr>
+    <tr>
+      <td><code>mem_cache/radix_cache.py</code></td>
+      <td>~800</td>
+      <td>RadixCache: prefix tree for KV cache sharing</td>
+    </tr>
+  </tbody>
+</table>
+
+</div><!-- .content -->
+</body>
+</html>

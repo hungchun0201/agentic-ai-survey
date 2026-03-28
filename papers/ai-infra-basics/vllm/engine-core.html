@@ -1,0 +1,1625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM V1 EngineCore &amp; IPC Architecture - Deep Dive</title>
+<style>
+:root {
+  --dark: #16213e;
+  --mid: #0f3460;
+  --primary: #e94560;
+  --green: #2ecc71;
+  --amber: #f5a623;
+  --purple: #9b59b6;
+  --cyan: #00d2d3;
+  --blue: #54a0ff;
+  --code-bg: #1e1e2e;
+  --card-bg: #1a2744;
+  --text: #e0e0e0;
+  --text-muted: #a0aec0;
+  --border: #2d3e5e;
+  --surface: #1e2d4a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--dark);
+  color: var(--text);
+  line-height: 1.7;
+}
+
+/* ---- Sticky Nav ---- */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(15, 52, 96, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 2rem;
+}
+nav ul {
+  display: flex;
+  list-style: none;
+  max-width: 1200px;
+  margin: 0 auto;
+  gap: 0.25rem;
+  overflow-x: auto;
+}
+nav ul li a {
+  display: block;
+  padding: 0.85rem 1rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 0.2s, border-bottom 0.2s;
+  border-bottom: 2px solid transparent;
+}
+nav ul li a:hover, nav ul li a.active {
+  color: #fff;
+  border-bottom: 2px solid var(--primary);
+}
+
+/* ---- Hero ---- */
+.hero {
+  background: linear-gradient(135deg, var(--dark) 0%, var(--mid) 40%, #1a1a3e 70%, var(--dark) 100%);
+  padding: 5rem 2rem 4rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle at 30% 50%, rgba(233,69,96,0.08) 0%, transparent 50%),
+              radial-gradient(circle at 70% 50%, rgba(84,160,255,0.06) 0%, transparent 50%);
+  animation: drift 20s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  from { transform: translateX(-2%) translateY(-1%); }
+  to   { transform: translateX(2%) translateY(1%); }
+}
+.hero h1 {
+  font-size: 2.6rem;
+  font-weight: 800;
+  position: relative;
+  background: linear-gradient(135deg, #fff 0%, var(--cyan) 50%, var(--blue) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero .subtitle {
+  color: var(--text-muted);
+  font-size: 1.15rem;
+  margin-top: 0.75rem;
+  position: relative;
+}
+.hero .badge-row {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1.5rem;
+  flex-wrap: wrap;
+  position: relative;
+}
+.badge {
+  display: inline-block;
+  padding: 0.35rem 1rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.badge-red    { background: rgba(233,69,96,0.2); color: var(--primary); border: 1px solid rgba(233,69,96,0.35); }
+.badge-green  { background: rgba(46,204,113,0.15); color: var(--green); border: 1px solid rgba(46,204,113,0.3); }
+.badge-blue   { background: rgba(84,160,255,0.15); color: var(--blue); border: 1px solid rgba(84,160,255,0.3); }
+.badge-purple { background: rgba(155,89,182,0.15); color: var(--purple); border: 1px solid rgba(155,89,182,0.3); }
+.badge-amber  { background: rgba(245,166,35,0.15); color: var(--amber); border: 1px solid rgba(245,166,35,0.3); }
+.badge-cyan   { background: rgba(0,210,211,0.15); color: var(--cyan); border: 1px solid rgba(0,210,211,0.3); }
+
+/* ---- Sections ---- */
+.container { max-width: 1100px; margin: 0 auto; padding: 3rem 2rem; }
+section { margin-bottom: 4rem; }
+h2 {
+  font-size: 1.7rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border);
+  color: #fff;
+}
+h2 .section-num {
+  color: var(--primary);
+  margin-right: 0.5rem;
+}
+h3 {
+  font-size: 1.25rem;
+  color: var(--cyan);
+  margin: 1.5rem 0 0.75rem;
+}
+h4 {
+  font-size: 1.05rem;
+  color: var(--amber);
+  margin: 1.2rem 0 0.5rem;
+}
+p { margin-bottom: 1rem; color: var(--text); }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #fff;
+}
+.card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+/* ---- Code Blocks ---- */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  overflow-x: auto;
+  margin: 1rem 0 1.5rem;
+  font-size: 0.82rem;
+  line-height: 1.65;
+}
+code {
+  font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+}
+pre code { color: #dcdfe4; }
+.kw   { color: #c678dd; }
+.fn   { color: #61afef; }
+.str  { color: #98c379; }
+.cmt  { color: #5c6370; font-style: italic; }
+.num  { color: #d19a66; }
+.cls  { color: #e5c07b; }
+.self { color: #e06c75; }
+.dec  { color: #c678dd; }
+.op   { color: #56b6c2; }
+.src-file {
+  display: inline-block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  font-family: monospace;
+}
+
+/* ---- Diagrams ---- */
+.diagram-container {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+.diagram-title {
+  text-align: center;
+  color: var(--cyan);
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+/* SVG diagrams */
+svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+svg .label { font-size: 12px; fill: #e0e0e0; }
+svg .label-sm { font-size: 10px; fill: #a0aec0; }
+svg .label-bold { font-size: 13px; fill: #ffffff; font-weight: 700; }
+svg .arrow { stroke-width: 2; fill: none; }
+
+/* ---- Callouts ---- */
+.callout {
+  border-left: 4px solid;
+  padding: 1rem 1.25rem;
+  margin: 1.25rem 0;
+  border-radius: 0 8px 8px 0;
+}
+.callout-red    { border-color: var(--primary); background: rgba(233,69,96,0.08); }
+.callout-green  { border-color: var(--green); background: rgba(46,204,113,0.08); }
+.callout-blue   { border-color: var(--blue); background: rgba(84,160,255,0.08); }
+.callout-amber  { border-color: var(--amber); background: rgba(245,166,35,0.08); }
+.callout-purple { border-color: var(--purple); background: rgba(155,89,182,0.08); }
+.callout strong { color: #fff; }
+
+/* ---- Grid ---- */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+@media (max-width: 768px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 1.8rem; }
+  nav ul { gap: 0; }
+}
+
+/* ---- Table ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.88rem;
+}
+th, td {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+th { background: var(--surface); color: var(--cyan); font-weight: 600; }
+td { color: var(--text); }
+tr:hover td { background: rgba(255,255,255,0.02); }
+td code {
+  background: rgba(255,255,255,0.08);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.82rem;
+}
+
+/* ---- Inline code ---- */
+p code, li code, td code, .callout code {
+  background: rgba(255,255,255,0.08);
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: var(--cyan);
+}
+
+ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+li { margin-bottom: 0.35rem; }
+
+/* ---- Footer ---- */
+footer {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<!-- ====== NAV ====== -->
+<nav>
+<ul>
+  <li><a href="#overview">Overview</a></li>
+  <li><a href="#busy-loop">Busy Loop</a></li>
+  <li><a href="#multiproc">Multi-Process</a></li>
+  <li><a href="#zmq-ipc">ZeroMQ IPC</a></li>
+  <li><a href="#msgpack">Msgpack</a></li>
+  <li><a href="#clients">Client Variants</a></li>
+  <li><a href="#output-proc">OutputProcessor</a></li>
+  <li><a href="#dp-coord">DP Coordinator</a></li>
+</ul>
+</nav>
+
+<!-- ====== HERO ====== -->
+<div class="hero">
+  <h1>vLLM V1 EngineCore &amp; IPC Architecture</h1>
+  <p class="subtitle">A source-code deep dive into vLLM's multi-process engine design, ZeroMQ messaging,<br>
+  msgpack serialization, and data-parallel coordination</p>
+  <div class="badge-row">
+    <span class="badge badge-red">EngineCore Busy Loop</span>
+    <span class="badge badge-blue">ZeroMQ IPC</span>
+    <span class="badge badge-green">Msgpack Serialization</span>
+    <span class="badge badge-purple">Data Parallelism</span>
+    <span class="badge badge-amber">Multi-Process</span>
+    <span class="badge badge-cyan">Client Variants</span>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ====================================================================== -->
+<!-- SECTION 1: ARCHITECTURE OVERVIEW                                       -->
+<!-- ====================================================================== -->
+<section id="overview">
+<h2><span class="section-num">#1</span> Architecture Overview</h2>
+
+<p>vLLM V1 separates the engine into two process-level concerns: a <strong>frontend process</strong> (the API server or <code>LLMEngine</code>) that handles tokenization, detokenization, and client-facing I/O, and a <strong>backend process</strong> (the <code>EngineCore</code>) that runs the GPU-bound scheduling and model execution loop. These two processes communicate via <strong>ZeroMQ sockets</strong> with <strong>msgpack serialization</strong>.</p>
+
+<div class="diagram-container">
+<div class="diagram-title">Process Topology: Single-Engine Deployment</div>
+<svg viewBox="0 0 900 340" xmlns="http://www.w3.org/2000/svg">
+  <!-- Frontend Process -->
+  <rect x="30" y="30" width="380" height="280" rx="12" fill="#1a2744" stroke="#54a0ff" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="220" y="58" text-anchor="middle" class="label-bold" fill="#54a0ff">Frontend Process (API Server)</text>
+
+  <!-- AsyncLLM -->
+  <rect x="55" y="75" width="160" height="48" rx="8" fill="#0f3460" stroke="#54a0ff" stroke-width="1.5"/>
+  <text x="135" y="104" text-anchor="middle" class="label-bold">AsyncLLM</text>
+
+  <!-- InputProcessor -->
+  <rect x="55" y="140" width="160" height="38" rx="8" fill="#1e2d4a" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="135" y="164" text-anchor="middle" class="label" fill="#2ecc71">InputProcessor</text>
+
+  <!-- OutputProcessor -->
+  <rect x="55" y="195" width="160" height="38" rx="8" fill="#1e2d4a" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="135" y="219" text-anchor="middle" class="label" fill="#f5a623">OutputProcessor</text>
+
+  <!-- EngineCoreClient -->
+  <rect x="55" y="250" width="160" height="38" rx="8" fill="#1e2d4a" stroke="#e94560" stroke-width="1.5"/>
+  <text x="135" y="274" text-anchor="middle" class="label" fill="#e94560">AsyncMPClient</text>
+
+  <!-- Arrows inside frontend -->
+  <path d="M135 123 L135 140" stroke="#5c6370" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <path d="M135 178 L135 195" stroke="#5c6370" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <path d="M135 233 L135 250" stroke="#5c6370" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+
+  <!-- ZMQ Bridge -->
+  <rect x="420" y="130" width="60" height="100" rx="6" fill="none" stroke="#e94560" stroke-width="2" stroke-dasharray="4,2"/>
+  <text x="450" y="160" text-anchor="middle" class="label-sm" fill="#e94560">ZMQ</text>
+  <text x="450" y="175" text-anchor="middle" class="label-sm" fill="#e94560">ROUTER</text>
+  <text x="450" y="190" text-anchor="middle" class="label-sm" fill="#e94560">/ PULL</text>
+
+  <!-- Arrows to ZMQ -->
+  <path d="M215 269 L420 180" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <text x="310" y="210" text-anchor="middle" class="label-sm" fill="#e94560">EngineCoreRequest</text>
+
+  <path d="M420 165 L215 210" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <text x="310" y="175" text-anchor="middle" class="label-sm" fill="#f5a623">EngineCoreOutputs</text>
+
+  <!-- Backend Process -->
+  <rect x="490" y="30" width="380" height="280" rx="12" fill="#1a2744" stroke="#2ecc71" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="680" y="58" text-anchor="middle" class="label-bold" fill="#2ecc71">EngineCore Process</text>
+
+  <!-- EngineCoreProc -->
+  <rect x="520" y="75" width="180" height="48" rx="8" fill="#0f3460" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="610" y="104" text-anchor="middle" class="label-bold">EngineCoreProc</text>
+
+  <!-- IO Threads -->
+  <rect x="520" y="140" width="80" height="36" rx="6" fill="#1e2d4a" stroke="#9b59b6" stroke-width="1"/>
+  <text x="560" y="162" text-anchor="middle" class="label-sm" fill="#9b59b6">Input Thread</text>
+
+  <rect x="620" y="140" width="80" height="36" rx="6" fill="#1e2d4a" stroke="#9b59b6" stroke-width="1"/>
+  <text x="660" y="162" text-anchor="middle" class="label-sm" fill="#9b59b6">Output Thread</text>
+
+  <!-- Scheduler -->
+  <rect x="520" y="195" width="100" height="36" rx="6" fill="#1e2d4a" stroke="#00d2d3" stroke-width="1"/>
+  <text x="570" y="217" text-anchor="middle" class="label-sm" fill="#00d2d3">Scheduler</text>
+
+  <!-- Executor -->
+  <rect x="640" y="195" width="100" height="36" rx="6" fill="#1e2d4a" stroke="#f5a623" stroke-width="1"/>
+  <text x="690" y="217" text-anchor="middle" class="label-sm" fill="#f5a623">Executor</text>
+
+  <!-- GPU -->
+  <rect x="580" y="250" width="120" height="42" rx="8" fill="rgba(233,69,96,0.15)" stroke="#e94560" stroke-width="1.5"/>
+  <text x="640" y="275" text-anchor="middle" class="label" fill="#e94560">GPU Workers</text>
+
+  <!-- ZMQ to backend -->
+  <path d="M480 165 L520 155" stroke="#9b59b6" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- Internal arrows -->
+  <path d="M570 176 L570 195" stroke="#5c6370" stroke-width="1" marker-end="url(#arrow-gray)"/>
+  <path d="M660 176 L690 195" stroke="#5c6370" stroke-width="1" marker-end="url(#arrow-gray)"/>
+  <path d="M620 231 L640 250" stroke="#5c6370" stroke-width="1" marker-end="url(#arrow-gray)"/>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#e94560"/></marker>
+    <marker id="arrow-amber" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f5a623"/></marker>
+    <marker id="arrow-gray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#5c6370"/></marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#9b59b6"/></marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2ecc71"/></marker>
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#00d2d3"/></marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#54a0ff"/></marker>
+  </defs>
+</svg>
+</div>
+
+<p>The key insight of V1's architecture is process isolation: the GPU-bound <code>EngineCore</code> runs in its own process with dedicated I/O threads, while tokenization, detokenization, and client management live in the frontend. This separation is bridged by ZeroMQ for message passing and msgpack for efficient serialization.</p>
+
+<div class="callout callout-blue">
+  <strong>Key files:</strong> <code>vllm/v1/engine/core.py</code> (EngineCore + EngineCoreProc), <code>vllm/v1/engine/core_client.py</code> (all client variants), <code>vllm/v1/engine/async_llm.py</code> (AsyncLLM frontend), <code>vllm/v1/engine/output_processor.py</code> (detokenization), <code>vllm/v1/engine/coordinator.py</code> (DP coordinator), <code>vllm/v1/serial_utils.py</code> (msgpack).
+</div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 2: ENGINE CORE BUSY LOOP                                       -->
+<!-- ====================================================================== -->
+<section id="busy-loop">
+<h2><span class="section-num">#2</span> EngineCore Busy Loop: schedule() &rarr; execute_model() &rarr; update_from_output()</h2>
+
+<p>The <code>EngineCore</code> class in <code>core.py</code> implements the fundamental execution loop. It is the "inner loop of vLLM's Engine", as the source code states.</p>
+
+<h3>2.1 The run_busy_loop() Entry Point</h3>
+
+<p>The <code>EngineCoreProc</code> subclass wraps <code>EngineCore</code> with ZMQ I/O and runs the busy loop in a background process:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_busy_loop()</span>
+<pre><code><span class="kw">def</span> <span class="fn">run_busy_loop</span>(<span class="self">self</span>):
+    <span class="str">"""Core busy loop of the EngineCore."""</span>
+    <span class="kw">while</span> <span class="self">self</span>._handle_shutdown():
+        <span class="cmt"># 1) Poll the input queue until there is work to do.</span>
+        <span class="self">self</span>._process_input_queue()
+        <span class="cmt"># 2) Step the engine core and return the outputs.</span>
+        <span class="self">self</span>._process_engine_step()
+
+    <span class="kw">raise</span> <span class="cls">SystemExit</span></code></pre>
+
+<p>This loop has only two phases: drain the input queue (which receives deserialized requests from the I/O thread) and then step the engine. The loop continues until a shutdown signal is received.</p>
+
+<h3>2.2 The step() Function: Schedule, Execute, Update</h3>
+
+<p>The core computation happens in <code>step()</code> -- vLLM's per-iteration heartbeat:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCore.step()</span>
+<pre><code><span class="kw">def</span> <span class="fn">step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">tuple</span>[<span class="cls">dict</span>[<span class="cls">int</span>, <span class="cls">EngineCoreOutputs</span>], <span class="cls">bool</span>]:
+    <span class="str">"""Schedule, execute, and make output."""</span>
+
+    <span class="cmt"># Check for any requests remaining in the scheduler</span>
+    <span class="kw">if not</span> <span class="self">self</span>.scheduler.has_requests():
+        <span class="kw">return</span> {}, <span class="kw">False</span>
+    scheduler_output = <span class="self">self</span>.scheduler.schedule()
+    future = <span class="self">self</span>.model_executor.execute_model(scheduler_output, non_block=<span class="kw">True</span>)
+    grammar_output = <span class="self">self</span>.scheduler.get_grammar_bitmask(scheduler_output)
+    <span class="kw">with</span> (
+        <span class="self">self</span>.log_error_detail(scheduler_output),
+        <span class="self">self</span>.log_iteration_details(scheduler_output),
+    ):
+        model_output = future.result()
+        <span class="kw">if</span> model_output <span class="kw">is None</span>:
+            model_output = <span class="self">self</span>.model_executor.sample_tokens(grammar_output)
+
+    <span class="cmt"># Before processing the model output, process any aborts that happened</span>
+    <span class="cmt"># during the model execution.</span>
+    <span class="self">self</span>._process_aborts_queue()
+    engine_core_outputs = <span class="self">self</span>.scheduler.update_from_output(
+        scheduler_output, model_output
+    )
+
+    <span class="kw">return</span> engine_core_outputs, scheduler_output.total_num_scheduled_tokens > <span class="num">0</span></code></pre>
+
+<div class="callout callout-green">
+  <strong>Three-phase execution per iteration:</strong><br>
+  1. <code>scheduler.schedule()</code> -- selects which requests to batch together<br>
+  2. <code>model_executor.execute_model()</code> -- dispatches GPU computation (non-blocking)<br>
+  3. <code>scheduler.update_from_output()</code> -- processes results, advances request state
+</div>
+
+<h3>2.3 Pipeline Parallelism: step_with_batch_queue()</h3>
+
+<p>When pipeline parallelism is enabled (<code>max_concurrent_batches > 1</code>), vLLM uses a batch queue to overlap scheduling with execution, eliminating pipeline bubbles:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCore.__init__()</span>
+<pre><code><span class="self">self</span>.batch_queue_size = <span class="self">self</span>.model_executor.max_concurrent_batches
+<span class="self">self</span>.batch_queue: <span class="cls">deque</span>[...] | <span class="kw">None</span> = <span class="kw">None</span>
+<span class="kw">if</span> <span class="self">self</span>.batch_queue_size > <span class="num">1</span>:
+    logger.debug(<span class="str">"Batch queue is enabled with size %d"</span>, <span class="self">self</span>.batch_queue_size)
+    <span class="self">self</span>.batch_queue = <span class="cls">deque</span>(maxlen=<span class="self">self</span>.batch_queue_size)
+
+<span class="self">self</span>.step_fn = (
+    <span class="self">self</span>.step <span class="kw">if</span> <span class="self">self</span>.batch_queue <span class="kw">is None else</span> <span class="self">self</span>.step_with_batch_queue
+)</code></pre>
+
+<h3>2.4 _process_engine_step(): Dispatching Output</h3>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_engine_step()</span>
+<pre><code><span class="kw">def</span> <span class="fn">_process_engine_step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">bool</span>:
+    <span class="str">"""Called only when there are unfinished local requests."""</span>
+    <span class="cmt"># Step the engine core.</span>
+    outputs, model_executed = <span class="self">self</span>.step_fn()
+    <span class="cmt"># Put EngineCoreOutputs into the output queue.</span>
+    <span class="kw">for</span> output <span class="kw">in</span> outputs.items() <span class="kw">if</span> outputs <span class="kw">else</span> ():
+        <span class="self">self</span>.output_queue.put_nowait(output)
+    <span class="cmt"># Post-step hook.</span>
+    <span class="self">self</span>.post_step(model_executed)
+
+    <span class="cmt"># If no model execution happened but there are waiting requests</span>
+    <span class="cmt"># yield the GIL briefly to allow background threads to make progress.</span>
+    <span class="kw">if not</span> model_executed <span class="kw">and</span> <span class="self">self</span>.scheduler.has_unfinished_requests():
+        time.sleep(<span class="num">0.001</span>)
+
+    <span class="kw">return</span> model_executed</code></pre>
+
+<p>After each step, outputs are placed into <code>self.output_queue</code> (a <code>queue.Queue</code>), which is drained by the dedicated output I/O thread and sent over ZMQ to the frontend.</p>
+
+<h3>2.5 Input Queue Processing: Blocking vs. Non-Blocking</h3>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_input_queue()</span>
+<pre><code><span class="kw">def</span> <span class="fn">_process_input_queue</span>(<span class="self">self</span>):
+    <span class="str">"""Exits when an engine step needs to be performed."""</span>
+    waited = <span class="kw">False</span>
+    <span class="kw">while not</span> <span class="self">self</span>.has_work() <span class="kw">and</span> <span class="self">self</span>.is_running():
+        <span class="cmt"># Notify callbacks waiting for engine to become idle.</span>
+        <span class="self">self</span>._notify_idle_state_callbacks()
+        <span class="kw">if</span> <span class="self">self</span>.input_queue.empty():
+            <span class="cmt"># Drain aborts queue; clear all pending aborts.</span>
+            <span class="kw">with</span> <span class="self">self</span>.aborts_queue.mutex:
+                <span class="self">self</span>.aborts_queue.queue.clear()
+        block = <span class="self">self</span>.process_input_queue_block
+        <span class="kw">try</span>:
+            req = <span class="self">self</span>.input_queue.get(block=block)
+            <span class="self">self</span>._handle_client_request(*req)
+        <span class="kw">except</span> <span class="cls">queue.Empty</span>:
+            <span class="kw">break</span>
+
+    <span class="cmt"># Handle any more client requests.</span>
+    <span class="kw">while not</span> <span class="self">self</span>.input_queue.empty():
+        req = <span class="self">self</span>.input_queue.get_nowait()
+        <span class="self">self</span>._handle_client_request(*req)</code></pre>
+
+<p>When the engine has no work, it blocks on the input queue (sleeping the thread). Once there is work, it drains all remaining messages non-blocking before proceeding to the engine step.</p>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 3: MULTI-PROCESS ARCHITECTURE                                  -->
+<!-- ====================================================================== -->
+<section id="multiproc">
+<h2><span class="section-num">#3</span> Multi-Process Architecture: EngineCoreProc</h2>
+
+<h3>3.1 Process Spawning</h3>
+
+<p><code>EngineCoreProc.run_engine_core()</code> is the entry point for the background process. It is invoked by the process management infrastructure:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_engine_core()</span>
+<pre><code><span class="dec">@staticmethod</span>
+<span class="kw">def</span> <span class="fn">run_engine_core</span>(*args, dp_rank: <span class="cls">int</span> = <span class="num">0</span>, local_dp_rank: <span class="cls">int</span> = <span class="num">0</span>, **kwargs):
+    <span class="str">"""Launch EngineCore busy loop in background process."""</span>
+    maybe_register_config_serialize_by_value()
+
+    engine_core: <span class="cls">EngineCoreProc</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    <span class="kw">try</span>:
+        vllm_config: <span class="cls">VllmConfig</span> = kwargs[<span class="str">"vllm_config"</span>]
+        parallel_config = vllm_config.parallel_config
+        data_parallel = parallel_config.data_parallel_size > <span class="num">1</span> <span class="kw">or</span> dp_rank > <span class="num">0</span>
+        <span class="kw">if</span> data_parallel:
+            parallel_config.data_parallel_rank_local = local_dp_rank
+            process_title = <span class="str">f"EngineCore_DP{dp_rank}"</span>
+        <span class="kw">else</span>:
+            process_title = <span class="str">"EngineCore"</span>
+        set_process_title(process_title)
+
+        <span class="cmt"># Choose DPEngineCoreProc for MoE models with DP,</span>
+        <span class="cmt"># regular EngineCoreProc otherwise.</span>
+        <span class="kw">if</span> data_parallel <span class="kw">and</span> vllm_config.model_config.is_moe:
+            parallel_config.data_parallel_rank = dp_rank
+            engine_core = <span class="cls">DPEngineCoreProc</span>(*args, **kwargs)
+        <span class="kw">else</span>:
+            parallel_config.data_parallel_size = <span class="num">1</span>
+            engine_core = <span class="cls">EngineCoreProc</span>(*args, engine_index=dp_rank, **kwargs)
+
+        engine_core.run_busy_loop()
+
+    <span class="kw">except</span> <span class="cls">Exception</span> <span class="kw">as</span> e:
+        <span class="kw">if</span> engine_core <span class="kw">is not None</span>:
+            engine_core._send_engine_dead()
+        <span class="kw">raise</span> e
+    <span class="kw">finally</span>:
+        <span class="kw">if</span> engine_core <span class="kw">is not None</span>:
+            engine_core.shutdown()</code></pre>
+
+<h3>3.2 I/O Thread Architecture</h3>
+
+<p><code>EngineCoreProc.__init__()</code> spawns two daemon threads that bridge ZMQ sockets with the main loop's <code>queue.Queue</code> objects:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.__init__()</span>
+<pre><code><span class="cmt"># Background Threads and Queues for IO. These enable us to</span>
+<span class="cmt"># overlap ZMQ socket IO with GPU since they release the GIL,</span>
+<span class="cmt"># and to overlap some serialization/deserialization with the</span>
+<span class="cmt"># model forward pass.</span>
+<span class="cmt"># Threads handle Socket <-> Queues and core_busy_loop uses Queue.</span>
+input_thread = threading.Thread(
+    target=<span class="self">self</span>.process_input_sockets,
+    args=(addresses.inputs, addresses.coordinator_input, identity, ready_event),
+    daemon=<span class="kw">True</span>,
+)
+input_thread.start()
+
+<span class="self">self</span>.output_thread = threading.Thread(
+    target=<span class="self">self</span>.process_output_sockets,
+    args=(addresses.outputs, addresses.coordinator_output, <span class="self">self</span>.engine_index),
+    daemon=<span class="kw">True</span>,
+)</code></pre>
+
+<div class="diagram-container">
+<div class="diagram-title">EngineCoreProc Thread Architecture</div>
+<svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+  <!-- Input Thread -->
+  <rect x="30" y="30" width="200" height="200" rx="10" fill="none" stroke="#9b59b6" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="130" y="55" text-anchor="middle" class="label-bold" fill="#9b59b6">Input Thread</text>
+
+  <rect x="50" y="70" width="160" height="34" rx="6" fill="#1e2d4a" stroke="#54a0ff" stroke-width="1"/>
+  <text x="130" y="92" text-anchor="middle" class="label-sm" fill="#54a0ff">ZMQ DEALER Socket</text>
+
+  <rect x="50" y="120" width="160" height="34" rx="6" fill="#1e2d4a" stroke="#2ecc71" stroke-width="1"/>
+  <text x="130" y="142" text-anchor="middle" class="label-sm" fill="#2ecc71">MsgpackDecoder</text>
+
+  <rect x="50" y="170" width="160" height="34" rx="6" fill="#1e2d4a" stroke="#f5a623" stroke-width="1"/>
+  <text x="130" y="192" text-anchor="middle" class="label-sm" fill="#f5a623">preprocess_add_request()</text>
+
+  <!-- Arrow: input thread to queues -->
+  <path d="M230 160 L310 120" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <path d="M230 185 L310 175" stroke="#f5a623" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+
+  <!-- Queues -->
+  <rect x="310" y="90" width="160" height="40" rx="6" fill="#0f3460" stroke="#e94560" stroke-width="1.5"/>
+  <text x="390" y="115" text-anchor="middle" class="label" fill="#e94560">input_queue</text>
+
+  <rect x="310" y="150" width="160" height="40" rx="6" fill="#0f3460" stroke="#f5a623" stroke-width="1.5"/>
+  <text x="390" y="175" text-anchor="middle" class="label" fill="#f5a623">aborts_queue</text>
+
+  <rect x="310" y="210" width="160" height="40" rx="6" fill="#0f3460" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="390" y="235" text-anchor="middle" class="label" fill="#2ecc71">output_queue</text>
+
+  <!-- Main Thread -->
+  <rect x="510" y="80" width="140" height="110" rx="10" fill="none" stroke="#00d2d3" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="580" y="105" text-anchor="middle" class="label-bold" fill="#00d2d3">Main Thread</text>
+  <text x="580" y="130" text-anchor="middle" class="label-sm">_process_input_queue()</text>
+  <text x="580" y="150" text-anchor="middle" class="label-sm">_process_engine_step()</text>
+  <text x="580" y="170" text-anchor="middle" class="label-sm">step_fn()</text>
+
+  <!-- Arrow: queues to main -->
+  <path d="M470 110 L510 120" stroke="#e94560" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+  <path d="M510 170 L470 225" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Output Thread -->
+  <rect x="680" y="30" width="160" height="200" rx="10" fill="none" stroke="#9b59b6" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="760" y="55" text-anchor="middle" class="label-bold" fill="#9b59b6">Output Thread</text>
+
+  <rect x="700" y="70" width="120" height="34" rx="6" fill="#1e2d4a" stroke="#2ecc71" stroke-width="1"/>
+  <text x="760" y="92" text-anchor="middle" class="label-sm" fill="#2ecc71">MsgpackEncoder</text>
+
+  <rect x="700" y="120" width="120" height="34" rx="6" fill="#1e2d4a" stroke="#54a0ff" stroke-width="1"/>
+  <text x="760" y="142" text-anchor="middle" class="label-sm" fill="#54a0ff">ZMQ PUSH Socket</text>
+
+  <rect x="700" y="170" width="120" height="34" rx="6" fill="#1e2d4a" stroke="#f5a623" stroke-width="1"/>
+  <text x="760" y="192" text-anchor="middle" class="label-sm" fill="#f5a623">Buffer Reuse Pool</text>
+
+  <!-- Arrow: output queue to output thread -->
+  <path d="M470 230 L700 100" stroke="#2ecc71" stroke-width="2" marker-end="url(#arrow-green)"/>
+</svg>
+</div>
+
+<h3>3.3 Handshake Protocol</h3>
+
+<p>Before the busy loop starts, <code>EngineCoreProc</code> performs a handshake with the frontend using a dedicated ZMQ DEALER socket. The handshake exchanges configuration, ZMQ addresses, and DP coordination info:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.startup_handshake()</span>
+<pre><code><span class="dec">@staticmethod</span>
+<span class="kw">def</span> <span class="fn">startup_handshake</span>(handshake_socket, local_client, headless, parallel_config=<span class="kw">None</span>):
+    <span class="cmt"># Send registration message.</span>
+    handshake_socket.send(
+        msgspec.msgpack.encode({<span class="str">"status"</span>: <span class="str">"HELLO"</span>, <span class="str">"local"</span>: local_client, <span class="str">"headless"</span>: headless})
+    )
+    <span class="cmt"># Receive initialization message.</span>
+    init_bytes = handshake_socket.recv()
+    init_message: <span class="cls">EngineHandshakeMetadata</span> = msgspec.msgpack.decode(init_bytes, type=<span class="cls">EngineHandshakeMetadata</span>)
+    <span class="kw">if</span> parallel_config <span class="kw">is not None</span>:
+        <span class="kw">for</span> key, value <span class="kw">in</span> init_message.parallel_config.items():
+            setattr(parallel_config, key, value)
+    <span class="kw">return</span> init_message.addresses</code></pre>
+
+<div class="callout callout-amber">
+  <strong>Engine-Dead Signal:</strong> If the <code>EngineCore</code> encounters a fatal error, it sends the sentinel value <code>ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"</code> through the output socket, which the client detects and raises <code>EngineDeadError</code>.
+</div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 4: ZEROMQ IPC                                                  -->
+<!-- ====================================================================== -->
+<section id="zmq-ipc">
+<h2><span class="section-num">#4</span> ZeroMQ IPC: How AsyncLLM Communicates with EngineCore</h2>
+
+<h3>4.1 Socket Topology</h3>
+
+<p>The MPClient base class sets up two ZMQ sockets for bidirectional communication:</p>
+
+<span class="src-file">vllm/v1/engine/core_client.py : MPClient.__init__()</span>
+<pre><code><span class="cmt"># ZMQ setup.</span>
+sync_ctx = zmq.Context(io_threads=<span class="num">2</span>)
+<span class="self">self</span>.ctx = zmq.asyncio.Context(sync_ctx) <span class="kw">if</span> asyncio_mode <span class="kw">else</span> sync_ctx
+
+<span class="cmt"># Input socket: ROUTER pattern -- routes to specific engine by identity</span>
+<span class="self">self</span>.input_socket = make_zmq_socket(
+    <span class="self">self</span>.ctx, addresses.inputs[<span class="num">0</span>], zmq.ROUTER, bind=<span class="kw">True</span>,
+    router_handover=enable_input_socket_handover,
+)
+<span class="cmt"># Output socket: PULL pattern -- pulls results from engine</span>
+<span class="self">self</span>.resources.output_socket = make_zmq_socket(
+    <span class="self">self</span>.ctx, addresses.outputs[<span class="num">0</span>], zmq.PULL
+)</code></pre>
+
+<div class="diagram-container">
+<div class="diagram-title">ZeroMQ Socket Patterns</div>
+<svg viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Client side -->
+  <rect x="30" y="30" width="200" height="140" rx="10" fill="#1a2744" stroke="#54a0ff" stroke-width="2"/>
+  <text x="130" y="55" text-anchor="middle" class="label-bold" fill="#54a0ff">MPClient</text>
+
+  <rect x="50" y="70" width="160" height="30" rx="6" fill="#0f3460" stroke="#e94560" stroke-width="1"/>
+  <text x="130" y="90" text-anchor="middle" class="label-sm" fill="#e94560">ROUTER (bind) &rarr; input</text>
+
+  <rect x="50" y="115" width="160" height="30" rx="6" fill="#0f3460" stroke="#2ecc71" stroke-width="1"/>
+  <text x="130" y="135" text-anchor="middle" class="label-sm" fill="#2ecc71">PULL (connect) &larr; output</text>
+
+  <!-- Arrows -->
+  <path d="M230 85 L520 85" stroke="#e94560" stroke-width="2.5" marker-end="url(#arrow-red)"/>
+  <text x="375" y="78" text-anchor="middle" class="label-sm" fill="#e94560">(Identity, Type, msgpack data...)</text>
+
+  <path d="M520 130 L230 130" stroke="#2ecc71" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="375" y="155" text-anchor="middle" class="label-sm" fill="#2ecc71">(msgpack EngineCoreOutputs...)</text>
+
+  <!-- Engine side -->
+  <rect x="520" y="30" width="250" height="140" rx="10" fill="#1a2744" stroke="#2ecc71" stroke-width="2"/>
+  <text x="645" y="55" text-anchor="middle" class="label-bold" fill="#2ecc71">EngineCoreProc</text>
+
+  <rect x="540" y="70" width="210" height="30" rx="6" fill="#0f3460" stroke="#e94560" stroke-width="1"/>
+  <text x="645" y="90" text-anchor="middle" class="label-sm" fill="#e94560">DEALER (connect) &larr; input_thread</text>
+
+  <rect x="540" y="115" width="210" height="30" rx="6" fill="#0f3460" stroke="#2ecc71" stroke-width="1"/>
+  <text x="645" y="135" text-anchor="middle" class="label-sm" fill="#2ecc71">PUSH (connect) &rarr; output_thread</text>
+</svg>
+</div>
+
+<h3>4.2 Sending Requests: AsyncMPClient._send_input()</h3>
+
+<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._send_input()</span>
+<pre><code><span class="kw">def</span> <span class="fn">_send_input</span>(<span class="self">self</span>, request_type, request, engine=<span class="kw">None</span>):
+    <span class="kw">if</span> engine <span class="kw">is None</span>:
+        engine = <span class="self">self</span>.core_engine
+
+    message = (request_type.value, *<span class="self">self</span>.encoder.encode(request))
+    <span class="kw">return</span> <span class="self">self</span>._send_input_message(message, engine, request)
+
+<span class="kw">def</span> <span class="fn">_send_input_message</span>(<span class="self">self</span>, message, engine, objects):
+    <span class="self">self</span>.ensure_alive()
+    <span class="self">self</span>.free_pending_messages()
+    msg = (engine,) + message   <span class="cmt"># (Identity, RequestType, SerializedData...)</span>
+    <span class="kw">if not</span> objects <span class="kw">or</span> len(msg) <= <span class="num">3</span>:
+        <span class="cmt"># No auxiliary buffers => no tensor backing buffers in request.</span>
+        <span class="kw">return</span> <span class="self">self</span>.input_socket.send_multipart(msg, copy=<span class="kw">False</span>)
+    <span class="cmt"># Track message for zero-copy buffer lifetime management.</span>
+    future = <span class="self">self</span>.input_socket.send_multipart(msg, copy=<span class="kw">False</span>, track=<span class="kw">True</span>)
+    <span class="kw">...</span></code></pre>
+
+<p>The message format over ZMQ is: <code>(engine_identity, request_type_bytes, msgpack_payload, [aux_buffer_1, aux_buffer_2, ...])</code>. The ROUTER socket uses the identity byte prefix to route to the correct engine process.</p>
+
+<h3>4.3 Receiving Outputs: Async Output Queue</h3>
+
+<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._ensure_output_queue_task()</span>
+<pre><code><span class="kw">async def</span> <span class="fn">process_outputs_socket</span>():
+    <span class="kw">try</span>:
+        <span class="kw">while True</span>:
+            frames = <span class="kw">await</span> output_socket.recv_multipart(copy=<span class="kw">False</span>)
+            resources.validate_alive(frames)
+            outputs: <span class="cls">EngineCoreOutputs</span> = decoder.decode(frames)
+            <span class="kw">if</span> outputs.utility_output:
+                _process_utility_output(outputs.utility_output, utility_results)
+                <span class="kw">continue</span>
+            <span class="kw">if</span> outputs.outputs <span class="kw">or</span> outputs.scheduler_stats:
+                outputs_queue.put_nowait(outputs)
+    <span class="kw">except</span> <span class="cls">Exception</span> <span class="kw">as</span> e:
+        outputs_queue.put_nowait(e)</code></pre>
+
+<p>This runs as an <code>asyncio.Task</code> that continuously reads from the PULL socket. Decoded outputs go to the <code>outputs_queue</code>, while utility results (RPC responses) are routed to their pending futures.</p>
+
+<h3>4.4 The Engine Input Thread: Deserialization and Preprocessing</h3>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_input_sockets()</span>
+<pre><code><span class="cmt"># Msgpack serialization decoding with optional tensor IPC receiver.</span>
+add_request_decoder = <span class="cls">MsgpackDecoder</span>(
+    <span class="cls">EngineCoreRequest</span>, oob_tensor_provider=<span class="self">self</span>.tensor_ipc_receiver
+)
+generic_decoder = <span class="cls">MsgpackDecoder</span>(oob_tensor_provider=<span class="self">self</span>.tensor_ipc_receiver)
+
+<span class="kw">while True</span>:
+    <span class="kw">for</span> input_socket, _ <span class="kw">in</span> poller.poll():
+        type_frame, *data_frames = input_socket.recv_multipart(copy=<span class="kw">False</span>)
+        request_type = <span class="cls">EngineCoreRequestType</span>(bytes(type_frame.buffer))
+
+        <span class="kw">if</span> request_type == <span class="cls">EngineCoreRequestType</span>.ADD:
+            req = add_request_decoder.decode(data_frames)
+            request = <span class="self">self</span>.preprocess_add_request(req)
+        <span class="kw">else</span>:
+            request = generic_decoder.decode(data_frames)
+            <span class="kw">if</span> request_type == <span class="cls">EngineCoreRequestType</span>.ABORT:
+                <span class="cmt"># Aborts go to BOTH queues for eager processing</span>
+                <span class="self">self</span>.aborts_queue.put_nowait(request)
+
+        <span class="self">self</span>.input_queue.put_nowait((request_type, request))</code></pre>
+
+<div class="callout callout-purple">
+  <strong>Design insight:</strong> The input I/O thread performs request <strong>preprocessing</strong> (multimodal cache lookup, block hash computation, grammar initialization) in parallel with the GPU execution running in the main thread. This overlaps CPU work (deserialization + preprocessing) with GPU work.
+</div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 5: MSGPACK SERIALIZATION                                       -->
+<!-- ====================================================================== -->
+<section id="msgpack">
+<h2><span class="section-num">#5</span> Msgpack Serialization for Cross-Process Data Transfer</h2>
+
+<p>vLLM uses <code>msgspec</code> (a high-performance msgpack library) with custom extensions for tensors, numpy arrays, and multimodal data. The implementation is in <code>vllm/v1/serial_utils.py</code>.</p>
+
+<h3>5.1 MsgpackEncoder: Zero-Copy Tensor Serialization</h3>
+
+<span class="src-file">vllm/v1/serial_utils.py : MsgpackEncoder</span>
+<pre><code><span class="kw">class</span> <span class="cls">MsgpackEncoder</span>:
+    <span class="str">"""Encoder with custom torch tensor and numpy array serialization.
+    By default, arrays below 256B are serialized inline. Larger will get sent
+    via dedicated messages (zero-copy)."""</span>
+
+    <span class="kw">def</span> <span class="fn">encode</span>(<span class="self">self</span>, obj) <span class="op">-></span> <span class="cls">Sequence</span>[bytestr]:
+        <span class="kw">if</span> <span class="self">self</span>.oob_tensor_consumer <span class="kw">is not None</span>:
+            <span class="self">self</span>.oob_tensor_consumer.new_message()
+        <span class="self">self</span>.aux_buffers = bufs = [<span class="str">b""</span>]
+        bufs[<span class="num">0</span>] = <span class="self">self</span>.encoder.encode(obj)
+        <span class="cmt"># bufs collects direct pointers to backing buffers of</span>
+        <span class="cmt"># tensors and np arrays, returned alongside the main buffer</span>
+        <span class="kw">return</span> bufs
+
+    <span class="kw">def</span> <span class="fn">_encode_tensor</span>(<span class="self">self</span>, obj: torch.Tensor):
+        <span class="kw">if</span> obj.nbytes < <span class="self">self</span>.size_threshold <span class="kw">and</span> obj.is_cpu:
+            <span class="cmt"># Small tensors: inline as raw bytes</span>
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))
+        <span class="kw">elif</span> oob_consumer <span class="kw">is not None</span> <span class="kw">and</span> (data := oob_consumer(obj)) <span class="kw">is not None</span>:
+            <span class="cmt"># Out-of-band tensor IPC (shared memory)</span>
+            <span class="kw">assert</span> isinstance(data, <span class="cls">dict</span>)
+        <span class="kw">else</span>:
+            <span class="cmt"># Large tensors: store index to aux buffer (zero-copy send)</span>
+            data = len(<span class="self">self</span>.aux_buffers)
+            <span class="self">self</span>.aux_buffers.append(tensor_data(obj))
+        dtype = str(obj.dtype).removeprefix(<span class="str">"torch."</span>)
+        <span class="kw">return</span> dtype, obj.shape, data</code></pre>
+
+<h3>5.2 Three-Tier Tensor Serialization Strategy</h3>
+
+<table>
+<thead>
+<tr><th>Tier</th><th>Condition</th><th>Method</th><th>Performance</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>Inline</strong></td>
+  <td><code>nbytes &lt; threshold</code> (default 256B)</td>
+  <td>Embed as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, ...)</code></td>
+  <td>Single buffer, minimal overhead</td>
+</tr>
+<tr>
+  <td><strong>Zero-copy</strong></td>
+  <td><code>nbytes &ge; threshold</code>, no OOB consumer</td>
+  <td>Store buffer index in main message, send buffer as separate ZMQ frame</td>
+  <td>No copy -- ZMQ sends directly from tensor memory</td>
+</tr>
+<tr>
+  <td><strong>OOB IPC</strong></td>
+  <td>OOB consumer accepts tensor (e.g., shared memory)</td>
+  <td>Pass tensor via IPC mechanism, include metadata dict in message</td>
+  <td>Best for large multimodal tensors (images, video)</td>
+</tr>
+</tbody>
+</table>
+
+<h3>5.3 MsgpackDecoder: Reconstruction</h3>
+
+<span class="src-file">vllm/v1/serial_utils.py : MsgpackDecoder</span>
+<pre><code><span class="kw">class</span> <span class="cls">MsgpackDecoder</span>:
+    <span class="kw">def</span> <span class="fn">decode</span>(<span class="self">self</span>, bufs):
+        <span class="kw">if</span> isinstance(bufs, bytestr):
+            <span class="kw">return</span> <span class="self">self</span>.decoder.decode(bufs)
+        <span class="self">self</span>.aux_buffers = bufs        <span class="cmt"># Multi-frame message</span>
+        <span class="kw">try</span>:
+            <span class="kw">return</span> <span class="self">self</span>.decoder.decode(bufs[<span class="num">0</span>])  <span class="cmt"># Main frame</span>
+        <span class="kw">finally</span>:
+            <span class="self">self</span>.aux_buffers = ()
+
+    <span class="kw">def</span> <span class="fn">_decode_tensor</span>(<span class="self">self</span>, arr):
+        dtype, shape, data = arr
+        <span class="kw">if</span> isinstance(data, <span class="cls">dict</span>):
+            <span class="cmt"># OOB tensor: retrieve from shared memory</span>
+            <span class="kw">return</span> <span class="self">self</span>.oob_tensor_provider(dtype, shape, data)
+        is_aux = isinstance(data, <span class="cls">int</span>)
+        buffer = <span class="self">self</span>.aux_buffers[data] <span class="kw">if</span> is_aux <span class="kw">else</span> data
+        arr = torch.frombuffer(buffer, dtype=torch.uint8)
+        <span class="cmt"># Pin larger tensors for efficient CPU->GPU transfer</span>
+        <span class="kw">if not</span> is_aux:
+            arr = arr.clone()
+        <span class="kw">elif not</span> <span class="self">self</span>.share_mem:
+            arr = arr.pin_memory() <span class="kw">if</span> <span class="self">self</span>.pin_tensors <span class="kw">else</span> arr.clone()
+        <span class="kw">return</span> arr.view(torch_dtype).view(shape)</code></pre>
+
+<h3>5.4 Output Thread: Buffer Reuse for Encoding</h3>
+
+<p>The output thread in <code>EngineCoreProc</code> reuses bytearray buffers to minimize allocation overhead:</p>
+
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_output_sockets()</span>
+<pre><code>encoder = <span class="cls">MsgpackEncoder</span>()
+reuse_buffers: <span class="cls">list</span>[bytearray] = []
+pending = <span class="cls">deque</span>[<span class="cls">tuple</span>[zmq.MessageTracker, Any, bytearray]]()
+
+<span class="kw">while True</span>:
+    output = <span class="self">self</span>.output_queue.get()
+    <span class="kw">if</span> output == <span class="cls">EngineCoreProc</span>.ENGINE_CORE_DEAD:
+        <span class="kw">for</span> socket <span class="kw">in</span> sockets:
+            socket.send(output)
+        <span class="kw">break</span>
+    client_index, outputs = output
+    outputs.engine_index = engine_index
+
+    <span class="cmt"># Reclaim buffers that zmq is finished with.</span>
+    <span class="kw">while</span> pending <span class="kw">and</span> pending[-<span class="num">1</span>][<span class="num">0</span>].done:
+        reuse_buffers.append(pending.pop()[<span class="num">2</span>])
+
+    buffer = reuse_buffers.pop() <span class="kw">if</span> reuse_buffers <span class="kw">else</span> bytearray()
+    buffers = encoder.encode_into(outputs, buffer)
+    tracker = sockets[client_index].send_multipart(buffers, copy=<span class="kw">False</span>, track=<span class="kw">True</span>)</code></pre>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 6: CLIENT VARIANTS                                              -->
+<!-- ====================================================================== -->
+<section id="clients">
+<h2><span class="section-num">#6</span> Client Variants: From In-Process to Multi-Engine Data Parallel</h2>
+
+<h3>6.1 Client Selection Factory</h3>
+
+<span class="src-file">vllm/v1/engine/core_client.py : EngineCoreClient.make_client()</span>
+<pre><code><span class="dec">@staticmethod</span>
+<span class="kw">def</span> <span class="fn">make_client</span>(multiprocess_mode, asyncio_mode, vllm_config, executor_class, log_stats):
+    <span class="kw">if</span> multiprocess_mode <span class="kw">and</span> asyncio_mode:
+        <span class="kw">return</span> <span class="cls">EngineCoreClient</span>.make_async_mp_client(vllm_config, executor_class, log_stats)
+    <span class="kw">if</span> multiprocess_mode <span class="kw">and not</span> asyncio_mode:
+        <span class="kw">return</span> <span class="cls">SyncMPClient</span>(vllm_config, executor_class, log_stats)
+    <span class="kw">return</span> <span class="cls">InprocClient</span>(vllm_config, executor_class, log_stats)
+
+<span class="dec">@staticmethod</span>
+<span class="kw">def</span> <span class="fn">make_async_mp_client</span>(vllm_config, executor_class, log_stats, ...):
+    parallel_config = vllm_config.parallel_config
+    <span class="kw">if</span> parallel_config.data_parallel_size > <span class="num">1</span>:
+        <span class="kw">if</span> parallel_config.data_parallel_external_lb:
+            <span class="kw">return</span> <span class="cls">DPAsyncMPClient</span>(...)   <span class="cmt"># External load balancer</span>
+        <span class="kw">return</span> <span class="cls">DPLBAsyncMPClient</span>(...)     <span class="cmt"># Internal load balancer</span>
+    <span class="kw">return</span> <span class="cls">AsyncMPClient</span>(...)</code></pre>
+
+<h3>6.2 Client Comparison</h3>
+
+<table>
+<thead>
+<tr><th>Client</th><th>Process Model</th><th>Async</th><th>DP Support</th><th>Use Case</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>InprocClient</code></td>
+  <td>Single process</td>
+  <td>No</td>
+  <td>No</td>
+  <td>V0-compatible <code>LLMEngine</code></td>
+</tr>
+<tr>
+  <td><code>SyncMPClient</code></td>
+  <td>Multi-process</td>
+  <td>No</td>
+  <td>Basic</td>
+  <td>Sync <code>LLM</code> with background EngineCore</td>
+</tr>
+<tr>
+  <td><code>AsyncMPClient</code></td>
+  <td>Multi-process</td>
+  <td>Yes</td>
+  <td>No (DP=1)</td>
+  <td><code>AsyncLLM</code> / API server</td>
+</tr>
+<tr>
+  <td><code>DPAsyncMPClient</code></td>
+  <td>Multi-process</td>
+  <td>Yes</td>
+  <td>External LB</td>
+  <td>DP with external load balancer</td>
+</tr>
+<tr>
+  <td><code>DPLBAsyncMPClient</code></td>
+  <td>Multi-process</td>
+  <td>Yes</td>
+  <td>Internal LB</td>
+  <td>DP with built-in load balancing</td>
+</tr>
+</tbody>
+</table>
+
+<h3>6.3 InprocClient: Direct Function Calls</h3>
+
+<p>The simplest variant -- no IPC, no threads. The EngineCore runs in the same process:</p>
+
+<span class="src-file">vllm/v1/engine/core_client.py : InprocClient</span>
+<pre><code><span class="kw">class</span> <span class="cls">InprocClient</span>(<span class="cls">EngineCoreClient</span>):
+    <span class="str">"""InprocClient: client for in-process EngineCore.
+    Intended for use in LLMEngine for V0-style add_request() and step()
+        EngineCore setup in this process (no busy loop)."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, *args, **kwargs):
+        <span class="self">self</span>.engine_core = <span class="cls">EngineCore</span>(*args, **kwargs)
+
+    <span class="kw">def</span> <span class="fn">get_output</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">EngineCoreOutputs</span>:
+        outputs, model_executed = <span class="self">self</span>.engine_core.step_fn()
+        <span class="self">self</span>.engine_core.post_step(model_executed=model_executed)
+        <span class="kw">return</span> outputs <span class="kw">and</span> outputs.get(<span class="num">0</span>) <span class="kw">or</span> <span class="cls">EngineCoreOutputs</span>()
+
+    <span class="kw">def</span> <span class="fn">add_request</span>(<span class="self">self</span>, request):
+        req, request_wave = <span class="self">self</span>.engine_core.preprocess_add_request(request)
+        <span class="self">self</span>.engine_core.add_request(req, request_wave)</code></pre>
+
+<h3>6.4 DPLBAsyncMPClient: Internal Load Balancing</h3>
+
+<p>The most sophisticated variant implements load-balanced request routing across multiple engine processes:</p>
+
+<span class="src-file">vllm/v1/engine/core_client.py : DPLBAsyncMPClient.get_core_engine_for_request()</span>
+<pre><code><span class="kw">def</span> <span class="fn">get_core_engine_for_request</span>(<span class="self">self</span>, request):
+    <span class="cmt"># Check for explicit DP rank assignment or late-interaction routing.</span>
+    <span class="kw">if</span> (eng_index := request.data_parallel_rank) <span class="kw">is None and</span> (
+        eng_index := get_late_interaction_engine_index(...)
+    ) <span class="kw">is None</span>:
+        current_counts = <span class="self">self</span>.lb_engines
+        min_score = sys.maxsize
+        eng_index = <span class="num">0</span>
+        <span class="kw">for</span> i <span class="kw">in</span> range(num_engines):
+            idx = (<span class="self">self</span>.eng_start_index + i) % num_engines
+            waiting, running = current_counts[idx]
+            score = waiting * <span class="num">4</span> + running   <span class="cmt"># Weighted score: prioritize empty queues</span>
+            <span class="kw">if</span> score < min_score:
+                min_score = score
+                eng_index = idx
+        <span class="cmt"># Increment local waiting count for better balancing</span>
+        <span class="cmt"># between stats updates from the coordinator (every ~100ms).</span>
+        current_counts[eng_index][<span class="num">0</span>] += <span class="self">self</span>.client_count
+
+    chosen_engine = <span class="self">self</span>.core_engines[eng_index]
+    <span class="self">self</span>.reqs_in_flight[request.request_id] = chosen_engine
+    <span class="kw">return</span> chosen_engine</code></pre>
+
+<div class="callout callout-green">
+  <strong>Load-balancing formula:</strong> <code>score = waiting * 4 + running</code>. The 4x weight on waiting requests means requests are steered towards engines with shorter queues. Between coordinator updates (~100ms), the client also locally increments the chosen engine's count to prevent burst routing.
+</div>
+
+<div class="diagram-container">
+<div class="diagram-title">Data-Parallel Client Architecture (DPLBAsyncMPClient)</div>
+<svg viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg">
+  <!-- API Server -->
+  <rect x="30" y="30" width="220" height="120" rx="10" fill="#1a2744" stroke="#54a0ff" stroke-width="2"/>
+  <text x="140" y="55" text-anchor="middle" class="label-bold" fill="#54a0ff">API Server</text>
+  <rect x="50" y="70" width="180" height="30" rx="6" fill="#0f3460" stroke="#54a0ff" stroke-width="1"/>
+  <text x="140" y="90" text-anchor="middle" class="label-sm" fill="#54a0ff">DPLBAsyncMPClient</text>
+  <rect x="50" y="110" width="180" height="30" rx="6" fill="#0f3460" stroke="#f5a623" stroke-width="1"/>
+  <text x="140" y="130" text-anchor="middle" class="label-sm" fill="#f5a623">LB: score = wait*4 + run</text>
+
+  <!-- ROUTER -->
+  <rect x="280" y="70" width="80" height="60" rx="8" fill="#0f3460" stroke="#e94560" stroke-width="2"/>
+  <text x="320" y="98" text-anchor="middle" class="label-sm" fill="#e94560">ZMQ</text>
+  <text x="320" y="115" text-anchor="middle" class="label-sm" fill="#e94560">ROUTER</text>
+
+  <path d="M250 100 L280 100" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+
+  <!-- Engine 0 -->
+  <rect x="410" y="20" width="200" height="80" rx="10" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="510" y="45" text-anchor="middle" class="label-bold" fill="#2ecc71">EngineCore DP=0</text>
+  <text x="510" y="68" text-anchor="middle" class="label-sm">GPU Workers (TP group 0)</text>
+  <text x="510" y="88" text-anchor="middle" class="label-sm" fill="#f5a623">identity: 0x0000</text>
+
+  <!-- Engine 1 -->
+  <rect x="410" y="120" width="200" height="80" rx="10" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="510" y="145" text-anchor="middle" class="label-bold" fill="#2ecc71">EngineCore DP=1</text>
+  <text x="510" y="168" text-anchor="middle" class="label-sm">GPU Workers (TP group 1)</text>
+  <text x="510" y="188" text-anchor="middle" class="label-sm" fill="#f5a623">identity: 0x0100</text>
+
+  <!-- Engine N -->
+  <rect x="410" y="220" width="200" height="80" rx="10" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="510" y="245" text-anchor="middle" class="label-bold" fill="#2ecc71">EngineCore DP=N</text>
+  <text x="510" y="268" text-anchor="middle" class="label-sm">GPU Workers (TP group N)</text>
+  <text x="510" y="288" text-anchor="middle" class="label-sm" fill="#f5a623">identity: N bytes LE</text>
+
+  <!-- Arrows ROUTER to engines -->
+  <path d="M360 85 L410 55" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <path d="M360 100 L410 155" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <path d="M360 115 L410 255" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Coordinator -->
+  <rect x="660" y="120" width="200" height="110" rx="10" fill="#1a2744" stroke="#9b59b6" stroke-width="2"/>
+  <text x="760" y="148" text-anchor="middle" class="label-bold" fill="#9b59b6">DPCoordinator</text>
+  <text x="760" y="170" text-anchor="middle" class="label-sm">Wave tracking</text>
+  <text x="760" y="188" text-anchor="middle" class="label-sm">Stats aggregation</text>
+  <text x="760" y="206" text-anchor="middle" class="label-sm">Engine wake-up</text>
+
+  <!-- Coordinator arrows -->
+  <path d="M610 60 L660 155" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+  <path d="M610 160 L660 175" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+  <path d="M610 260 L660 195" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+
+  <path d="M660 145 L250 105" stroke="#f5a623" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-amber)"/>
+  <text x="450" y="340" text-anchor="middle" class="label-sm" fill="#f5a623">Stats publish: (counts[], wave, running)</text>
+</svg>
+</div>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 7: OUTPUT PROCESSOR                                             -->
+<!-- ====================================================================== -->
+<section id="output-proc">
+<h2><span class="section-num">#7</span> OutputProcessor: Detokenization and Stop Checking</h2>
+
+<p>The <code>OutputProcessor</code> lives in the frontend process and converts raw <code>EngineCoreOutput</code> (token IDs) into user-facing <code>RequestOutput</code> objects with decoded text.</p>
+
+<h3>7.1 The Main Processing Loop</h3>
+
+<span class="src-file">vllm/v1/engine/output_processor.py : OutputProcessor.process_outputs()</span>
+<pre><code><span class="kw">def</span> <span class="fn">process_outputs</span>(<span class="self">self</span>, engine_core_outputs, engine_core_timestamp=<span class="kw">None</span>, iteration_stats=<span class="kw">None</span>):
+    <span class="str">"""Process the EngineCoreOutputs:
+    1) Compute stats for logging
+    2) Detokenize
+    3) Create and handle RequestOutput objects:
+       - If queue exists (AsyncLLM): put into queue for generate()
+       - If no queue (LLMEngine): return list of RequestOutputs
+
+    NOTE: vLLM V1 minimizes the number of python loops over the full
+    batch. This is the ONLY function that loops over EngineCoreOutputs."""</span>
+
+    request_outputs = []
+    reqs_to_abort = []
+    <span class="kw">for</span> engine_core_output <span class="kw">in</span> engine_core_outputs:
+        req_state = <span class="self">self</span>.request_states.get(engine_core_output.request_id)
+        <span class="kw">if</span> req_state <span class="kw">is None</span>:
+            <span class="kw">continue</span>  <span class="cmt"># Ignore output for already-aborted request</span>
+
+        <span class="cmt"># 1) Compute stats for this iteration.</span>
+        <span class="self">self</span>._update_stats_from_output(req_state, engine_core_output, ...)
+
+        <span class="cmt"># 2) Detokenize the token ids into text and perform stop checks.</span>
+        <span class="kw">if</span> pooling_output <span class="kw">is None</span>:
+            stop_string = req_state.detokenizer.update(
+                new_token_ids, finish_reason == <span class="cls">FinishReason</span>.STOP
+            )
+            <span class="kw">if</span> stop_string:
+                finish_reason = <span class="cls">FinishReason</span>.STOP
+                stop_reason = stop_string
+
+            <span class="cmt"># 3) Compute sample and prompt logprobs if required.</span>
+            req_state.logprobs_processor.update_from_output(engine_core_output)
+
+        <span class="cmt"># 4) Create and handle RequestOutput objects.</span>
+        <span class="kw">if</span> request_output := req_state.make_request_output(...):
+            <span class="kw">if</span> req_state.queue <span class="kw">is not None</span>:
+                req_state.queue.put(request_output)  <span class="cmt"># AsyncLLM path</span>
+            <span class="kw">else</span>:
+                request_outputs.append(request_output)  <span class="cmt"># LLMEngine path</span>
+
+        <span class="cmt"># 5) Free completed requests.</span>
+        <span class="kw">if</span> finish_reason <span class="kw">is not None</span>:
+            <span class="kw">if not</span> engine_core_output.finished:
+                <span class="cmt"># Detokenizer detected stop string -- abort in EngineCore</span>
+                reqs_to_abort.append(req_id)</code></pre>
+
+<div class="callout callout-red">
+  <strong>Critical design note:</strong> The comment in the source code emphasizes that this is the <em>only</em> function that loops over <code>EngineCoreOutputs</code>. This minimizes Python-level overhead on the hot path -- all per-request operations (detokenization, logprobs, stats, output creation) are done in a single pass.
+</div>
+
+<h3>7.2 RequestOutputCollector: Async Event-Driven Streaming</h3>
+
+<p>For <code>AsyncLLM</code>, each request has a <code>RequestOutputCollector</code> that uses <code>asyncio.Event</code> for backpressure:</p>
+
+<span class="src-file">vllm/v1/engine/output_processor.py : RequestOutputCollector</span>
+<pre><code><span class="kw">class</span> <span class="cls">RequestOutputCollector</span>:
+    <span class="str">"""Collects streamed RequestOutputs per request.
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, output_kind, request_id):
+        <span class="self">self</span>.aggregate = output_kind == <span class="cls">RequestOutputKind</span>.DELTA
+        <span class="self">self</span>.output = <span class="kw">None</span>
+        <span class="self">self</span>.ready = asyncio.Event()
+
+    <span class="kw">def</span> <span class="fn">put</span>(<span class="self">self</span>, output):
+        <span class="str">"""Non-blocking put operation."""</span>
+        <span class="kw">if</span> <span class="self">self</span>.output <span class="kw">is None or</span> isinstance(output, <span class="cls">Exception</span>):
+            <span class="self">self</span>.output = output
+            <span class="self">self</span>.ready.set()
+        <span class="kw">elif</span> isinstance(<span class="self">self</span>.output, <span class="cls">RequestOutput</span>):
+            <span class="cmt"># Merge outputs if producer ahead of consumer</span>
+            <span class="self">self</span>.output.add(output, aggregate=<span class="self">self</span>.aggregate)
+
+    <span class="kw">async def</span> <span class="fn">get</span>(<span class="self">self</span>):
+        <span class="str">"""Get operation blocks on put event."""</span>
+        <span class="kw">while</span> (<span class="self">self</span>.output) <span class="kw">is None</span>:
+            <span class="kw">await</span> <span class="self">self</span>.ready.wait()
+        output = <span class="self">self</span>.output
+        <span class="self">self</span>.output = <span class="kw">None</span>
+        <span class="self">self</span>.ready.clear()
+        <span class="kw">if</span> isinstance(output, <span class="cls">Exception</span>):
+            <span class="kw">raise</span> output
+        <span class="kw">return</span> output</code></pre>
+
+<h3>7.3 How AsyncLLM Ties It Together</h3>
+
+<p>The <code>AsyncLLM</code> frontend initializes both an <code>InputProcessor</code> and <code>OutputProcessor</code> in the same process, and delegates actual GPU computation to the <code>EngineCore</code> via the <code>AsyncMPClient</code>:</p>
+
+<span class="src-file">vllm/v1/engine/async_llm.py : AsyncLLM.__init__()</span>
+<pre><code><span class="cmt"># Convert EngineInput --> EngineCoreRequest.</span>
+<span class="self">self</span>.input_processor = <span class="cls">InputProcessor</span>(<span class="self">self</span>.vllm_config, renderer)
+
+<span class="cmt"># Converts EngineCoreOutputs --> RequestOutput.</span>
+<span class="self">self</span>.output_processor = <span class="cls">OutputProcessor</span>(
+    renderer.tokenizer,
+    log_stats=<span class="self">self</span>.log_stats,
+    stream_interval=<span class="self">self</span>.vllm_config.scheduler_config.stream_interval,
+)
+
+<span class="cmt"># EngineCore (starts the engine in background process).</span>
+<span class="self">self</span>.engine_core = <span class="cls">EngineCoreClient</span>.make_async_mp_client(
+    vllm_config=vllm_config,
+    executor_class=executor_class,
+    log_stats=<span class="self">self</span>.log_stats,
+)</code></pre>
+
+<h3>7.4 The LLMEngine.step() Flow (Sync Path)</h3>
+
+<span class="src-file">vllm/v1/engine/llm_engine.py : LLMEngine.step()</span>
+<pre><code><span class="kw">def</span> <span class="fn">step</span>(<span class="self">self</span>):
+    <span class="cmt"># 1) Get EngineCoreOutput from the EngineCore.</span>
+    outputs = <span class="self">self</span>.engine_core.get_output()
+
+    <span class="cmt"># 2) Process EngineCoreOutputs.</span>
+    iteration_stats = <span class="cls">IterationStats</span>() <span class="kw">if</span> <span class="self">self</span>.log_stats <span class="kw">else None</span>
+    processed_outputs = <span class="self">self</span>.output_processor.process_outputs(
+        outputs.outputs,
+        engine_core_timestamp=outputs.timestamp,
+        iteration_stats=iteration_stats,
+    )
+    <span class="self">self</span>.output_processor.update_scheduler_stats(outputs.scheduler_stats)
+
+    <span class="cmt"># 3) Abort any reqs that finished due to stop strings.</span>
+    <span class="self">self</span>.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+
+    <span class="kw">return</span> processed_outputs.request_outputs</code></pre>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 8: DP COORDINATOR                                               -->
+<!-- ====================================================================== -->
+<section id="dp-coord">
+<h2><span class="section-num">#8</span> Data-Parallel Coordination via DPCoordinator</h2>
+
+<p>For data-parallel deployments (DP > 1), vLLM runs a <code>DPCoordinator</code> in its own process. It aggregates queue statistics from all engine processes and manages the "request wave" protocol that coordinates their running/paused state.</p>
+
+<h3>8.1 Coordinator Architecture</h3>
+
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinator.__init__()</span>
+<pre><code><span class="kw">class</span> <span class="cls">DPCoordinator</span>:
+    <span class="str">"""Coordinator process used for data-parallel deployments (DP>1).
+    * Collects stats from each DP engine (waiting and running queue lengths)
+    * Publishes stats to all front-ends for load-balancing decisions
+    * Keeps track of the current DP "request wave" number
+    * Broadcasts START_DP_WAVE messages to engines"""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, parallel_config, enable_wave_coordination=<span class="kw">True</span>):
+        dp_size = parallel_config.data_parallel_size
+        context = get_mp_context()
+        parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=<span class="kw">False</span>)
+        <span class="self">self</span>.proc = context.Process(
+            target=<span class="cls">DPCoordinatorProc</span>.run_coordinator,
+            name=<span class="str">"VLLM_DP_Coordinator"</span>,
+            kwargs={
+                <span class="str">"engine_count"</span>: parallel_config.data_parallel_size,
+                <span class="str">"front_publish_address"</span>: front_publish_address,
+                <span class="str">"back_output_address"</span>: back_output_address,
+                <span class="str">"back_publish_address"</span>: back_publish_address,
+            },
+            daemon=<span class="kw">True</span>,
+        )
+        <span class="self">self</span>.proc.start()</code></pre>
+
+<h3>8.2 Three-Socket ZMQ Design</h3>
+
+<p>The coordinator process uses three ZMQ sockets:</p>
+
+<div class="grid-2">
+<div class="card">
+  <div class="card-header">
+    <div class="card-icon" style="background:rgba(84,160,255,0.2); color:var(--blue);">F</div>
+    publish_front (XPUB)
+  </div>
+  <p>Publishes aggregated stats and wave state to all frontend API server processes. Frontends subscribe via XSUB pattern.</p>
+</div>
+<div class="card">
+  <div class="card-header">
+    <div class="card-icon" style="background:rgba(46,204,113,0.2); color:var(--green);">B</div>
+    output_back (PULL) + publish_back (XPUB)
+  </div>
+  <p><strong>PULL</strong>: Receives stats and wave notifications from engine processes. <strong>XPUB</strong>: Broadcasts START_DP_WAVE messages to all engines.</p>
+</div>
+</div>
+
+<h3>8.3 Wave Protocol</h3>
+
+<p>The "request wave" is a coordination mechanism for MoE models with data parallelism, where all engines must synchronize:</p>
+
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket()</span>
+<pre><code><span class="cmt"># Wave coordination: handle wave completion and start notifications</span>
+<span class="kw">if</span> (wave := outputs.wave_complete) <span class="kw">is not None</span>:
+    <span class="cmt"># Notification from rank 0 engine that we've moved into</span>
+    <span class="cmt"># the global paused state (engines_running==False).</span>
+    <span class="kw">if</span> current_wave <= wave:
+        new_wave = wave + <span class="num">1</span>
+        logger.debug(<span class="str">"Moving DP wave from %d to %d."</span>, current_wave, new_wave)
+        current_wave = new_wave
+        engines_running = <span class="kw">False</span>
+        wave_state_changed = <span class="kw">True</span>
+<span class="kw">elif</span> (wave := outputs.start_wave) <span class="kw">is not None</span>:
+    <span class="cmt"># Engine received request for a non-current wave --</span>
+    <span class="cmt"># ensure other engines progress to next wave.</span>
+    engines_running = <span class="kw">True</span>
+    wave_state_changed = <span class="kw">True</span>
+    <span class="self">self</span>._send_start_wave(publish_back, wave, eng_index)</code></pre>
+
+<h3>8.4 Stats Aggregation and Publishing</h3>
+
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc</span>
+<pre><code><span class="cmt"># Engines send their stats to the coordinator.</span>
+<span class="kw">if</span> scheduler_stats:
+    stats = <span class="self">self</span>.engines[eng_index].request_counts
+    stats[<span class="num">0</span>] = scheduler_stats.num_waiting_reqs
+    stats[<span class="num">1</span>] = scheduler_stats.num_running_reqs
+    stats_changed = <span class="kw">True</span>
+
+<span class="cmt"># Publish to front-ends at interval (default 100ms).</span>
+to_publish = (engine_req_counts_list, current_wave, engines_running)
+publish_front.send(msgspec.msgpack.encode(to_publish))</code></pre>
+
+<div class="diagram-container">
+<div class="diagram-title">DP Coordinator Message Flow</div>
+<svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+  <!-- Engines -->
+  <rect x="30" y="30" width="150" height="60" rx="8" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="105" y="55" text-anchor="middle" class="label" fill="#2ecc71">Engine DP=0</text>
+  <text x="105" y="75" text-anchor="middle" class="label-sm">stats, wave_complete</text>
+
+  <rect x="30" y="110" width="150" height="60" rx="8" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="105" y="135" text-anchor="middle" class="label" fill="#2ecc71">Engine DP=1</text>
+  <text x="105" y="155" text-anchor="middle" class="label-sm">stats, start_wave</text>
+
+  <rect x="30" y="190" width="150" height="60" rx="8" fill="#1a2744" stroke="#2ecc71" stroke-width="1.5"/>
+  <text x="105" y="215" text-anchor="middle" class="label" fill="#2ecc71">Engine DP=N</text>
+  <text x="105" y="235" text-anchor="middle" class="label-sm">stats</text>
+
+  <!-- PUSH arrows to coordinator -->
+  <path d="M180 60 L320 130" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <path d="M180 140 L320 145" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <path d="M180 220 L320 160" stroke="#2ecc71" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="250" y="105" text-anchor="middle" class="label-sm" fill="#2ecc71">PUSH</text>
+
+  <!-- Coordinator -->
+  <rect x="320" y="80" width="200" height="130" rx="12" fill="#0f3460" stroke="#9b59b6" stroke-width="2.5"/>
+  <text x="420" y="110" text-anchor="middle" class="label-bold" fill="#9b59b6">DPCoordinator</text>
+  <text x="420" y="135" text-anchor="middle" class="label-sm">PULL: output_back</text>
+  <text x="420" y="155" text-anchor="middle" class="label-sm">XPUB: publish_back</text>
+  <text x="420" y="175" text-anchor="middle" class="label-sm">XPUB: publish_front</text>
+  <text x="420" y="195" text-anchor="middle" class="label-sm" fill="#f5a623">Wave: N, Running: T/F</text>
+
+  <!-- XPUB back to engines -->
+  <path d="M320 170 L180 65" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+  <path d="M320 170 L180 145" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+  <path d="M320 170 L180 225" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-purple)"/>
+  <text x="220" y="185" text-anchor="middle" class="label-sm" fill="#9b59b6">START_DP_WAVE</text>
+
+  <!-- API Servers -->
+  <rect x="610" y="50" width="170" height="55" rx="8" fill="#1a2744" stroke="#54a0ff" stroke-width="1.5"/>
+  <text x="695" y="73" text-anchor="middle" class="label" fill="#54a0ff">API Server 0</text>
+  <text x="695" y="93" text-anchor="middle" class="label-sm">XSUB subscriber</text>
+
+  <rect x="610" y="125" width="170" height="55" rx="8" fill="#1a2744" stroke="#54a0ff" stroke-width="1.5"/>
+  <text x="695" y="148" text-anchor="middle" class="label" fill="#54a0ff">API Server 1</text>
+  <text x="695" y="168" text-anchor="middle" class="label-sm">XSUB subscriber</text>
+
+  <!-- XPUB front to API servers -->
+  <path d="M520 120 L610 80" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <path d="M520 150 L610 152" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <text x="560" y="95" text-anchor="middle" class="label-sm" fill="#f5a623">(counts[], wave, running)</text>
+
+  <!-- New request from API server back to coordinator -->
+  <path d="M610 165 L520 175" stroke="#e94560" stroke-width="1.5" stroke-dasharray="3,2" marker-end="url(#arrow-red)"/>
+  <text x="570" y="200" text-anchor="middle" class="label-sm" fill="#e94560">FIRST_REQ</text>
+
+  <!-- Legend -->
+  <rect x="580" y="230" width="250" height="60" rx="6" fill="rgba(255,255,255,0.03)" stroke="var(--border)" stroke-width="1"/>
+  <text x="590" y="250" class="label-sm" fill="#2ecc71">--- PUSH: Engine stats to coordinator</text>
+  <text x="590" y="268" class="label-sm" fill="#f5a623">--- XPUB: Stats to API servers (100ms)</text>
+  <text x="590" y="286" class="label-sm" fill="#9b59b6">--- XPUB: Wave broadcasts to engines</text>
+</svg>
+</div>
+
+<h3>8.5 Elastic EP Scaling</h3>
+
+<p>The coordinator also supports dynamic scaling of engine processes. When a <code>SCALE_ELASTIC_EP</code> message is received, it adds or removes <code>EngineState</code> entries:</p>
+
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc</span>
+<pre><code><span class="kw">if</span> decoded[<span class="num">0</span>] == <span class="str">"SCALE_ELASTIC_EP"</span>:
+    new_engine_count = decoded[<span class="num">1</span>]
+    current_count = len(<span class="self">self</span>.engines)
+    <span class="kw">if</span> new_engine_count > current_count:
+        <span class="kw">for</span> _ <span class="kw">in</span> range(new_engine_count - current_count):
+            <span class="self">self</span>.engines.append(<span class="cls">EngineState</span>())
+        logger.info(<span class="str">"DPCoordinator scaled up from %s to %s engines"</span>,
+                    current_count, new_engine_count)
+    <span class="kw">else</span>:
+        <span class="self">self</span>.engines = <span class="self">self</span>.engines[:new_engine_count]
+        logger.info(<span class="str">"DPCoordinator scaled down from %s to %s engines"</span>,
+                    current_count, new_engine_count)</code></pre>
+</section>
+
+<!-- ====================================================================== -->
+<!-- SECTION 9: SUMMARY                                                      -->
+<!-- ====================================================================== -->
+<section>
+<h2><span class="section-num">#9</span> Summary: End-to-End Request Flow</h2>
+
+<div class="diagram-container">
+<div class="diagram-title">Complete Request Lifecycle</div>
+<svg viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+  <!-- Steps -->
+  <rect x="30" y="30" width="170" height="55" rx="8" fill="#0f3460" stroke="#54a0ff" stroke-width="2"/>
+  <text x="115" y="52" text-anchor="middle" class="label-sm" fill="#54a0ff">Step 1</text>
+  <text x="115" y="72" text-anchor="middle" class="label-bold">API Request</text>
+
+  <path d="M200 57 L230 57" stroke="#54a0ff" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <rect x="230" y="30" width="170" height="55" rx="8" fill="#0f3460" stroke="#2ecc71" stroke-width="2"/>
+  <text x="315" y="52" text-anchor="middle" class="label-sm" fill="#2ecc71">Step 2</text>
+  <text x="315" y="72" text-anchor="middle" class="label-bold">InputProcessor</text>
+
+  <path d="M400 57 L430 57" stroke="#2ecc71" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <rect x="430" y="30" width="170" height="55" rx="8" fill="#0f3460" stroke="#e94560" stroke-width="2"/>
+  <text x="515" y="52" text-anchor="middle" class="label-sm" fill="#e94560">Step 3</text>
+  <text x="515" y="72" text-anchor="middle" class="label-bold">MsgpackEncoder</text>
+
+  <path d="M600 57 L630 57" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+
+  <rect x="630" y="30" width="170" height="55" rx="8" fill="#0f3460" stroke="#9b59b6" stroke-width="2"/>
+  <text x="715" y="52" text-anchor="middle" class="label-sm" fill="#9b59b6">Step 4</text>
+  <text x="715" y="72" text-anchor="middle" class="label-bold">ZMQ Send</text>
+
+  <!-- Row 2 -->
+  <path d="M715 85 L715 120" stroke="#9b59b6" stroke-width="2" marker-end="url(#arrow-purple)"/>
+
+  <rect x="630" y="120" width="170" height="55" rx="8" fill="#1a2744" stroke="#f5a623" stroke-width="2"/>
+  <text x="715" y="142" text-anchor="middle" class="label-sm" fill="#f5a623">Step 5</text>
+  <text x="715" y="162" text-anchor="middle" class="label-bold">Input Thread</text>
+
+  <path d="M630 147 L600 147" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+
+  <rect x="430" y="120" width="170" height="55" rx="8" fill="#1a2744" stroke="#00d2d3" stroke-width="2"/>
+  <text x="515" y="142" text-anchor="middle" class="label-sm" fill="#00d2d3">Step 6</text>
+  <text x="515" y="162" text-anchor="middle" class="label-bold">MsgpackDecoder</text>
+
+  <path d="M430 147 L400 147" stroke="#00d2d3" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+
+  <rect x="230" y="120" width="170" height="55" rx="8" fill="#1a2744" stroke="#2ecc71" stroke-width="2"/>
+  <text x="315" y="142" text-anchor="middle" class="label-sm" fill="#2ecc71">Step 7</text>
+  <text x="315" y="162" text-anchor="middle" class="label-bold">input_queue</text>
+
+  <!-- Row 3: Engine Core -->
+  <path d="M315 175 L315 210" stroke="#2ecc71" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <rect x="130" y="210" width="540" height="55" rx="10" fill="rgba(233,69,96,0.12)" stroke="#e94560" stroke-width="2"/>
+  <text x="400" y="232" text-anchor="middle" class="label-sm" fill="#e94560">Step 8 -- EngineCore Busy Loop (Main Thread)</text>
+  <text x="400" y="252" text-anchor="middle" class="label-bold">schedule() &rarr; execute_model() &rarr; update_from_output()</text>
+
+  <!-- Row 4: Output path -->
+  <path d="M400 265 L400 295" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+
+  <rect x="330" y="295" width="140" height="45" rx="8" fill="#1a2744" stroke="#f5a623" stroke-width="2"/>
+  <text x="400" y="322" text-anchor="middle" class="label-bold" fill="#f5a623">output_queue</text>
+
+  <path d="M470 317 L520 317" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+
+  <rect x="520" y="295" width="150" height="45" rx="8" fill="#1a2744" stroke="#9b59b6" stroke-width="2"/>
+  <text x="595" y="315" text-anchor="middle" class="label-sm" fill="#9b59b6">Step 9</text>
+  <text x="595" y="332" text-anchor="middle" class="label-bold">Output Thread</text>
+
+  <path d="M670 317 L700 317" stroke="#9b59b6" stroke-width="2" marker-end="url(#arrow-purple)"/>
+
+  <rect x="700" y="295" width="130" height="45" rx="8" fill="#1a2744" stroke="#e94560" stroke-width="2"/>
+  <text x="765" y="315" text-anchor="middle" class="label-sm" fill="#e94560">Step 10</text>
+  <text x="765" y="332" text-anchor="middle" class="label-bold">ZMQ Push</text>
+
+  <!-- Row 5: Frontend output processing -->
+  <path d="M765 340 L765 370" stroke="#e94560" stroke-width="2" marker-end="url(#arrow-red)"/>
+
+  <rect x="580" y="370" width="220" height="40" rx="8" fill="#0f3460" stroke="#f5a623" stroke-width="2"/>
+  <text x="690" y="395" text-anchor="middle" class="label-bold" fill="#f5a623">OutputProcessor.process_outputs()</text>
+
+  <path d="M580 390 L430 390" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow-amber)"/>
+
+  <rect x="250" y="370" width="180" height="40" rx="8" fill="#0f3460" stroke="#2ecc71" stroke-width="2"/>
+  <text x="340" y="395" text-anchor="middle" class="label-bold" fill="#2ecc71">Detokenize + Stream</text>
+
+  <path d="M250 390 L120 390" stroke="#2ecc71" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <rect x="20" y="370" width="100" height="40" rx="8" fill="#0f3460" stroke="#54a0ff" stroke-width="2"/>
+  <text x="70" y="395" text-anchor="middle" class="label-bold" fill="#54a0ff">SSE Stream</text>
+
+  <!-- Labels for process boundaries -->
+  <line x1="10" y1="100" x2="850" y2="100" stroke="var(--border)" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="870" y="90" class="label-sm" fill="var(--text-muted)" text-anchor="end">Frontend Process</text>
+  <text x="870" y="115" class="label-sm" fill="var(--text-muted)" text-anchor="end">EngineCore Process</text>
+
+  <line x1="10" y1="360" x2="850" y2="360" stroke="var(--border)" stroke-width="1" stroke-dasharray="8,4"/>
+  <text x="870" y="375" class="label-sm" fill="var(--text-muted)" text-anchor="end">Frontend Process</text>
+</svg>
+</div>
+
+<div class="grid-2">
+<div class="card">
+  <div class="card-header">
+    <div class="card-icon" style="background:rgba(233,69,96,0.2); color:var(--primary);">K</div>
+    Key Design Decisions
+  </div>
+  <ul>
+    <li><strong>Process isolation</strong>: GPU computation in separate process avoids GIL contention with Python-heavy tokenization</li>
+    <li><strong>I/O threads with queues</strong>: GIL-releasing ZMQ I/O overlaps with GPU execution</li>
+    <li><strong>Single-pass output processing</strong>: All per-request work done in one loop iteration</li>
+    <li><strong>Zero-copy serialization</strong>: Large tensors sent as separate ZMQ frames, not copied into msgpack buffer</li>
+  </ul>
+</div>
+<div class="card">
+  <div class="card-header">
+    <div class="card-icon" style="background:rgba(46,204,113,0.2); color:var(--green);">P</div>
+    Performance Characteristics
+  </div>
+  <ul>
+    <li><strong>Input preprocessing overlap</strong>: MM cache lookup, block hashing, grammar init run parallel to GPU</li>
+    <li><strong>Buffer reuse</strong>: Output thread maintains a pool of reusable bytearrays</li>
+    <li><strong>Coordinator stats at 100ms</strong>: Low-overhead DP load balancing without per-request synchronization</li>
+    <li><strong>Batch queue</strong>: Pipeline parallelism eliminates bubble via async scheduling</li>
+  </ul>
+</div>
+</div>
+
+<div class="callout callout-blue">
+  <strong>Source files covered:</strong><br>
+  <code>vllm/v1/engine/core.py</code> -- EngineCore, EngineCoreProc, DPEngineCoreProc (busy loop, I/O threads, handshake)<br>
+  <code>vllm/v1/engine/core_client.py</code> -- InprocClient, SyncMPClient, AsyncMPClient, DPAsyncMPClient, DPLBAsyncMPClient<br>
+  <code>vllm/v1/engine/async_llm.py</code> -- AsyncLLM frontend<br>
+  <code>vllm/v1/engine/llm_engine.py</code> -- LLMEngine sync frontend<br>
+  <code>vllm/v1/engine/output_processor.py</code> -- OutputProcessor, RequestState, RequestOutputCollector<br>
+  <code>vllm/v1/engine/coordinator.py</code> -- DPCoordinator, DPCoordinatorProc<br>
+  <code>vllm/v1/serial_utils.py</code> -- MsgpackEncoder, MsgpackDecoder
+</div>
+</section>
+
+</div><!-- /container -->
+
+<footer>
+  vLLM V1 EngineCore &amp; IPC Architecture -- Source Code Deep Dive
+</footer>
+
+</body>
+</html>

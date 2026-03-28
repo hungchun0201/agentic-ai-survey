@@ -1,0 +1,1558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Life of a Request in vLLM V1 -- End-to-End Deep Dive</title>
+<style>
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0b0e1a;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav.top-nav{position:sticky;top:0;z-index:1000;background:rgba(11,14,26,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(110,198,255,.12);padding:.6rem 1.5rem;display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap}
+nav.top-nav .brand{font-weight:700;font-size:1.05rem;color:#ff9f43;letter-spacing:.5px}
+nav.top-nav a{font-size:.85rem;padding:.25rem .5rem;border-radius:4px;transition:background .2s,color .2s}
+nav.top-nav a:hover{background:rgba(110,198,255,.12);color:#fff}
+nav.top-nav a.active{background:rgba(255,159,67,.15);color:#ff9f43}
+nav.top-nav .sep{color:#3a3f55}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#16213e 0%,#0f3460 50%,#1a1a40 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(110,198,255,.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero h1 span{background:linear-gradient(90deg,#6ec6ff,#ff9f43);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero .subtitle{font-size:1.2rem;color:#8fa4c0;max-width:720px;margin:0 auto 1.5rem;position:relative}
+.hero .badge{display:inline-block;background:rgba(255,159,67,.15);border:1px solid rgba(255,159,67,.3);color:#ffb74d;padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTION HEADINGS ===== */
+h2.section-title{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(110,198,255,.2);position:relative}
+h2.section-title::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+
+/* ===== CARDS ===== */
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(110,198,255,.1);border-radius:12px;padding:1.5rem 1.8rem;margin:1.2rem 0;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(110,198,255,.25);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.highlight-orange{border-left:4px solid #ff9f43}
+.card.highlight-blue{border-left:4px solid #6ec6ff}
+.card.highlight-green{border-left:4px solid #66bb6a}
+.card.highlight-purple{border-left:4px solid #b388ff}
+.card.highlight-red{border-left:4px solid #ef5350}
+
+/* ===== CALLOUT ===== */
+.callout{background:rgba(110,198,255,.06);border:1px solid rgba(110,198,255,.2);border-radius:8px;padding:1rem 1.4rem;margin:1rem 0;font-size:.93rem}
+.callout.warn{background:rgba(255,159,67,.06);border-color:rgba(255,159,67,.25)}
+.callout.key{background:rgba(102,187,106,.06);border-color:rgba(102,187,106,.25)}
+.callout strong{color:#fff}
+
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+.inline-code{background:rgba(110,198,255,.1);padding:.1em .4em;border-radius:4px;color:#89b4fa;font-size:.85em}
+
+/* Syntax highlighting */
+.kw{color:#cba6f7} /* keyword */
+.fn{color:#89b4fa} /* function */
+.cl{color:#f9e2af} /* class */
+.st{color:#a6e3a1} /* string */
+.cm{color:#6c7086;font-style:italic} /* comment */
+.op{color:#fab387} /* operator */
+.nb{color:#f38ba8} /* builtin */
+.nr{color:#fab387} /* number */
+.dc{color:#89dceb} /* decorator */
+.ty{color:#f9e2af} /* type */
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(110,198,255,.1);color:#6ec6ff;padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(110,198,255,.2)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== ARCHITECTURE DIAGRAM ===== */
+.arch-diagram{background:linear-gradient(135deg,#0d1117 0%,#161b22 100%);border:1px solid rgba(110,198,255,.15);border-radius:14px;padding:2rem;margin:2rem 0;overflow-x:auto}
+.arch-row{display:flex;align-items:stretch;justify-content:center;gap:1.2rem;margin:.8rem 0;flex-wrap:wrap}
+.arch-box{background:rgba(30,30,46,.8);border:2px solid;border-radius:10px;padding:.8rem 1rem;text-align:center;min-width:140px;position:relative;transition:transform .2s,box-shadow .2s}
+.arch-box:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.arch-box .box-title{font-weight:700;font-size:.85rem;margin-bottom:.3rem}
+.arch-box .box-detail{font-size:.72rem;color:#8fa4c0;line-height:1.4}
+.arch-box.api{border-color:#6ec6ff;background:linear-gradient(180deg,rgba(110,198,255,.08),rgba(30,30,46,.8))}
+.arch-box.api .box-title{color:#6ec6ff}
+.arch-box.engine{border-color:#ff9f43;background:linear-gradient(180deg,rgba(255,159,67,.08),rgba(30,30,46,.8))}
+.arch-box.engine .box-title{color:#ff9f43}
+.arch-box.gpu{border-color:#66bb6a;background:linear-gradient(180deg,rgba(102,187,106,.08),rgba(30,30,46,.8))}
+.arch-box.gpu .box-title{color:#66bb6a}
+.arch-box.ipc{border-color:#b388ff;background:linear-gradient(135deg,rgba(179,136,255,.1),rgba(30,30,46,.8));min-width:100px}
+.arch-box.ipc .box-title{color:#b388ff}
+.arch-box.data{border-color:#ef5350;background:linear-gradient(180deg,rgba(239,83,80,.06),rgba(30,30,46,.8));border-style:dashed}
+.arch-box.data .box-title{color:#ef5350;font-size:.75rem}
+
+.arch-arrow{display:flex;align-items:center;justify-content:center;color:#8fa4c0;font-size:1.3rem;min-width:30px;flex-shrink:0}
+.arch-arrow.down{writing-mode:vertical-rl;margin:.3rem auto;font-size:1rem}
+.arch-arrow .label{font-size:.65rem;color:#6c7086;display:block;margin-top:.1rem}
+.arch-label{text-align:center;font-size:.75rem;color:#6c7086;margin:.3rem 0;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+.process-badge{display:inline-block;padding:.15rem .5rem;border-radius:4px;font-size:.7rem;font-weight:600;letter-spacing:.5px}
+.process-badge.p0{background:rgba(110,198,255,.15);color:#6ec6ff}
+.process-badge.p1{background:rgba(255,159,67,.15);color:#ff9f43}
+
+/* ===== FLOW STEPS ===== */
+.flow-step{display:flex;gap:1rem;margin:.8rem 0;align-items:flex-start}
+.flow-num{flex-shrink:0;width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.9rem;color:#fff}
+.flow-num.blue{background:linear-gradient(135deg,#2196f3,#6ec6ff)}
+.flow-num.orange{background:linear-gradient(135deg,#ff9800,#ff9f43)}
+.flow-num.green{background:linear-gradient(135deg,#4caf50,#66bb6a)}
+.flow-num.purple{background:linear-gradient(135deg,#7c4dff,#b388ff)}
+.flow-num.red{background:linear-gradient(135deg,#f44336,#ef5350)}
+.flow-content{flex:1}
+.flow-content h4{margin-top:0;font-size:.95rem}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .arch-row{flex-direction:column;align-items:center}
+  .arch-arrow{writing-mode:vertical-rl}
+  pre{font-size:.75rem;padding:.7rem}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== NAVIGATION ===== -->
+<nav class="top-nav">
+  <span class="brand">vLLM V1 Internals</span>
+  <span class="sep">|</span>
+  <a href="../index.html">Overview</a>
+  <a href="entrypoints.html">Entrypoints</a>
+  <a href="engine-core.html">EngineCore</a>
+  <a href="scheduler.html">Scheduler</a>
+  <a href="model-runner.html">ModelRunner</a>
+  <a href="attention.html">Attention</a>
+  <a href="index.html" class="active">Life of a Request</a>
+</nav>
+
+<!-- ===== HERO ===== -->
+<section class="hero">
+  <h1>Life of a Request in <span>vLLM V1</span></h1>
+  <p class="subtitle">Tracing a single HTTP chat-completion request end-to-end through vLLM's multi-process architecture -- from FastAPI handler to GPU forward pass and back, with actual source code.</p>
+  <span class="badge">Source: vllm/v1/ -- live codebase analysis</span>
+</section>
+
+<!-- ===== MAIN CONTENT ===== -->
+<div class="container">
+
+<!-- ============================================================ -->
+<!-- SECTION 0: TL;DR OVERVIEW -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="overview">0. TL;DR -- The Journey at a Glance</h2>
+
+<div class="callout key">
+  <strong>Key insight:</strong> vLLM V1 splits work across two OS processes. The <strong>API process</strong> handles HTTP, tokenization, and detokenization. The <strong>EngineCore process</strong> runs the GPU scheduler + model. They communicate over <strong>ZeroMQ + msgpack</strong>, eliminating Python GIL contention.
+</div>
+
+<table>
+  <thead>
+    <tr><th>Step</th><th>Process</th><th>Component</th><th>What Happens</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1</td><td><span class="process-badge p0">API</span></td><td>FastAPI Router</td><td>HTTP POST /v1/chat/completions received</td></tr>
+    <tr><td>2</td><td><span class="process-badge p0">API</span></td><td>OpenAIServingChat</td><td>Parse request, apply chat template, tokenize prompt</td></tr>
+    <tr><td>3</td><td><span class="process-badge p0">API</span></td><td>AsyncLLM.generate()</td><td>Create EngineCoreRequest, register with OutputProcessor</td></tr>
+    <tr><td>4</td><td><span class="process-badge p0">API</span></td><td>AsyncMPClient</td><td>Serialize via msgpack, send over ZMQ ROUTER socket</td></tr>
+    <tr><td>5</td><td><span class="process-badge p1">Core</span></td><td>EngineCoreProc input thread</td><td>Receive from ZMQ DEALER, deserialize, push to input_queue</td></tr>
+    <tr><td>6</td><td><span class="process-badge p1">Core</span></td><td>Scheduler.schedule()</td><td>Allocate KV blocks, create token budget, build SchedulerOutput</td></tr>
+    <tr><td>7</td><td><span class="process-badge p1">Core</span></td><td>Executor.execute_model()</td><td>Send SchedulerOutput to Worker process(es)</td></tr>
+    <tr><td>8</td><td><span class="process-badge p1">Core</span></td><td>GPUModelRunner.execute_model()</td><td>Build attention metadata, run model forward, sample tokens</td></tr>
+    <tr><td>9</td><td><span class="process-badge p1">Core</span></td><td>Scheduler.update_from_output()</td><td>Update request state, detect stop conditions, build EngineCoreOutputs</td></tr>
+    <tr><td>10</td><td><span class="process-badge p1">Core</span></td><td>EngineCoreProc output thread</td><td>Serialize EngineCoreOutputs via msgpack, send over ZMQ PUSH</td></tr>
+    <tr><td>11</td><td><span class="process-badge p0">API</span></td><td>AsyncLLM output_handler</td><td>Receive outputs, run OutputProcessor (detokenize)</td></tr>
+    <tr><td>12</td><td><span class="process-badge p0">API</span></td><td>FastAPI StreamingResponse</td><td>Yield SSE chunks back to client</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================================================ -->
+<!-- SECTION 1: ARCHITECTURE DIAGRAM -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="architecture">1. Multi-Process Architecture Diagram</h2>
+
+<div class="arch-diagram">
+  <div class="arch-label">External Client</div>
+  <div class="arch-row">
+    <div class="arch-box data">
+      <div class="box-title">HTTP Client</div>
+      <div class="box-detail">POST /v1/chat/completions<br>{"messages": [...]}</div>
+    </div>
+  </div>
+
+  <div class="arch-arrow down">&#8595;</div>
+
+  <div class="arch-label"><span class="process-badge p0">API Process (P0)</span> -- asyncio event loop, handles HTTP, tokenization, detokenization</div>
+  <div class="arch-row">
+    <div class="arch-box api">
+      <div class="box-title">FastAPI + Uvicorn</div>
+      <div class="box-detail">api_server.py<br>chat_completion/api_router.py</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box api">
+      <div class="box-title">OpenAIServingChat</div>
+      <div class="box-detail">chat_completion/serving.py<br>render + tokenize</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box api" style="min-width:180px">
+      <div class="box-title">AsyncLLM</div>
+      <div class="box-detail">v1/engine/async_llm.py<br>InputProcessor + OutputProcessor<br>generate() + output_handler()</div>
+    </div>
+  </div>
+
+  <div class="arch-arrow down">&#8595; &#8593;</div>
+
+  <div class="arch-label"><span class="process-badge" style="background:rgba(179,136,255,.15);color:#b388ff">ZeroMQ + msgpack IPC</span></div>
+  <div class="arch-row">
+    <div class="arch-box ipc">
+      <div class="box-title">ZMQ ROUTER</div>
+      <div class="box-detail">Requests &darr;<br>(API &rarr; Core)</div>
+    </div>
+    <div class="arch-box ipc">
+      <div class="box-title">ZMQ PUSH/PULL</div>
+      <div class="box-detail">Outputs &uarr;<br>(Core &rarr; API)</div>
+    </div>
+    <div class="arch-box ipc">
+      <div class="box-title">MsgpackEncoder</div>
+      <div class="box-detail">serial_utils.py<br>zero-copy tensors</div>
+    </div>
+  </div>
+
+  <div class="arch-arrow down">&#8595; &#8593;</div>
+
+  <div class="arch-label"><span class="process-badge p1">EngineCore Process (P1)</span> -- runs the tight schedule-execute-update loop</div>
+  <div class="arch-row">
+    <div class="arch-box engine">
+      <div class="box-title">Input Thread</div>
+      <div class="box-detail">ZMQ DEALER &rarr;<br>input_queue</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box engine" style="min-width:220px">
+      <div class="box-title">EngineCoreProc.run_busy_loop()</div>
+      <div class="box-detail">v1/engine/core.py<br>schedule() &rarr; execute_model() &rarr; update_from_output()</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box engine">
+      <div class="box-title">Output Thread</div>
+      <div class="box-detail">output_queue &rarr;<br>ZMQ PUSH</div>
+    </div>
+  </div>
+
+  <div class="arch-arrow down">&#8595;</div>
+
+  <div class="arch-row">
+    <div class="arch-box engine">
+      <div class="box-title">Scheduler</div>
+      <div class="box-detail">v1/core/sched/scheduler.py<br>unified token budget</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box engine">
+      <div class="box-title">KVCacheManager</div>
+      <div class="box-detail">v1/core/kv_cache_manager.py<br>block alloc + prefix cache</div>
+    </div>
+    <div class="arch-arrow">&#8594;</div>
+    <div class="arch-box gpu">
+      <div class="box-title">Worker + GPUModelRunner</div>
+      <div class="box-detail">v1/worker/gpu_worker.py<br>v1/worker/gpu_model_runner.py<br>InputBatch + forward + sample</div>
+    </div>
+  </div>
+
+  <div class="arch-arrow down">&#8595;</div>
+
+  <div class="arch-row">
+    <div class="arch-box gpu">
+      <div class="box-title">GPU (CUDA)</div>
+      <div class="box-detail">Model forward pass<br>Attention kernels<br>Sampling</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 2: HTTP ENTRY -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step1-http">2. Step 1 -- HTTP Entry: FastAPI Router</h2>
+
+<div class="card highlight-blue">
+<h4>File: vllm/entrypoints/openai/chat_completion/api_router.py</h4>
+<p>Every request begins at a FastAPI route. The <span class="inline-code">create_chat_completion</span> handler is decorated with <span class="inline-code">@with_cancellation</span> (for client disconnect handling) and <span class="inline-code">@load_aware_call</span>.</p>
+
+<pre><code><span class="dc">@router.post</span>(<span class="st">"/v1/chat/completions"</span>, ...)
+<span class="dc">@with_cancellation</span>
+<span class="dc">@load_aware_call</span>
+<span class="kw">async def</span> <span class="fn">create_chat_completion</span>(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    handler = chat(raw_request)  <span class="cm"># Get OpenAIServingChat from app state</span>
+    generator = <span class="kw">await</span> handler.create_chat_completion(request, raw_request)
+
+    <span class="kw">if</span> <span class="nb">isinstance</span>(generator, ChatCompletionResponse):
+        <span class="kw">return</span> JSONResponse(content=generator.model_dump(), ...)
+    <span class="kw">return</span> StreamingResponse(content=generator, media_type=<span class="st">"text/event-stream"</span>)
+</code></pre>
+</div>
+
+<div class="card highlight-blue">
+<h4>File: vllm/entrypoints/openai/chat_completion/serving.py</h4>
+<p>The <span class="inline-code">OpenAIServingChat.create_chat_completion()</span> method applies the chat template, tokenizes the prompt, builds sampling parameters, then calls <span class="inline-code">engine_client.generate()</span>.</p>
+
+<pre><code><span class="kw">async def</span> <span class="fn">create_chat_completion</span>(self, request, raw_request):
+    <span class="cm"># Apply chat template and tokenize</span>
+    result = <span class="kw">await</span> self.render_chat_request(request)
+    conversation, engine_inputs = result
+
+    request_id = <span class="st">f"chatcmpl-{self._base_request_id(...)}"</span>
+    sampling_params = request.to_sampling_params(max_tokens, ...)
+
+    <span class="cm"># engine_client is AsyncLLM -- calls generate() below</span>
+    generator = self.engine_client.generate(
+        prompt=engine_input,
+        sampling_params=sampling_params,
+        request_id=sub_request_id,
+        lora_request=lora_request,
+        trace_headers=trace_headers,
+        data_parallel_rank=data_parallel_rank,
+    )
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 3: AsyncLLM -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step2-asyncllm">3. Step 2 -- AsyncLLM: Tokenize + Queue</h2>
+
+<div class="card highlight-blue">
+<h4>File: vllm/v1/engine/async_llm.py -- The API-Facing Engine</h4>
+
+<p>AsyncLLM is the beating heart of the API process. It holds three critical components:</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">AsyncLLM</span>(EngineClient):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, vllm_config, executor_class, ...):
+        <span class="cm"># Convert EngineInput --> EngineCoreRequest (tokenization)</span>
+        self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+        <span class="cm"># Converts EngineCoreOutputs --> RequestOutput (detokenization)</span>
+        self.output_processor = OutputProcessor(
+            renderer.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
+        )
+
+        <span class="cm"># EngineCore (starts the engine in background process)</span>
+        self.engine_core = EngineCoreClient.make_async_mp_client(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=self.log_stats,
+        )
+</code></pre>
+</div>
+
+<div class="card highlight-blue">
+<h4>generate() -- The Main Entry Point for Every Request</h4>
+
+<pre><code><span class="kw">async def</span> <span class="fn">generate</span>(self, prompt, sampling_params, request_id, ...):
+    <span class="st">"""
+    Main function called by the API server to kick off a request
+      * 1) Making an AsyncStream corresponding to the Request.
+      * 2) Processing the Input.
+      * 3) Adding the Request to the Detokenizer.
+      * 4) Adding the Request to the EngineCore (separate process).
+    """</span>
+    q = <span class="kw">await</span> self.add_request(request_id, prompt, sampling_params, ...)
+
+    <span class="cm"># The output_handler task pushes items into the queue.</span>
+    <span class="cm"># This task pulls from the queue and yields to caller.</span>
+    finished = <span class="nb">False</span>
+    <span class="kw">while not</span> finished:
+        out = q.get_nowait() <span class="kw">or</span> <span class="kw">await</span> q.get()
+        finished = out.finished
+        <span class="kw">if</span> out <span class="kw">is not</span> STREAM_FINISHED:
+            <span class="kw">yield</span> out
+</code></pre>
+</div>
+
+<div class="card highlight-blue">
+<h4>add_request() -- Tokenize and Dispatch</h4>
+
+<pre><code><span class="kw">async def</span> <span class="fn">add_request</span>(self, request_id, prompt, params, ...):
+    <span class="cm"># Convert Input --> EngineCoreRequest (includes tokenization)</span>
+    request = self.input_processor.process_inputs(
+        request_id, prompt, params,
+        supported_tasks=<span class="kw">await</span> self.get_supported_tasks(),
+        arrival_time=arrival_time,
+        lora_request=lora_request,
+    )
+
+    <span class="cm"># Create output collector for this request</span>
+    queue = RequestOutputCollector(params.output_kind, request.request_id)
+
+    <span class="kw">await</span> self._add_request(request, prompt_text, <span class="nb">None</span>, <span class="nr">0</span>, queue)
+    <span class="kw">return</span> queue
+
+<span class="kw">async def</span> <span class="fn">_add_request</span>(self, request, prompt, parent_req, index, queue):
+    <span class="cm"># Register with OutputProcessor (this process - for detokenization later)</span>
+    self.output_processor.add_request(request, prompt, parent_req, index, queue)
+
+    <span class="cm"># Send to EngineCore (separate process) via ZMQ</span>
+    <span class="kw">await</span> self.engine_core.add_request_async(request)
+</code></pre>
+</div>
+
+<div class="callout">
+  <strong>Key data structure -- EngineCoreRequest:</strong> This msgspec Struct is what crosses the process boundary. It contains the tokenized prompt_token_ids, sampling_params, and metadata -- but NOT the raw text (that stays in the API process for detokenization).
+</div>
+
+<pre><code><span class="cm"># vllm/v1/engine/__init__.py</span>
+<span class="kw">class</span> <span class="cl">EngineCoreRequest</span>(
+    msgspec.Struct,
+    array_like=<span class="nb">True</span>,   <span class="cm"># compact serialization</span>
+    omit_defaults=<span class="nb">True</span>, <span class="cm"># skip default values to save bytes</span>
+    gc=<span class="nb">False</span>,            <span class="cm"># disable cyclic GC tracking</span>
+):
+    request_id: <span class="ty">str</span>
+    prompt_token_ids: <span class="ty">list[int] | None</span>
+    mm_features: <span class="ty">list[MultiModalFeatureSpec] | None</span>
+    sampling_params: <span class="ty">SamplingParams | None</span>
+    pooling_params: <span class="ty">PoolingParams | None</span>
+    arrival_time: <span class="ty">float</span>
+    lora_request: <span class="ty">LoRARequest | None</span>
+    cache_salt: <span class="ty">str | None</span>
+    data_parallel_rank: <span class="ty">int | None</span>
+    prompt_embeds: <span class="ty">torch.Tensor | None</span> = <span class="nb">None</span>
+    client_index: <span class="ty">int</span> = <span class="nr">0</span>
+    priority: <span class="ty">int</span> = <span class="nr">0</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 4: ZMQ IPC -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step3-zmq">4. Step 3 -- ZeroMQ IPC: Crossing the Process Boundary</h2>
+
+<div class="card highlight-purple">
+<h4>File: vllm/v1/engine/core_client.py -- MPClient (ZMQ Client Side)</h4>
+
+<p>The <span class="inline-code">AsyncMPClient</span> sends requests to EngineCore over a ZMQ ROUTER socket. The EngineCore process connects back with DEALER sockets. Messages are serialized with msgpack for speed.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">MPClient</span>(EngineCoreClient):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, asyncio_mode, vllm_config, executor_class, ...):
+        <span class="cm"># ZMQ setup</span>
+        sync_ctx = zmq.Context(io_threads=<span class="nr">2</span>)
+        self.ctx = zmq.asyncio.Context(sync_ctx) <span class="kw">if</span> asyncio_mode <span class="kw">else</span> sync_ctx
+
+        <span class="cm"># ROUTER socket for sending requests (API -> Core)</span>
+        self.input_socket = make_zmq_socket(
+            self.ctx, addresses.inputs[<span class="nr">0</span>], zmq.ROUTER, bind=<span class="nb">True</span>
+        )
+        <span class="cm"># PULL socket for receiving outputs (Core -> API)</span>
+        self.resources.output_socket = make_zmq_socket(
+            self.ctx, addresses.outputs[<span class="nr">0</span>], zmq.PULL
+        )
+
+        <span class="cm"># Serialization with optional tensor IPC for multimodal</span>
+        self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
+        self.decoder = MsgpackDecoder(EngineCoreOutputs)
+</code></pre>
+</div>
+
+<div class="card highlight-purple">
+<h4>File: vllm/v1/engine/core.py -- EngineCoreProc Input Thread (Core Side)</h4>
+<p>In the EngineCore process, a dedicated <strong>input thread</strong> reads from ZMQ and pushes into a Python queue. This thread releases the GIL during ZMQ I/O, allowing the main thread to run GPU operations concurrently.</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">process_input_sockets</span>(self, input_addresses, coord_input_address,
+                          identity, ready_event):
+    <span class="st">"""Input socket IO thread."""</span>
+
+    add_request_decoder = MsgpackDecoder(
+        EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
+    )
+
+    <span class="cm"># ZMQ DEALER sockets connect to the API ROUTER</span>
+    input_sockets = [
+        make_zmq_socket(ctx, addr, zmq.DEALER, identity=identity, bind=<span class="nb">False</span>)
+        <span class="kw">for</span> addr <span class="kw">in</span> input_addresses
+    ]
+
+    <span class="kw">while</span> <span class="nb">True</span>:
+        <span class="kw">for</span> input_socket, _ <span class="kw">in</span> poller.poll():
+            type_frame, *data_frames = input_socket.recv_multipart(copy=<span class="nb">False</span>)
+            request_type = EngineCoreRequestType(<span class="nb">bytes</span>(type_frame.buffer))
+
+            <span class="kw">if</span> request_type == EngineCoreRequestType.ADD:
+                req = add_request_decoder.decode(data_frames)
+                request = self.preprocess_add_request(req)
+
+            <span class="cm"># Push to input queue for core busy loop</span>
+            self.input_queue.put_nowait((request_type, request))
+</code></pre>
+</div>
+
+<div class="callout warn">
+  <strong>Why ZMQ + msgpack?</strong> Python's GIL means a single process cannot truly run asyncio I/O and GPU computation in parallel. By splitting into two processes with ZMQ IPC (which releases the GIL during socket operations), vLLM V1 achieves true overlap: the API process can tokenize/detokenize while the EngineCore process runs the GPU.
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 5: ENGINECORE BUSY LOOP -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step4-enginecore">5. Step 4 -- EngineCore: The Tight Busy Loop</h2>
+
+<div class="card highlight-orange">
+<h4>File: vllm/v1/engine/core.py -- The Heart of vLLM</h4>
+<p>EngineCore's main thread runs a <strong>tight busy loop</strong> that orchestrates three core operations in sequence every iteration.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">EngineCoreProc</span>(EngineCore):
+    <span class="st">"""ZMQ-wrapper for running EngineCore in background process."""</span>
+
+    <span class="kw">def</span> <span class="fn">run_busy_loop</span>(self):
+        <span class="st">"""Core busy loop of the EngineCore."""</span>
+        <span class="kw">while</span> self._handle_shutdown():
+            <span class="cm"># 1) Poll the input queue until there is work to do.</span>
+            self._process_input_queue()
+            <span class="cm"># 2) Step the engine core and return the outputs.</span>
+            self._process_engine_step()
+
+        <span class="kw">raise</span> SystemExit
+</code></pre>
+</div>
+
+<div class="card highlight-orange">
+<h4>_process_input_queue() -- Drain New Requests</h4>
+<pre><code><span class="kw">def</span> <span class="fn">_process_input_queue</span>(self):
+    <span class="st">"""Exits when an engine step needs to be performed."""</span>
+
+    <span class="kw">while not</span> self.has_work() <span class="kw">and</span> self.is_running():
+        <span class="cm"># Block on input queue when idle</span>
+        block = self.process_input_queue_block
+        <span class="kw">try</span>:
+            req = self.input_queue.get(block=block)
+            self._handle_client_request(*req)
+        <span class="kw">except</span> queue.Empty:
+            <span class="kw">break</span>
+
+    <span class="cm"># Handle any more client requests (non-blocking drain)</span>
+    <span class="kw">while not</span> self.input_queue.empty():
+        req = self.input_queue.get_nowait()
+        self._handle_client_request(*req)
+</code></pre>
+</div>
+
+<div class="card highlight-orange">
+<h4>step() -- Schedule, Execute, Update</h4>
+<p>This is the <strong>single most important function</strong> in vLLM V1. It runs every iteration of the busy loop:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">step</span>(self) -> <span class="ty">tuple[dict[int, EngineCoreOutputs], bool]</span>:
+    <span class="st">"""Schedule, execute, and make output."""</span>
+
+    <span class="cm"># Check for any requests remaining in the scheduler</span>
+    <span class="kw">if not</span> self.scheduler.has_requests():
+        <span class="kw">return</span> {}, <span class="nb">False</span>
+
+    <span class="cm"># 1. SCHEDULE: Decide which requests get tokens this step</span>
+    scheduler_output = self.scheduler.schedule()
+
+    <span class="cm"># 2. EXECUTE: Run model forward pass on the GPU</span>
+    future = self.model_executor.execute_model(scheduler_output, non_block=<span class="nb">True</span>)
+
+    <span class="cm"># 3. GRAMMAR: Get structured output bitmask (if needed)</span>
+    grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+
+    <span class="cm"># 4. WAIT: Block until GPU forward + sampling complete</span>
+    model_output = future.result()
+    <span class="kw">if</span> model_output <span class="kw">is</span> <span class="nb">None</span>:
+        model_output = self.model_executor.sample_tokens(grammar_output)
+
+    <span class="cm"># 5. UPDATE: Process results, detect stop conditions</span>
+    self._process_aborts_queue()
+    engine_core_outputs = self.scheduler.update_from_output(
+        scheduler_output, model_output
+    )
+
+    <span class="kw">return</span> engine_core_outputs, scheduler_output.total_num_scheduled_tokens > <span class="nr">0</span>
+</code></pre>
+</div>
+
+<div class="card highlight-orange">
+<h4>_process_engine_step() -- Send Results to Output Queue</h4>
+<pre><code><span class="kw">def</span> <span class="fn">_process_engine_step</span>(self) -> <span class="ty">bool</span>:
+    <span class="st">"""Called only when there are unfinished local requests."""</span>
+
+    <span class="cm"># Step the engine core</span>
+    outputs, model_executed = self.step_fn()
+
+    <span class="cm"># Put EngineCoreOutputs into the output queue</span>
+    <span class="kw">for</span> output <span class="kw">in</span> outputs.items() <span class="kw">if</span> outputs <span class="kw">else</span> ():
+        self.output_queue.put_nowait(output)
+
+    <span class="cm"># Post-step hook (e.g., update draft tokens for spec decode)</span>
+    self.post_step(model_executed)
+    <span class="kw">return</span> model_executed
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 6: SCHEDULER -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step5-scheduler">6. Step 5 -- Scheduler: Unified Token Budget</h2>
+
+<div class="card highlight-green">
+<h4>File: vllm/v1/core/sched/scheduler.py</h4>
+<p>The V1 Scheduler uses a <strong>unified token budget</strong> that covers both prefill and decode tokens. There is no separate "prefill phase" vs "decode phase" -- each request simply has <span class="inline-code">num_computed_tokens</span> that it tries to catch up to <span class="inline-code">num_tokens_with_spec</span>.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">Scheduler</span>(SchedulerInterface):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, vllm_config, kv_cache_config, ...):
+        <span class="cm"># Scheduling constraints</span>
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_scheduled_tokens = (
+            self.scheduler_config.max_num_scheduled_tokens
+            <span class="kw">if</span> self.scheduler_config.max_num_scheduled_tokens
+            <span class="kw">else</span> self.scheduler_config.max_num_batched_tokens
+        )
+
+        <span class="cm"># Priority queues</span>
+        self.waiting = create_request_queue(self.policy)
+        self.running: <span class="ty">list[Request]</span> = []
+
+        <span class="cm"># Create the KV cache manager</span>
+        self.kv_cache_manager = KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=self.max_model_len,
+            enable_caching=self.cache_config.enable_prefix_caching,
+        )
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>schedule() -- The Scheduling Algorithm</h4>
+
+<pre><code><span class="kw">def</span> <span class="fn">schedule</span>(self) -> <span class="ty">SchedulerOutput</span>:
+    <span class="cm"># NOTE(woosuk) on the scheduling algorithm:</span>
+    <span class="cm"># There's no "decoding phase" nor "prefill phase" in the scheduler.</span>
+    <span class="cm"># Each request just has num_computed_tokens and num_tokens_with_spec.</span>
+    <span class="cm"># At each step, the scheduler tries to assign tokens to the requests</span>
+    <span class="cm"># so that each request's num_computed_tokens can catch up its</span>
+    <span class="cm"># num_tokens_with_spec.</span>
+
+    token_budget = self.max_num_scheduled_tokens
+
+    <span class="cm"># First, schedule the RUNNING requests</span>
+    req_index = <span class="nr">0</span>
+    <span class="kw">while</span> req_index < <span class="nb">len</span>(self.running) <span class="kw">and</span> token_budget > <span class="nr">0</span>:
+        request = self.running[req_index]
+
+        num_new_tokens = (
+            request.num_tokens_with_spec
+            + request.num_output_placeholders
+            - request.num_computed_tokens
+        )
+        num_new_tokens = <span class="nb">min</span>(num_new_tokens, token_budget)
+
+        <span class="cm"># Allocate KV cache blocks for new tokens</span>
+        new_blocks = self.kv_cache_manager.allocate_slots(
+            request, num_new_tokens,
+            num_lookahead_tokens=self.num_lookahead_tokens,
+        )
+
+        <span class="kw">if</span> new_blocks <span class="kw">is</span> <span class="nb">None</span>:
+            <span class="cm"># Out of memory -- preempt lowest-priority request</span>
+            preempted_req = self.running.pop()
+            self._preempt_request(preempted_req, ...)
+            <span class="kw">continue</span>
+
+        <span class="cm"># Schedule the request</span>
+        num_scheduled_tokens[request_id] = num_new_tokens
+        token_budget -= num_new_tokens
+        req_index += <span class="nr">1</span>
+
+    <span class="cm"># Then, schedule WAITING requests with remaining budget</span>
+    <span class="cm"># (similar loop over self.waiting queue)</span>
+    ...
+</code></pre>
+</div>
+
+<div class="callout key">
+  <strong>V1 Innovation -- Unified Token Budget:</strong> Instead of splitting iterations into prefill-only or decode-only batches, V1 packs prefill tokens and decode tokens into the <em>same</em> budget. A prefill request consuming 512 tokens and 488 decode requests each consuming 1 token can share the same 1000-token step. This is the foundation of "chunked prefill" which dramatically reduces time-to-first-token for concurrent requests.
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 7: KV CACHE -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step6-kvcache">7. Step 6 -- KV Cache Management</h2>
+
+<div class="card highlight-green">
+<h4>File: vllm/v1/core/kv_cache_manager.py</h4>
+<p>The KVCacheManager is responsible for allocating and freeing blocks of GPU memory for KV caches. It supports <strong>prefix caching</strong> through block hashing.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">KVCacheManager</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, kv_cache_config, max_model_len, ...):
+        self.coordinator = get_kv_cache_coordinator(
+            kv_cache_config=kv_cache_config,
+            max_model_len=self.max_model_len,
+            enable_caching=self.enable_caching,
+        )
+        self.block_pool = self.coordinator.block_pool
+
+    <span class="kw">def</span> <span class="fn">get_computed_blocks</span>(self, request) -> <span class="ty">tuple[KVCacheBlocks, int]</span>:
+        <span class="st">"""Find prefix cache hits for a request."""</span>
+        <span class="kw">if not</span> self.enable_caching:
+            <span class="kw">return</span> self.empty_kv_cache_blocks, <span class="nr">0</span>
+
+        max_cache_hit_length = request.num_tokens - <span class="nr">1</span>
+        computed_blocks, num_new_computed_tokens = (
+            self.coordinator.find_longest_cache_hit(
+                request.block_hashes, max_cache_hit_length
+            )
+        )
+        <span class="kw">return</span> self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+</code></pre>
+</div>
+
+<pre><code><span class="cm"># The KVCacheBlocks data structure</span>
+<span class="dc">@dataclass</span>
+<span class="kw">class</span> <span class="cl">KVCacheBlocks</span>:
+    blocks: <span class="ty">tuple[Sequence[KVCacheBlock], ...]</span>
+    <span class="st">"""
+    blocks[i][j] refers to the i-th kv_cache_group
+    and the j-th block of tokens.
+    """</span>
+
+    <span class="kw">def</span> <span class="fn">get_block_ids</span>(self) -> <span class="ty">tuple[list[int], ...]</span>:
+        <span class="kw">return</span> <span class="nb">tuple</span>([blk.block_id <span class="kw">for</span> blk <span class="kw">in</span> group] <span class="kw">for</span> group <span class="kw">in</span> self.blocks)
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 8: GPU WORKER + MODEL RUNNER -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step7-worker">8. Step 7 -- Worker + GPUModelRunner: The Forward Pass</h2>
+
+<div class="card highlight-green">
+<h4>File: vllm/v1/worker/gpu_worker.py -- Worker</h4>
+<p>The Worker manages the GPU device, initializes distributed communication, and hosts the GPUModelRunner. In a single-GPU setup, it runs inside the EngineCore process. With tensor parallelism, separate worker processes handle each GPU.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">Worker</span>(WorkerBase):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, vllm_config, local_rank, rank, ...):
+        <span class="kw">super</span>().__init__(
+            vllm_config=vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>File: vllm/v1/worker/gpu_model_runner.py -- GPUModelRunner</h4>
+<p>The GPUModelRunner is the most complex component. It manages the <strong>persistent InputBatch</strong>, builds attention metadata, runs the model forward pass, and samples output tokens.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">GPUModelRunner</span>(
+    LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
+):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, vllm_config, device):
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
+        self.device = device
+        self.dtype = self.model_config.dtype
+        ...
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>execute_model() -- The GPU Forward Pass</h4>
+
+<pre><code><span class="kw">def</span> <span class="fn">execute_model</span>(
+    self, scheduler_output: SchedulerOutput,
+    intermediate_tensors: IntermediateTensors | <span class="nb">None</span> = <span class="nb">None</span>,
+) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | <span class="nb">None</span>:
+
+    num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+    <span class="cm"># 1. Update persistent batch states from SchedulerOutput</span>
+    deferred_state_corrections_fn = self._update_states(scheduler_output)
+
+    <span class="kw">if not</span> num_scheduled_tokens:
+        <span class="kw">return</span> EMPTY_MODEL_RUNNER_OUTPUT
+
+    num_reqs = self.input_batch.num_reqs
+    req_ids = self.input_batch.req_ids
+
+    <span class="cm"># 2. Prepare inputs (build attention metadata, positions, etc.)</span>
+    logits_indices, spec_decode_metadata = self._prepare_inputs(
+        scheduler_output, num_scheduled_tokens_np,
+    )
+
+    <span class="cm"># 3. Determine CUDA graph mode and padding</span>
+    (cudagraph_mode, batch_desc, should_ubatch,
+     num_tokens_across_dp, cudagraph_stats,
+    ) = self._determine_batch_execution_and_padding(
+        num_tokens=num_tokens_unpadded,
+        num_reqs=num_reqs,
+        num_scheduled_tokens_np=num_scheduled_tokens_np,
+        max_num_scheduled_tokens=max_num_scheduled_tokens,
+        ...
+    )
+
+    <span class="cm"># 4. Build attention metadata per layer</span>
+    <span class="cm"># 5. Run the actual model forward pass</span>
+    <span class="cm"># 6. Sample tokens from logits</span>
+    <span class="cm"># 7. Return ModelRunnerOutput</span>
+</code></pre>
+</div>
+
+<div class="callout key">
+  <strong>V1 Innovation -- Persistent InputBatch:</strong> Unlike V0 which recreated input tensors every step, V1 maintains a <span class="inline-code">InputBatch</span> that persists across iterations. New requests are <em>added</em> to it, finished requests are <em>removed</em>, and only the deltas are applied. This avoids expensive tensor allocation/deallocation.
+</div>
+
+<pre><code><span class="cm"># vllm/v1/worker/gpu_input_batch.py</span>
+<span class="kw">class</span> <span class="cl">InputBatch</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, max_num_reqs, max_model_len, max_num_batched_tokens, device, ...):
+        <span class="cm"># Pre-allocated CPU tensors (persistent across steps)</span>
+        self.token_ids_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len), device=<span class="st">"cpu"</span>, dtype=torch.int32
+        )
+        self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+
+        self.num_computed_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,), device=<span class="st">"cpu"</span>, dtype=torch.int32
+        )
+
+        <span class="cm"># Block table (maps request -> KV cache blocks)</span>
+        self.block_table = MultiGroupBlockTable(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            ...
+        )
+
+        <span class="cm"># Sampling metadata (pre-allocated)</span>
+        self.temperatures_cpu_tensor = torch.empty(...)
+        self.top_p_cpu_tensor = torch.empty(...)
+        self.top_k_cpu_tensor = torch.empty(...)
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 9: MODEL OUTPUT -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step8-output">9. Step 8 -- ModelRunnerOutput: Tokens Come Back</h2>
+
+<div class="card highlight-red">
+<h4>Data Structure: ModelRunnerOutput</h4>
+<p>After the forward pass and sampling, the GPU produces a <span class="inline-code">ModelRunnerOutput</span> containing the sampled token IDs for every request in the batch.</p>
+
+<pre><code><span class="cm"># vllm/v1/outputs.py</span>
+<span class="dc">@dataclass</span>
+<span class="kw">class</span> <span class="cl">ModelRunnerOutput</span>:
+    <span class="cm"># [num_reqs]</span>
+    req_ids: <span class="ty">list[str]</span>
+    req_id_to_index: <span class="ty">dict[str, int]</span>
+
+    <span class="cm"># num_reqs x num_generated_tokens</span>
+    sampled_token_ids: <span class="ty">list[list[int]]</span>
+
+    <span class="cm"># [num_reqs, max_num_logprobs + 1]</span>
+    logprobs: <span class="ty">LogprobsLists | None</span> = <span class="nb">None</span>
+
+    <span class="cm"># req_id -> (token_ids, logprobs, ranks)</span>
+    prompt_logprobs_dict: <span class="ty">dict[str, LogprobsTensors | None]</span>
+
+    <span class="cm"># [num_reqs, hidden_size]</span>
+    pooler_output: <span class="ty">list[torch.Tensor | None] | None</span> = <span class="nb">None</span>
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 10: UPDATE FROM OUTPUT -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step9-update">10. Step 9 -- Scheduler.update_from_output(): State Update</h2>
+
+<div class="card highlight-orange">
+<h4>File: vllm/v1/core/sched/scheduler.py</h4>
+<p>After model execution, the scheduler updates every request's state with the newly generated tokens, checks stop conditions, and produces <span class="inline-code">EngineCoreOutput</span> objects.</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">update_from_output</span>(
+    self,
+    scheduler_output: SchedulerOutput,
+    model_runner_output: ModelRunnerOutput,
+) -> <span class="ty">dict[int, EngineCoreOutputs]</span>:
+    sampled_token_ids = model_runner_output.sampled_token_ids
+    num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+
+    outputs: <span class="ty">dict[int, list[EngineCoreOutput]]</span> = defaultdict(<span class="nb">list</span>)
+
+    <span class="kw">for</span> req_id, num_tokens_scheduled <span class="kw">in</span> num_scheduled_tokens.items():
+        request = self.requests.get(req_id)
+        <span class="kw">if</span> request <span class="kw">is</span> <span class="nb">None</span> <span class="kw">or</span> request.is_finished():
+            <span class="kw">continue</span>
+
+        req_index = model_runner_output.req_id_to_index[req_id]
+        generated_token_ids = sampled_token_ids[req_index]
+
+        <span class="cm"># Update request with new tokens, check stop conditions</span>
+        new_token_ids, stopped = self._update_request_with_output(
+            request, generated_token_ids
+        )
+
+        <span class="kw">if</span> stopped:
+            finish_reason = request.get_finished_reason()
+            finished = self._handle_stopped_request(request)
+            <span class="kw">if</span> finished:
+                kv_transfer_params = self._free_request(request)
+
+        <span class="cm"># Build EngineCoreOutput for this request</span>
+        output = EngineCoreOutput(
+            request_id=req_id,
+            new_token_ids=new_token_ids,
+            finish_reason=finish_reason,
+            ...
+        )
+        outputs[client_index].append(output)
+</code></pre>
+</div>
+
+<pre><code><span class="cm"># EngineCoreOutput -- what crosses the ZMQ boundary back to the API process</span>
+<span class="kw">class</span> <span class="cl">EngineCoreOutput</span>(
+    msgspec.Struct, array_like=<span class="nb">True</span>, omit_defaults=<span class="nb">True</span>, gc=<span class="nb">False</span>
+):
+    request_id: <span class="ty">str</span>
+    new_token_ids: <span class="ty">list[int]</span>
+    new_logprobs: <span class="ty">LogprobsLists | None</span> = <span class="nb">None</span>
+    finish_reason: <span class="ty">FinishReason | None</span> = <span class="nb">None</span>
+    stop_reason: <span class="ty">int | str | None</span> = <span class="nb">None</span>
+    num_cached_tokens: <span class="ty">int</span> = <span class="nr">0</span>
+
+<span class="cm"># Wrapped in EngineCoreOutputs for batch sending</span>
+<span class="kw">class</span> <span class="cl">EngineCoreOutputs</span>(
+    msgspec.Struct, array_like=<span class="nb">True</span>, omit_defaults=<span class="nb">True</span>, gc=<span class="nb">False</span>
+):
+    engine_index: <span class="ty">int</span> = <span class="nr">0</span>
+    outputs: <span class="ty">list[EngineCoreOutput]</span> = []
+    scheduler_stats: <span class="ty">SchedulerStats | None</span> = <span class="nb">None</span>
+    timestamp: <span class="ty">float</span> = <span class="nr">0.0</span>
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 11: ZMQ BACK -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step10-zmqback">11. Step 10 -- ZMQ IPC: Results Flow Back</h2>
+
+<div class="card highlight-purple">
+<h4>File: vllm/v1/engine/core.py -- Output Thread</h4>
+<p>The EngineCore's output thread serializes <span class="inline-code">EngineCoreOutputs</span> with msgpack and sends them over ZMQ PUSH sockets back to the API process.</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">process_output_sockets</span>(self, output_paths, coord_output_path, engine_index):
+    <span class="st">"""Output socket IO thread."""</span>
+
+    encoder = MsgpackEncoder()
+    reuse_buffers: <span class="ty">list[bytearray]</span> = []
+    pending = deque[<span class="ty">tuple[zmq.MessageTracker, Any, bytearray]</span>]()
+
+    sockets = [
+        make_zmq_socket(ctx, output_path, zmq.PUSH, linger=<span class="nr">4000</span>)
+        <span class="kw">for</span> output_path <span class="kw">in</span> output_paths
+    ]
+
+    <span class="kw">while</span> <span class="nb">True</span>:
+        output = self.output_queue.get()
+        client_index, outputs = output
+        outputs.engine_index = engine_index
+
+        <span class="cm"># Reclaim buffers that zmq is finished with</span>
+        <span class="kw">while</span> pending <span class="kw">and</span> pending[-<span class="nr">1</span>][<span class="nr">0</span>].done:
+            reuse_buffers.append(pending.pop()[<span class="nr">2</span>])
+
+        buffer = reuse_buffers.pop() <span class="kw">if</span> reuse_buffers <span class="kw">else</span> <span class="nb">bytearray</span>()
+        buffers = encoder.encode_into(outputs, buffer)
+        tracker = sockets[client_index].send_multipart(
+            buffers, copy=<span class="nb">False</span>, track=<span class="nb">True</span>
+        )
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 12: OUTPUT PROCESSING -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step11-detokenize">12. Step 11 -- OutputProcessor: Detokenize</h2>
+
+<div class="card highlight-blue">
+<h4>File: vllm/v1/engine/async_llm.py -- output_handler()</h4>
+<p>Back in the API process, a background asyncio task continuously pulls outputs from EngineCore and pushes them through the OutputProcessor for detokenization.</p>
+
+<pre><code><span class="kw">async def</span> <span class="fn">output_handler</span>():
+    <span class="kw">try</span>:
+        <span class="kw">while</span> <span class="nb">True</span>:
+            <span class="cm"># 1) Pull EngineCoreOutputs from the EngineCore</span>
+            outputs = <span class="kw">await</span> engine_core.get_output_async()
+            num_outputs = <span class="nb">len</span>(outputs.outputs)
+
+            iteration_stats = IterationStats() <span class="kw">if</span> (log_stats <span class="kw">and</span> num_outputs) <span class="kw">else</span> <span class="nb">None</span>
+
+            <span class="cm"># Split outputs into chunks to avoid blocking the event loop</span>
+            engine_core_outputs = outputs.outputs
+            <span class="kw">for</span> start <span class="kw">in</span> <span class="nb">range</span>(<span class="nr">0</span>, num_outputs, chunk_size):
+                end = start + chunk_size
+                outputs_slice = engine_core_outputs[start:end]
+
+                <span class="cm"># 2) Process: detokenize + build RequestOutput objects</span>
+                processed_outputs = output_processor.process_outputs(
+                    outputs_slice, outputs.timestamp, iteration_stats
+                )
+
+                <span class="cm"># Allow other asyncio tasks to run between chunks</span>
+                <span class="kw">if</span> end < num_outputs:
+                    <span class="kw">await</span> asyncio.sleep(<span class="nr">0</span>)
+
+                <span class="cm"># 3) Abort any reqs that finished due to stop strings</span>
+                <span class="kw">if</span> processed_outputs.reqs_to_abort:
+                    <span class="kw">await</span> engine_core.abort_requests_async(
+                        processed_outputs.reqs_to_abort
+                    )
+    <span class="kw">except</span> <span class="nb">Exception</span> <span class="kw">as</span> e:
+        output_processor.propagate_error(e)
+</code></pre>
+</div>
+
+<div class="card highlight-blue">
+<h4>File: vllm/v1/engine/output_processor.py -- OutputProcessor.process_outputs()</h4>
+<p>This is the <strong>only function</strong> that loops over every request output per iteration. It performs detokenization via the IncrementalDetokenizer and produces RequestOutput objects.</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">OutputProcessor</span>:
+    <span class="st">"""Process EngineCoreOutputs into RequestOutputs."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, tokenizer, *, log_stats, stream_interval=<span class="nr">1</span>, ...):
+        self.tokenizer = tokenizer
+        self.request_states: <span class="ty">dict[str, RequestState]</span> = {}
+
+    <span class="kw">def</span> <span class="fn">process_outputs</span>(
+        self, engine_core_outputs: <span class="ty">list[EngineCoreOutput]</span>,
+        engine_core_timestamp: <span class="ty">float | None</span> = <span class="nb">None</span>,
+        iteration_stats: <span class="ty">IterationStats | None</span> = <span class="nb">None</span>,
+    ) -> OutputProcessorOutput:
+        <span class="st">"""
+        Process the EngineCoreOutputs:
+        1) Compute stats for logging
+        2) Detokenize
+        3) Create and handle RequestOutput objects
+        """</span>
+        <span class="kw">for</span> engine_core_output <span class="kw">in</span> engine_core_outputs:
+            req_id = engine_core_output.request_id
+            req_state = self.request_states.get(req_id)
+
+            <span class="cm"># 1) Compute stats for this iteration</span>
+            self._update_stats_from_output(req_state, engine_core_output, ...)
+
+            <span class="cm"># 2) Detokenize new token IDs into text</span>
+            <span class="cm"># (via IncrementalDetokenizer in RequestState)</span>
+            <span class="cm"># ...</span>
+
+            <span class="cm"># 3) Build RequestOutput and push to per-request queue</span>
+            request_output = req_state.make_request_output(
+                new_token_ids=new_token_ids,
+                finish_reason=finish_reason,
+                ...
+            )
+            <span class="kw">if</span> request_output <span class="kw">and</span> req_state.queue:
+                req_state.queue.put(request_output)
+</code></pre>
+</div>
+
+<div class="callout">
+  <strong>Note:</strong> The <span class="inline-code">RequestOutputCollector</span> uses a lightweight asyncio Event to signal the generate() coroutine. When outputs are ready, the generate() task wakes up and yields them to the FastAPI StreamingResponse handler.
+</div>
+
+<pre><code><span class="cm"># vllm/v1/engine/output_processor.py</span>
+<span class="kw">class</span> <span class="cl">RequestOutputCollector</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, output_kind, request_id):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.request_id = request_id
+        self.output = <span class="nb">None</span>
+        self.ready = asyncio.Event()
+
+    <span class="kw">def</span> <span class="fn">put</span>(self, output):
+        <span class="st">"""Non-blocking put operation."""</span>
+        <span class="kw">if</span> self.output <span class="kw">is</span> <span class="nb">None</span>:
+            self.output = output
+            self.ready.set()  <span class="cm"># Wake up the generate() task</span>
+        <span class="kw">elif</span> <span class="nb">isinstance</span>(self.output, RequestOutput):
+            self.output.add(output, aggregate=self.aggregate)  <span class="cm"># Merge deltas</span>
+
+    <span class="kw">async def</span> <span class="fn">get</span>(self):
+        <span class="kw">while</span> (output := self.output) <span class="kw">is</span> <span class="nb">None</span>:
+            <span class="kw">await</span> self.ready.wait()
+        self.output = <span class="nb">None</span>
+        self.ready.clear()
+        <span class="kw">return</span> output
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 13: HTTP RESPONSE -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="step12-response">13. Step 12 -- HTTP Response: Streaming Back to Client</h2>
+
+<div class="card highlight-blue">
+<p>The <span class="inline-code">generate()</span> coroutine in AsyncLLM yields <span class="inline-code">RequestOutput</span> objects. The OpenAI serving layer wraps these into SSE-formatted JSON chunks that stream back through the FastAPI StreamingResponse.</p>
+
+<pre><code><span class="cm"># Back in AsyncLLM.generate():</span>
+<span class="kw">while not</span> finished:
+    <span class="cm"># Fast path: drain queue without await if possible</span>
+    out = q.get_nowait() <span class="kw">or</span> <span class="kw">await</span> q.get()
+    finished = out.finished
+    <span class="kw">if</span> out <span class="kw">is not</span> STREAM_FINISHED:
+        <span class="kw">yield</span> out   <span class="cm"># --> back to OpenAIServingChat --> SSE chunk</span>
+
+<span class="cm"># The API server converts RequestOutput to SSE events:</span>
+<span class="cm"># data: {"id":"chatcmpl-...","choices":[{"delta":{"content":"Hello"},...}]}</span>
+<span class="cm"># data: {"id":"chatcmpl-...","choices":[{"delta":{"content":" world"},...}]}</span>
+<span class="cm"># data: [DONE]</span>
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 14: V1 INNOVATIONS -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="innovations">14. Key V1 Innovations Summary</h2>
+
+<div class="card highlight-orange">
+<h3>14.1 Multi-Process Architecture</h3>
+<p>vLLM V1 splits the API server and EngineCore into separate OS processes. The API process runs the asyncio event loop (HTTP handling, tokenization, detokenization) while the EngineCore process runs the GPU scheduler and model in a tight busy loop. This eliminates GIL contention.</p>
+
+<table>
+<thead><tr><th>Aspect</th><th>V0</th><th>V1</th></tr></thead>
+<tbody>
+<tr><td>Process model</td><td>Single process</td><td>Multi-process (API + EngineCore)</td></tr>
+<tr><td>IPC</td><td>In-process queues</td><td>ZeroMQ + msgpack</td></tr>
+<tr><td>GIL impact</td><td>Asyncio and GPU compete</td><td>Fully overlapped</td></tr>
+<tr><td>Serialization</td><td>N/A (in-process)</td><td>msgspec Structs (zero-copy where possible)</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="card highlight-purple">
+<h3>14.2 ZeroMQ + msgpack IPC</h3>
+<p>Communication uses ZMQ sockets with msgspec for serialization. Key design choices:</p>
+<ul style="margin-left:1.5rem;margin-top:.5rem">
+  <li><strong>ROUTER/DEALER pattern:</strong> Allows the API process to target specific EngineCore instances (for data parallelism)</li>
+  <li><strong>PUSH/PULL pattern:</strong> For output messages flowing back (fan-in from multiple engines)</li>
+  <li><strong>Background IO threads:</strong> Both input and output sockets run in separate threads that release the GIL during ZMQ operations</li>
+  <li><strong>Buffer reuse:</strong> The output thread reuses serialization buffers (<span class="inline-code">encode_into(outputs, buffer)</span>) and tracks ZMQ message completion</li>
+  <li><strong>Tensor IPC:</strong> For multimodal inputs, large tensors bypass msgpack via shared memory (<span class="inline-code">TensorIpcSender</span> / <span class="inline-code">TensorIpcReceiver</span>)</li>
+</ul>
+
+<pre><code><span class="cm"># Request types are single-byte hex for minimal overhead</span>
+<span class="kw">class</span> <span class="cl">EngineCoreRequestType</span>(enum.Enum):
+    ADD = <span class="st">b"\x00"</span>
+    ABORT = <span class="st">b"\x01"</span>
+    START_DP_WAVE = <span class="st">b"\x02"</span>
+    UTILITY = <span class="st">b"\x03"</span>
+    EXECUTOR_FAILED = <span class="st">b"\x04"</span>
+    WAKEUP = <span class="st">b"\x05"</span>
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h3>14.3 Unified Token Budget (Chunked Prefill)</h3>
+<p>The scheduler makes no distinction between "prefill tokens" and "decode tokens". Both consume from the same token budget per step. This enables:</p>
+<ul style="margin-left:1.5rem;margin-top:.5rem">
+  <li><strong>Mixed batching:</strong> Prefill and decode requests run in the same step</li>
+  <li><strong>Chunked prefill:</strong> Long prompts are split across multiple steps, sharing budget with decode requests</li>
+  <li><strong>Speculative decoding:</strong> Draft tokens are just more tokens in the same budget</li>
+</ul>
+
+<pre><code><span class="cm"># From the schedule() docstring:</span>
+<span class="cm"># There's no "decoding phase" nor "prefill phase" in the scheduler.</span>
+<span class="cm"># Each request just has the num_computed_tokens and</span>
+<span class="cm"># num_tokens_with_spec. At each step, the scheduler tries to assign</span>
+<span class="cm"># tokens to the requests so that each request's num_computed_tokens</span>
+<span class="cm"># can catch up its num_tokens_with_spec.</span>
+</code></pre>
+</div>
+
+<div class="card highlight-red">
+<h3>14.4 Persistent InputBatch</h3>
+<p>V1's <span class="inline-code">InputBatch</span> is a pre-allocated set of CPU tensors that persists across scheduling steps. Instead of building a new batch tensor every iteration:</p>
+<ul style="margin-left:1.5rem;margin-top:.5rem">
+  <li>New requests are <strong>added</strong> to existing slots</li>
+  <li>Finished requests are <strong>removed</strong> by swapping with the last element</li>
+  <li>Only the <strong>delta</strong> (new tokens, updated block tables) is applied each step</li>
+  <li>Pre-allocated buffers for <span class="inline-code">token_ids</span>, <span class="inline-code">block_table</span>, <span class="inline-code">temperatures</span>, <span class="inline-code">top_p</span>, <span class="inline-code">top_k</span> etc.</li>
+</ul>
+
+<pre><code><span class="cm"># Key tensors in InputBatch (all pre-allocated):</span>
+self.token_ids_cpu_tensor = torch.zeros((max_num_reqs, max_model_len), dtype=torch.int32)
+self.num_computed_tokens_cpu_tensor = torch.zeros((max_num_reqs,), dtype=torch.int32)
+self.temperatures_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32)
+self.top_p_cpu_tensor = torch.empty((max_num_reqs,), dtype=torch.float32)
+self.block_table = MultiGroupBlockTable(max_num_reqs=max_num_reqs, ...)
+</code></pre>
+</div>
+
+<div class="card highlight-orange">
+<h3>14.5 The Tight Busy Loop</h3>
+<p>The core scheduling loop is deliberately minimal: <span class="inline-code">schedule() -> execute_model() -> update_from_output()</span>. There is no complex state machine or mode switching. Background threads handle I/O while the main thread focuses exclusively on the schedule-execute-update cycle.</p>
+
+<pre><code><span class="cm"># The entire busy loop is just these lines:</span>
+<span class="kw">while</span> self._handle_shutdown():
+    self._process_input_queue()      <span class="cm"># Drain new requests from ZMQ</span>
+    self._process_engine_step()      <span class="cm"># schedule() + execute() + update()</span>
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 15: KEY FILES REFERENCE -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="reference">15. Key Files Quick Reference</h2>
+
+<table>
+<thead>
+  <tr><th>Component</th><th>File</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+  <tr><td>HTTP Entrypoint</td><td><code>vllm/entrypoints/openai/api_server.py</code></td><td>FastAPI app, lifespan, build_async_engine_client</td></tr>
+  <tr><td>Chat Handler</td><td><code>vllm/entrypoints/openai/chat_completion/serving.py</code></td><td>OpenAIServingChat.create_chat_completion()</td></tr>
+  <tr><td>Chat Router</td><td><code>vllm/entrypoints/openai/chat_completion/api_router.py</code></td><td>POST /v1/chat/completions route</td></tr>
+  <tr><td>AsyncLLM</td><td><code>vllm/v1/engine/async_llm.py</code></td><td>API-facing engine: tokenize, queue, output_handler</td></tr>
+  <tr><td>Input Processor</td><td><code>vllm/v1/engine/input_processor.py</code></td><td>Convert EngineInput to EngineCoreRequest</td></tr>
+  <tr><td>Output Processor</td><td><code>vllm/v1/engine/output_processor.py</code></td><td>Detokenize EngineCoreOutput to RequestOutput</td></tr>
+  <tr><td>Core Client</td><td><code>vllm/v1/engine/core_client.py</code></td><td>ZMQ IPC client: AsyncMPClient, SyncMPClient, InprocClient</td></tr>
+  <tr><td>EngineCore</td><td><code>vllm/v1/engine/core.py</code></td><td>EngineCore + EngineCoreProc (busy loop, I/O threads)</td></tr>
+  <tr><td>Data Structures</td><td><code>vllm/v1/engine/__init__.py</code></td><td>EngineCoreRequest, EngineCoreOutput, EngineCoreOutputs</td></tr>
+  <tr><td>Scheduler</td><td><code>vllm/v1/core/sched/scheduler.py</code></td><td>Unified scheduler: schedule(), update_from_output()</td></tr>
+  <tr><td>Scheduler Output</td><td><code>vllm/v1/core/sched/output.py</code></td><td>SchedulerOutput, NewRequestData, CachedRequestData</td></tr>
+  <tr><td>KV Cache Manager</td><td><code>vllm/v1/core/kv_cache_manager.py</code></td><td>Block allocation, prefix caching, eviction</td></tr>
+  <tr><td>GPU Worker</td><td><code>vllm/v1/worker/gpu_worker.py</code></td><td>Device init, weight loading, profiling</td></tr>
+  <tr><td>GPU Model Runner</td><td><code>vllm/v1/worker/gpu_model_runner.py</code></td><td>Forward pass, attention metadata, sampling</td></tr>
+  <tr><td>Input Batch</td><td><code>vllm/v1/worker/gpu_input_batch.py</code></td><td>Persistent batch with pre-allocated tensors</td></tr>
+  <tr><td>Model Outputs</td><td><code>vllm/v1/outputs.py</code></td><td>ModelRunnerOutput, SamplerOutput, LogprobsLists</td></tr>
+  <tr><td>Serialization</td><td><code>vllm/v1/serial_utils.py</code></td><td>MsgpackEncoder / MsgpackDecoder</td></tr>
+</tbody>
+</table>
+
+<!-- ============================================================ -->
+<!-- SECTION 16: COMPLETE REQUEST FLOW TIMELINE -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="timeline">16. Complete Request Timeline</h2>
+
+<div class="flow-step">
+  <div class="flow-num blue">1</div>
+  <div class="flow-content">
+    <h4>HTTP POST arrives at FastAPI</h4>
+    <p><span class="inline-code">create_chat_completion()</span> in <code>api_router.py</code> receives the ChatCompletionRequest.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num blue">2</div>
+  <div class="flow-content">
+    <h4>Chat Template + Tokenization (API Process)</h4>
+    <p><span class="inline-code">OpenAIServingChat.render_chat_request()</span> applies the chat template and tokenizes the conversation into <span class="inline-code">prompt_token_ids</span>.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num blue">3</div>
+  <div class="flow-content">
+    <h4>AsyncLLM.generate() begins (API Process)</h4>
+    <p><span class="inline-code">InputProcessor.process_inputs()</span> builds an <span class="inline-code">EngineCoreRequest</span> with the tokenized prompt. <span class="inline-code">OutputProcessor.add_request()</span> creates a <span class="inline-code">RequestState</span> with an <span class="inline-code">IncrementalDetokenizer</span>. A <span class="inline-code">RequestOutputCollector</span> queue is created.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num purple">4</div>
+  <div class="flow-content">
+    <h4>ZMQ Send (API --> EngineCore)</h4>
+    <p><span class="inline-code">AsyncMPClient.add_request_async()</span> serializes the <span class="inline-code">EngineCoreRequest</span> with <span class="inline-code">MsgpackEncoder</span> and sends it over the ZMQ ROUTER socket with request type byte <span class="inline-code">b"\x00"</span> (ADD).</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num orange">5</div>
+  <div class="flow-content">
+    <h4>Input Thread Receives (EngineCore Process)</h4>
+    <p>The input I/O thread receives the multipart ZMQ message, deserializes it with <span class="inline-code">MsgpackDecoder(EngineCoreRequest)</span>, calls <span class="inline-code">preprocess_add_request()</span> to create a <span class="inline-code">Request</span> object, and pushes it to <span class="inline-code">input_queue</span>.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num orange">6</div>
+  <div class="flow-content">
+    <h4>Busy Loop Drains Queue (EngineCore Process)</h4>
+    <p><span class="inline-code">_process_input_queue()</span> drains all pending requests from the queue. <span class="inline-code">EngineCore.add_request()</span> passes the Request to <span class="inline-code">Scheduler.add_request()</span> which adds it to the waiting queue.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num orange">7</div>
+  <div class="flow-content">
+    <h4>Scheduler.schedule() (EngineCore Process)</h4>
+    <p>Iterates over running requests first, then waiting requests. For each: calculates <span class="inline-code">num_new_tokens</span>, calls <span class="inline-code">KVCacheManager.allocate_slots()</span>, deducts from the token budget. Produces a <span class="inline-code">SchedulerOutput</span> with all scheduling decisions.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num green">8</div>
+  <div class="flow-content">
+    <h4>GPUModelRunner.execute_model() (GPU)</h4>
+    <p>Updates the persistent <span class="inline-code">InputBatch</span> with the scheduler's decisions via <span class="inline-code">_update_states()</span>. Prepares attention metadata, determines CUDA graph mode, runs the model forward pass, then samples output tokens. Returns <span class="inline-code">ModelRunnerOutput</span>.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num orange">9</div>
+  <div class="flow-content">
+    <h4>Scheduler.update_from_output() (EngineCore Process)</h4>
+    <p>For each request: appends generated tokens, checks stop conditions (EOS, max_tokens, stop strings), updates <span class="inline-code">num_computed_tokens</span>. Frees KV cache blocks for finished requests. Builds <span class="inline-code">EngineCoreOutput</span> per request, wrapped in <span class="inline-code">EngineCoreOutputs</span>.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num purple">10</div>
+  <div class="flow-content">
+    <h4>ZMQ Send (EngineCore --> API)</h4>
+    <p>The output I/O thread serializes <span class="inline-code">EngineCoreOutputs</span> with <span class="inline-code">MsgpackEncoder.encode_into()</span> (reusing buffers) and sends via ZMQ PUSH socket. The API process receives on the PULL socket.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num blue">11</div>
+  <div class="flow-content">
+    <h4>output_handler() Detokenizes (API Process)</h4>
+    <p>The background asyncio task calls <span class="inline-code">OutputProcessor.process_outputs()</span> which: (a) incremental-detokenizes new token IDs into text, (b) builds <span class="inline-code">RequestOutput</span> objects, (c) pushes them into per-request <span class="inline-code">RequestOutputCollector</span> queues.</p>
+  </div>
+</div>
+
+<div class="flow-step">
+  <div class="flow-num blue">12</div>
+  <div class="flow-content">
+    <h4>SSE Response Streams to Client (API Process)</h4>
+    <p>The <span class="inline-code">generate()</span> coroutine yields the <span class="inline-code">RequestOutput</span>. The OpenAI serving layer formats it as an SSE event (<span class="inline-code">data: {...}\n\n</span>). FastAPI's <span class="inline-code">StreamingResponse</span> sends it over HTTP. Steps 7-12 repeat for each token until the request finishes.</p>
+  </div>
+</div>
+
+<div class="callout key" style="margin-top:2rem">
+  <strong>Iteration loop:</strong> Steps 6-12 happen repeatedly. Each iteration of the EngineCore busy loop processes ALL active requests in a single batch, generating one (or more, with speculative decoding) token per request. The API process continuously receives outputs and streams them. A request typically goes through hundreds of iterations before finishing.
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 17: CLIENT VARIANTS -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="clients">17. EngineCoreClient Variants</h2>
+
+<div class="card highlight-purple">
+<h4>File: vllm/v1/engine/core_client.py</h4>
+<p>vLLM provides three client variants depending on the execution mode. The factory method selects the appropriate one:</p>
+
+<pre><code><span class="kw">class</span> <span class="cl">EngineCoreClient</span>(ABC):
+    <span class="st">"""
+    EngineCoreClient: subclasses handle different methods for pushing
+        and pulling from the EngineCore for asyncio / multiprocessing.
+
+    Subclasses:
+    * InprocClient: In process EngineCore (for V0-style LLMEngine use)
+    * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
+    * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
+    """</span>
+
+    <span class="dc">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">make_client</span>(
+        multiprocess_mode: <span class="ty">bool</span>,
+        asyncio_mode: <span class="ty">bool</span>,
+        vllm_config: VllmConfig,
+        executor_class: <span class="ty">type[Executor]</span>,
+        log_stats: <span class="ty">bool</span>,
+    ) -> <span class="st">"EngineCoreClient"</span>:
+        <span class="kw">if</span> multiprocess_mode <span class="kw">and</span> asyncio_mode:
+            <span class="kw">return</span> EngineCoreClient.make_async_mp_client(
+                vllm_config, executor_class, log_stats
+            )
+        <span class="kw">if</span> multiprocess_mode <span class="kw">and not</span> asyncio_mode:
+            <span class="kw">return</span> SyncMPClient(vllm_config, executor_class, log_stats)
+        <span class="kw">return</span> InprocClient(vllm_config, executor_class, log_stats)
+</code></pre>
+</div>
+
+<table>
+  <thead><tr><th>Client</th><th>Mode</th><th>Use Case</th><th>IPC</th></tr></thead>
+  <tbody>
+    <tr><td><code>AsyncMPClient</code></td><td>Multi-process + asyncio</td><td>OpenAI API server (AsyncLLM)</td><td>ZMQ ROUTER/DEALER + PUSH/PULL</td></tr>
+    <tr><td><code>SyncMPClient</code></td><td>Multi-process + sync</td><td>Offline batch inference (LLM class)</td><td>ZMQ ROUTER/DEALER + PUSH/PULL</td></tr>
+    <tr><td><code>InprocClient</code></td><td>In-process</td><td>Debugging, V0-style LLMEngine</td><td>Direct function calls</td></tr>
+    <tr><td><code>DPAsyncMPClient</code></td><td>Data parallel + external LB</td><td>Multi-engine with external load balancer</td><td>ZMQ per DP rank</td></tr>
+    <tr><td><code>DPLBAsyncMPClient</code></td><td>Data parallel + internal LB</td><td>Multi-engine with built-in load balancing</td><td>ZMQ + DPCoordinator</td></tr>
+  </tbody>
+</table>
+
+<pre><code><span class="cm"># The InprocClient is the simplest -- direct in-process calls</span>
+<span class="kw">class</span> <span class="cl">InprocClient</span>(EngineCoreClient):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, *args, **kwargs):
+        self.engine_core = EngineCore(*args, **kwargs)
+
+    <span class="kw">def</span> <span class="fn">get_output</span>(self) -> EngineCoreOutputs:
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
+        <span class="kw">return</span> outputs <span class="kw">and</span> outputs.get(<span class="nr">0</span>) <span class="kw">or</span> EngineCoreOutputs()
+
+    <span class="kw">def</span> <span class="fn">add_request</span>(self, request: EngineCoreRequest) -> <span class="nb">None</span>:
+        req, request_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_request(req, request_wave)
+</code></pre>
+
+<!-- ============================================================ -->
+<!-- SECTION 18: THREADING MODEL -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="threading">18. Threading Model in the EngineCore Process</h2>
+
+<div class="card highlight-orange">
+<p>The EngineCore process has a carefully designed three-thread architecture to maximize overlap between I/O and computation:</p>
+</div>
+
+<table>
+  <thead><tr><th>Thread</th><th>Role</th><th>GIL Behavior</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>Main Thread</strong></td>
+      <td>Runs <code>run_busy_loop()</code>: drains input_queue, calls <code>step()</code> (schedule + execute + update), pushes to output_queue</td>
+      <td>Holds GIL during Python logic; releases during GPU kernel execution (CUDA is async)</td>
+    </tr>
+    <tr>
+      <td><strong>Input I/O Thread</strong></td>
+      <td>Runs <code>process_input_sockets()</code>: reads from ZMQ DEALER, deserializes with msgpack, pushes to <code>input_queue</code></td>
+      <td>Releases GIL during <code>zmq.recv_multipart()</code> and <code>poller.poll()</code></td>
+    </tr>
+    <tr>
+      <td><strong>Output I/O Thread</strong></td>
+      <td>Runs <code>process_output_sockets()</code>: pulls from <code>output_queue</code>, serializes with msgpack, sends via ZMQ PUSH</td>
+      <td>Releases GIL during <code>zmq.send_multipart()</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<pre><code><span class="cm"># In EngineCoreProc.__init__():</span>
+<span class="cm"># Background Threads and Queues for IO. These enable us to</span>
+<span class="cm"># overlap ZMQ socket IO with GPU since they release the GIL,</span>
+<span class="cm"># and to overlap some serialization/deserialization with the</span>
+<span class="cm"># model forward pass.</span>
+input_thread = threading.Thread(
+    target=self.process_input_sockets,
+    args=(addresses.inputs, addresses.coordinator_input, identity, ready_event),
+    daemon=<span class="nb">True</span>,
+)
+input_thread.start()
+
+self.output_thread = threading.Thread(
+    target=self.process_output_sockets,
+    args=(addresses.outputs, ...),
+    daemon=<span class="nb">True</span>,
+)
+self.output_thread.start()
+</code></pre>
+
+<div class="callout">
+  <strong>Why threading works here:</strong> Even though Python has the GIL, ZMQ socket operations release it. This means the input thread can receive the next request while the main thread is running GPU kernels (which also release the GIL). The output thread can serialize and send results while the next scheduling step begins. This three-thread design is simpler than the two-process split between API and EngineCore, but follows the same principle: overlap I/O with computation by using operations that release the GIL.
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 19: PERFORMANCE OPTIMIZATIONS -->
+<!-- ============================================================ -->
+<h2 class="section-title" id="perf">19. Performance Optimization Details</h2>
+
+<div class="card highlight-green">
+<h4>msgspec Structs with gc=False</h4>
+<p>All cross-process data structures use <span class="inline-code">msgspec.Struct</span> with <span class="inline-code">gc=False</span> to disable Python's cyclic garbage collector tracking. Combined with <span class="inline-code">array_like=True</span> for compact serialization and <span class="inline-code">omit_defaults=True</span> to skip default-valued fields, this minimizes both serialization overhead and GC pause times.</p>
+</div>
+
+<div class="card highlight-green">
+<h4>GC Heap Freezing</h4>
+<p>After initialization, EngineCore calls <span class="inline-code">freeze_gc_heap()</span> to mark all existing objects as permanent. This prevents the GC from scanning startup allocations (model weights, config objects) during collection cycles, significantly reducing GC pause times.</p>
+
+<pre><code><span class="cm"># At the end of EngineCore.__init__():</span>
+
+<span class="cm"># Mark the startup heap as static so that it's ignored by GC.</span>
+<span class="cm"># Reduces pause times of oldest generation collections.</span>
+freeze_gc_heap()
+<span class="cm"># Enable environment variable cache</span>
+enable_envs_cache()
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>Zero-Copy Buffer Reuse in Output Thread</h4>
+<p>The output I/O thread reuses serialization buffers via <span class="inline-code">encode_into(outputs, buffer)</span> and tracks ZMQ message delivery with <span class="inline-code">zmq.MessageTracker</span>. Buffers are only reclaimed when ZMQ confirms the message has been sent, preventing premature deallocation of backing memory for numpy arrays and tensors.</p>
+
+<pre><code><span class="cm"># Output thread buffer management:</span>
+reuse_buffers: <span class="ty">list[bytearray]</span> = []
+pending = deque[<span class="ty">tuple[zmq.MessageTracker, Any, bytearray]</span>]()
+
+<span class="cm"># Reclaim buffers that zmq is finished with</span>
+<span class="kw">while</span> pending <span class="kw">and</span> pending[-<span class="nr">1</span>][<span class="nr">0</span>].done:
+    reuse_buffers.append(pending.pop()[<span class="nr">2</span>])
+
+buffer = reuse_buffers.pop() <span class="kw">if</span> reuse_buffers <span class="kw">else</span> <span class="nb">bytearray</span>()
+buffers = encoder.encode_into(outputs, buffer)
+tracker = socket.send_multipart(buffers, copy=<span class="nb">False</span>, track=<span class="nb">True</span>)
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>Async Output Copy Stream</h4>
+<p>GPU-to-CPU copies of sampled tokens are performed on a separate CUDA stream, overlapping the copy with the next forward pass. The <span class="inline-code">AsyncGPUModelRunnerOutput</span> wrapper lazily materializes the CPU result only when needed.</p>
+
+<pre><code><span class="cm"># vllm/v1/worker/gpu_model_runner.py</span>
+<span class="kw">class</span> <span class="cl">AsyncGPUModelRunnerOutput</span>(AsyncModelRunnerOutput):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model_runner_output, sampled_token_ids, ...):
+        <span class="cm"># Initiate copy on a separate stream (non-blocking)</span>
+        <span class="kw">with</span> torch.cuda.stream(async_output_copy_stream):
+            async_output_copy_stream.wait_stream(default_stream)
+            self.sampled_token_ids_cpu = self._sampled_token_ids.to(
+                <span class="st">"cpu"</span>, non_blocking=<span class="nb">True</span>
+            )
+            self.async_copy_ready_event.record()
+
+    <span class="kw">def</span> <span class="fn">get_output</span>(self) -> ModelRunnerOutput:
+        <span class="st">"""Blocks until copy is finished, then returns."""</span>
+        self.async_copy_ready_event.synchronize()
+        <span class="cm"># Convert to Python lists</span>
+        valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        ...
+</code></pre>
+</div>
+
+<div class="card highlight-green">
+<h4>Output Processing Chunking</h4>
+<p>The API process splits output processing into chunks of <span class="inline-code">VLLM_V1_OUTPUT_PROC_CHUNK_SIZE</span> to avoid blocking the asyncio event loop when there are many concurrent requests. Between chunks, it yields control with <span class="inline-code">await asyncio.sleep(0)</span>.</p>
+
+<pre><code><span class="cm"># In output_handler():</span>
+chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
+
+<span class="kw">for</span> start <span class="kw">in</span> <span class="nb">range</span>(<span class="nr">0</span>, num_outputs, chunk_size):
+    end = start + chunk_size
+    outputs_slice = engine_core_outputs[start:end]
+    processed_outputs = output_processor.process_outputs(outputs_slice, ...)
+    <span class="cm"># Allow other asyncio tasks to run between chunks</span>
+    <span class="kw">if</span> end < num_outputs:
+        <span class="kw">await</span> asyncio.sleep(<span class="nr">0</span>)
+</code></pre>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 20: FOOTER -->
+<!-- ============================================================ -->
+<div style="margin-top:4rem;padding-top:2rem;border-top:1px solid rgba(110,198,255,.1);text-align:center;color:#6c7086;font-size:.85rem">
+  <p>Generated from vLLM V1 source code analysis. All code snippets are from the actual repository.</p>
+  <p style="margin-top:.5rem">
+    <a href="../index.html">Back to Overview</a> |
+    <a href="engine-core.html">EngineCore Deep Dive</a> |
+    <a href="scheduler.html">Scheduler Deep Dive</a> |
+    <a href="model-runner.html">ModelRunner Deep Dive</a>
+  </p>
+</div>
+
+</div><!-- end .container -->
+</body>
+</html>

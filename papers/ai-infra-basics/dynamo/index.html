@@ -1,0 +1,1451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA Dynamo Deep Dive - Datacenter-Scale Inference Orchestration</title>
+<style>
+  :root {
+    --bg-primary: #0a0e1a;
+    --bg-secondary: #111827;
+    --bg-card: #1a2236;
+    --bg-card-alt: #1e2a42;
+    --accent-green: #76b900;
+    --accent-green-dim: #4a7a00;
+    --accent-lime: #a3e635;
+    --accent-cyan: #22d3ee;
+    --accent-purple: #a78bfa;
+    --accent-orange: #fb923c;
+    --accent-pink: #f472b6;
+    --accent-red: #ef4444;
+    --accent-yellow: #fbbf24;
+    --accent-teal: #2dd4bf;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --border-color: #2a3654;
+    --border-glow: rgba(118,185,0,0.3);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+  }
+
+  /* Sticky Nav */
+  nav {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,14,26,0.92);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 2rem;
+  }
+  nav .nav-inner {
+    max-width: 1300px; margin: 0 auto;
+    display: flex; align-items: center; gap: 1rem;
+    height: 56px; overflow-x: auto;
+  }
+  nav a {
+    color: var(--text-secondary); text-decoration: none;
+    font-size: 0.82rem; font-weight: 500; white-space: nowrap;
+    padding: 0.3rem 0.6rem; border-radius: 6px;
+    transition: all 0.2s;
+  }
+  nav a:hover, nav a.active { color: var(--accent-green); background: rgba(118,185,0,0.1); }
+  nav .nav-brand {
+    font-weight: 700; font-size: 1rem;
+    color: var(--accent-green); margin-right: 1rem;
+    letter-spacing: 0.5px;
+  }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #0a1628 0%, #0f2618 30%, #132a0e 60%, #0a1628 100%);
+    padding: 5rem 2rem 4rem;
+    position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at 20% 50%, rgba(118,185,0,0.15) 0%, transparent 60%),
+      radial-gradient(ellipse at 80% 30%, rgba(34,211,238,0.08) 0%, transparent 50%);
+  }
+  .hero-content { max-width: 1100px; margin: 0 auto; position: relative; z-index: 1; }
+  .hero-badges { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    font-size: 0.75rem; font-weight: 600;
+    padding: 0.3rem 0.75rem; border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .hero-badge.green { background: rgba(118,185,0,0.15); color: var(--accent-lime); border-color: rgba(118,185,0,0.3); }
+  .hero-badge.cyan { background: rgba(34,211,238,0.12); color: var(--accent-cyan); border-color: rgba(34,211,238,0.25); }
+  .hero-badge.purple { background: rgba(167,139,250,0.12); color: var(--accent-purple); border-color: rgba(167,139,250,0.25); }
+  .hero-badge.orange { background: rgba(251,146,60,0.12); color: var(--accent-orange); border-color: rgba(251,146,60,0.25); }
+  .hero h1 { font-size: 2.8rem; font-weight: 800; line-height: 1.15; margin-bottom: 1rem; }
+  .hero h1 .green { color: var(--accent-green); }
+  .hero .subtitle { font-size: 1.15rem; color: var(--text-secondary); max-width: 800px; margin-bottom: 2rem; }
+
+  /* Section */
+  section { padding: 4rem 2rem; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  .section-label {
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 2px; margin-bottom: 0.5rem;
+  }
+  .section-label.green { color: var(--accent-green); }
+  .section-label.cyan { color: var(--accent-cyan); }
+  .section-label.purple { color: var(--accent-purple); }
+  .section-label.orange { color: var(--accent-orange); }
+  .section-label.pink { color: var(--accent-pink); }
+  .section-label.teal { color: var(--accent-teal); }
+  .section-label.yellow { color: var(--accent-yellow); }
+  h2 { font-size: 2rem; font-weight: 700; margin-bottom: 1rem; }
+  h3 { font-size: 1.35rem; font-weight: 600; margin: 2rem 0 0.8rem; color: var(--text-primary); }
+  h4 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.5rem; }
+  p { margin-bottom: 1rem; color: var(--text-secondary); }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;
+    transition: border-color 0.3s;
+  }
+  .card:hover { border-color: var(--border-glow); }
+  .card-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+  .card-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; font-weight: 700;
+  }
+  .card-icon.green { background: rgba(118,185,0,0.15); color: var(--accent-green); }
+  .card-icon.cyan { background: rgba(34,211,238,0.12); color: var(--accent-cyan); }
+  .card-icon.purple { background: rgba(167,139,250,0.12); color: var(--accent-purple); }
+  .card-icon.orange { background: rgba(251,146,60,0.12); color: var(--accent-orange); }
+  .card-icon.pink { background: rgba(244,114,182,0.12); color: var(--accent-pink); }
+  .card-icon.teal { background: rgba(45,212,191,0.12); color: var(--accent-teal); }
+
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+  .card-grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }
+
+  /* Code */
+  pre {
+    background: #0d1117; border: 1px solid #21262d; border-radius: 8px;
+    padding: 1.2rem; overflow-x: auto; margin: 1rem 0;
+    font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', monospace;
+    font-size: 0.82rem; line-height: 1.6;
+  }
+  code {
+    font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', monospace;
+    font-size: 0.85rem;
+  }
+  :not(pre) > code {
+    background: rgba(118,185,0,0.1); color: var(--accent-lime);
+    padding: 0.15rem 0.4rem; border-radius: 4px;
+  }
+  .kw { color: #ff7b72; }
+  .fn { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm { color: #8b949e; }
+  .num { color: #79c0ff; }
+  .ty { color: #ffa657; }
+  .op { color: #c9d1d9; }
+
+  /* Tables */
+  table {
+    width: 100%; border-collapse: collapse; margin: 1rem 0;
+    font-size: 0.88rem;
+  }
+  th {
+    background: var(--bg-card-alt); padding: 0.75rem 1rem;
+    text-align: left; font-weight: 600;
+    border-bottom: 2px solid var(--accent-green-dim);
+    white-space: nowrap;
+  }
+  td {
+    padding: 0.65rem 1rem; border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+  }
+  tr:hover td { background: rgba(118,185,0,0.03); }
+
+  /* Diagrams */
+  .diagram-container {
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: 12px; padding: 2rem; margin: 1.5rem 0; overflow-x: auto;
+  }
+  .diagram-title {
+    font-size: 0.82rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 1.5px; margin-bottom: 1.5rem; text-align: center;
+  }
+  .diagram-title.green { color: var(--accent-green); }
+  .diagram-title.cyan { color: var(--accent-cyan); }
+  .diagram-title.purple { color: var(--accent-purple); }
+
+  svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+
+  /* Key results */
+  .key-results {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem; margin: 2rem 0;
+  }
+  .key-result {
+    text-align: center; padding: 1.5rem 1rem;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: 12px;
+  }
+  .key-result .number { font-size: 2.2rem; font-weight: 800; line-height: 1; margin-bottom: 0.3rem; }
+  .key-result .label { font-size: 0.78rem; color: var(--text-muted); }
+
+  /* Callout */
+  .callout {
+    padding: 1rem 1.5rem; border-radius: 8px; margin: 1.5rem 0;
+    border-left: 4px solid;
+  }
+  .callout.green { background: rgba(118,185,0,0.08); border-color: var(--accent-green); }
+  .callout.cyan { background: rgba(34,211,238,0.06); border-color: var(--accent-cyan); }
+  .callout.purple { background: rgba(167,139,250,0.06); border-color: var(--accent-purple); }
+  .callout.orange { background: rgba(251,146,60,0.06); border-color: var(--accent-orange); }
+
+  /* Tags */
+  .tag {
+    display: inline-block; font-size: 0.7rem; font-weight: 600;
+    padding: 0.15rem 0.5rem; border-radius: 4px; margin-right: 0.4rem;
+  }
+  .tag.rust { background: rgba(251,146,60,0.15); color: var(--accent-orange); }
+  .tag.python { background: rgba(34,211,238,0.12); color: var(--accent-cyan); }
+  .tag.new { background: rgba(118,185,0,0.15); color: var(--accent-lime); }
+
+  /* List styling */
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; color: var(--text-secondary); }
+  li { margin-bottom: 0.3rem; }
+
+  /* Separator */
+  .sep { border: none; border-top: 1px solid var(--border-color); margin: 0; }
+
+  /* Footer */
+  footer {
+    padding: 3rem 2rem; text-align: center;
+    color: var(--text-muted); font-size: 0.8rem;
+    border-top: 1px solid var(--border-color);
+  }
+  footer a { color: var(--accent-green); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .hero h1 { font-size: 1.8rem; }
+    nav .nav-inner { gap: 0.5rem; }
+    nav a { font-size: 0.75rem; padding: 0.2rem 0.4rem; }
+    .card-grid { grid-template-columns: 1fr; }
+    .key-results { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* Flow steps */
+  .flow-step {
+    display: flex; align-items: flex-start; gap: 1rem;
+    margin-bottom: 1.2rem; padding: 1rem;
+    background: var(--bg-card); border-radius: 8px;
+    border-left: 3px solid var(--accent-green);
+  }
+  .flow-step .step-num {
+    min-width: 32px; height: 32px; border-radius: 50%;
+    background: rgba(118,185,0,0.15); color: var(--accent-green);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.85rem;
+  }
+  .flow-step.cyan-step { border-left-color: var(--accent-cyan); }
+  .flow-step.cyan-step .step-num { background: rgba(34,211,238,0.12); color: var(--accent-cyan); }
+  .flow-step.purple-step { border-left-color: var(--accent-purple); }
+  .flow-step.purple-step .step-num { background: rgba(167,139,250,0.12); color: var(--accent-purple); }
+  .flow-step.orange-step { border-left-color: var(--accent-orange); }
+  .flow-step.orange-step .step-num { background: rgba(251,146,60,0.12); color: var(--accent-orange); }
+
+  /* Tier cards */
+  .tier-card {
+    border-radius: 10px; padding: 1.2rem; text-align: center;
+    border: 1px solid var(--border-color);
+  }
+  .tier-card .tier-label {
+    font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1.5px; margin-bottom: 0.3rem;
+  }
+  .tier-card .tier-name { font-size: 1.1rem; font-weight: 700; margin-bottom: 0.2rem; }
+  .tier-card .tier-detail { font-size: 0.78rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="nav-inner">
+    <span class="nav-brand">Dynamo Deep Dive</span>
+    <a href="#arch">Architecture</a>
+    <a href="#router">Smart Router</a>
+    <a href="#kvbm">KVBM</a>
+    <a href="#planner">Planner</a>
+    <a href="#disagg">Disagg P/D</a>
+    <a href="#nixl">NIXL</a>
+    <a href="#agentic">Agentic</a>
+    <a href="#v1">v1.0</a>
+    <a href="#code">Source Map</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero" id="top">
+  <div class="hero-content">
+    <div class="hero-badges">
+      <span class="hero-badge green">NVIDIA Dynamo v1.0</span>
+      <span class="hero-badge cyan">Rust + Python</span>
+      <span class="hero-badge purple">Apache 2.0</span>
+      <span class="hero-badge orange">Source Code Analysis</span>
+    </div>
+    <h1>NVIDIA <span class="green">Dynamo</span><br>Datacenter-Scale Inference Stack</h1>
+    <p class="subtitle">
+      The open-source orchestration layer above inference engines. Dynamo turns a cluster of GPUs
+      running SGLang, TensorRT-LLM, or vLLM into a coordinated multi-node inference system with
+      disaggregated serving, KV-aware routing, multi-tier caching, and SLA-driven autoscaling.
+    </p>
+    <div class="key-results">
+      <div class="key-result">
+        <div class="number" style="color:var(--accent-green)">750x</div>
+        <div class="label">Higher throughput<br>DeepSeek-R1 on GB300 NVL72</div>
+      </div>
+      <div class="key-result">
+        <div class="number" style="color:var(--accent-cyan)">7x</div>
+        <div class="label">Faster model startup<br>ModelExpress weight streaming</div>
+      </div>
+      <div class="key-result">
+        <div class="number" style="color:var(--accent-purple)">2x</div>
+        <div class="label">Faster TTFT<br>KV-aware routing (Baseten)</div>
+      </div>
+      <div class="key-result">
+        <div class="number" style="color:var(--accent-orange)">80%</div>
+        <div class="label">Fewer SLA breaches<br>Planner autoscaling</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 1: Architecture -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="arch">
+  <div class="container">
+    <div class="section-label green">Section 1</div>
+    <h2>Three-Plane Architecture</h2>
+    <p>
+      Dynamo is built around three cooperating concerns: a fast <strong>Request Plane</strong> for token generation,
+      a responsive <strong>Control Plane</strong> for scaling and placement, and a resilient <strong>Storage &amp; Events Plane</strong>
+      for KV reuse and failure recovery. This separation allows each concern to evolve and scale independently.
+    </p>
+
+    <!-- Architecture Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title green">Full System Architecture</div>
+      <svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:900px;margin:0 auto;display:block;">
+        <!-- Request Plane Background -->
+        <rect x="20" y="15" width="860" height="150" rx="12" fill="rgba(118,185,0,0.06)" stroke="#76b900" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="40" y="38" fill="#76b900" font-size="11" font-weight="700" letter-spacing="1.5">REQUEST PLANE</text>
+
+        <!-- Client -->
+        <rect x="40" y="55" width="100" height="48" rx="8" fill="#1a2236" stroke="#4a7a00" stroke-width="1.5"/>
+        <text x="90" y="76" fill="#e2e8f0" font-size="11" text-anchor="middle" font-weight="600">Client</text>
+        <text x="90" y="92" fill="#94a3b8" font-size="9" text-anchor="middle">HTTP/gRPC</text>
+
+        <!-- Frontend -->
+        <rect x="190" y="55" width="110" height="48" rx="8" fill="#1a2236" stroke="#76b900" stroke-width="1.5"/>
+        <text x="245" y="76" fill="#a3e635" font-size="11" text-anchor="middle" font-weight="600">Frontend</text>
+        <text x="245" y="92" fill="#94a3b8" font-size="9" text-anchor="middle">Validate + Tokenize</text>
+
+        <!-- Router -->
+        <rect x="350" y="50" width="130" height="58" rx="8" fill="rgba(118,185,0,0.12)" stroke="#76b900" stroke-width="2"/>
+        <text x="415" y="73" fill="#a3e635" font-size="12" text-anchor="middle" font-weight="700">Smart Router</text>
+        <text x="415" y="89" fill="#94a3b8" font-size="9" text-anchor="middle">KV-Aware + Cost Fn</text>
+        <text x="415" y="101" fill="#64748b" font-size="8" text-anchor="middle">RadixTree Indexer</text>
+
+        <!-- Prefill Workers -->
+        <rect x="540" y="45" width="140" height="32" rx="6" fill="#1a2236" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="610" y="66" fill="#22d3ee" font-size="10" text-anchor="middle" font-weight="600">Prefill Workers (xP)</text>
+
+        <!-- Decode Workers -->
+        <rect x="540" y="90" width="140" height="32" rx="6" fill="#1a2236" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="610" y="111" fill="#a78bfa" font-size="10" text-anchor="middle" font-weight="600">Decode Workers (yD)</text>
+
+        <!-- GPU icons -->
+        <rect x="710" y="45" width="50" height="32" rx="4" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="735" y="66" fill="#22d3ee" font-size="9" text-anchor="middle">GPU</text>
+        <rect x="710" y="90" width="50" height="32" rx="4" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="735" y="111" fill="#a78bfa" font-size="9" text-anchor="middle">GPU</text>
+        <rect x="780" y="45" width="50" height="32" rx="4" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="805" y="66" fill="#22d3ee" font-size="9" text-anchor="middle">GPU</text>
+        <rect x="780" y="90" width="50" height="32" rx="4" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="805" y="111" fill="#a78bfa" font-size="9" text-anchor="middle">GPU</text>
+
+        <!-- Arrows -->
+        <line x1="140" y1="79" x2="187" y2="79" stroke="#76b900" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <line x1="300" y1="79" x2="347" y2="79" stroke="#76b900" stroke-width="1.5" marker-end="url(#arrowG)"/>
+        <line x1="480" y1="70" x2="537" y2="61" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowC)"/>
+        <line x1="480" y1="90" x2="537" y2="106" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+        <line x1="680" y1="61" x2="707" y2="61" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrowC)"/>
+        <line x1="680" y1="106" x2="707" y2="106" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrowP)"/>
+
+        <!-- Control Plane Background -->
+        <rect x="20" y="185" width="430" height="150" rx="12" fill="rgba(251,146,60,0.05)" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="40" y="208" fill="#fb923c" font-size="11" font-weight="700" letter-spacing="1.5">CONTROL PLANE</text>
+
+        <!-- Planner -->
+        <rect x="40" y="220" width="120" height="50" rx="8" fill="rgba(251,146,60,0.1)" stroke="#fb923c" stroke-width="2"/>
+        <text x="100" y="242" fill="#fb923c" font-size="11" text-anchor="middle" font-weight="700">Planner</text>
+        <text x="100" y="258" fill="#94a3b8" font-size="8" text-anchor="middle">SLA-Driven Scaling</text>
+
+        <!-- Dynamo Operator -->
+        <rect x="185" y="220" width="120" height="50" rx="8" fill="#1a2236" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="245" y="242" fill="#fb923c" font-size="10" text-anchor="middle" font-weight="600">K8s Operator</text>
+        <text x="245" y="258" fill="#94a3b8" font-size="8" text-anchor="middle">DGD Reconciler</text>
+
+        <!-- Grove -->
+        <rect x="330" y="220" width="100" height="50" rx="8" fill="#1a2236" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="380" y="242" fill="#fb923c" font-size="10" text-anchor="middle" font-weight="600">Grove</text>
+        <text x="380" y="258" fill="#94a3b8" font-size="8" text-anchor="middle">Topo Scheduler</text>
+
+        <!-- Connectors -->
+        <line x1="100" y1="270" x2="100" y2="290" stroke="#fb923c" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="100" y="305" fill="#64748b" font-size="8" text-anchor="middle">Prometheus Metrics</text>
+        <line x1="160" y1="245" x2="182" y2="245" stroke="#fb923c" stroke-width="1" marker-end="url(#arrowO)"/>
+        <line x1="305" y1="245" x2="327" y2="245" stroke="#fb923c" stroke-width="1" marker-end="url(#arrowO)"/>
+
+        <!-- Storage & Events Plane Background -->
+        <rect x="470" y="185" width="410" height="150" rx="12" fill="rgba(167,139,250,0.05)" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6,3"/>
+        <text x="490" y="208" fill="#a78bfa" font-size="11" font-weight="700" letter-spacing="1.5">STORAGE &amp; EVENTS PLANE</text>
+
+        <!-- KVBM -->
+        <rect x="490" y="220" width="110" height="50" rx="8" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="2"/>
+        <text x="545" y="240" fill="#a78bfa" font-size="11" text-anchor="middle" font-weight="700">KVBM</text>
+        <text x="545" y="256" fill="#94a3b8" font-size="8" text-anchor="middle">4-Tier Cache Mgr</text>
+
+        <!-- NIXL -->
+        <rect x="620" y="220" width="100" height="50" rx="8" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="2"/>
+        <text x="670" y="240" fill="#22d3ee" font-size="11" text-anchor="middle" font-weight="700">NIXL</text>
+        <text x="670" y="256" fill="#94a3b8" font-size="8" text-anchor="middle">KV Transfer</text>
+
+        <!-- KV Events -->
+        <rect x="740" y="220" width="120" height="50" rx="8" fill="#1a2236" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="800" y="240" fill="#a78bfa" font-size="10" text-anchor="middle" font-weight="600">KV Events</text>
+        <text x="800" y="256" fill="#94a3b8" font-size="8" text-anchor="middle">NATS / ZMQ</text>
+
+        <line x1="600" y1="245" x2="617" y2="245" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrowP)"/>
+        <line x1="720" y1="245" x2="737" y2="245" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrowP)"/>
+
+        <!-- Storage Tier Icons -->
+        <rect x="40" y="370" width="840" height="120" rx="12" fill="rgba(45,212,191,0.04)" stroke="#2dd4bf" stroke-width="1" stroke-dasharray="6,3"/>
+        <text x="60" y="393" fill="#2dd4bf" font-size="11" font-weight="700" letter-spacing="1.5">MEMORY HIERARCHY</text>
+
+        <rect x="60" y="410" width="160" height="55" rx="8" fill="rgba(239,68,68,0.08)" stroke="#ef4444" stroke-width="1.5"/>
+        <text x="140" y="432" fill="#ef4444" font-size="11" text-anchor="middle" font-weight="700">G1: GPU HBM</text>
+        <text x="140" y="448" fill="#94a3b8" font-size="9" text-anchor="middle">Active KV + Hot Cache</text>
+        <text x="140" y="460" fill="#64748b" font-size="8" text-anchor="middle">~80 GB per GPU</text>
+
+        <rect x="250" y="410" width="160" height="55" rx="8" fill="rgba(251,146,60,0.08)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="330" y="432" fill="#fb923c" font-size="11" text-anchor="middle" font-weight="700">G2: CPU Pinned</text>
+        <text x="330" y="448" fill="#94a3b8" font-size="9" text-anchor="middle">Offloaded Blocks</text>
+        <text x="330" y="460" fill="#64748b" font-size="8" text-anchor="middle">Page-locked DRAM</text>
+
+        <rect x="440" y="410" width="160" height="55" rx="8" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="520" y="432" fill="#fbbf24" font-size="11" text-anchor="middle" font-weight="700">G3: Local SSD</text>
+        <text x="520" y="448" fill="#94a3b8" font-size="9" text-anchor="middle">NVMe + GDS</text>
+        <text x="520" y="460" fill="#64748b" font-size="8" text-anchor="middle">NIXL POSIX I/O</text>
+
+        <rect x="630" y="410" width="170" height="55" rx="8" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="715" y="432" fill="#22d3ee" font-size="11" text-anchor="middle" font-weight="700">G4: Remote / Cloud</text>
+        <text x="715" y="448" fill="#94a3b8" font-size="9" text-anchor="middle">S3 / NFS / RDMA</text>
+        <text x="715" y="460" fill="#64748b" font-size="8" text-anchor="middle">Opaque Blob Store</text>
+
+        <!-- Tier flow arrows -->
+        <line x1="220" y1="437" x2="247" y2="437" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <line x1="410" y1="437" x2="437" y2="437" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <line x1="600" y1="437" x2="627" y2="437" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+
+        <!-- Arrow markers -->
+        <defs>
+          <marker id="arrowG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#76b900"/></marker>
+          <marker id="arrowC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#22d3ee"/></marker>
+          <marker id="arrowP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/></marker>
+          <marker id="arrowO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#fb923c"/></marker>
+          <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker>
+        </defs>
+      </svg>
+    </div>
+
+    <h3>Design Goals</h3>
+    <div class="card-grid-3">
+      <div class="card">
+        <div class="card-header"><div class="card-icon green">L</div><strong>Latency Stability</strong></div>
+        <p style="font-size:0.85rem">Keep TTFT and ITL predictable under bursty, mixed-length traffic. Disaggregated serving isolates compute-bound prefill from memory-bound decode.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon cyan">E</div><strong>GPU Efficiency</strong></div>
+        <p style="font-size:0.85rem">Independently scale prefill and decode pools so each runs on hardware tuned for its workload. No wasted cycles on idle phases.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon purple">R</div><strong>Compute Reuse</strong></div>
+        <p style="font-size:0.85rem">KV-aware routing with radix-tree indexing eliminates redundant prefill. Multi-tier KVBM extends effective cache capacity far beyond HBM.</p>
+      </div>
+    </div>
+
+    <h3>End-to-End Request Flow (Disaggregated Mode)</h3>
+    <p>From the <code>architecture.md</code> design doc -- the nine steps of a disaggregated inference request:</p>
+
+    <div class="flow-step"><div class="step-num">1</div><div><strong>Client sends request to Frontend</strong> -- HTTP POST to the OpenAI-compatible endpoint on port 8000.</div></div>
+    <div class="flow-step"><div class="step-num">2</div><div><strong>Frontend validates and preprocesses</strong> -- applies chat template, tokenizes, parses <code>nvext</code> hints.</div></div>
+    <div class="flow-step"><div class="step-num">3</div><div><strong>Router selects a Prefill worker</strong> -- uses cost function combining KV cache overlap and decode load.</div></div>
+    <div class="flow-step cyan-step"><div class="step-num">4</div><div><strong>Prefill computes KV cache</strong> -- GPU forward pass generates key-value tensors for the prompt.</div></div>
+    <div class="flow-step cyan-step"><div class="step-num">5</div><div><strong>Prefill returns transfer metadata</strong> -- backend-specific <code>disaggregated_params</code> for KV handoff.</div></div>
+    <div class="flow-step purple-step"><div class="step-num">6</div><div><strong>Router selects a Decode worker</strong> -- injects prefill metadata into the decode request.</div></div>
+    <div class="flow-step purple-step"><div class="step-num">7</div><div><strong>Decode receives KV via NIXL</strong> -- direct GPU-to-GPU transfer using NVLink or InfiniBand/UCX.</div></div>
+    <div class="flow-step orange-step"><div class="step-num">8</div><div><strong>Decode streams tokens</strong> -- auto-regressive generation using transferred KV state.</div></div>
+    <div class="flow-step orange-step"><div class="step-num">9</div><div><strong>KV Events update cache visibility</strong> -- KVBM may offload/recall blocks based on reuse potential.</div></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 2: Smart Router -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="router">
+  <div class="container">
+    <div class="section-label cyan">Section 2</div>
+    <h2>Smart Router: KV-Aware Routing</h2>
+    <p>
+      The KV Router is implemented in Rust (<code>lib/kv-router/src/</code>) and is the critical decision point
+      for every inference request. It tracks two metrics per worker: <strong>potential active blocks</strong>
+      (decode load) and <strong>potential new prefill blocks</strong> (tokens requiring fresh computation).
+      These feed a cost function that minimizes redundant prefill while balancing decode load.
+    </p>
+
+    <h3>Radix Tree KV Cache Indexer</h3>
+    <p>
+      The <code>KVIndexer</code> maintains a global radix (prefix) tree built from worker-reported KV events.
+      Each node in the tree stores a set of worker IDs that have cached that particular block. From
+      <code>lib/kv-router/src/indexer/radix_tree.rs</code>:
+    </p>
+
+    <pre><code><span class="cm">// lib/kv-router/src/indexer/radix_tree.rs</span>
+
+<span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct</span> <span class="ty">RadixBlock</span> {
+    <span class="cm">/// Child blocks, keyed by local block hash</span>
+    <span class="kw">pub</span> children: <span class="ty">FxHashMap</span>&lt;<span class="ty">LocalBlockHash</span>, <span class="ty">SharedRadixBlock</span>&gt;,
+    <span class="cm">/// Workers that have this block cached</span>
+    <span class="kw">pub</span> workers: <span class="ty">FxHashSet</span>&lt;<span class="ty">WorkerWithDpRank</span>&gt;,
+    <span class="cm">/// External sequence block hash (None for root)</span>
+    <span class="kw">pub</span> block_hash: <span class="ty">Option</span>&lt;<span class="ty">ExternalSequenceBlockHash</span>&gt;,
+    <span class="cm">/// Recency buffer for frequency-based decisions</span>
+    <span class="kw">pub</span> recent_uses: <span class="ty">VecDeque</span>&lt;<span class="ty">Instant</span>&gt;,
+}
+
+<span class="kw">pub struct</span> <span class="ty">RadixTree</span> {
+    <span class="kw">pub</span> root: <span class="ty">SharedRadixBlock</span>,
+    <span class="cm">/// Per-worker O(1) lookup: worker -> (block_hash -> block)</span>
+    <span class="kw">pub</span> lookup: <span class="ty">FxHashMap</span>&lt;<span class="ty">WorkerWithDpRank</span>,
+              <span class="ty">FxHashMap</span>&lt;<span class="ty">ExternalSequenceBlockHash</span>, <span class="ty">SharedRadixBlock</span>&gt;&gt;,
+    <span class="kw">pub</span> expiration_duration: <span class="ty">Option</span>&lt;<span class="ty">Duration</span>&gt;,
+}</code></pre>
+
+    <p>
+      The <code>find_matches</code> method traverses the tree for a token sequence, tracking which workers
+      share each prefix depth. Workers "drop out" as we descend where their cached blocks end. The algorithm
+      supports early exit when only a single worker remains, and per-block frequency tracking with TTL-based
+      expiration for approximate mode.
+    </p>
+
+    <div class="callout green">
+      <strong>Two Indexer Backends:</strong> With <code>--router-event-threads 1</code>, a single-threaded
+      <code>RadixTree</code> with TTL/pruning support is used. With N &gt; 1 (default: 4), a
+      <code>ConcurrentRadixTree</code> uses sticky worker routing for per-worker event serialization
+      while allowing concurrent reads.
+    </div>
+
+    <h3>Cost Function and Worker Selection</h3>
+    <p>
+      The core selection logic in <code>lib/kv-router/src/scheduling/selector.rs</code> computes a cost
+      for each worker and selects the minimum:
+    </p>
+
+    <pre><code><span class="cm">// lib/kv-router/src/scheduling/selector.rs - DefaultWorkerSelector</span>
+
+<span class="kw">let</span> get_score = |worker: <span class="ty">WorkerWithDpRank</span>| -> <span class="ty">f64</span> {
+    <span class="kw">let</span> overlap = overlaps.get(&amp;worker).unwrap_or(&amp;<span class="num">0</span>);
+    <span class="kw">let</span> prefill_token = prefill_tokens.get(&amp;worker).unwrap_or(&amp;isl);
+    <span class="kw">let</span> potential_prefill_block = prefill_token <span class="kw">as</span> <span class="ty">f64</span> / block_size <span class="kw">as</span> <span class="ty">f64</span>;
+    <span class="kw">let</span> decode_block = decode_blocks.get(&amp;worker).unwrap_or(&amp;...);
+
+    <span class="cm">// The core cost function:</span>
+    <span class="kw">let</span> logit = <span class="fn">overlap_weight</span> * potential_prefill_block + decode_block;
+    logit
+};</code></pre>
+
+    <!-- Router Decision Flow Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title cyan">Routing Decision Flow</div>
+      <svg viewBox="0 0 860 440" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:860px;margin:0 auto;display:block;">
+        <!-- Input -->
+        <rect x="30" y="20" width="140" height="50" rx="8" fill="rgba(118,185,0,0.12)" stroke="#76b900" stroke-width="2"/>
+        <text x="100" y="42" fill="#a3e635" font-size="11" text-anchor="middle" font-weight="700">Incoming Request</text>
+        <text x="100" y="58" fill="#94a3b8" font-size="9" text-anchor="middle">tokens[], nvext hints</text>
+
+        <!-- Tokenize + Hash -->
+        <rect x="220" y="20" width="140" height="50" rx="8" fill="#1a2236" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="290" y="42" fill="#22d3ee" font-size="10" text-anchor="middle" font-weight="600">Block Hashing</text>
+        <text x="290" y="58" fill="#94a3b8" font-size="9" text-anchor="middle">tokens / block_size</text>
+
+        <line x1="170" y1="45" x2="217" y2="45" stroke="#76b900" stroke-width="1.5" marker-end="url(#arrowG)"/>
+
+        <!-- RadixTree Lookup -->
+        <rect x="410" y="10" width="180" height="70" rx="10" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="2"/>
+        <text x="500" y="34" fill="#a78bfa" font-size="12" text-anchor="middle" font-weight="700">RadixTree Lookup</text>
+        <text x="500" y="52" fill="#94a3b8" font-size="9" text-anchor="middle">find_matches(block_hashes)</text>
+        <text x="500" y="68" fill="#64748b" font-size="8" text-anchor="middle">Returns: {worker_id: overlap_score}</text>
+
+        <line x1="360" y1="45" x2="407" y2="45" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowC)"/>
+
+        <!-- Queue Decision -->
+        <rect x="30" y="120" width="200" height="55" rx="8" fill="#1a2236" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="130" y="140" fill="#fb923c" font-size="10" text-anchor="middle" font-weight="600">Queue Policy Check</text>
+        <text x="130" y="156" fill="#94a3b8" font-size="9" text-anchor="middle">FCFS | LCFS | WSPT (Smith's rule)</text>
+        <text x="130" y="168" fill="#64748b" font-size="8" text-anchor="middle">Threshold: router_queue_threshold</text>
+
+        <line x1="500" y1="80" x2="500" y2="95" stroke="#a78bfa" stroke-width="1"/>
+        <line x1="500" y1="95" x2="130" y2="95" stroke="#a78bfa" stroke-width="1"/>
+        <line x1="130" y1="95" x2="130" y2="117" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+
+        <!-- Cost Computation -->
+        <rect x="290" y="120" width="280" height="70" rx="10" fill="rgba(118,185,0,0.08)" stroke="#76b900" stroke-width="2"/>
+        <text x="430" y="142" fill="#a3e635" font-size="11" text-anchor="middle" font-weight="700">Cost Function (per worker)</text>
+        <text x="430" y="160" fill="#e2e8f0" font-size="10" text-anchor="middle" font-family="monospace">cost = W * prefill_blocks + decode_blocks</text>
+        <text x="430" y="178" fill="#94a3b8" font-size="9" text-anchor="middle">W = overlap_score_weight (default: 1.0)</text>
+
+        <line x1="230" y1="147" x2="287" y2="147" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowO)"/>
+
+        <!-- Temperature Selection -->
+        <rect x="620" y="120" width="210" height="55" rx="8" fill="#1a2236" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="725" y="140" fill="#22d3ee" font-size="10" text-anchor="middle" font-weight="600">Worker Selection</text>
+        <text x="725" y="158" fill="#94a3b8" font-size="9" text-anchor="middle">T=0: argmin(cost) + tree-size tiebreaker</text>
+        <text x="725" y="170" fill="#94a3b8" font-size="9" text-anchor="middle">T>0: softmax_sample(costs, T)</text>
+
+        <line x1="570" y1="150" x2="617" y2="150" stroke="#76b900" stroke-width="1.5" marker-end="url(#arrowG)"/>
+
+        <!-- Worker boxes showing example -->
+        <text x="80" y="240" fill="#64748b" font-size="10" font-weight="600">EXAMPLE: overlap_score_weight = 1.0, 3 workers, 10-block request</text>
+
+        <rect x="30" y="260" width="240" height="80" rx="8" fill="#1a2236" stroke="#ef4444" stroke-width="1"/>
+        <text x="150" y="282" fill="#ef4444" font-size="10" text-anchor="middle" font-weight="600">Worker 1: 2 cached blocks</text>
+        <text x="150" y="300" fill="#94a3b8" font-size="9" text-anchor="middle">prefill = (10-2) = 8 blocks</text>
+        <text x="150" y="316" fill="#94a3b8" font-size="9" text-anchor="middle">decode = 10 active blocks</text>
+        <text x="150" y="332" fill="#e2e8f0" font-size="10" text-anchor="middle" font-weight="600">cost = 1.0*8 + 10 = 18.0</text>
+
+        <rect x="310" y="260" width="240" height="80" rx="8" fill="rgba(118,185,0,0.08)" stroke="#76b900" stroke-width="2"/>
+        <text x="430" y="282" fill="#76b900" font-size="10" text-anchor="middle" font-weight="700">Worker 2: 5 cached blocks</text>
+        <text x="430" y="300" fill="#94a3b8" font-size="9" text-anchor="middle">prefill = (10-5) = 5 blocks</text>
+        <text x="430" y="316" fill="#94a3b8" font-size="9" text-anchor="middle">decode = 5 active blocks</text>
+        <text x="430" y="332" fill="#a3e635" font-size="11" text-anchor="middle" font-weight="700">cost = 1.0*5 + 5 = 10.0  SELECTED</text>
+
+        <rect x="590" y="260" width="240" height="80" rx="8" fill="#1a2236" stroke="#fb923c" stroke-width="1"/>
+        <text x="710" y="282" fill="#fb923c" font-size="10" text-anchor="middle" font-weight="600">Worker 3: 8 cached blocks</text>
+        <text x="710" y="300" fill="#94a3b8" font-size="9" text-anchor="middle">prefill = (10-8) = 2 blocks</text>
+        <text x="710" y="316" fill="#94a3b8" font-size="9" text-anchor="middle">decode = 9 active blocks</text>
+        <text x="710" y="332" fill="#e2e8f0" font-size="10" text-anchor="middle" font-weight="600">cost = 1.0*2 + 9 = 11.0</text>
+
+        <!-- Event sync -->
+        <rect x="30" y="370" width="800" height="55" rx="8" fill="rgba(34,211,238,0.05)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="430" y="392" fill="#22d3ee" font-size="10" text-anchor="middle" font-weight="600">Inter-Router Sync (multi-replica): AddRequest | MarkPrefillCompleted | Free</text>
+        <text x="430" y="410" fill="#94a3b8" font-size="9" text-anchor="middle">Router replicas synchronize active block state via NATS Core messaging. Each event carries a unique router ID to prevent self-processing.</text>
+      </svg>
+    </div>
+
+    <h3>Scheduling Policies</h3>
+    <p>When <code>router_queue_threshold</code> is set, the router maintains a priority queue with pluggable policies
+    (from <code>lib/kv-router/src/scheduling/policy.rs</code>):</p>
+
+    <table>
+      <thead>
+        <tr><th>Policy</th><th>Key Formula</th><th>Optimizes For</th><th>Source</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>FCFS</code> (default)</td>
+          <td><code>priority_jump - arrival_offset</code></td>
+          <td>Tail TTFT -- no request waits longer than necessary</td>
+          <td><span class="tag rust">Rust</span></td>
+        </tr>
+        <tr>
+          <td><code>LCFS</code></td>
+          <td><code>priority_jump + arrival_offset</code></td>
+          <td>Favors newer arrivals (experiment/comparison)</td>
+          <td><span class="tag rust">Rust</span></td>
+        </tr>
+        <tr>
+          <td><code>WSPT</code></td>
+          <td><code>(1 + priority_jump) / new_tokens</code></td>
+          <td>Average TTFT via Smith's rule (1956); short or high-priority requests first</td>
+          <td><span class="tag rust">Rust</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout cyan">
+      <strong>WSPT uses max overlap:</strong> The WSPT policy computes <code>new_tokens = ISL - max_overlap * block_size</code>,
+      using the maximum overlap across all workers. This approximates the realized overlap since the downstream
+      selector routes to the best-overlap worker. Short requests with high cache hits jump ahead of long ones.
+    </div>
+
+    <h3>KV Event Transport Modes</h3>
+    <table>
+      <thead>
+        <tr><th>Mode</th><th>Mechanism</th><th>Best For</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>NATS Core / Local Indexer</strong> (default)</td>
+          <td>Fire-and-forget pub/sub. Workers maintain local radix trees. Gap detection via monotonic event IDs.</td>
+          <td>Low latency, simple setup, single-router</td>
+        </tr>
+        <tr>
+          <td><strong>JetStream</strong> (<code>--durable-kv-events</code>)</td>
+          <td>Persistent NATS stream with durable consumers. State snapshots in NATS Object Store.</td>
+          <td>Production multi-replica consistency</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 3: KVBM -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="kvbm">
+  <div class="container">
+    <div class="section-label purple">Section 3</div>
+    <h2>KV Block Manager (KVBM)</h2>
+    <p>
+      KVBM is the multi-tier cache manager that extends effective KV cache capacity far beyond GPU HBM.
+      Implemented in Rust (<code>lib/kvbm-physical/</code>, <code>lib/kvbm-logical/</code>, <code>lib/kvbm-common/</code>),
+      it manages a 4-tier memory hierarchy with asynchronous offload/onboard operations coordinated through NIXL.
+    </p>
+
+    <!-- KV Tier Hierarchy Diagram -->
+    <div class="diagram-container">
+      <div class="diagram-title purple">KV Block Manager: 4-Tier Memory Hierarchy</div>
+      <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:860px;margin:0 auto;display:block;">
+        <!-- G1: GPU HBM -->
+        <rect x="30" y="20" width="800" height="75" rx="10" fill="rgba(239,68,68,0.08)" stroke="#ef4444" stroke-width="2"/>
+        <rect x="50" y="30" width="60" height="55" rx="6" fill="rgba(239,68,68,0.15)" stroke="#ef4444" stroke-width="1"/>
+        <text x="80" y="55" fill="#ef4444" font-size="16" text-anchor="middle" font-weight="800">G1</text>
+        <text x="80" y="75" fill="#ef4444" font-size="8" text-anchor="middle">HBM</text>
+        <text x="140" y="45" fill="#ef4444" font-size="13" font-weight="700">GPU Device Memory (HBM3e)</text>
+        <text x="140" y="62" fill="#94a3b8" font-size="9">Active KV blocks + hot prefix cache. DeviceStorage backed by CUDA device buffers.</text>
+        <text x="140" y="78" fill="#64748b" font-size="8">Pools: ActivePool (in-use sequences) + InactivePool (free list). Block states: Reset -> Partial -> Complete -> Registered.</text>
+        <text x="720" y="50" fill="#ef4444" font-size="11" text-anchor="end" font-weight="600">~80 GB / GPU</text>
+        <text x="720" y="68" fill="#64748b" font-size="9" text-anchor="end">Lowest latency</text>
+
+        <!-- Arrow G1 -> G2 -->
+        <line x1="430" y1="95" x2="430" y2="115" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrowGray)"/>
+        <text x="445" y="109" fill="#fb923c" font-size="8" font-weight="600">CUDA D2H</text>
+        <line x1="400" y1="115" x2="400" y2="95" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="355" y="109" fill="#22d3ee" font-size="8" font-weight="600">CUDA H2D</text>
+
+        <!-- G2: CPU Pinned -->
+        <rect x="30" y="120" width="800" height="75" rx="10" fill="rgba(251,146,60,0.06)" stroke="#fb923c" stroke-width="2"/>
+        <rect x="50" y="130" width="60" height="55" rx="6" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="1"/>
+        <text x="80" y="155" fill="#fb923c" font-size="16" text-anchor="middle" font-weight="800">G2</text>
+        <text x="80" y="175" fill="#fb923c" font-size="8" text-anchor="middle">CPU</text>
+        <text x="140" y="145" fill="#fb923c" font-size="13" font-weight="700">CPU Pinned Memory (DRAM)</text>
+        <text x="140" y="162" fill="#94a3b8" font-size="9">Page-locked host memory for efficient CUDA transfers and NIXL I/O. PinnedStorage backend.</text>
+        <text x="140" y="178" fill="#64748b" font-size="8">Receives Device offloads (D2H), can onboard to Device (H2D), and offloads to Disk. Dedup by sequence_hash.</text>
+        <text x="720" y="150" fill="#fb923c" font-size="11" text-anchor="end" font-weight="600">TBs of DRAM</text>
+        <text x="720" y="168" fill="#64748b" font-size="9" text-anchor="end">Cross-node via NIXL</text>
+
+        <!-- Arrow G2 -> G3 -->
+        <line x1="430" y1="195" x2="430" y2="215" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrowGray)"/>
+        <text x="445" y="209" fill="#fbbf24" font-size="8" font-weight="600">NIXL POSIX</text>
+        <line x1="400" y1="215" x2="400" y2="195" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+        <text x="347" y="209" fill="#22d3ee" font-size="8" font-weight="600">NIXL Read / GDS</text>
+
+        <!-- G3: Local SSD -->
+        <rect x="30" y="220" width="800" height="75" rx="10" fill="rgba(251,191,36,0.05)" stroke="#fbbf24" stroke-width="2"/>
+        <rect x="50" y="230" width="60" height="55" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="80" y="255" fill="#fbbf24" font-size="16" text-anchor="middle" font-weight="800">G3</text>
+        <text x="80" y="275" fill="#fbbf24" font-size="8" text-anchor="middle">SSD</text>
+        <text x="140" y="245" fill="#fbbf24" font-size="13" font-weight="700">Local NVMe SSD</text>
+        <text x="140" y="262" fill="#94a3b8" font-size="9">NIXL descriptors expose file offsets/regions for zero-copy I/O and optional GPUDirect Storage (GDS).</text>
+        <text x="140" y="278" fill="#64748b" font-size="8">Disk-to-Device onboard path bypasses CPU via GDS when available. Also supports NFS/Lustre/GPFS mounted FS.</text>
+        <text x="720" y="250" fill="#fbbf24" font-size="11" text-anchor="end" font-weight="600">Multi-TB NVMe</text>
+        <text x="720" y="268" fill="#64748b" font-size="9" text-anchor="end">GDS zero-copy</text>
+
+        <!-- Arrow G3 -> G4 -->
+        <line x1="430" y1="295" x2="430" y2="315" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrowGray)"/>
+        <text x="445" y="309" fill="#22d3ee" font-size="8" font-weight="600">NIXL Write</text>
+
+        <!-- G4: Remote -->
+        <rect x="30" y="320" width="800" height="70" rx="10" fill="rgba(34,211,238,0.05)" stroke="#22d3ee" stroke-width="2"/>
+        <rect x="50" y="330" width="60" height="50" rx="6" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="80" y="355" fill="#22d3ee" font-size="16" text-anchor="middle" font-weight="800">G4</text>
+        <text x="80" y="373" fill="#22d3ee" font-size="8" text-anchor="middle">REM</text>
+        <text x="140" y="345" fill="#22d3ee" font-size="13" font-weight="700">Remote / Cloud Storage</text>
+        <text x="140" y="362" fill="#94a3b8" font-size="9">S3, Azure Blob, or RDMA-capable volumes. KVBM treats G4 as an opaque blob store via NIXL get()/put().</text>
+        <text x="140" y="378" fill="#64748b" font-size="8">v1.0 adds S3/Azure blob support + global KV events for cluster-wide cache visibility.</text>
+        <text x="720" y="350" fill="#22d3ee" font-size="11" text-anchor="end" font-weight="600">Unlimited</text>
+        <text x="720" y="368" fill="#64748b" font-size="9" text-anchor="end">Highest latency</text>
+      </svg>
+    </div>
+
+    <h3>Block State Machine</h3>
+    <p>From <code>kvbm-design.md</code>, each KV block follows a strict lifecycle managed via RAII handles:</p>
+
+    <table>
+      <thead>
+        <tr><th>State</th><th>Description</th><th>Valid Transitions</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code style="color:#ef4444">Reset</code></td>
+          <td>Block uninitialized or recycled. Held in InactivePool, reusable.</td>
+          <td><code>init_sequence(salt_hash)</code> --> Partial</td>
+        </tr>
+        <tr>
+          <td><code style="color:#fb923c">Partial</code></td>
+          <td>Being filled with tokens. Owned by sequence creator thread.</td>
+          <td><code>add_token()</code> stays Partial; <code>commit()</code> --> Complete; <code>reset()</code> --> Reset</td>
+        </tr>
+        <tr>
+          <td><code style="color:#fbbf24">Complete</code></td>
+          <td>Fully filled but not yet visible for reuse by other requests.</td>
+          <td><code>register()</code> --> Registered; <code>reset()</code> --> Reset</td>
+        </tr>
+        <tr>
+          <td><code style="color:#76b900">Registered</code></td>
+          <td>Finalized and visible in the dedup cache. Shared ownership.</td>
+          <td>Auto <code>drop()</code> triggers Remove event --> Reset</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>KVBM Internal Architecture</h3>
+    <p>The <code>KvBlockManager&lt;H, D&gt;</code> orchestrates across memory tiers by managing per-backend block pools:</p>
+
+    <pre><code><span class="cm">// Conceptual structure from kvbm-design.md</span>
+
+<span class="ty">KvBlockManager</span>&lt;H, D&gt; owns:
+  - <span class="ty">BlockPool</span>&lt;<span class="ty">Device</span>&gt;     <span class="cm">// GPU-resident blocks (G1)</span>
+  - <span class="ty">BlockPool</span>&lt;<span class="ty">Host</span>&gt;       <span class="cm">// CPU pinned-memory blocks (G2)</span>
+  - <span class="ty">NixlAgent</span>             <span class="cm">// Remote communication + memory sharing</span>
+  - <span class="ty">BlockSetRegistry</span>      <span class="cm">// Remote lookup + import/export metadata</span>
+
+Each <span class="ty">BlockPool</span>&lt;T&gt; tracks:
+  - <span class="fn">ActivePool</span>     <span class="cm">// Blocks currently in use by sequences</span>
+  - <span class="fn">InactivePool</span>   <span class="cm">// Recycled blocks ready for allocation (free list)</span>
+
+Block memory layout: [num_layers][page_size x inner_dim]
+  block_stride = <span class="fn">align_up</span>(num_layers * layer_stride, alignment)</code></pre>
+
+    <h3>Transfer Manager and Data Flows</h3>
+    <p>The <code>TransferManager</code> is an asynchronous orchestrator with per-path queues:</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-header"><div class="card-icon pink">D2H</div><strong>Device --> Host (Offload)</strong></div>
+        <p style="font-size:0.85rem">Triggered by the connector scheduler. CUDA D2H copy or custom kernel. Host pool registers new immutable block, deduped by <code>sequence_hash</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon orange">H2D</div><strong>Host --> Device (Onboard)</strong></div>
+        <p style="font-size:0.85rem">Brings a host block back into GPU memory. CUDA H2D copy. Device pool registers the new immutable block for reuse.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon teal">H2K</div><strong>Host --> Disk (Offload)</strong></div>
+        <p style="font-size:0.85rem">NIXL Write via POSIX; GPUDirect Storage when available. Also supports network FS (NFS/Lustre/GPFS) for G4 remote storage.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon cyan">K2D</div><strong>Disk --> Device (Onboard)</strong></div>
+        <p style="font-size:0.85rem">Direct disk-to-GPU via NIXL Read, bypassing CPU when GDS is available. Fastest cold-onboard path for large KV blocks.</p>
+      </div>
+    </div>
+
+    <div class="callout purple">
+      <strong>RAII Event Integration:</strong> Block lifecycle is managed via RAII handles. When a block is registered,
+      a <code>PublishHandle</code> triggers a <strong>StoreEvent</strong>. When the handle is dropped (eviction or end-of-life),
+      a <strong>RemoveEvent</strong> is automatically published to the Dynamo Event Plane (NATS or ZMQ). This ensures
+      consistent cross-worker cache visibility without explicit deallocation logic.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 4: Planner -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="planner">
+  <div class="container">
+    <div class="section-label orange">Section 4</div>
+    <h2>Planner: SLA-Driven Dynamic Scaling</h2>
+    <p>
+      The Planner is Dynamo's autoscaling controller, implemented in Python (<code>components/src/dynamo/planner/</code>).
+      It supports two scaling modes: <strong>throughput-based</strong> (profiling data + traffic prediction) and
+      <strong>load-based</strong> (real-time engine metrics + online regression). Both aim to meet TTFT and ITL
+      SLA targets while minimizing total cost of ownership (TCO).
+    </p>
+
+    <h3>Throughput-Based Scaling Algorithm</h3>
+
+    <div class="flow-step"><div class="step-num">1</div><div><strong>Metric Collection:</strong> Every <code>adjustment_interval</code> seconds (default: 180s), queries Prometheus for avg TTFT, ITL, request count, avg ISL, and avg OSL from the Frontend's <code>/metrics</code> endpoint.</div></div>
+
+    <div class="flow-step cyan-step"><div class="step-num">2</div><div><strong>Correction Factor:</strong> Computes <code>prefill_correction = actual_ttft / expected_ttft</code> and <code>decode_correction = actual_itl / expected_itl</code>. These adapt profiling-based predictions to real-world behavior (request queueing, prefix cache hits, chunked prefill effects).</div></div>
+
+    <div class="flow-step purple-step"><div class="step-num">3</div><div><strong>Load Prediction:</strong> Forecasts <code>next_num_req</code>, <code>next_isl</code>, <code>next_osl</code> using one of four predictor algorithms (see below).</div></div>
+
+    <div class="flow-step orange-step"><div class="step-num">4</div><div><strong>Replica Calculation:</strong> Computes required prefill and decode replicas using profiling-based interpolation and correction factors.</div></div>
+
+    <div class="flow-step"><div class="step-num">5</div><div><strong>Scaling Execution:</strong> Calls <code>connector.set_component_replicas()</code> non-blocking. Supports KubernetesConnector (patches DGD resources) or VirtualConnector (writes to distributed runtime for external orchestrators).</div></div>
+
+    <h3>Replica Calculation Formulas</h3>
+    <p>From <code>planner-design.md</code> and <code>planner_core.py</code>:</p>
+
+    <pre><code><span class="cm"># Prefill replicas (single-batched, linear correction effect)</span>
+predicted_load = next_requests * next_isl / interval * <span class="fn">min</span>(<span class="num">1</span>, prefill_correction)
+prefill_replicas = <span class="fn">ceil</span>(predicted_load / interpolated_throughput / gpus_per_engine)
+
+<span class="cm"># Decode replicas (correction applied to ITL SLA target)</span>
+corrected_itl = target_itl / decode_correction_factor
+throughput_per_gpu = decode_interpolator.<span class="fn">find_best_throughput_per_gpu</span>(
+    itl=corrected_itl,
+    context_length=next_isl + next_osl / <span class="num">2</span>
+)
+decode_replicas = <span class="fn">ceil</span>(next_num_req * next_osl / interval / throughput_per_gpu / gpus_per_engine)</code></pre>
+
+    <h3>Load Predictor Algorithms</h3>
+    <p>Four predictor implementations in <code>load_predictor.py</code>, all extending <code>BasePredictor</code>:</p>
+
+    <table>
+      <thead>
+        <tr><th>Predictor</th><th>Algorithm</th><th>Best For</th><th>Min Data Points</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Constant</strong></td>
+          <td><code>next = current</code></td>
+          <td>Stable workloads, long intervals</td>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td><strong>ARIMA</strong></td>
+          <td>Auto-ARIMA (<code>pmdarima</code>) with optional <code>log1p</code> transform. Auto-fallback from raw to log1p if model collapses to (0,d,0).</td>
+          <td>Trending / seasonal patterns</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><strong>Kalman</strong></td>
+          <td>Local linear trend Kalman filter (<code>filterpy</code>). Starts after <code>--kalman-min-points</code> observations.</td>
+          <td>Bursty traffic</td>
+          <td>configurable</td>
+        </tr>
+        <tr>
+          <td><strong>Prophet</strong></td>
+          <td>Facebook Prophet time-series model. Handles complex seasonality.</td>
+          <td>Complex seasonal patterns</td>
+          <td>multiple intervals</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout orange">
+      <strong>Idle Period Handling:</strong> All predictors inherit from <code>BasePredictor</code> which skips
+      leading zeros (idle period after deployment) until the first non-zero datapoint from live traffic. This
+      prevents cold-start artifacts from distorting predictions. Predictors also support warm-starting from
+      trace files via <code>--load-predictor-warmup-trace</code>.
+    </div>
+
+    <h3>Load-Based Scaling Mode</h3>
+    <p>
+      Uses <code>ForwardPassMetrics</code> (FPM) from the Dynamo event plane for real-time scaling without
+      profiling data. Three specialized regression models in <code>fpm_regression.py</code>:
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Regression</th><th>Estimates</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>PrefillRegressionModel</code></td>
+          <td>1D: sum_prefill_tokens --> wall_time</td>
+          <td>TTFT via simulated chunked prefill scheduling</td>
+        </tr>
+        <tr>
+          <td><code>DecodeRegressionModel</code></td>
+          <td>1D: sum_decode_kv_tokens --> wall_time</td>
+          <td>ITL for total decode load (scheduled + queued)</td>
+        </tr>
+        <tr>
+          <td><code>AggRegressionModel</code></td>
+          <td>2D: (prefill_tokens, decode_kv_tokens) --> wall_time</td>
+          <td>Both TTFT and ITL with piggybacked decode/prefill</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      Scaling decisions: scale up if <strong>ALL</strong> engines' estimated latency exceeds SLA; scale down
+      if <strong>ALL</strong> are below SLA * sensitivity. Only +/-1 per interval with pending-desired guard.
+    </p>
+
+    <h3>Co-existence of Modes</h3>
+    <p>
+      When both modes are enabled, throughput-based scaling (longer interval) sets a <strong>lower bound</strong>
+      on replicas while load-based scaling (shorter interval) handles real-time adjustments above that floor.
+      This gives the best of both worlds: capacity planning from profiling data and reactive adaptation from
+      live metrics.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 5: Disaggregated Serving -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="disagg">
+  <div class="container">
+    <div class="section-label pink">Section 5</div>
+    <h2>Disaggregated Prefill/Decode Serving</h2>
+    <p>
+      Prefill and decode have fundamentally different compute characteristics: prefill is compute-bound
+      (processes all input tokens in one forward pass) while decode is memory-bandwidth-bound (generates
+      one token at a time). Disaggregating them into specialized GPU pools allows each to scale independently,
+      using optimal tensor-parallel (TP) configurations for each phase.
+    </p>
+
+    <h3>PrefillRouter Orchestration</h3>
+    <p>The <code>PrefillRouter</code> (from <code>disagg-serving.md</code>) orchestrates the full flow:</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-header"><div class="card-icon green">1</div><strong>Worker Selection</strong></div>
+        <p style="font-size:0.85rem">Router selects a prefill worker using KV-aware routing (cache overlap + load) or simple load balancing. KV overlap scores from the RadixTree indexer determine which prefill worker can reuse the most cached blocks.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon cyan">2</div><strong>Prefill Execution</strong></div>
+        <p style="font-size:0.85rem">Prefill worker computes KV cache and returns <code>disaggregated_params</code> containing backend-specific transfer metadata. The KV cache lives in the prefill worker's GPU memory.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon purple">3</div><strong>Decode Routing</strong></div>
+        <p style="font-size:0.85rem">Router injects prefill result into decode request, routes to decode worker. The decode worker is selected based on available KV capacity and current load.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon orange">4</div><strong>KV Transfer + Decode</strong></div>
+        <p style="font-size:0.85rem">Decode worker coordinates with prefill worker for direct GPU-to-GPU transfer via NIXL (NVLink, InfiniBand/UCX). Non-blocking -- GPU forward passes continue during transfer.</p>
+      </div>
+    </div>
+
+    <h3>Backend-Specific Transfer Metadata</h3>
+    <table>
+      <thead>
+        <tr><th>Backend</th><th>Metadata Format</th><th>Transfer Behavior</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>SGLang</strong></td>
+          <td><code>bootstrap_info</code> (host, port, room_id)</td>
+          <td>RDMA bootstrap coordination. Prefill runs as background task -- decode begins immediately while KV transfer proceeds in parallel.</td>
+        </tr>
+        <tr>
+          <td><strong>vLLM</strong></td>
+          <td><code>kv_transfer_params</code> (block IDs, worker connection)</td>
+          <td>Synchronous prefill. Decode waits for prefill to complete.</td>
+        </tr>
+        <tr>
+          <td><strong>TensorRT-LLM</strong></td>
+          <td><code>opaque_state</code> (serialized internal metadata)</td>
+          <td>Synchronous prefill. Decode waits for prefill to complete.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Runtime-Reconfigurable xPyD</h3>
+    <p>
+      Dynamo supports runtime-reconfigurable xPyD (x prefill workers, y decode workers). Workers can be
+      added or removed without downtime:
+    </p>
+    <ul>
+      <li><strong>Add worker:</strong> Registers with discovery service and publishes <code>RuntimeConfig</code> (including KV capacity). Router auto-discovers via discovery service.</li>
+      <li><strong>Remove worker:</strong> Drains active requests and deregisters from discovery. Router stops routing new requests to it.</li>
+    </ul>
+
+    <div class="callout pink">
+      <strong>Performance Impact:</strong> On H100 with R1 Distilled Llama 70B FP8, disaggregated serving on
+      2 nodes significantly outperforms aggregated serving on 1 or 2 nodes, with superior Pareto curves for
+      throughput vs. latency. The key insight: separating long prefills into dedicated engines prevents them
+      from blocking ongoing decode operations.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 6: NIXL -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="nixl">
+  <div class="container">
+    <div class="section-label teal">Section 6</div>
+    <h2>NIXL: NVIDIA Interchange Library</h2>
+    <p>
+      NIXL is the data transfer fabric that enables high-speed KV cache movement across workers and memory
+      domains. In Dynamo's Rust codebase (<code>lib/memory/src/nixl.rs</code>, <code>lib/kvbm-physical/src/transfer/executor/nixl.rs</code>),
+      NIXL provides a unified interface over heterogeneous transports (NVLink, InfiniBand/UCX, PCIe, POSIX I/O).
+    </p>
+
+    <h3>NIXL Architecture in KVBM</h3>
+    <pre><code><span class="cm">// lib/memory/src/nixl.rs</span>
+
+<span class="cm">/// Trait for storage types that can be registered with NIXL.</span>
+<span class="kw">pub trait</span> <span class="ty">NixlCompatible</span> {
+    <span class="cm">/// Returns (ptr, size, mem_type, device_id)</span>
+    <span class="kw">fn</span> <span class="fn">nixl_params</span>(&amp;<span class="kw">self</span>) -> (*<span class="kw">const</span> <span class="ty">u8</span>, <span class="ty">usize</span>, <span class="ty">MemType</span>, <span class="ty">u64</span>);
+}
+
+<span class="cm">/// NIXL descriptor for memory region registration.</span>
+<span class="kw">pub struct</span> <span class="ty">NixlDescriptor</span> {
+    <span class="kw">pub</span> addr: <span class="ty">u64</span>,       <span class="cm">// Base address</span>
+    <span class="kw">pub</span> size: <span class="ty">usize</span>,     <span class="cm">// Region size in bytes</span>
+    <span class="kw">pub</span> mem_type: <span class="ty">MemType</span>, <span class="cm">// host / device / etc.</span>
+    <span class="kw">pub</span> device_id: <span class="ty">u64</span>,  <span class="cm">// GPU index for device memory</span>
+}</code></pre>
+
+    <h3>Typestate Transfer Builder</h3>
+    <p>
+      The NIXL transfer builder in <code>lib/kvbm-physical/src/transfer/executor/nixl.rs</code> uses
+      Rust's typestate pattern for compile-time safety -- all required parameters (source layout, destination
+      layout, block IDs, transfer strategy) must be set before a transfer can be executed:
+    </p>
+
+    <pre><code><span class="cm">// lib/kvbm-physical/src/transfer/executor/nixl.rs</span>
+
+<span class="kw">pub struct</span> <span class="ty">NixlTransferBuilder</span>&lt;'a, TSrc, TDst, TSrcBlocks, TDstBlocks, TStrategy&gt; {
+    src: <span class="ty">Option</span>&lt;&amp;'a <span class="ty">PhysicalLayout</span>&gt;,
+    dst: <span class="ty">Option</span>&lt;&amp;'a <span class="ty">PhysicalLayout</span>&gt;,
+    src_block_ids: <span class="ty">Option</span>&lt;&amp;'a [<span class="ty">BlockId</span>]&gt;,
+    dst_block_ids: <span class="ty">Option</span>&lt;&amp;'a [<span class="ty">BlockId</span>]&gt;,
+    strategy: <span class="ty">Option</span>&lt;<span class="ty">TransferStrategy</span>&gt;,
+    <span class="cm">// Phantom markers: Unset -> Set at compile time</span>
+}</code></pre>
+
+    <h3>Remote Memory Registration Protocol</h3>
+    <p>From the KVBM design doc, the bidirectional protocol for cross-worker KV transfer:</p>
+
+    <div class="flow-step"><div class="step-num">1</div><div><strong>Agent Creation &amp; Memory Registration:</strong> Each worker sets up a <code>NixlAgent</code>, registers its memory regions (device memory) via <code>nixl_register()</code>. NIXL creates remote-accessible descriptors bound to the memory layout.</div></div>
+    <div class="flow-step cyan-step"><div class="step-num">2</div><div><strong>Metadata Exchange:</strong> Workers exchange <code>SerializedNixlBlockLayout</code> containing <code>LayoutConfig</code> (num_layers, page_size, inner_dim, dtype), <code>BlockSetID</code>, base address + stride, device ID + memory type. This bridges TP mismatches (e.g., TP=4 vs TP=8).</div></div>
+    <div class="flow-step purple-step"><div class="step-num">3</div><div><strong>Serialization / Deserialization:</strong> <code>FullyContiguous::serialize()</code> encodes physical memory descriptors (address, size, VRAM/DRAM type). <code>deserialize()</code> rehydrates into a remote memory view with correct offsets. Enables correct gather-scatter across different system configurations.</div></div>
+    <div class="flow-step orange-step"><div class="step-num">4</div><div><strong>Ownership &amp; Lifetime:</strong> RAII-based <code>RegistrationHandle</code>. On drop, automatic Remove event is published, deregistering the block from NIXL and removing it from the remote block registry. Prevents stale memory access and dangling pointers.</div></div>
+
+    <div class="callout teal">
+      <strong>Dell + NIXL:</strong> Dell integrated PowerScale with NIXL, achieving 19x faster TTFT by enabling
+      direct storage-to-GPU KV cache streaming, bypassing the CPU entirely via GPUDirect Storage.
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 7: Agentic Features -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="agentic">
+  <div class="container">
+    <div class="section-label yellow">Section 7</div>
+    <h2>Agentic Features</h2>
+    <p>
+      From <code>docs/features/agentic_workloads.md</code>: Agentic LLM inference is dominated by KV-cache
+      storage and I/O rather than computation. Without leveraging the predictable structure of agent lifecycles,
+      significant optimizations are left on the table. Dynamo bridges this gap with <strong>agentic hints</strong>
+      that flow from the harness through the router to the KV cache manager.
+    </p>
+
+    <h3>nvext API: Agentic Hints</h3>
+    <p>
+      Hints are carried in the request body under <code>nvext</code> on chat completions. The frontend
+      parses them and passes them to the KV router and backends.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Hint</th><th>Location</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>priority</code></td>
+          <td><code>nvext.agent_hints</code></td>
+          <td>Unified request priority. Higher values move the request earlier in the router queue (via <code>priority_jump</code> in all scheduling policies) and are forwarded to the backend for scheduling + priority-based eviction.</td>
+        </tr>
+        <tr>
+          <td><code>osl</code></td>
+          <td><code>nvext.agent_hints</code></td>
+          <td>Expected output sequence length. Used by the router for output block tracking and load-balancing accuracy when <code>--router-track-output-blocks</code> is enabled.</td>
+        </tr>
+        <tr>
+          <td><code>speculative_prefill</code></td>
+          <td><code>nvext.agent_hints</code></td>
+          <td>After assistant turn completes, prefills the predicted next-turn prefix to warm the KV cache. Up to ~3x TTFT improvement on turns 2+.</td>
+        </tr>
+        <tr>
+          <td><code>cache_control</code></td>
+          <td><code>nvext.cache_control</code></td>
+          <td>TTL-based KV cache pinning. Pinned prefixes resist eviction for the specified duration, demoting to host memory rather than deletion.</td>
+        </tr>
+        <tr>
+          <td><code>program_id</code></td>
+          <td><code>nvext.agent_hints</code></td>
+          <td>(Planned) Identifies the agentic program for program-level metrics and cache affinity.</td>
+        </tr>
+        <tr>
+          <td><code>context_type</code></td>
+          <td><code>nvext.agent_hints</code></td>
+          <td>(Planned) Semantic type (system prompt, tool definition, reasoning branch) for context-aware eviction.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Cache Pinning with TTL</h3>
+    <p>
+      From the router config (<code>lib/kv-router/src/scheduling/config.rs</code>), cache control is enabled
+      via <code>router_enable_cache_control</code>. When enabled, after generation completes the router calls
+      a <code>pin_prefix</code> hook (with TTL) to the worker's cache_control service mesh endpoint. Pinned
+      nodes resist eviction in SGLang's HiCache, demoting to host memory rather than being deleted.
+    </p>
+
+    <pre><code><span class="cm">// From lib/kv-router/src/scheduling/config.rs</span>
+
+<span class="cm">/// Enable cache control (PIN with TTL) via the worker's</span>
+<span class="cm">/// cache_control service mesh endpoint.</span>
+<span class="kw">pub</span> router_enable_cache_control: <span class="ty">bool</span>,  <span class="cm">// default: false</span></code></pre>
+
+    <div class="callout orange">
+      <strong>NeMo Agent Toolkit Integration:</strong> TTL is dynamically computed as the product of
+      expected reuse count and inter-request time. The NAT profiler pre-computes these expectations during
+      agent evaluations and injects <code>nvext.cache_control</code> with the derived TTL automatically.
+      <strong>Future work:</strong> TTL could be context-type-aware -- think tokens get lower TTL than system
+      prompts and tool definitions.
+    </div>
+
+    <h3>LangChain Integration</h3>
+    <p>
+      Dynamo is supported directly in LangChain via the
+      <a href="https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo" style="color:var(--accent-cyan)">NVIDIA AI Endpoints integration</a>.
+      Configure the chat model to use the Dynamo endpoint and pass agent hints directly from the LangChain client.
+    </p>
+
+    <h3>Feature Matrix by Backend</h3>
+    <table>
+      <thead>
+        <tr><th>Feature</th><th>SGLang</th><th>TensorRT-LLM</th><th>vLLM</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Priority-based cache eviction</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-yellow)">In progress</td><td style="color:var(--accent-yellow)">In progress</td></tr>
+        <tr><td>Cache pinning (TTL)</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-yellow)">In progress</td><td>--</td></tr>
+        <tr><td>Cache prefetching</td><td style="color:var(--accent-yellow)">In progress</td><td>--</td><td>--</td></tr>
+        <tr><td>Speculative prefill</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>Priority-aware routing</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 8: v1.0 Features -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="v1">
+  <div class="container">
+    <div class="section-label green">Section 8</div>
+    <h2>v1.0 Features &amp; Benchmarks</h2>
+    <p>
+      Dynamo 1.0 shipped March 2026 as a production-ready release with strong community adoption.
+      The release spans zero-config deployment, agentic inference, multimodal E/P/D, video generation,
+      and K8s Inference Gateway integration.
+    </p>
+
+    <h3>What's New in 1.0</h3>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-header"><div class="card-icon green">ZC</div><strong>Zero-Config Deploy (DGDR)</strong></div>
+        <p style="font-size:0.85rem"><span class="tag new">BETA</span> Specify model, HW, and SLA in one YAML. AIConfigurator auto-profiles, Planner optimizes topology, Dynamo deploys.</p>
+        <pre style="font-size:0.75rem"><code><span class="kw">apiVersion:</span> nvidia.com/v1beta1
+<span class="kw">kind:</span> DynamoGraphDeploymentRequest
+<span class="kw">spec:</span>
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  sla: { ttft: 200.0, itl: 20.0 }
+  autoApply: true</code></pre>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon cyan">AG</div><strong>Agentic Inference</strong></div>
+        <p style="font-size:0.85rem">Per-request hints for latency priority, expected output length, and cache pinning TTL. LangChain + NeMo Agent Toolkit integrations with speculative prefill for ~3x TTFT on turns 2+.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon purple">MM</div><strong>Multimodal E/P/D</strong></div>
+        <p style="font-size:0.85rem">Disaggregated encode/prefill/decode with embedding cache -- 30% faster TTFT on image workloads. Block hashing incorporates <code>mm_hash</code> for multimodal objects.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon orange">VG</div><strong>Video Generation</strong></div>
+        <p style="font-size:0.85rem">Native FastVideo + SGLang Diffusion support. Real-time 1080p on a single B200.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon pink">K8</div><strong>K8s Inference Gateway</strong></div>
+        <p style="font-size:0.85rem">KV-aware routing inside the standard Kubernetes gateway. EPP plugin with <code>skip_initial_worker_wait</code> for external worker management.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-icon teal">S3</div><strong>Storage-Tier KV Offload</strong></div>
+        <p style="font-size:0.85rem">S3/Azure blob support for G4 tier + global KV events for cluster-wide cache visibility. Event Plane broadcasts StoreEvent / RemoveEvent for smart tiering.</p>
+      </div>
+    </div>
+
+    <h3>Key Benchmarks</h3>
+    <table>
+      <thead>
+        <tr><th>Result</th><th>Model</th><th>Hardware</th><th>Context</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong style="color:var(--accent-green)">750x</strong> higher throughput</td>
+          <td>DeepSeek-R1</td>
+          <td>GB300 NVL72</td>
+          <td>InferenceXv2 benchmark (SemiAnalysis)</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-green)">7x</strong> higher throughput/GPU</td>
+          <td>DeepSeek R1</td>
+          <td>GB200 NVL72 vs B200</td>
+          <td>InferenceX benchmark (SemiAnalysis)</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-cyan)">7x</strong> faster model startup</td>
+          <td>DeepSeek-V3</td>
+          <td>H200</td>
+          <td>ModelExpress GPU-to-GPU weight streaming via NIXL/NVLink</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-purple)">2x</strong> faster TTFT</td>
+          <td>Qwen3-Coder 480B</td>
+          <td>Multi-node</td>
+          <td>KV-aware routing (Baseten production benchmark)</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-orange)">80%</strong> fewer SLA breaches</td>
+          <td>Various</td>
+          <td>Production</td>
+          <td>Planner autoscaling at 5% lower TCO (Alibaba APSARA 2025)</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-pink)">10x</strong> inference speedup</td>
+          <td>Kimi K2</td>
+          <td>GB200</td>
+          <td>Moonshot AI production deployment</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--accent-teal)">19x</strong> faster TTFT</td>
+          <td>Various</td>
+          <td>Dell PowerScale + NIXL</td>
+          <td>Storage-to-GPU KV streaming via GDS</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Backend Support Matrix</h3>
+    <table>
+      <thead>
+        <tr><th>Feature</th><th>SGLang</th><th>TensorRT-LLM</th><th>vLLM</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Disaggregated Serving</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>KV-Aware Routing</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>SLA-Based Planner</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>KVBM</td><td style="color:var(--accent-yellow)">In progress</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>Multimodal</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+        <tr><td>Tool Calling</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td><td style="color:var(--accent-green)">Available</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 9: Source Map -->
+<!-- ============================================================ -->
+<hr class="sep">
+<section id="code">
+  <div class="container">
+    <div class="section-label cyan">Source Reference</div>
+    <h2>Codebase Map</h2>
+    <p>Key directories and files explored during this analysis of the <code>ai-dynamo/dynamo</code> repository:</p>
+
+    <h3>Rust Core (Performance-Critical)</h3>
+    <table>
+      <thead>
+        <tr><th>Path</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>lib/kv-router/src/scheduling/selector.rs</code></td><td>DefaultWorkerSelector: cost function, softmax sampling, tie-breaking</td></tr>
+        <tr><td><code>lib/kv-router/src/scheduling/policy.rs</code></td><td>FCFS, LCFS, WSPT (Smith's rule) scheduling policies</td></tr>
+        <tr><td><code>lib/kv-router/src/scheduling/config.rs</code></td><td>KvRouterConfig: all router parameters, defaults, cache control toggle</td></tr>
+        <tr><td><code>lib/kv-router/src/indexer/radix_tree.rs</code></td><td>RadixTree: find_matches, block tracking, frequency-based TTL</td></tr>
+        <tr><td><code>lib/kv-router/src/indexer/concurrent_radix_tree.rs</code></td><td>Thread-safe radix tree with sticky worker routing</td></tr>
+        <tr><td><code>lib/kvbm-physical/src/transfer/executor/nixl.rs</code></td><td>NixlTransferBuilder: typestate pattern for safe cross-worker transfers</td></tr>
+        <tr><td><code>lib/memory/src/nixl.rs</code></td><td>NixlCompatible trait, NixlDescriptor, NixlAgent wrappers</td></tr>
+        <tr><td><code>lib/llm/src/block_manager/</code></td><td>Block layouts, NIXL storage, transfer coordination</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Python Components (Extensibility)</h3>
+    <table>
+      <thead>
+        <tr><th>Path</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>components/src/dynamo/planner/utils/planner_core.py</code></td><td>Base planner, scaling loop, Prometheus metrics, connector integration</td></tr>
+        <tr><td><code>components/src/dynamo/planner/utils/load_predictor.py</code></td><td>ARIMA, Kalman, Prophet, Constant predictors with idle-period handling</td></tr>
+        <tr><td><code>components/src/dynamo/planner/utils/fpm_regression.py</code></td><td>Prefill/Decode/Agg regression models for load-based scaling</td></tr>
+        <tr><td><code>components/src/dynamo/planner/utils/perf_interpolation.py</code></td><td>NPZ profiling data interpolation for throughput/latency mapping</td></tr>
+        <tr><td><code>components/src/dynamo/planner/kubernetes_connector.py</code></td><td>K8s DGD PATCH for replica scaling via operator</td></tr>
+        <tr><td><code>components/src/dynamo/planner/virtual_connector.py</code></td><td>VirtualConnector for non-K8s orchestrators</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Design Documentation</h3>
+    <table>
+      <thead>
+        <tr><th>Path</th><th>Content</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>docs/design-docs/architecture.md</code></td><td>Three-plane architecture, design goals, fault tolerance</td></tr>
+        <tr><td><code>docs/design-docs/router-design.md</code></td><td>KVIndexer, cost function, event transport modes, inter-router sync</td></tr>
+        <tr><td><code>docs/design-docs/kvbm-design.md</code></td><td>4-tier hierarchy, block state machine, NIXL integration, framework connectors</td></tr>
+        <tr><td><code>docs/design-docs/planner-design.md</code></td><td>Throughput + load-based scaling, predictor algorithms, connector design</td></tr>
+        <tr><td><code>docs/design-docs/disagg-serving.md</code></td><td>PrefillRouter orchestration, backend-specific metadata, xPyD</td></tr>
+        <tr><td><code>docs/design-docs/dynamo-flow.md</code></td><td>Full request flow with color-coded phases</td></tr>
+        <tr><td><code>docs/features/agentic_workloads.md</code></td><td>nvext hints, cache pinning, speculative prefill, LangChain integration</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <p>
+    NVIDIA Dynamo Deep Dive -- Built from source code analysis of
+    <a href="https://github.com/ai-dynamo/dynamo">ai-dynamo/dynamo</a> repository.
+    <br>
+    Design docs: <code>docs/design-docs/</code> | Router: <code>lib/kv-router/</code> |
+    KVBM: <code>lib/kvbm-*/</code> | Planner: <code>components/src/dynamo/planner/</code>
+  </p>
+</footer>
+
+</body>
+</html>

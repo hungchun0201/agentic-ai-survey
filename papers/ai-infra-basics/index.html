@@ -1,0 +1,1769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Life of a Request — AI Inference Engine Deep Dive</title>
+<style>
+/* ================================================================
+   CSS Custom Properties
+   ================================================================ */
+:root {
+  --dark: #0d1117;
+  --dark-alt: #161b22;
+  --mid: #0f3460;
+  --surface: #1c2333;
+  --surface-alt: #21293a;
+  --card-bg: #1a2744;
+  --card-hover: #1e3050;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-dim: #6e7681;
+  --border: #30363d;
+  --border-light: #3d444d;
+
+  /* Engine brand colors */
+  --vllm: #e94560;
+  --vllm-bg: rgba(233, 69, 96, 0.12);
+  --sglang: #58a6ff;
+  --sglang-bg: rgba(88, 166, 255, 0.12);
+  --lmcache: #3fb950;
+  --lmcache-bg: rgba(63, 185, 80, 0.12);
+  --dynamo: #76b900;
+  --dynamo-bg: rgba(118, 185, 0, 0.12);
+
+  /* Accent palette */
+  --purple: #bc8cff;
+  --amber: #f0b429;
+  --cyan: #56d4dd;
+  --orange: #f78166;
+  --pink: #f778ba;
+
+  --code-bg: #0d1117;
+  --code-border: #21262d;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.2);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,0.4), 0 8px 32px rgba(0,0,0,0.3);
+}
+
+/* ================================================================
+   Reset & Base
+   ================================================================ */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+  background: var(--dark);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--sglang); text-decoration: none; transition: color 0.2s; }
+a:hover { color: #79c0ff; text-decoration: underline; }
+
+img { max-width: 100%; }
+
+code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.875em;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  color: var(--cyan);
+}
+
+/* ================================================================
+   Sticky Navigation
+   ================================================================ */
+nav.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(13, 17, 23, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 2rem;
+}
+
+nav.topnav .nav-inner {
+  display: flex;
+  align-items: center;
+  max-width: 1280px;
+  margin: 0 auto;
+  gap: 0;
+}
+
+nav.topnav .nav-brand {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text);
+  white-space: nowrap;
+  padding-right: 1.5rem;
+  border-right: 1px solid var(--border);
+  margin-right: 0.5rem;
+}
+
+nav.topnav ul {
+  display: flex;
+  list-style: none;
+  gap: 0;
+  overflow-x: auto;
+  flex: 1;
+  scrollbar-width: none;
+}
+nav.topnav ul::-webkit-scrollbar { display: none; }
+
+nav.topnav ul li a {
+  display: block;
+  padding: 0.85rem 1rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.825rem;
+  font-weight: 500;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
+}
+nav.topnav ul li a:hover {
+  color: #fff;
+  border-bottom-color: var(--vllm);
+  text-decoration: none;
+}
+
+nav.topnav .nav-back {
+  margin-left: auto;
+  padding: 0.5rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all 0.2s;
+}
+nav.topnav .nav-back:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+  text-decoration: none;
+  background: var(--surface);
+}
+
+/* ================================================================
+   Hero Section
+   ================================================================ */
+.hero {
+  background:
+    radial-gradient(ellipse 120% 60% at 20% 80%, rgba(233,69,96,0.15) 0%, transparent 60%),
+    radial-gradient(ellipse 100% 50% at 80% 20%, rgba(88,166,255,0.12) 0%, transparent 55%),
+    radial-gradient(ellipse 80% 40% at 50% 50%, rgba(63,185,80,0.08) 0%, transparent 50%),
+    linear-gradient(165deg, #0d1117 0%, #111a2e 30%, #0f1d32 60%, #0d1117 100%);
+  padding: 6rem 2rem 5rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-image:
+    radial-gradient(circle at 25% 25%, rgba(233,69,96,0.06) 0%, transparent 50%),
+    radial-gradient(circle at 75% 75%, rgba(88,166,255,0.06) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.hero-content { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; }
+
+.hero-label {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--amber);
+  background: rgba(240, 180, 41, 0.12);
+  border: 1px solid rgba(240, 180, 41, 0.25);
+  padding: 0.3rem 1rem;
+  border-radius: 100px;
+  margin-bottom: 1.5rem;
+}
+
+.hero h1 {
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  font-weight: 800;
+  line-height: 1.2;
+  margin-bottom: 1rem;
+  background: linear-gradient(135deg, #fff 0%, #c9d1d9 50%, #8b949e 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero h1 em {
+  font-style: normal;
+  background: linear-gradient(135deg, var(--vllm) 0%, var(--sglang) 50%, var(--lmcache) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  max-width: 700px;
+  margin: 0 auto 2rem;
+  line-height: 1.65;
+}
+
+.hero-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1.1rem;
+  border-radius: 100px;
+  font-size: 0.825rem;
+  font-weight: 600;
+  border: 1px solid;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.hero-badge:hover { transform: translateY(-2px); }
+
+.badge-vllm { color: var(--vllm); background: var(--vllm-bg); border-color: rgba(233,69,96,0.3); }
+.badge-vllm:hover { box-shadow: 0 4px 20px rgba(233,69,96,0.25); }
+
+.badge-sglang { color: var(--sglang); background: var(--sglang-bg); border-color: rgba(88,166,255,0.3); }
+.badge-sglang:hover { box-shadow: 0 4px 20px rgba(88,166,255,0.25); }
+
+.badge-lmcache { color: var(--lmcache); background: var(--lmcache-bg); border-color: rgba(63,185,80,0.3); }
+.badge-lmcache:hover { box-shadow: 0 4px 20px rgba(63,185,80,0.25); }
+
+.badge-dynamo { color: var(--dynamo); background: var(--dynamo-bg); border-color: rgba(118,185,0,0.3); }
+.badge-dynamo:hover { box-shadow: 0 4px 20px rgba(118,185,0,0.25); }
+
+.badge-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.badge-dot.vllm { background: var(--vllm); }
+.badge-dot.sglang { background: var(--sglang); }
+.badge-dot.lmcache { background: var(--lmcache); }
+.badge-dot.dynamo { background: var(--dynamo); }
+
+/* ================================================================
+   Sections
+   ================================================================ */
+.container {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+section {
+  padding: 4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+section:last-child { border-bottom: none; }
+
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--sglang);
+  margin-bottom: 0.5rem;
+}
+
+.section-title {
+  font-size: 1.8rem;
+  font-weight: 800;
+  margin-bottom: 0.75rem;
+  line-height: 1.3;
+}
+
+.section-desc {
+  color: var(--text-muted);
+  font-size: 1rem;
+  max-width: 720px;
+  margin-bottom: 2rem;
+  line-height: 1.7;
+}
+
+/* ================================================================
+   Overview Section
+   ================================================================ */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.overview-point {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  transition: border-color 0.2s;
+}
+.overview-point:hover { border-color: var(--border-light); }
+
+.overview-point .op-icon {
+  font-size: 1.5rem;
+  margin-bottom: 0.75rem;
+  display: block;
+}
+
+.overview-point h4 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.overview-point p {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* ================================================================
+   Navigation Cards
+   ================================================================ */
+.nav-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.engine-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.25s, border-color 0.25s, box-shadow 0.25s;
+  text-decoration: none;
+  color: var(--text);
+  position: relative;
+  overflow: hidden;
+}
+.engine-card:hover {
+  transform: translateY(-4px);
+  text-decoration: none;
+  box-shadow: var(--shadow-lg);
+}
+
+.engine-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+
+.engine-card.vllm-card { border-color: rgba(233,69,96,0.25); }
+.engine-card.vllm-card::before { background: linear-gradient(90deg, var(--vllm), rgba(233,69,96,0.3)); }
+.engine-card.vllm-card:hover { border-color: var(--vllm); box-shadow: 0 8px 32px rgba(233,69,96,0.15); }
+
+.engine-card.sglang-card { border-color: rgba(88,166,255,0.25); }
+.engine-card.sglang-card::before { background: linear-gradient(90deg, var(--sglang), rgba(88,166,255,0.3)); }
+.engine-card.sglang-card:hover { border-color: var(--sglang); box-shadow: 0 8px 32px rgba(88,166,255,0.15); }
+
+.engine-card.lmcache-card { border-color: rgba(63,185,80,0.25); }
+.engine-card.lmcache-card::before { background: linear-gradient(90deg, var(--lmcache), rgba(63,185,80,0.3)); }
+.engine-card.lmcache-card:hover { border-color: var(--lmcache); box-shadow: 0 8px 32px rgba(63,185,80,0.15); }
+
+.engine-card.dynamo-card { border-color: rgba(118,185,0,0.25); }
+.engine-card.dynamo-card::before { background: linear-gradient(90deg, var(--dynamo), rgba(118,185,0,0.3)); }
+.engine-card.dynamo-card:hover { border-color: var(--dynamo); box-shadow: 0 8px 32px rgba(118,185,0,0.15); }
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.card-icon {
+  width: 48px; height: 48px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.card-icon.vllm-icon { background: var(--vllm-bg); color: var(--vllm); border: 1px solid rgba(233,69,96,0.3); }
+.card-icon.sglang-icon { background: var(--sglang-bg); color: var(--sglang); border: 1px solid rgba(88,166,255,0.3); }
+.card-icon.lmcache-icon { background: var(--lmcache-bg); color: var(--lmcache); border: 1px solid rgba(63,185,80,0.3); }
+.card-icon.dynamo-icon { background: var(--dynamo-bg); color: var(--dynamo); border: 1px solid rgba(118,185,0,0.3); }
+
+.card-title-group h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+
+.card-version {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.card-description {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 1.25rem;
+  flex: 1;
+}
+
+.card-innovation {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.75rem;
+  border-radius: 100px;
+  margin-bottom: 1.25rem;
+}
+.card-innovation.vllm-inn { background: var(--vllm-bg); color: var(--vllm); }
+.card-innovation.sglang-inn { background: var(--sglang-bg); color: var(--sglang); }
+.card-innovation.lmcache-inn { background: var(--lmcache-bg); color: var(--lmcache); }
+.card-innovation.dynamo-inn { background: var(--dynamo-bg); color: var(--dynamo); }
+
+.card-sublinks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  margin-top: auto;
+}
+
+.card-sublinks h4 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  margin-bottom: 0.25rem;
+}
+
+.sublink-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.sublink {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+  background: var(--dark-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.sublink:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+  border-color: var(--border-light);
+  text-decoration: none;
+}
+.sublink .arrow { font-size: 0.65rem; opacity: 0.5; }
+
+/* ================================================================
+   Comparison Table
+   ================================================================ */
+.table-wrapper {
+  overflow-x: auto;
+  margin-top: 2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.table-wrapper table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.table-wrapper thead th {
+  background: var(--dark-alt);
+  padding: 1rem 1.25rem;
+  text-align: left;
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.table-wrapper thead th:first-child {
+  min-width: 160px;
+  color: var(--text-muted);
+}
+
+.th-vllm { color: var(--vllm) !important; }
+.th-sglang { color: var(--sglang) !important; }
+.th-lmcache { color: var(--lmcache) !important; }
+
+.table-wrapper tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s;
+}
+.table-wrapper tbody tr:last-child { border-bottom: none; }
+.table-wrapper tbody tr:hover { background: rgba(88,166,255,0.04); }
+
+.table-wrapper tbody td {
+  padding: 0.85rem 1.25rem;
+  vertical-align: top;
+  line-height: 1.55;
+}
+
+.table-wrapper tbody td:first-child {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.table-wrapper tbody td:not(:first-child) {
+  color: var(--text-muted);
+}
+
+.cell-na {
+  color: var(--text-dim) !important;
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.cell-highlight {
+  font-weight: 600;
+}
+
+.cell-tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  margin-right: 0.25rem;
+  white-space: nowrap;
+}
+.cell-tag.vllm-tag { background: var(--vllm-bg); color: var(--vllm); }
+.cell-tag.sglang-tag { background: var(--sglang-bg); color: var(--sglang); }
+.cell-tag.lmcache-tag { background: var(--lmcache-bg); color: var(--lmcache); }
+
+/* ================================================================
+   Architecture Diagram
+   ================================================================ */
+.arch-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+.arch-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  position: relative;
+}
+
+.arch-panel h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.arch-panel .arch-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+}
+
+.arch-label.vllm-l { background: var(--vllm-bg); color: var(--vllm); }
+.arch-label.sglang-l { background: var(--sglang-bg); color: var(--sglang); }
+
+/* Diagram blocks */
+.diagram-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dg-block {
+  border-radius: var(--radius);
+  padding: 0.65rem 1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: center;
+  position: relative;
+  transition: transform 0.15s;
+}
+.dg-block:hover { transform: scale(1.02); }
+
+.dg-block.http { background: #1c2951; color: #79c0ff; border: 1px solid rgba(88,166,255,0.3); }
+.dg-block.api { background: #252e1f; color: #7ee787; border: 1px solid rgba(63,185,80,0.3); }
+.dg-block.engine { background: #2b1f3d; color: var(--purple); border: 1px solid rgba(188,140,255,0.3); }
+.dg-block.sched { background: #3a1e1e; color: var(--vllm); border: 1px solid rgba(233,69,96,0.3); }
+.dg-block.worker { background: #2e2810; color: var(--amber); border: 1px solid rgba(240,180,41,0.3); }
+.dg-block.model { background: #0d2d2d; color: var(--cyan); border: 1px solid rgba(86,212,221,0.3); }
+.dg-block.output { background: #2d1a2d; color: var(--pink); border: 1px solid rgba(247,120,186,0.3); }
+.dg-block.cache { background: #1f2d1f; color: var(--lmcache); border: 1px solid rgba(63,185,80,0.3); }
+.dg-block.ipc { background: var(--dark); color: var(--text-dim); border: 1px dashed var(--border); font-weight: 400; font-size: 0.7rem; padding: 0.35rem 0.75rem; }
+
+.dg-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.dg-arrow {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  padding: 0.15rem 0;
+  user-select: none;
+}
+
+.dg-sub {
+  font-weight: 400;
+  font-size: 0.7rem;
+  display: block;
+  margin-top: 0.15rem;
+  opacity: 0.75;
+}
+
+.process-tag {
+  position: absolute;
+  top: -0.5rem;
+  right: 0.75rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 3px;
+  background: var(--dark);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.process-boundary {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  margin: 0.25rem 0;
+  position: relative;
+}
+
+/* ================================================================
+   Glossary
+   ================================================================ */
+.glossary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+.glossary-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  transition: border-color 0.2s;
+}
+.glossary-item:hover { border-color: var(--border-light); }
+
+.glossary-item h4 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.glossary-item .gl-tag {
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.glossary-item p {
+  font-size: 0.825rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.gl-tag.vllm-t { background: var(--vllm-bg); color: var(--vllm); }
+.gl-tag.sglang-t { background: var(--sglang-bg); color: var(--sglang); }
+.gl-tag.general-t { background: rgba(188,140,255,0.12); color: var(--purple); }
+
+/* ================================================================
+   Footer / Back Link
+   ================================================================ */
+.page-footer {
+  padding: 3rem 0;
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 2rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.back-link:hover {
+  background: var(--surface-alt);
+  border-color: var(--border-light);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.footer-meta {
+  margin-top: 1.5rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+/* ================================================================
+   Request Flow Highlight Box
+   ================================================================ */
+.flow-box {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 2rem;
+  margin-top: 1.5rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 2;
+  overflow-x: auto;
+  color: var(--text-muted);
+}
+
+.flow-box .fl-step { color: var(--text); font-weight: 600; }
+.flow-box .fl-vllm { color: var(--vllm); }
+.flow-box .fl-sglang { color: var(--sglang); }
+.flow-box .fl-lmcache { color: var(--lmcache); }
+.flow-box .fl-arrow { color: var(--text-dim); margin: 0 0.25rem; }
+.flow-box .fl-ipc { color: var(--amber); font-style: italic; }
+
+/* ================================================================
+   Info Banner
+   ================================================================ */
+.info-banner {
+  background: linear-gradient(135deg, rgba(88,166,255,0.08) 0%, rgba(188,140,255,0.06) 100%);
+  border: 1px solid rgba(88,166,255,0.2);
+  border-left: 4px solid var(--sglang);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 1.25rem 1.5rem;
+  margin: 1.5rem 0;
+  font-size: 0.875rem;
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+.info-banner strong { color: var(--text); }
+
+/* ================================================================
+   Stat Row
+   ================================================================ */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.stat-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.stat-box .stat-num {
+  font-size: 1.8rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.stat-box .stat-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.stat-num.c-vllm { color: var(--vllm); }
+.stat-num.c-sglang { color: var(--sglang); }
+.stat-num.c-lmcache { color: var(--lmcache); }
+.stat-num.c-dynamo { color: var(--dynamo); }
+
+/* ================================================================
+   Topology Legend
+   ================================================================ */
+.topo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--dark-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.topo-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.topo-dot {
+  width: 10px; height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* ================================================================
+   Responsive
+   ================================================================ */
+@media (max-width: 1024px) {
+  .nav-cards { grid-template-columns: 1fr; }
+  .arch-compare { grid-template-columns: 1fr; }
+  .overview-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 768px) {
+  .hero { padding: 4rem 1.5rem 3rem; }
+  .hero h1 { font-size: 1.8rem; }
+  .container { padding: 0 1rem; }
+  section { padding: 2.5rem 0; }
+  .glossary-grid { grid-template-columns: 1fr; }
+  .stat-row { grid-template-columns: repeat(2, 1fr); }
+  .dg-row { grid-template-columns: 1fr; }
+  nav.topnav { padding: 0 1rem; }
+  .nav-brand { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ================================================================
+     NAVIGATION
+     ================================================================ -->
+<nav class="topnav">
+  <div class="nav-inner">
+    <span class="nav-brand">AI Infra Basics</span>
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#engines">Engines</a></li>
+      <li><a href="#comparison">Comparison</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#glossary">Glossary</a></li>
+    </ul>
+    <a href="../../index-en.html" class="nav-back">&larr; Back to Survey</a>
+  </div>
+</nav>
+
+<!-- ================================================================
+     HERO
+     ================================================================ -->
+<header class="hero">
+  <div class="hero-content">
+    <div class="hero-label">Source Code Deep Dive &middot; March 2026</div>
+    <h1>The Life of a Request &mdash;<br><em>AI Inference Engine Deep Dive</em></h1>
+    <p class="hero-subtitle">
+      A comprehensive architectural comparison of the four systems that form the modern
+      open-source LLM serving stack &mdash; tracing every step a request takes from HTTP
+      arrival to token output.
+    </p>
+    <div class="hero-badges">
+      <span class="hero-badge badge-vllm">
+        <span class="badge-dot vllm"></span> vLLM V1
+      </span>
+      <span class="hero-badge badge-sglang">
+        <span class="badge-dot sglang"></span> SGLang
+      </span>
+      <span class="hero-badge badge-lmcache">
+        <span class="badge-dot lmcache"></span> LMCache
+      </span>
+      <span class="hero-badge badge-dynamo">
+        <span class="badge-dot dynamo"></span> NVIDIA Dynamo
+      </span>
+    </div>
+  </div>
+</header>
+
+<!-- ================================================================
+     SECTION: OVERVIEW
+     ================================================================ -->
+<section id="overview">
+  <div class="container">
+    <div class="section-label">Why This Section Exists</div>
+    <h2 class="section-title">Understanding the Modern LLM Serving Stack</h2>
+    <div class="section-desc">
+      These four systems &mdash; vLLM, SGLang, LMCache, and NVIDIA Dynamo &mdash; together
+      represent the state of the art in open-source and production LLM serving infrastructure
+      as of March 2026. Each deep-dive in this section is based on <strong>reading actual
+      source code</strong> from the latest repositories, not just published papers.
+    </div>
+
+    <div class="info-banner">
+      <strong>Methodology:</strong> Every architectural claim in these deep-dives comes from
+      direct source code analysis of the March 2026 repositories. vLLM now runs exclusively on
+      its V1 engine (V0 was removed in v0.11.0). SGLang has matured its overlap scheduling and
+      RadixCache into production-grade components. LMCache provides middleware KV caching that
+      plugs into either engine. NVIDIA Dynamo adds disaggregated serving orchestration with
+      intelligent routing. Together they cover the entire inference lifecycle from request
+      ingestion to token delivery.
+    </div>
+
+    <div class="stat-row">
+      <div class="stat-box">
+        <div class="stat-num c-vllm">500+</div>
+        <div class="stat-label">Source files indexed</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num c-sglang">4</div>
+        <div class="stat-label">Inference systems</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num c-lmcache">10</div>
+        <div class="stat-label">Pipeline stages traced</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num c-dynamo">80%</div>
+        <div class="stat-label">Subsystem overlap (vLLM/SGLang)</div>
+      </div>
+    </div>
+
+    <div class="overview-grid">
+      <div class="overview-point">
+        <span class="op-icon" style="color:var(--vllm);">&#9670;</span>
+        <h4>vLLM V1 &mdash; PagedAttention Pioneer</h4>
+        <p>
+          The first system to introduce PagedAttention for efficient KV cache memory management.
+          V1 features a multi-process architecture with ZeroMQ IPC, a unified token budget scheduler,
+          and an extensive set of attention backends including FlashAttention 3/4 and MLA variants for
+          DeepSeek models.
+        </p>
+      </div>
+      <div class="overview-point">
+        <span class="op-icon" style="color:var(--sglang);">&#9670;</span>
+        <h4>SGLang &mdash; RadixAttention Innovator</h4>
+        <p>
+          Built around RadixCache for automatic prefix sharing via a radix tree data structure.
+          Features an overlap scheduling mode where the GPU executes the current batch while the CPU
+          prepares the next one. Pioneered the "extend" mode for efficient multi-turn conversations
+          and offers a powerful frontend DSL for LLM programs.
+        </p>
+      </div>
+      <div class="overview-point">
+        <span class="op-icon" style="color:var(--lmcache);">&#9670;</span>
+        <h4>LMCache &mdash; Multi-Tier KV Cache Middleware</h4>
+        <p>
+          A middleware layer that sits between inference engines and multi-tier storage.
+          Reduces time-to-first-token by 3&ndash;10x by caching KV tensors across GPU, CPU DRAM,
+          NVMe, and remote storage. Unlike built-in prefix caching, LMCache can reuse any repeated
+          text segment across any serving instance in a distributed deployment.
+        </p>
+      </div>
+      <div class="overview-point">
+        <span class="op-icon" style="color:var(--dynamo);">&#9670;</span>
+        <h4>NVIDIA Dynamo &mdash; Disaggregated Orchestrator</h4>
+        <p>
+          NVIDIA's open-source inference framework for disaggregated serving, providing intelligent
+          request routing, prefill-decode separation, and KV cache transfer orchestration across
+          GPU clusters. Integrates with vLLM and other backends to enable production-scale
+          multi-node deployments with dynamic scaling.
+        </p>
+      </div>
+    </div>
+
+    <div class="flow-box" style="margin-top:2rem;">
+      <div style="margin-bottom:0.5rem; color:var(--text-dim); font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em;">Canonical Request Lifecycle</div>
+      <span class="fl-step">HTTP Request</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">FastAPI Server</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Tokenization</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-ipc">[IPC]</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Scheduler</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Prefix Cache Lookup</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">KV Memory Alloc</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Model Forward</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Attention</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Sampling</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-ipc">[IPC]</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">Detokenization</span>
+      <span class="fl-arrow">&rarr;</span>
+      <span class="fl-step">HTTP Response</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     SECTION: ENGINE NAVIGATION CARDS
+     ================================================================ -->
+<section id="engines">
+  <div class="container">
+    <div class="section-label">Deep Dive Navigation</div>
+    <h2 class="section-title">Explore Each Engine</h2>
+    <div class="section-desc">
+      Each deep-dive traces a single inference request through the engine's source code,
+      mapping every subsystem from HTTP entry to token output. Click a card to enter
+      the full walkthrough, or jump directly to a specific subsystem.
+    </div>
+
+    <div class="nav-cards">
+
+      <!-- ---- vLLM V1 Card ---- -->
+      <div class="engine-card vllm-card">
+        <div class="card-header">
+          <div class="card-icon vllm-icon">vL</div>
+          <div class="card-title-group">
+            <h3><a href="vllm/index.html" style="color:inherit;">vLLM V1</a></h3>
+            <span class="card-version">v0.11+ &middot; V1 Engine (V0 removed)</span>
+          </div>
+        </div>
+        <div class="card-innovation vllm-inn">PagedAttention &middot; Unified Token Budget &middot; ZeroMQ IPC</div>
+        <p class="card-description">
+          Multi-process architecture where AsyncLLM handles tokenization/detokenization and
+          EngineCore runs the tight <code>schedule &rarr; execute &rarr; update</code> loop in a
+          separate OS process. Workers receive only incremental diffs each step. Supports
+          FlashAttention 3/4, FlashInfer, MLA, speculative decoding (EAGLE, Medusa, MTP, N-gram),
+          and disaggregated prefill-decode via NIXL and LMCache connectors.
+        </p>
+        <div class="card-sublinks">
+          <h4>Deep-Dive Pages</h4>
+          <div class="sublink-row">
+            <a href="vllm/index.html" class="sublink">Full Overview <span class="arrow">&rarr;</span></a>
+            <a href="vllm/engine-core.html" class="sublink">EngineCore &amp; IPC <span class="arrow">&rarr;</span></a>
+            <a href="vllm/scheduler.html" class="sublink">Scheduler &amp; KV Cache <span class="arrow">&rarr;</span></a>
+            <a href="vllm/model-runner.html" class="sublink">ModelRunner &amp; Attention <span class="arrow">&rarr;</span></a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- SGLang Card ---- -->
+      <div class="engine-card sglang-card">
+        <div class="card-header">
+          <div class="card-icon sglang-icon">SG</div>
+          <div class="card-title-group">
+            <h3><a href="sglang/index.html" style="color:inherit;">SGLang</a></h3>
+            <span class="card-version">Latest &middot; SRT Runtime</span>
+          </div>
+        </div>
+        <div class="card-innovation sglang-inn">RadixAttention &middot; Overlap Scheduling &middot; Extend Mode</div>
+        <p class="card-description">
+          Six-layer multi-process architecture with dedicated TokenizerManager and DetokenizerManager
+          processes. The scheduler features both normal and overlap event loops &mdash; overlap mode
+          pipelines CPU batch preparation with GPU execution. RadixCache automatically shares KV cache
+          across requests with common prefixes. Supports EAGLE, MTP, FlashInfer, FA3, dual-chunk
+          attention, and a powerful frontend DSL.
+        </p>
+        <div class="card-sublinks">
+          <h4>Deep-Dive Pages</h4>
+          <div class="sublink-row">
+            <a href="sglang/index.html" class="sublink">Full Overview <span class="arrow">&rarr;</span></a>
+            <a href="sglang/scheduler.html" class="sublink">Scheduler &amp; Batching <span class="arrow">&rarr;</span></a>
+            <a href="sglang/radix-cache.html" class="sublink">RadixCache <span class="arrow">&rarr;</span></a>
+            <a href="sglang/model-runner.html" class="sublink">ModelRunner &amp; Attention <span class="arrow">&rarr;</span></a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- LMCache Card ---- -->
+      <div class="engine-card lmcache-card">
+        <div class="card-header">
+          <div class="card-icon lmcache-icon">LC</div>
+          <div class="card-title-group">
+            <h3><a href="lmcache/index.html" style="color:inherit;">LMCache</a></h3>
+            <span class="card-version">v1 &middot; KV Cache Middleware</span>
+          </div>
+        </div>
+        <div class="card-innovation lmcache-inn">Multi-Tier Storage &middot; Content-Addressable Chunks &middot; CacheBlend</div>
+        <p class="card-description">
+          Middleware KV cache layer that plugs into vLLM or SGLang via connector interfaces.
+          Divides token sequences into 256-token content-addressable chunks, enabling cross-instance
+          cache reuse. Four storage tiers &mdash; CPU DRAM (&lt;1ms), NVMe (1&ndash;10ms), remote
+          (10&ndash;100ms), and P2P GPU-to-GPU (5&ndash;50ms) &mdash; with plugin-based remote
+          connectors (Redis, InfiniStore, Mooncake, NIXL). Winner: ACM EuroSys'25 Best Paper
+          for CacheBlend.
+        </p>
+        <div class="card-sublinks">
+          <h4>Deep-Dive Pages</h4>
+          <div class="sublink-row">
+            <a href="lmcache/index.html" class="sublink">Full Overview <span class="arrow">&rarr;</span></a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- NVIDIA Dynamo Card ---- -->
+      <div class="engine-card dynamo-card">
+        <div class="card-header">
+          <div class="card-icon dynamo-icon">DY</div>
+          <div class="card-title-group">
+            <h3><a href="dynamo/index.html" style="color:inherit;">NVIDIA Dynamo</a></h3>
+            <span class="card-version">Open Source &middot; Disaggregated Serving</span>
+          </div>
+        </div>
+        <div class="card-innovation dynamo-inn">Disaggregated P/D &middot; Smart Routing &middot; Multi-Node</div>
+        <p class="card-description">
+          NVIDIA's framework for production-scale disaggregated LLM serving. Separates prefill
+          and decode phases across dedicated GPU pools with intelligent request routing and KV cache
+          transfer orchestration. Built to work with vLLM as the per-node inference backend, adding
+          cluster-level scheduling, autoscaling, and observability. Supports NIXL for high-performance
+          GPU-to-GPU KV transfer across nodes.
+        </p>
+        <div class="card-sublinks">
+          <h4>Deep-Dive Pages</h4>
+          <div class="sublink-row">
+            <a href="dynamo/index.html" class="sublink">Full Overview <span class="arrow">&rarr;</span></a>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     SECTION: CROSS-SYSTEM COMPARISON TABLE
+     ================================================================ -->
+<section id="comparison">
+  <div class="container">
+    <div class="section-label">Cross-System Analysis</div>
+    <h2 class="section-title">Stage-by-Stage Comparison</h2>
+    <div class="section-desc">
+      How do vLLM V1, SGLang, and LMCache handle each stage of the inference pipeline?
+      This table maps every major subsystem across all three systems, highlighting where they
+      converge and where they diverge.
+    </div>
+
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Pipeline Stage</th>
+            <th class="th-vllm">vLLM V1</th>
+            <th class="th-sglang">SGLang</th>
+            <th class="th-lmcache">LMCache</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>HTTP Entry</td>
+            <td>
+              FastAPI via Uvicorn<br>
+              <code>entrypoints/openai/api_server.py</code><br>
+              OpenAI-compatible REST routes
+            </td>
+            <td>
+              FastAPI server<br>
+              <code>entrypoints/http_server.py</code><br>
+              OpenAI + Anthropic + Ollama compatible
+            </td>
+            <td class="cell-na">N/A (middleware &mdash; no HTTP layer)</td>
+          </tr>
+          <tr>
+            <td>Tokenization</td>
+            <td>
+              In <strong>AsyncLLM</strong> process<br>
+              HF tokenizer via <code>inputs/preprocess.py</code><br>
+              Same process as API server
+            </td>
+            <td>
+              Separate <strong>TokenizerManager</strong> process<br>
+              Chat template application + multimodal preprocessing<br>
+              Communicates with Scheduler via ZMQ
+            </td>
+            <td class="cell-na">N/A (uses engine's tokenizer)</td>
+          </tr>
+          <tr>
+            <td>Scheduling</td>
+            <td>
+              <span class="cell-tag vllm-tag">Unified Token Budget</span><br>
+              Continuous batching; decode priority over prefill<br>
+              Automatic chunked prefill for long prompts<br>
+              <code>v1/core/sched/scheduler.py</code>
+            </td>
+            <td>
+              <span class="cell-tag sglang-tag">Overlap Scheduling</span><br>
+              FCFS with extend mode; GPU executes batch N while CPU prepares batch N+1<br>
+              <code>managers/scheduler.py</code>
+            </td>
+            <td class="cell-na">N/A (no scheduling)</td>
+          </tr>
+          <tr>
+            <td>Prefix Caching</td>
+            <td>
+              <span class="cell-tag vllm-tag">Block Hash</span><br>
+              Hash-based block matching with <strong>16-token blocks</strong><br>
+              <code>cached_block_hash_to_block</code> dictionary<br>
+              Enabled by default; <code>find_longest_cache_hit()</code>
+            </td>
+            <td>
+              <span class="cell-tag sglang-tag">RadixCache</span><br>
+              Radix tree for <strong>automatic prefix sharing</strong><br>
+              LRU/LFU eviction; <code>match_prefix()</code><br>
+              No explicit configuration needed
+            </td>
+            <td>
+              <span class="cell-tag lmcache-tag">Content-Addressable</span><br>
+              <strong>256-token chunks</strong> with rolling hashes<br>
+              ChunkedTokenDatabase; cross-instance dedup<br>
+              Can reuse <em>any</em> repeated text segment
+            </td>
+          </tr>
+          <tr>
+            <td>KV Cache Memory</td>
+            <td>
+              Pre-allocated paged blocks<br>
+              <code>gpu_memory_utilization=0.9</code> default<br>
+              Free block queue (doubly-linked list)<br>
+              Preemption via recomputation only
+            </td>
+            <td>
+              <strong>ReqToTokenPool + TokenToKVPool</strong><br>
+              Specialized pools for MHA/MLA/Mamba<br>
+              HiRadixCache for three-tier GPU/CPU/storage<br>
+              Sliding window attention pool support
+            </td>
+            <td>
+              <strong>Four latency tiers:</strong><br>
+              L1: CPU DRAM (&lt;1ms, pinned, NUMA-aware)<br>
+              L2: NVMe (1&ndash;10ms, persistent)<br>
+              L3: Remote (10&ndash;100ms, Redis/RDMA/Mooncake)<br>
+              L4: P2P GPU-to-GPU (5&ndash;50ms, NIXL)
+            </td>
+          </tr>
+          <tr>
+            <td>Attention</td>
+            <td>
+              FlashAttention 3/4 (primary, Hopper+)<br>
+              FlashInfer, Triton, PagedAttention<br>
+              TRT-LLM attention backend<br>
+              <strong>MLA suite:</strong> FlashMLA, CUTLASS MLA, Triton MLA, Sparse MLA
+            </td>
+            <td>
+              FlashInfer (default pre-Hopper)<br>
+              FlashAttention 3 (default Hopper)<br>
+              FA4 (FP4), TRT-LLM MLA/MHA<br>
+              Dual-chunk FA (Qwen2.5-1M long context)<br>
+              Hybrid prefill/decode mixing
+            </td>
+            <td class="cell-na">N/A (uses engine's attention kernels)</td>
+          </tr>
+          <tr>
+            <td>Speculative Decoding</td>
+            <td>
+              Integrated in <strong>GPUModelRunner</strong><br>
+              <code>propose_draft_token_ids()</code><br>
+              Triton-based rejection sampler<br>
+              EAGLE, EAGLE-3, Medusa, MTP, N-gram
+            </td>
+            <td>
+              Dedicated <strong>EAGLE worker</strong> (separate process)<br>
+              Tree-based speculation with CUDA graph runner<br>
+              EAGLE, EAGLE-2/3, MTP, draft models, N-gram
+            </td>
+            <td class="cell-na">N/A</td>
+          </tr>
+          <tr>
+            <td>MoE / Expert Parallelism</td>
+            <td>
+              <strong>FusedMoE</strong> kernels<br>
+              <code>--enable-expert-parallel</code><br>
+              Expert parallel load balancing (EPLB)
+            </td>
+            <td>
+              <strong>Triton-based fused MoE</strong> with pre-tuned configs<br>
+              EP with DeepEP, Mooncake, Mori, FuseEP<br>
+              FlashInfer all-to-all dispatch<br>
+              Dynamic expert rebalancing (EPLB Manager)
+            </td>
+            <td class="cell-na">N/A</td>
+          </tr>
+          <tr>
+            <td>Disaggregated P/D</td>
+            <td>
+              <strong>KVConnectorBase_V1</strong> interface<br>
+              Scheduler-side: <code>build_connector_meta()</code><br>
+              Worker-side: <code>start_load_kv() / save_kv_layer()</code><br>
+              Connectors: NIXL, LMCache, shared storage
+            </td>
+            <td>
+              Disaggregation directory + <strong>HiCache</strong><br>
+              Three-tier GPU/CPU/storage backends
+            </td>
+            <td>
+              <strong>PDBackend</strong> via NIXL/RDMA<br>
+              Layer-by-layer pipelined transfers<br>
+              Overlaps KV transfer with inference<br>
+              Plugs into vLLM or SGLang connectors
+            </td>
+          </tr>
+          <tr>
+            <td>Detokenization</td>
+            <td>
+              In <strong>AsyncLLM</strong> (output_processor)<br>
+              Incremental detokenization + stop checking<br>
+              Same process as tokenization
+            </td>
+            <td>
+              Separate <strong>DetokenizerManager</strong> process<br>
+              Converts token IDs &rarr; text incrementally<br>
+              Trims at stop sequences; sends <code>BatchStrOut</code>
+            </td>
+            <td class="cell-na">N/A (uses engine's detokenizer)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="info-banner" style="margin-top:1.5rem;">
+      <strong>Key Insight:</strong> vLLM and SGLang share roughly 80% of the same subsystem
+      categories &mdash; API server, scheduler, model runner, attention backends, sampling,
+      parallelism &mdash; but diverge meaningfully in three areas: <strong>caching strategy</strong>
+      (block-hash vs. radix tree), <strong>scheduling philosophy</strong> (unified budget vs. overlap
+      scheduling), and <strong>process topology</strong> (AsyncLLM combines tokenization/detokenization
+      vs. SGLang's dedicated manager processes). LMCache complements both by adding a cross-instance,
+      multi-tier KV cache layer that neither engine provides natively.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     SECTION: ARCHITECTURE COMPARISON DIAGRAM
+     ================================================================ -->
+<section id="architecture">
+  <div class="container">
+    <div class="section-label">Process Topology</div>
+    <h2 class="section-title">Architecture Comparison: vLLM V1 vs SGLang</h2>
+    <div class="section-desc">
+      Both systems use multi-process architectures with ZeroMQ IPC, but their process topologies
+      differ in important ways. vLLM consolidates tokenization and detokenization in a single
+      AsyncLLM process, while SGLang separates them into dedicated manager processes.
+    </div>
+
+    <div class="arch-compare">
+
+      <!-- ---- vLLM V1 Diagram ---- -->
+      <div class="arch-panel">
+        <h3>
+          <span class="arch-label vllm-l">vLLM V1</span>
+          Multi-Process Architecture
+        </h3>
+
+        <div class="diagram-stack">
+          <!-- Process 1: API + AsyncLLM -->
+          <div class="process-boundary" style="border-color: rgba(233,69,96,0.3);">
+            <span class="process-tag" style="color:var(--vllm);">Process 1: API Server</span>
+            <div class="diagram-stack" style="gap:0.4rem;">
+              <div class="dg-block http">
+                FastAPI Server (Uvicorn)
+                <span class="dg-sub">OpenAI-compatible REST API</span>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-block api">
+                AsyncLLM
+                <span class="dg-sub">Tokenization + Detokenization + Streaming</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="dg-block ipc">ZeroMQ IPC (msgpack serialization)</div>
+
+          <!-- Process 2: EngineCore -->
+          <div class="process-boundary" style="border-color: rgba(188,140,255,0.3);">
+            <span class="process-tag" style="color:var(--purple);">Process 2: EngineCore</span>
+            <div class="diagram-stack" style="gap:0.4rem;">
+              <div class="dg-block engine">
+                EngineCore Busy Loop
+                <span class="dg-sub">schedule() &rarr; execute_model() &rarr; update_from_output()</span>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-row">
+                <div class="dg-block sched">
+                  V1 Scheduler
+                  <span class="dg-sub">Unified token budget<br>Chunked prefill</span>
+                </div>
+                <div class="dg-block cache">
+                  KVCacheManager
+                  <span class="dg-sub">Paged blocks (16-tok)<br>Hash-based prefix</span>
+                </div>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-block worker">
+                Executor &rarr; Worker
+                <span class="dg-sub">UniProc / MultiProc / Ray</span>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-block model">
+                GPUModelRunner
+                <span class="dg-sub">_update_states &rarr; _prepare_inputs &rarr; forward &rarr; sample</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- SGLang Diagram ---- -->
+      <div class="arch-panel">
+        <h3>
+          <span class="arch-label sglang-l">SGLang</span>
+          Six-Layer Process Architecture
+        </h3>
+
+        <div class="diagram-stack">
+          <!-- Process 1: HTTP Server -->
+          <div class="process-boundary" style="border-color: rgba(88,166,255,0.3);">
+            <span class="process-tag" style="color:var(--sglang);">Process 1: HTTP</span>
+            <div class="dg-block http">
+              FastAPI HTTP Server
+              <span class="dg-sub">OpenAI + Anthropic + Ollama API</span>
+            </div>
+          </div>
+
+          <div class="dg-block ipc">ZeroMQ IPC</div>
+
+          <!-- Process 2: TokenizerManager -->
+          <div class="process-boundary" style="border-color: rgba(63,185,80,0.3);">
+            <span class="process-tag" style="color:var(--lmcache);">Process 2: Tokenizer</span>
+            <div class="dg-block api">
+              TokenizerManager
+              <span class="dg-sub">Tokenization + Chat templates + Multimodal</span>
+            </div>
+          </div>
+
+          <div class="dg-block ipc">ZeroMQ IPC</div>
+
+          <!-- Process 3: Scheduler -->
+          <div class="process-boundary" style="border-color: rgba(233,69,96,0.3);">
+            <span class="process-tag" style="color:var(--vllm);">Process 3: Scheduler</span>
+            <div class="diagram-stack" style="gap:0.4rem;">
+              <div class="dg-block engine">
+                Scheduler Event Loop
+                <span class="dg-sub">Normal mode / Overlap mode (CPU+GPU pipeline)</span>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-row">
+                <div class="dg-block sched">
+                  Batch Scheduler
+                  <span class="dg-sub">FCFS + Extend mode</span>
+                </div>
+                <div class="dg-block cache">
+                  RadixCache
+                  <span class="dg-sub">Radix tree prefix match<br>LRU/LFU eviction</span>
+                </div>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-block worker">
+                TpModelWorker
+                <span class="dg-sub">Normal / Overlap thread variant</span>
+              </div>
+              <div class="dg-arrow">&darr;</div>
+              <div class="dg-block model">
+                ModelRunner
+                <span class="dg-sub">forward_decode / forward_extend / forward_idle</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="dg-block ipc">ZeroMQ IPC</div>
+
+          <!-- Process 4: DetokenizerManager -->
+          <div class="process-boundary" style="border-color: rgba(247,120,186,0.3);">
+            <span class="process-tag" style="color:var(--pink);">Process 4: Detokenizer</span>
+            <div class="dg-block output">
+              DetokenizerManager
+              <span class="dg-sub">Tokens &rarr; Text + Stop sequence trimming</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Topology Legend -->
+    <div class="topo-legend">
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:#79c0ff;"></span> HTTP / API Layer
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:#7ee787;"></span> Tokenization
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--purple);"></span> Engine Core / Event Loop
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--vllm);"></span> Scheduling
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--lmcache);"></span> Cache Layer
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--amber);"></span> Worker / Executor
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--cyan);"></span> Model Runner
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--pink);"></span> Detokenization
+      </div>
+      <div class="topo-legend-item">
+        <span class="topo-dot" style="background:var(--text-dim); border:1px dashed var(--border);"></span> IPC Boundary
+      </div>
+    </div>
+
+    <!-- Key Differences Callout -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; margin-top:2rem;">
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:1.5rem;">
+        <h4 style="font-size:0.9rem; color:var(--vllm); margin-bottom:0.75rem;">vLLM V1: Consolidated Process Model</h4>
+        <ul style="font-size:0.825rem; color:var(--text-muted); line-height:1.7; padding-left:1.25rem;">
+          <li>Tokenization and detokenization in the <strong>same process</strong> (AsyncLLM)</li>
+          <li>EngineCore runs a tight busy loop &mdash; minimal overhead per step</li>
+          <li>Workers maintain <strong>persistent state</strong> and receive only incremental diffs</li>
+          <li><strong>InputBatch</strong> avoids tensor recreation at each step</li>
+          <li>Data-parallel via DPCoordinator for multi-EngineCore load balancing</li>
+          <li>KV connector interface enables pluggable disaggregated P/D</li>
+        </ul>
+      </div>
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:1.5rem;">
+        <h4 style="font-size:0.9rem; color:var(--sglang); margin-bottom:0.75rem;">SGLang: Separated Manager Model</h4>
+        <ul style="font-size:0.825rem; color:var(--text-muted); line-height:1.7; padding-left:1.25rem;">
+          <li>Dedicated TokenizerManager and DetokenizerManager <strong>as separate processes</strong></li>
+          <li><strong>Overlap scheduling</strong>: GPU processes batch N while CPU prepares batch N+1</li>
+          <li><strong>Extend mode</strong> incrementally updates existing KV caches (ragged tensors)</li>
+          <li>Three forward modes: <code>DECODE</code>, <code>EXTEND</code>, <code>IDLE</code></li>
+          <li>DataParallelController with round-robin across DP replicas</li>
+          <li>Grammar mask generation overlapped with GPU inference for zero overhead</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     SECTION: KEY CONCEPTS GLOSSARY
+     ================================================================ -->
+<section id="glossary">
+  <div class="container">
+    <div class="section-label">Quick Reference</div>
+    <h2 class="section-title">Key Concepts Glossary</h2>
+    <div class="section-desc">
+      Core terminology used throughout the deep-dive pages. Each concept is tagged with its
+      primary system of origin, though most are applicable across engines.
+    </div>
+
+    <div class="glossary-grid">
+
+      <div class="glossary-item">
+        <h4>
+          PagedAttention
+          <span class="gl-tag vllm-t">vLLM</span>
+        </h4>
+        <p>
+          Memory management technique that partitions KV cache into fixed-size <strong>pages
+          (blocks)</strong>, enabling non-contiguous storage of key-value tensors in GPU memory.
+          Eliminates internal fragmentation and enables memory sharing across requests.
+          Inspired by OS virtual memory paging. Each block typically holds 16 tokens.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          RadixAttention
+          <span class="gl-tag sglang-t">SGLang</span>
+        </h4>
+        <p>
+          KV cache management using a <strong>radix tree</strong> (compact trie) that automatically
+          shares cached key-value tensors across requests with common token prefixes. Unlike
+          block-hash approaches, the radix tree structure naturally handles arbitrary-length prefix
+          matching and enables efficient LRU/LFU eviction at any granularity.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          Continuous Batching
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Dynamic batching strategy where new requests can <strong>join or leave a running
+          batch at every iteration step</strong>, rather than waiting for all requests in a
+          batch to complete. Maximizes GPU utilization by immediately filling slots freed
+          by completed requests. Both vLLM and SGLang implement this as their core
+          scheduling strategy.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          Chunked Prefill
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Technique for handling long prompts by <strong>splitting the prefill computation into
+          smaller chunks</strong> that can be interleaved with decode tokens in the same batch.
+          Prevents long prompts from monopolizing GPU compute and causing latency spikes for
+          concurrent decode-phase requests. vLLM uses <code>long_prefill_token_threshold</code>;
+          SGLang uses extend mode.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          Prefix Caching
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Optimization that <strong>reuses KV cache from previously computed token sequences</strong>
+          when a new request shares the same prefix (e.g., system prompt, few-shot examples).
+          vLLM uses hash-based block matching (16-token blocks). SGLang uses RadixCache
+          (automatic radix tree). LMCache uses content-addressable 256-token chunks with
+          cross-instance deduplication.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          KV Cache
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Cached <strong>key and value projection tensors</strong> from the attention mechanism,
+          stored per layer per token. During autoregressive decoding, only the new token's Q/K/V
+          need to be computed &mdash; all previous K/V are read from cache. KV cache memory
+          consumption scales linearly with sequence length and is typically the dominant memory
+          consumer after model weights.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          CUDA Graphs
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          NVIDIA mechanism for <strong>capturing and replaying a sequence of GPU operations</strong>
+          as a single launchable unit, eliminating per-kernel CPU launch overhead. Both vLLM and
+          SGLang capture CUDA graphs for common batch sizes at startup. SGLang's
+          <code>CudaGraphRunner</code> and vLLM's graph management in GPUModelRunner reduce
+          decode-phase latency by 10&ndash;30%.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          Tensor Parallelism (TP)
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Distributed strategy that <strong>splits individual weight matrices across multiple
+          GPUs</strong>, with each GPU computing a portion of every layer's output. Requires
+          all-reduce or all-gather communication between GPUs after each layer. Both engines
+          implement <code>ColumnParallelLinear</code> and <code>RowParallelLinear</code> layers.
+          Best for intra-node parallelism with fast NVLink interconnect.
+        </p>
+      </div>
+
+      <div class="glossary-item">
+        <h4>
+          Pipeline Parallelism (PP)
+          <span class="gl-tag general-t">General</span>
+        </h4>
+        <p>
+          Distributed strategy that <strong>assigns different layers of the model to different
+          GPUs</strong>, forming a pipeline where activations are sent forward between stages.
+          Better suited for inter-node parallelism where bandwidth is limited. vLLM supports PP
+          via Ray compiled DAG. SGLang implements PP via its scheduler PP mixin.
+          Micro-batching minimizes pipeline bubble overhead.
+        </p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     FOOTER
+     ================================================================ -->
+<footer class="page-footer">
+  <div class="container">
+    <a href="../../index-en.html" class="back-link">
+      &larr; Back to Agentic AI Infrastructure Survey
+    </a>
+    <div class="footer-meta">
+      AI Infra Basics: Life of a Request &mdash; Source code analysis based on March 2026 repositories.<br>
+      vLLM (v0.11+, V1 engine) &middot; SGLang (latest SRT) &middot; LMCache (v1) &middot; NVIDIA Dynamo<br>
+      Part of the <a href="../../index-en.html">Agentic AI Infrastructure Survey</a>.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

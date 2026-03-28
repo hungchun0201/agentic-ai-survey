@@ -1,0 +1,1979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM V1 Deep Dive: API Server, Entrypoints &amp; Request Processing</title>
+<style>
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #1c2128;
+  --bg-code: #0d1117;
+  --border: #30363d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-orange: #d29922;
+  --accent-red: #f85149;
+  --accent-purple: #bc8cff;
+  --accent-cyan: #39d353;
+  --accent-pink: #f778ba;
+  --accent-teal: #56d4dd;
+  --diagram-bg: #0e1419;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.7;
+  overflow-x: hidden;
+}
+
+/* Navigation */
+.nav-bar {
+  position: fixed; top: 0; left: 0; right: 0;
+  background: rgba(13,17,23,0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  z-index: 1000;
+  padding: 0.6rem 2rem;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+.nav-bar .logo {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--accent-blue);
+  white-space: nowrap;
+}
+.nav-links { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.nav-links a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.78rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.nav-links a:hover { color: var(--accent-blue); background: var(--bg-secondary); }
+
+/* Main layout */
+.container {
+  max-width: 1100px;
+  margin: 5rem auto 4rem;
+  padding: 0 2rem;
+}
+
+/* Hero */
+.hero {
+  text-align: center;
+  padding: 3rem 0 2rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 3rem;
+}
+.hero h1 {
+  font-size: 2.6rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple), var(--accent-pink));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  line-height: 1.2;
+  margin-bottom: 1rem;
+}
+.hero .subtitle {
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  max-width: 700px;
+  margin: 0 auto;
+}
+.hero .badge {
+  display: inline-block;
+  margin-top: 1rem;
+  padding: 0.3rem 1rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid var(--accent-green);
+  color: var(--accent-green);
+}
+
+/* Section styles */
+section {
+  margin-bottom: 3.5rem;
+  scroll-margin-top: 4rem;
+}
+section h2 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin-bottom: 1.2rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+section h2 .num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem; height: 2rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+section h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.8rem;
+  color: var(--accent-blue);
+}
+section h4 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 1.2rem 0 0.6rem;
+  color: var(--accent-teal);
+}
+p { margin-bottom: 1rem; color: var(--text-primary); }
+
+/* Color-coded section numbers */
+.num-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); }
+.num-green { background: rgba(63,185,80,0.15); color: var(--accent-green); }
+.num-orange { background: rgba(210,153,34,0.15); color: var(--accent-orange); }
+.num-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); }
+.num-red { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+.num-cyan { background: rgba(86,212,221,0.15); color: var(--accent-teal); }
+.num-pink { background: rgba(247,120,186,0.15); color: var(--accent-pink); }
+.num-teal { background: rgba(57,211,83,0.15); color: var(--accent-cyan); }
+
+/* Code blocks */
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  margin: 1rem 0 1.5rem;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 0.85em;
+}
+p code, li code {
+  background: var(--bg-tertiary);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  color: var(--accent-orange);
+  font-size: 0.85em;
+}
+.file-path {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: italic;
+  margin-bottom: 0.3rem;
+  display: block;
+}
+
+/* Syntax highlighting (manual) */
+.kw { color: var(--accent-purple); }         /* keyword */
+.fn { color: #d2a8ff; }                      /* function name */
+.cls { color: var(--accent-green); }          /* class name */
+.str { color: #a5d6ff; }                      /* string */
+.cmt { color: var(--text-muted); font-style: italic; } /* comment */
+.dec { color: var(--accent-orange); }          /* decorator */
+.tp { color: var(--accent-teal); }             /* type */
+.num-lit { color: #79c0ff; }                   /* numeric literal */
+.op { color: var(--accent-red); }              /* operator */
+
+/* Diagram */
+.diagram-container {
+  background: var(--diagram-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2rem;
+  margin: 1.5rem 0 2rem;
+  overflow-x: auto;
+}
+.diagram-container h4 {
+  text-align: center;
+  color: var(--accent-pink);
+  margin-bottom: 1.5rem;
+  font-size: 1.1rem;
+}
+
+/* SVG diagram styles */
+svg text { font-family: 'SF Mono', Consolas, monospace; }
+
+/* Info cards */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.info-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.2rem;
+  border-left: 3px solid var(--accent-blue);
+}
+.info-card.green { border-left-color: var(--accent-green); }
+.info-card.orange { border-left-color: var(--accent-orange); }
+.info-card.purple { border-left-color: var(--accent-purple); }
+.info-card.red { border-left-color: var(--accent-red); }
+.info-card.cyan { border-left-color: var(--accent-teal); }
+.info-card .card-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 0.4rem;
+}
+.info-card .card-body {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+/* Table */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0 1.5rem;
+  font-size: 0.88rem;
+}
+th, td {
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+th {
+  background: var(--bg-secondary);
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+td { background: var(--bg-tertiary); }
+td code { font-size: 0.82em; }
+
+/* List styling */
+ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+li { margin-bottom: 0.4rem; color: var(--text-primary); }
+
+/* Call-out */
+.callout {
+  background: var(--bg-secondary);
+  border-left: 4px solid var(--accent-blue);
+  border-radius: 0 8px 8px 0;
+  padding: 1rem 1.2rem;
+  margin: 1rem 0 1.5rem;
+  font-size: 0.9rem;
+}
+.callout.warn { border-left-color: var(--accent-orange); }
+.callout.tip { border-left-color: var(--accent-green); }
+.callout strong { color: var(--accent-blue); }
+.callout.warn strong { color: var(--accent-orange); }
+.callout.tip strong { color: var(--accent-green); }
+
+/* Footer */
+footer {
+  text-align: center;
+  padding: 2rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .nav-bar { padding: 0.5rem 1rem; gap: 1rem; }
+  .nav-links a { font-size: 0.7rem; padding: 0.2rem 0.4rem; }
+  .container { padding: 0 1rem; }
+  .hero h1 { font-size: 1.8rem; }
+  pre { font-size: 0.75rem; padding: 0.8rem; }
+  .info-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="nav-bar">
+  <div class="logo">vLLM V1 Entrypoints</div>
+  <div class="nav-links">
+    <a href="#cli-launch">CLI Launch</a>
+    <a href="#routes">Route Registration</a>
+    <a href="#chat-handler">Chat Handler</a>
+    <a href="#pydantic-models">Pydantic Models</a>
+    <a href="#multimodal">Multimodal</a>
+    <a href="#offline-llm">Offline LLM</a>
+    <a href="#tokenization">Tokenization</a>
+    <a href="#chat-templates">Chat Templates</a>
+    <a href="#diagrams">Diagrams</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<!-- Hero -->
+<div class="hero">
+  <h1>vLLM V1: API Server, Entrypoints &amp; Request Processing</h1>
+  <p class="subtitle">
+    A deep-dive into how HTTP requests travel from the CLI through FastAPI routes,
+    Pydantic validation, prompt construction, and into the AsyncLLM engine &mdash;
+    based on reading the actual vLLM source code.
+  </p>
+  <span class="badge">Source: vllm-project/vllm (V1 architecture)</span>
+</div>
+
+<!-- ================================================================== -->
+<!-- SECTION 1: CLI Launch -->
+<!-- ================================================================== -->
+<section id="cli-launch">
+<h2><span class="num num-blue">1</span> How <code>vllm serve</code> Launches the Server</h2>
+
+<p>
+The journey from a user typing <code>vllm serve meta-llama/Llama-3-8B</code> to a running
+FastAPI server involves three layers: the CLI dispatcher, the serve subcommand, and
+the Uvicorn HTTP server wrapping a FastAPI application.
+</p>
+
+<h3>1.1 CLI Dispatcher: <code>vllm/entrypoints/cli/main.py</code></h3>
+
+<p>
+The <code>vllm</code> command is a console script pointing at <code>main()</code>.
+It lazily imports all subcommand modules and registers them with <code>argparse</code>:
+</p>
+
+<span class="file-path">vllm/entrypoints/cli/main.py</span>
+<pre><code><span class="kw">def</span> <span class="fn">main</span>():
+    <span class="kw">import</span> vllm.entrypoints.cli.serve
+    <span class="kw">import</span> vllm.entrypoints.cli.launch
+    <span class="kw">import</span> vllm.entrypoints.cli.openai
+    <span class="kw">import</span> vllm.entrypoints.cli.run_batch
+    <span class="cmt">...</span>
+
+    CMD_MODULES = [
+        vllm.entrypoints.cli.openai,
+        vllm.entrypoints.cli.serve,
+        vllm.entrypoints.cli.launch,
+        vllm.entrypoints.cli.benchmark.main,
+        vllm.entrypoints.cli.collect_env,
+        vllm.entrypoints.cli.run_batch,
+    ]
+
+    cli_env_setup()
+    parser = <span class="cls">FlexibleArgumentParser</span>(description=<span class="str">"vLLM CLI"</span>)
+    subparsers = parser.add_subparsers(required=<span class="kw">False</span>, dest=<span class="str">"subparser"</span>)
+    cmds = {}
+    <span class="kw">for</span> cmd_module <span class="kw">in</span> CMD_MODULES:
+        new_cmds = cmd_module.cmd_init()
+        <span class="kw">for</span> cmd <span class="kw">in</span> new_cmds:
+            cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
+            cmds[cmd.name] = cmd
+
+    args = parser.parse_args()
+    <span class="kw">if</span> args.subparser <span class="kw">in</span> cmds:
+        cmds[args.subparser].validate(args)
+
+    <span class="kw">if</span> <span class="fn">hasattr</span>(args, <span class="str">"dispatch_function"</span>):
+        args.dispatch_function(args)   <span class="cmt"># calls ServeSubcommand.cmd(args)</span></code></pre>
+
+<div class="callout tip">
+<strong>Key design:</strong> Each subcommand is a <code>CLISubcommand</code> class that implements
+<code>cmd()</code>, <code>validate()</code>, and <code>subparser_init()</code>. The <code>serve</code> subcommand
+is defined in <code>vllm/entrypoints/cli/serve.py</code>.
+</div>
+
+<h3>1.2 ServeSubcommand: Single vs Multi API Server</h3>
+
+<p>
+The <code>ServeSubcommand.cmd()</code> method handles three modes depending on
+<code>api_server_count</code>: headless (no API servers), multi-server (data parallelism),
+and single-server (the common case):
+</p>
+
+<span class="file-path">vllm/entrypoints/cli/serve.py</span>
+<pre><code><span class="kw">class</span> <span class="cls">ServeSubcommand</span>(<span class="cls">CLISubcommand</span>):
+    name = <span class="str">"serve"</span>
+
+    <span class="dec">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">cmd</span>(args: argparse.Namespace) -> <span class="kw">None</span>:
+        <span class="cmt"># If model is specified in CLI as positional arg, it takes precedence</span>
+        <span class="kw">if</span> <span class="fn">hasattr</span>(args, <span class="str">"model_tag"</span>) <span class="kw">and</span> args.model_tag <span class="kw">is not None</span>:
+            args.model = args.model_tag
+
+        <span class="kw">if</span> args.api_server_count < <span class="num-lit">1</span>:
+            run_headless(args)              <span class="cmt"># No HTTP server, engine only</span>
+        <span class="kw">elif</span> args.api_server_count > <span class="num-lit">1</span>:
+            run_multi_api_server(args)      <span class="cmt"># Multiple workers with shared engine</span>
+        <span class="kw">else</span>:
+            <span class="cmt"># Single API server (this process) -- most common path</span>
+            args.api_server_count = <span class="kw">None</span>
+            uvloop.run(run_server(args))</code></pre>
+
+<h3>1.3 run_server &rarr; setup_server &rarr; build_and_serve</h3>
+
+<p>
+The single-server path goes through three phases: socket binding, engine creation,
+and HTTP serving:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/api_server.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">run_server</span>(args, **uvicorn_kwargs) -> <span class="kw">None</span>:
+    <span class="str">"""Run a single-worker API server."""</span>
+    decorate_logs(<span class="str">"APIServer"</span>)
+    listen_address, sock = <span class="fn">setup_server</span>(args)  <span class="cmt"># Bind socket BEFORE engine</span>
+    <span class="kw">await</span> <span class="fn">run_server_worker</span>(listen_address, sock, args, **uvicorn_kwargs)
+
+
+<span class="kw">async def</span> <span class="fn">run_server_worker</span>(listen_address, sock, args, ...) -> <span class="kw">None</span>:
+    <span class="kw">async with</span> <span class="fn">build_async_engine_client</span>(args) <span class="kw">as</span> engine_client:
+        shutdown_task = <span class="kw">await</span> <span class="fn">build_and_serve</span>(
+            engine_client, listen_address, sock, args, **uvicorn_kwargs
+        )
+    <span class="kw">await</span> shutdown_task      <span class="cmt"># Wait until Uvicorn shuts down</span>
+    sock.close()</code></pre>
+
+<h3>1.4 Engine Client: V1 AsyncLLM</h3>
+
+<p>
+In V1, the engine client is always <code>AsyncLLM</code> created in-process (no separate RPC
+process). The build function creates the <code>VllmConfig</code> first, then instantiates
+<code>AsyncLLM.from_vllm_config()</code>:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/api_server.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">build_async_engine_client_from_engine_args</span>(
+    engine_args, *, usage_context, client_config,
+) -> AsyncIterator[<span class="cls">EngineClient</span>]:
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    <span class="kw">from</span> vllm.v1.engine.async_llm <span class="kw">import</span> <span class="cls">AsyncLLM</span>
+
+    async_llm = <span class="cls">AsyncLLM</span>.from_vllm_config(
+        vllm_config=vllm_config,
+        usage_context=usage_context,
+        enable_log_requests=engine_args.enable_log_requests,
+        <span class="cmt">...</span>
+    )
+    <span class="kw">await</span> async_llm.reset_mm_cache()
+    <span class="kw">yield</span> async_llm</code></pre>
+
+<h3>1.5 FastAPI App &rarr; Uvicorn</h3>
+
+<p>
+The <code>build_and_serve()</code> function creates the FastAPI app, initializes state, then
+hands everything to Uvicorn via <code>serve_http()</code>:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/api_server.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">build_and_serve</span>(engine_client, listen_address, sock, args, **uvicorn_kwargs):
+    supported_tasks = <span class="kw">await</span> engine_client.get_supported_tasks()
+    model_config = engine_client.model_config
+
+    app = <span class="fn">build_app</span>(args, supported_tasks, model_config)
+    <span class="kw">await</span> <span class="fn">init_app_state</span>(engine_client, app.state, args, supported_tasks)
+
+    <span class="kw">return await</span> <span class="fn">serve_http</span>(
+        app, sock=sock,
+        host=args.host, port=args.port,
+        log_level=args.uvicorn_log_level,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        <span class="cmt">...</span>
+    )</code></pre>
+
+<span class="file-path">vllm/entrypoints/launcher.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">serve_http</span>(app: <span class="cls">FastAPI</span>, sock, **uvicorn_kwargs):
+    <span class="cmt"># Log all available routes</span>
+    <span class="kw">for</span> route <span class="kw">in</span> app.routes:
+        methods = <span class="fn">getattr</span>(route, <span class="str">"methods"</span>, <span class="kw">None</span>)
+        path = <span class="fn">getattr</span>(route, <span class="str">"path"</span>, <span class="kw">None</span>)
+        <span class="kw">if</span> methods <span class="kw">and</span> path:
+            logger.info(<span class="str">"Route: %s, Methods: %s"</span>, path, <span class="str">", "</span>.join(methods))
+
+    config = uvicorn.<span class="cls">Config</span>(app, **uvicorn_kwargs)
+    config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
+    config.load()
+    server = uvicorn.<span class="cls">Server</span>(config)
+    app.state.server = server
+    <span class="cmt">...</span></code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 2: Route Registration -->
+<!-- ================================================================== -->
+<section id="routes">
+<h2><span class="num num-green">2</span> Route Registration: All OpenAI-Compatible Endpoints</h2>
+
+<p>
+The <code>build_app()</code> function conditionally registers routers based on which
+tasks the model supports. Each router is a separate module with an <code>attach_router(app)</code>
+function that calls <code>app.include_router(router)</code>:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/api_server.py -- build_app()</span>
+<pre><code><span class="kw">def</span> <span class="fn">build_app</span>(args, supported_tasks, model_config) -> <span class="cls">FastAPI</span>:
+    app = <span class="cls">FastAPI</span>(lifespan=lifespan)
+
+    <span class="cmt"># Always registered: vLLM serve routers (LoRA, profile, sleep, cache, tokenize)</span>
+    <span class="fn">register_vllm_serve_api_routers</span>(app)
+
+    <span class="cmt"># Always registered: models endpoint</span>
+    <span class="fn">register_models_api_router</span>(app)
+
+    <span class="cmt"># Conditionally registered based on supported_tasks:</span>
+    <span class="kw">if</span> <span class="str">"generate"</span> <span class="kw">in</span> supported_tasks:
+        <span class="fn">register_generate_api_routers</span>(app)  <span class="cmt"># chat + completion + responses + anthropic</span>
+        <span class="fn">attach_disagg_router</span>(app)            <span class="cmt"># /v1/generate (disagg serving)</span>
+        <span class="fn">attach_rlhf_router</span>(app)              <span class="cmt"># RLHF endpoints</span>
+        <span class="fn">elastic_ep_attach_router</span>(app)        <span class="cmt"># Elastic EP</span>
+
+    <span class="kw">if</span> <span class="str">"transcription"</span> <span class="kw">in</span> supported_tasks:
+        <span class="fn">register_speech_to_text_api_router</span>(app)
+
+    <span class="kw">if</span> <span class="str">"realtime"</span> <span class="kw">in</span> supported_tasks:
+        <span class="fn">register_realtime_api_router</span>(app)    <span class="cmt"># WebSocket</span>
+
+    <span class="kw">if</span> <span class="fn">any</span>(task <span class="kw">in</span> POOLING_TASKS <span class="kw">for</span> task <span class="kw">in</span> supported_tasks):
+        <span class="fn">register_pooling_api_routers</span>(app, supported_tasks, model_config)</code></pre>
+
+<h3>2.1 The generate_api_routers</h3>
+
+<p>
+The <code>register_generate_api_routers()</code> function in <code>vllm/entrypoints/openai/generate/api_router.py</code>
+wires up the core OpenAI endpoints:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/generate/api_router.py</span>
+<pre><code><span class="kw">def</span> <span class="fn">register_generate_api_routers</span>(app: <span class="cls">FastAPI</span>):
+    <span class="cmt"># 1. POST /v1/chat/completions, /v1/chat/completions/batch</span>
+    <span class="fn">register_chat_api_router</span>(app)
+
+    <span class="cmt"># 2. POST /v1/responses (OpenAI Responses API)</span>
+    <span class="fn">register_responses_api_router</span>(app)
+
+    <span class="cmt"># 3. POST /v1/completions</span>
+    <span class="fn">register_completion_api_router</span>(app)
+
+    <span class="cmt"># 4. POST /v1/messages (Anthropic-compatible)</span>
+    <span class="fn">register_anthropic_api_router</span>(app)</code></pre>
+
+<h3>2.2 Complete Route Table</h3>
+
+<table>
+<tr>
+  <th>Endpoint</th>
+  <th>Method</th>
+  <th>Module</th>
+  <th>Task Guard</th>
+</tr>
+<tr>
+  <td><code>/v1/chat/completions</code></td>
+  <td>POST</td>
+  <td><code>chat_completion/api_router.py</code></td>
+  <td><code>"generate"</code></td>
+</tr>
+<tr>
+  <td><code>/v1/chat/completions/batch</code></td>
+  <td>POST</td>
+  <td><code>chat_completion/api_router.py</code></td>
+  <td><code>"generate"</code></td>
+</tr>
+<tr>
+  <td><code>/v1/completions</code></td>
+  <td>POST</td>
+  <td><code>completion/api_router.py</code></td>
+  <td><code>"generate"</code></td>
+</tr>
+<tr>
+  <td><code>/v1/responses</code></td>
+  <td>POST</td>
+  <td><code>responses/api_router.py</code></td>
+  <td><code>"generate"</code></td>
+</tr>
+<tr>
+  <td><code>/v1/messages</code></td>
+  <td>POST</td>
+  <td><code>anthropic/api_router.py</code></td>
+  <td><code>"generate"</code></td>
+</tr>
+<tr>
+  <td><code>/v1/models</code></td>
+  <td>GET</td>
+  <td><code>models/api_router.py</code></td>
+  <td>Always</td>
+</tr>
+<tr>
+  <td><code>/tokenize</code>, <code>/detokenize</code></td>
+  <td>POST</td>
+  <td><code>serve/tokenize/api_router.py</code></td>
+  <td>Always</td>
+</tr>
+<tr>
+  <td><code>/v1/lora/load</code>, <code>/v1/lora/unload</code></td>
+  <td>POST</td>
+  <td><code>serve/lora/api_router.py</code></td>
+  <td>Always</td>
+</tr>
+<tr>
+  <td><code>/v1/embeddings</code>, <code>/v1/score</code></td>
+  <td>POST</td>
+  <td><code>pooling/</code> modules</td>
+  <td>POOLING_TASKS</td>
+</tr>
+<tr>
+  <td><code>/v1/audio/transcriptions</code></td>
+  <td>POST</td>
+  <td><code>speech_to_text/api_router.py</code></td>
+  <td><code>"transcription"</code></td>
+</tr>
+</table>
+
+<h3>2.3 Middleware Stack</h3>
+
+<p>
+After route registration, <code>build_app()</code> adds a layered middleware stack:
+</p>
+
+<pre><code><span class="cmt"># CORS middleware</span>
+app.add_middleware(<span class="cls">CORSMiddleware</span>, allow_origins=args.allowed_origins, ...)
+
+<span class="cmt"># API key authentication</span>
+<span class="kw">if</span> tokens:
+    app.add_middleware(<span class="cls">AuthenticationMiddleware</span>, tokens=tokens)
+
+<span class="cmt"># Request ID tracking</span>
+<span class="kw">if</span> args.enable_request_id_headers:
+    app.add_middleware(<span class="cls">XRequestIdMiddleware</span>)
+
+<span class="cmt"># Scaling state middleware (elastic EP)</span>
+app.add_middleware(<span class="cls">ScalingMiddleware</span>)
+
+<span class="cmt"># Exception handlers</span>
+app.exception_handler(<span class="cls">HTTPException</span>)(http_exception_handler)
+app.exception_handler(<span class="cls">RequestValidationError</span>)(validation_exception_handler)
+app.exception_handler(<span class="cls">EngineGenerateError</span>)(engine_error_handler)
+app.exception_handler(<span class="cls">EngineDeadError</span>)(engine_error_handler)
+app.exception_handler(<span class="cls">Exception</span>)(exception_handler)</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 3: Chat Completion Handler -->
+<!-- ================================================================== -->
+<section id="chat-handler">
+<h2><span class="num num-orange">3</span> Chat Completion Handler: The Full Request Lifecycle</h2>
+
+<p>
+When a POST arrives at <code>/v1/chat/completions</code>, it flows through: FastAPI route
+function &rarr; <code>OpenAIServingChat.create_chat_completion()</code> &rarr; rendering &rarr;
+engine generation &rarr; streaming or non-streaming response.
+</p>
+
+<h3>3.1 The Route Function</h3>
+
+<span class="file-path">vllm/entrypoints/openai/chat_completion/api_router.py</span>
+<pre><code>router = <span class="cls">APIRouter</span>()
+
+<span class="dec">@router.post</span>(<span class="str">"/v1/chat/completions"</span>,
+    dependencies=[<span class="fn">Depends</span>(validate_json_request)])
+<span class="dec">@with_cancellation</span>
+<span class="dec">@load_aware_call</span>
+<span class="kw">async def</span> <span class="fn">create_chat_completion</span>(
+    request: <span class="cls">ChatCompletionRequest</span>,  <span class="cmt"># Pydantic auto-validates JSON body</span>
+    raw_request: <span class="cls">Request</span>
+):
+    handler = chat(raw_request)  <span class="cmt"># -> request.app.state.openai_serving_chat</span>
+    <span class="kw">if</span> handler <span class="kw">is None</span>:
+        <span class="kw">raise</span> <span class="cls">NotImplementedError</span>(<span class="str">"Model does not support Chat Completions API"</span>)
+
+    generator = <span class="kw">await</span> handler.create_chat_completion(request, raw_request)
+
+    <span class="kw">if</span> <span class="fn">isinstance</span>(generator, <span class="cls">ErrorResponse</span>):
+        <span class="kw">return</span> <span class="cls">JSONResponse</span>(content=generator.model_dump(), status_code=...)
+    <span class="kw">elif</span> <span class="fn">isinstance</span>(generator, <span class="cls">ChatCompletionResponse</span>):
+        <span class="kw">return</span> <span class="cls">JSONResponse</span>(content=generator.model_dump())
+
+    <span class="cmt"># Streaming: return as text/event-stream (SSE)</span>
+    <span class="kw">return</span> <span class="cls">StreamingResponse</span>(content=generator, media_type=<span class="str">"text/event-stream"</span>)</code></pre>
+
+<div class="callout">
+<strong>Decorators:</strong> <code>@with_cancellation</code> ensures the engine aborts if the client disconnects.
+<code>@load_aware_call</code> tracks concurrent request count for load-based routing.
+</div>
+
+<h3>3.2 OpenAIServingChat.create_chat_completion()</h3>
+
+<p>
+This is the central orchestration method. It coordinates model validation,
+prompt rendering, sampling parameter construction, and engine dispatch:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/chat_completion/serving.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">create_chat_completion</span>(self, request, raw_request):
+    <span class="cmt"># Step 1: Initialize reasoning parser (for models with chain-of-thought)</span>
+    reasoning_parser = <span class="kw">None</span>
+    <span class="kw">if</span> self.reasoning_parser_cls:
+        reasoning_parser = self.reasoning_parser_cls(tokenizer, ...)
+
+    <span class="cmt"># Step 2: Validate model and render chat messages into engine input</span>
+    result = <span class="kw">await</span> self.<span class="fn">render_chat_request</span>(request)
+    <span class="kw">if</span> <span class="fn">isinstance</span>(result, <span class="cls">ErrorResponse</span>):
+        <span class="kw">return</span> result
+    conversation, engine_inputs = result
+
+    <span class="cmt"># Step 3: Assign request ID and metadata</span>
+    request_id = f<span class="str">"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"</span>
+    request_metadata = <span class="cls">RequestResponseMetadata</span>(request_id=request_id)
+
+    <span class="cmt"># Step 4: Resolve LoRA adapter</span>
+    lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=<span class="kw">True</span>)
+
+    <span class="cmt"># Step 5: Build sampling parameters and submit to engine</span>
+    <span class="kw">for</span> i, engine_input <span class="kw">in</span> <span class="fn">enumerate</span>(engine_inputs):
+        max_tokens = <span class="fn">get_max_tokens</span>(
+            max_model_len,
+            request.max_completion_tokens <span class="kw">or</span> request.max_tokens,
+            self._extract_prompt_len(engine_input),
+            self.default_sampling_params,
+            self.override_max_tokens,
+        )
+        sampling_params = request.<span class="fn">to_sampling_params</span>(max_tokens, self.default_sampling_params)
+
+        generator = self.engine_client.<span class="fn">generate</span>(
+            engine_input,
+            sampling_params,
+            sub_request_id,
+            lora_request=lora_request,
+            priority=request.priority,
+            data_parallel_rank=data_parallel_rank,
+        )
+        generators.append(generator)
+
+    <span class="cmt"># Step 6: Branch on streaming vs non-streaming</span>
+    <span class="kw">if</span> request.stream:
+        <span class="kw">return</span> self.<span class="fn">chat_completion_stream_generator</span>(request, result_generator, ...)
+    <span class="kw">return await</span> self.<span class="fn">chat_completion_full_generator</span>(request, result_generator, ...)</code></pre>
+
+<h3>3.3 render_chat_request: The Preprocessing Pipeline</h3>
+
+<p>
+The rendering step is delegated to <code>OpenAIServingRender</code>, which handles chat template
+application, multimodal input resolution, and tokenization:
+</p>
+
+<pre><code><span class="kw">async def</span> <span class="fn">render_chat_request</span>(self, request):
+    <span class="cmt"># Check model exists and is accessible</span>
+    error_check_ret = <span class="kw">await</span> self.<span class="fn">_check_model</span>(request)
+    <span class="kw">if</span> error_check_ret <span class="kw">is not None</span>:
+        <span class="kw">return</span> error_check_ret
+
+    <span class="cmt"># Ensure engine is alive (important for streaming where 200 is sent early)</span>
+    <span class="kw">if</span> self.engine_client.errored:
+        <span class="kw">raise</span> self.engine_client.dead_error
+
+    <span class="cmt"># Delegate to the rendering layer</span>
+    <span class="kw">return await</span> self.openai_serving_render.<span class="fn">render_chat</span>(request)</code></pre>
+
+<h3>3.4 Streaming Response Generation</h3>
+
+<p>
+The streaming generator yields SSE chunks as the engine produces tokens. It handles
+tool call parsing, reasoning extraction, logprobs, and usage tracking:
+</p>
+
+<pre><code><span class="kw">async def</span> <span class="fn">chat_completion_stream_generator</span>(self, request, result_generator, ...):
+    created_time = <span class="fn">int</span>(<span class="fn">time.time</span>())
+    first_iteration = <span class="kw">True</span>
+
+    <span class="cmt"># First chunk: send role ("assistant") for each choice</span>
+    <span class="kw">async for</span> res <span class="kw">in</span> result_generator:
+        <span class="kw">if</span> first_iteration:
+            <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(num_choices):
+                chunk = <span class="cls">ChatCompletionStreamResponse</span>(
+                    id=request_id,
+                    object=<span class="str">"chat.completion.chunk"</span>,
+                    choices=[<span class="cls">ChatCompletionResponseStreamChoice</span>(
+                        index=i,
+                        delta=<span class="cls">DeltaMessage</span>(role=<span class="str">"assistant"</span>, content=<span class="str">""</span>),
+                    )],
+                    model=model_name,
+                )
+                <span class="kw">yield</span> f<span class="str">"data: {chunk.model_dump_json()}\n\n"</span>
+            first_iteration = <span class="kw">False</span>
+
+        <span class="cmt"># Subsequent chunks: delta text, tool calls, reasoning</span>
+        <span class="kw">for</span> output <span class="kw">in</span> res.outputs:
+            <span class="cmt">... # Tool parser, reasoning parser, logprobs extraction</span>
+            delta = <span class="cls">DeltaMessage</span>(content=delta_text)
+            chunk = <span class="cls">ChatCompletionStreamResponse</span>(
+                id=request_id, choices=[<span class="cls">ChatCompletionResponseStreamChoice</span>(
+                    index=i, delta=delta, logprobs=logprobs,
+                    finish_reason=output.finish_reason,
+                )], model=model_name,
+            )
+            <span class="kw">yield</span> f<span class="str">"data: {chunk.model_dump_json()}\n\n"</span>
+
+    <span class="cmt"># Final chunk with usage information</span>
+    <span class="kw">if</span> include_usage:
+        final_chunk = <span class="cls">ChatCompletionStreamResponse</span>(
+            id=request_id, choices=[], usage=final_usage_info, model=model_name,
+        )
+        <span class="kw">yield</span> f<span class="str">"data: {final_chunk.model_dump_json()}\n\n"</span>
+
+    <span class="kw">yield</span> <span class="str">"data: [DONE]\n\n"</span></code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 4: Pydantic Models -->
+<!-- ================================================================== -->
+<section id="pydantic-models">
+<h2><span class="num num-purple">4</span> Pydantic Models: Request &amp; Response Schemas</h2>
+
+<p>
+vLLM defines rich Pydantic models that closely mirror the OpenAI API specification
+while adding vLLM-specific extensions. All models inherit from <code>OpenAIBaseModel</code>.
+</p>
+
+<h3>4.1 ChatCompletionRequest</h3>
+
+<p>
+Located in <code>vllm/entrypoints/openai/chat_completion/protocol.py</code>, this model captures
+the full OpenAI chat completion API plus vLLM extensions:
+</p>
+
+<div class="info-grid">
+<div class="info-card">
+  <div class="card-title">OpenAI Standard Fields</div>
+  <div class="card-body">
+    <code>messages</code>, <code>model</code>, <code>temperature</code>, <code>top_p</code>,
+    <code>n</code>, <code>stream</code>, <code>stop</code>, <code>max_completion_tokens</code>,
+    <code>tools</code>, <code>tool_choice</code>, <code>response_format</code>,
+    <code>frequency_penalty</code>, <code>presence_penalty</code>, <code>seed</code>,
+    <code>logprobs</code>, <code>top_logprobs</code>
+  </div>
+</div>
+<div class="info-card green">
+  <div class="card-title">vLLM Sampling Extensions</div>
+  <div class="card-body">
+    <code>top_k</code>, <code>min_p</code>, <code>repetition_penalty</code>,
+    <code>use_beam_search</code>, <code>length_penalty</code>,
+    <code>stop_token_ids</code>, <code>min_tokens</code>,
+    <code>allowed_token_ids</code>, <code>bad_words</code>
+  </div>
+</div>
+<div class="info-card orange">
+  <div class="card-title">vLLM Chat Extensions</div>
+  <div class="card-body">
+    <code>chat_template</code>, <code>chat_template_kwargs</code>,
+    <code>add_generation_prompt</code>, <code>continue_final_message</code>,
+    <code>echo</code>, <code>documents</code> (RAG),
+    <code>media_io_kwargs</code>, <code>mm_processor_kwargs</code>
+  </div>
+</div>
+<div class="info-card purple">
+  <div class="card-title">Advanced Features</div>
+  <div class="card-body">
+    <code>structured_outputs</code> (json/regex/choice),
+    <code>reasoning_effort</code>, <code>thinking_token_budget</code>,
+    <code>priority</code>, <code>cache_salt</code>,
+    <code>kv_transfer_params</code>, <code>vllm_xargs</code>,
+    <code>repetition_detection</code>
+  </div>
+</div>
+</div>
+
+<h4>Key Pydantic Validators</h4>
+
+<pre><code><span class="kw">class</span> <span class="cls">ChatCompletionRequest</span>(<span class="cls">OpenAIBaseModel</span>):
+    messages: <span class="tp">list</span>[<span class="cls">ChatCompletionMessageParam</span>]
+    model: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    temperature: <span class="tp">float</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    stream: <span class="tp">bool</span> | <span class="kw">None</span> = <span class="kw">False</span>
+    tools: <span class="tp">list</span>[<span class="cls">ChatCompletionToolsParam</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+    tool_choice: <span class="tp">Literal</span>[<span class="str">"none"</span>] | <span class="tp">Literal</span>[<span class="str">"auto"</span>] | ... = <span class="str">"none"</span>
+    reasoning_effort: <span class="tp">Literal</span>[<span class="str">"none"</span>, <span class="str">"low"</span>, <span class="str">"medium"</span>, <span class="str">"high"</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+    <span class="cmt">...</span>
+
+    <span class="dec">@model_validator</span>(mode=<span class="str">"before"</span>)
+    <span class="kw">def</span> <span class="fn">validate_stream_options</span>(cls, data):
+        <span class="kw">if</span> data.get(<span class="str">"stream_options"</span>) <span class="kw">and not</span> data.get(<span class="str">"stream"</span>):
+            <span class="kw">raise</span> <span class="cls">VLLMValidationError</span>(<span class="str">"Stream options only when stream=True"</span>)
+        <span class="kw">return</span> data
+
+    <span class="dec">@model_validator</span>(mode=<span class="str">"before"</span>)
+    <span class="kw">def</span> <span class="fn">check_tool_usage</span>(cls, data):
+        <span class="cmt"># If tools provided but no tool_choice, default to "auto"</span>
+        <span class="kw">if</span> <span class="str">"tool_choice"</span> <span class="kw">not in</span> data <span class="kw">and</span> data.get(<span class="str">"tools"</span>):
+            data[<span class="str">"tool_choice"</span>] = <span class="str">"auto"</span>
+        <span class="cmt"># Validate named tool_choice matches a defined tool</span>
+        <span class="kw">if</span> <span class="fn">isinstance</span>(data[<span class="str">"tool_choice"</span>], <span class="tp">dict</span>):
+            <span class="cmt">... # cross-reference tool_choice.function.name with tools list</span>
+        <span class="kw">return</span> data
+
+    <span class="dec">@model_validator</span>(mode=<span class="str">"before"</span>)
+    <span class="kw">def</span> <span class="fn">check_generation_prompt</span>(cls, data):
+        <span class="kw">if</span> data.get(<span class="str">"continue_final_message"</span>) <span class="kw">and</span> data.get(<span class="str">"add_generation_prompt"</span>):
+            <span class="kw">raise</span> <span class="cls">ValueError</span>(<span class="str">"Cannot set both to True"</span>)
+        <span class="kw">return</span> data</code></pre>
+
+<h4>to_sampling_params(): Request to Engine Translation</h4>
+
+<pre><code><span class="kw">def</span> <span class="fn">to_sampling_params</span>(self, max_tokens, default_sampling_params) -> <span class="cls">SamplingParams</span>:
+    <span class="cmt"># Fall back to model's default_sampling_params from generation_config</span>
+    <span class="kw">if</span> (temperature := self.temperature) <span class="kw">is None</span>:
+        temperature = default_sampling_params.get(<span class="str">"temperature"</span>, <span class="num-lit">1.0</span>)
+    <span class="kw">if</span> (top_p := self.top_p) <span class="kw">is None</span>:
+        top_p = default_sampling_params.get(<span class="str">"top_p"</span>, <span class="num-lit">1.0</span>)
+    <span class="cmt">...</span>
+
+    <span class="kw">return</span> <span class="cls">SamplingParams</span>.from_optional(
+        n=self.n,
+        temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
+        seed=self.seed,
+        stop=self.stop, stop_token_ids=self.stop_token_ids,
+        max_tokens=max_tokens, min_tokens=self.min_tokens,
+        logprobs=self.top_logprobs <span class="kw">if</span> self.logprobs <span class="kw">else None</span>,
+        <span class="cmt"># DELTA for streaming, FINAL_ONLY for non-streaming</span>
+        output_kind=<span class="cls">RequestOutputKind</span>.DELTA <span class="kw">if</span> self.stream <span class="kw">else</span> <span class="cls">RequestOutputKind</span>.FINAL_ONLY,
+        structured_outputs=self.structured_outputs,
+        skip_clone=<span class="kw">True</span>,  <span class="cmt"># Fresh per request, safe to skip clone</span>
+    )</code></pre>
+
+<h3>4.2 CompletionRequest</h3>
+
+<span class="file-path">vllm/entrypoints/openai/completion/protocol.py</span>
+<pre><code><span class="kw">class</span> <span class="cls">CompletionRequest</span>(<span class="cls">OpenAIBaseModel</span>):
+    model: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    prompt: <span class="tp">list</span>[<span class="tp">int</span>] | <span class="tp">list</span>[<span class="tp">list</span>[<span class="tp">int</span>]] | <span class="tp">str</span> | <span class="tp">list</span>[<span class="tp">str</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+    echo: <span class="tp">bool</span> | <span class="kw">None</span> = <span class="kw">False</span>
+    max_tokens: <span class="tp">int</span> | <span class="kw">None</span> = <span class="num-lit">16</span>
+    n: <span class="tp">int</span> = <span class="num-lit">1</span>
+    stream: <span class="tp">bool</span> | <span class="kw">None</span> = <span class="kw">False</span>
+
+    <span class="cmt"># vLLM extension: accept pre-computed embeddings</span>
+    prompt_embeds: <span class="tp">bytes</span> | <span class="tp">list</span>[<span class="tp">bytes</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+    <span class="cmt">...</span></code></pre>
+
+<h3>4.3 Response Models</h3>
+
+<pre><code><span class="kw">class</span> <span class="cls">ChatCompletionResponse</span>(<span class="cls">OpenAIBaseModel</span>):
+    id: <span class="tp">str</span> = <span class="fn">Field</span>(default_factory=<span class="kw">lambda</span>: f<span class="str">"chatcmpl-{random_uuid()}"</span>)
+    object: <span class="tp">Literal</span>[<span class="str">"chat.completion"</span>] = <span class="str">"chat.completion"</span>
+    created: <span class="tp">int</span> = <span class="fn">Field</span>(default_factory=<span class="kw">lambda</span>: <span class="fn">int</span>(<span class="fn">time.time</span>()))
+    model: <span class="tp">str</span>
+    choices: <span class="tp">list</span>[<span class="cls">ChatCompletionResponseChoice</span>]
+    usage: <span class="cls">UsageInfo</span>
+    <span class="cmt"># vLLM extensions</span>
+    prompt_logprobs: <span class="tp">list</span>[<span class="tp">dict</span>[<span class="tp">int</span>, <span class="cls">Logprob</span>] | <span class="kw">None</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+    kv_transfer_params: <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">Any</span>] | <span class="kw">None</span> = <span class="kw">None</span>
+
+
+<span class="kw">class</span> <span class="cls">ChatCompletionStreamResponse</span>(<span class="cls">OpenAIBaseModel</span>):
+    id: <span class="tp">str</span>
+    object: <span class="tp">Literal</span>[<span class="str">"chat.completion.chunk"</span>] = <span class="str">"chat.completion.chunk"</span>
+    choices: <span class="tp">list</span>[<span class="cls">ChatCompletionResponseStreamChoice</span>]
+    usage: <span class="cls">UsageInfo</span> | <span class="kw">None</span> = <span class="kw">None</span>
+
+
+<span class="kw">class</span> <span class="cls">ChatMessage</span>(<span class="cls">OpenAIBaseModel</span>):
+    role: <span class="tp">str</span>
+    content: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    reasoning: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>    <span class="cmt"># vLLM extension for chain-of-thought</span>
+    tool_calls: <span class="tp">list</span>[<span class="cls">ToolCall</span>] = <span class="fn">Field</span>(default_factory=<span class="tp">list</span>)</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 5: Multimodal -->
+<!-- ================================================================== -->
+<section id="multimodal">
+<h2><span class="num num-red">5</span> Multimodal Input Handling</h2>
+
+<p>
+vLLM supports images, audio, video, and pre-computed embeddings within chat messages.
+The multimodal content types are defined in <code>vllm/entrypoints/chat_utils.py</code> as a
+rich union type.
+</p>
+
+<h3>5.1 Content Part Type Definitions</h3>
+
+<span class="file-path">vllm/entrypoints/chat_utils.py</span>
+<pre><code><span class="cmt"># The full union of all supported content part types</span>
+<span class="tp">ChatCompletionContentPartParam</span>: TypeAlias = (
+    <span class="cls">OpenAIChatCompletionContentPartParam</span>     <span class="cmt"># text, image_url</span>
+    | <span class="cls">ChatCompletionContentPartAudioParam</span>      <span class="cmt"># {"audio_url": {"url": "..."}}</span>
+    | <span class="cls">ChatCompletionContentPartInputAudioParam</span> <span class="cmt"># {"input_audio": {...}}</span>
+    | <span class="cls">ChatCompletionContentPartVideoParam</span>      <span class="cmt"># {"video_url": {"url": "..."}}</span>
+    | <span class="cls">ChatCompletionContentPartRefusalParam</span>    <span class="cmt"># refusal content</span>
+    | <span class="cls">CustomChatCompletionContentPILImageParam</span> <span class="cmt"># {"image_pil": PIL.Image}</span>
+    | <span class="cls">CustomChatCompletionContentSimpleImageParam</span>
+    | <span class="cls">ChatCompletionContentPartImageEmbedsParam</span> <span class="cmt"># pre-computed image embeds</span>
+    | <span class="cls">ChatCompletionContentPartAudioEmbedsParam</span> <span class="cmt"># pre-computed audio embeds</span>
+    | <span class="cls">CustomChatCompletionContentSimpleAudioParam</span>
+    | <span class="cls">CustomChatCompletionContentSimpleVideoParam</span>
+    | <span class="tp">str</span>                                       <span class="cmt"># plain text shorthand</span>
+    | <span class="cls">CustomThinkCompletionContentParam</span>        <span class="cmt"># thinking/reasoning</span>
+)</code></pre>
+
+<h3>5.2 Image Embeds and Audio Embeds</h3>
+
+<pre><code><span class="kw">class</span> <span class="cls">ChatCompletionContentPartImageEmbedsParam</span>(<span class="cls">TypedDict</span>, total=<span class="kw">False</span>):
+    image_embeds: <span class="tp">str</span> | <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">str</span>] | <span class="kw">None</span>
+    <span class="str">"""Base64-encoded image embeddings (single or dict)."""</span>
+    type: <span class="tp">Required</span>[<span class="tp">Literal</span>[<span class="str">"image_embeds"</span>]]
+    uuid: <span class="tp">str</span> | <span class="kw">None</span>
+    <span class="str">"""User-provided UUID for deduplication."""</span>
+
+
+<span class="kw">class</span> <span class="cls">ChatCompletionContentPartAudioEmbedsParam</span>(<span class="cls">TypedDict</span>, total=<span class="kw">False</span>):
+    audio_embeds: <span class="tp">str</span> | <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">str</span>] | <span class="kw">None</span>
+    <span class="str">"""Base64-encoded serialized torch tensor."""</span>
+    type: <span class="tp">Required</span>[<span class="tp">Literal</span>[<span class="str">"audio_embeds"</span>]]
+    uuid: <span class="tp">str</span> | <span class="kw">None</span></code></pre>
+
+<h3>5.3 Modality Placeholders</h3>
+
+<pre><code>MODALITY_PLACEHOLDERS_MAP = {
+    <span class="str">"image"</span>: <span class="str">"&lt;##IMAGE##&gt;"</span>,
+    <span class="str">"audio"</span>: <span class="str">"&lt;##AUDIO##&gt;"</span>,
+    <span class="str">"video"</span>: <span class="str">"&lt;##VIDEO##&gt;"</span>,
+}</code></pre>
+
+<p>
+These placeholders are inserted into the text during chat template rendering, then
+replaced by the model's actual multimodal tokens during input processing. The
+<code>media_io_kwargs</code> field on <code>ChatCompletionRequest</code> allows per-request configuration
+of media connectors (e.g., custom image resizing):
+</p>
+
+<pre><code><span class="cmt"># In ChatCompletionRequest:</span>
+media_io_kwargs: <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">Any</span>]] | <span class="kw">None</span> = <span class="fn">Field</span>(
+    default=<span class="kw">None</span>,
+    description=<span class="str">"Additional kwargs to pass to media IO connectors, keyed by modality."</span>,
+)
+mm_processor_kwargs: <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">Any</span>] | <span class="kw">None</span> = <span class="fn">Field</span>(
+    default=<span class="kw">None</span>,
+    description=<span class="str">"Additional kwargs to pass to the HF processor."</span>,
+)</code></pre>
+
+<h3>5.4 System Message Content Validation</h3>
+
+<p>
+A model validator warns when system messages contain non-text content parts,
+since this is not part of the OpenAI spec:
+</p>
+
+<pre><code><span class="dec">@model_validator</span>(mode=<span class="str">"before"</span>)
+<span class="kw">def</span> <span class="fn">check_system_message_content_type</span>(cls, data):
+    <span class="kw">for</span> msg <span class="kw">in</span> data.get(<span class="str">"messages"</span>, []):
+        <span class="kw">if</span> msg.get(<span class="str">"role"</span>) == <span class="str">"system"</span> <span class="kw">and</span> <span class="fn">isinstance</span>(msg.get(<span class="str">"content"</span>), <span class="tp">list</span>):
+            <span class="kw">for</span> part <span class="kw">in</span> msg[<span class="str">"content"</span>]:
+                part_type = part.get(<span class="str">"type"</span>)
+                <span class="cmt"># Infer type from fields: image_url, audio_url, video_url, etc.</span>
+                <span class="kw">if</span> part_type <span class="kw">and</span> part_type != <span class="str">"text"</span>:
+                    logger.warning_once(
+                        <span class="str">"System messages should only contain text content. Found: '%s'"</span>,
+                        part_type,
+                    )
+    <span class="kw">return</span> data</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 6: Offline LLM -->
+<!-- ================================================================== -->
+<section id="offline-llm">
+<h2><span class="num num-cyan">6</span> Offline LLM Class: The Python API for Batch Inference</h2>
+
+<p>
+The <code>LLM</code> class in <code>vllm/entrypoints/llm.py</code> provides a synchronous Python API
+for batch inference. It wraps the V1 <code>LLMEngine</code> and handles prompt preprocessing,
+tokenization, and result collection.
+</p>
+
+<h3>6.1 Constructor</h3>
+
+<span class="file-path">vllm/entrypoints/llm.py</span>
+<pre><code><span class="kw">class</span> <span class="cls">LLM</span>:
+    <span class="str">"""An LLM for generating texts from given prompts and sampling parameters.
+
+    This class includes a tokenizer, a language model (possibly distributed
+    across multiple GPUs), and GPU memory space allocated for intermediate
+    states (aka KV cache). Given a batch of prompts and sampling parameters,
+    this class generates texts from the model, using an intelligent batching
+    mechanism and efficient memory management."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        self,
+        model: <span class="tp">str</span>,
+        *,
+        tokenizer: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+        tokenizer_mode: <span class="tp">str</span> = <span class="str">"auto"</span>,
+        trust_remote_code: <span class="tp">bool</span> = <span class="kw">False</span>,
+        tensor_parallel_size: <span class="tp">int</span> = <span class="num-lit">1</span>,
+        dtype: <span class="tp">str</span> = <span class="str">"auto"</span>,
+        quantization: <span class="tp">str</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+        gpu_memory_utilization: <span class="tp">float</span> = <span class="num-lit">0.9</span>,
+        <span class="cmt">...</span>
+        **kwargs,
+    ):
+        engine_args = <span class="cls">EngineArgs</span>(
+            model=model, tokenizer=tokenizer,
+            tensor_parallel_size=tensor_parallel_size,
+            dtype=dtype, quantization=quantization,
+            gpu_memory_utilization=gpu_memory_utilization,
+            <span class="cmt">...</span>
+        )
+        self.llm_engine = <span class="cls">LLMEngine</span>.from_engine_args(
+            engine_args=engine_args, usage_context=<span class="cls">UsageContext</span>.LLM_CLASS
+        )
+        self.model_config = self.llm_engine.model_config
+        self.renderer = self.llm_engine.renderer
+        self.chat_template = <span class="fn">load_chat_template</span>(chat_template)</code></pre>
+
+<h3>6.2 generate() Method</h3>
+
+<pre><code><span class="kw">def</span> <span class="fn">generate</span>(
+    self,
+    prompts: <span class="tp">PromptType</span> | <span class="tp">Sequence</span>[<span class="tp">PromptType</span>],
+    sampling_params: <span class="tp">SamplingParams</span> | <span class="tp">Sequence</span>[<span class="tp">SamplingParams</span>] | <span class="kw">None</span> = <span class="kw">None</span>,
+    *,
+    use_tqdm: <span class="tp">bool</span> = <span class="kw">True</span>,
+    lora_request: <span class="tp">LoRARequest</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+    priority: <span class="tp">list</span>[<span class="tp">int</span>] | <span class="kw">None</span> = <span class="kw">None</span>,
+) -> <span class="tp">list</span>[<span class="cls">RequestOutput</span>]:
+    <span class="str">"""Generate completions for the input prompts.
+
+    This class automatically batches the given prompts, considering
+    the memory constraint. For best performance, put all prompts
+    into a single list and pass it to this method."""</span>
+
+    <span class="kw">if</span> self.model_config.runner_type != <span class="str">"generate"</span>:
+        <span class="kw">raise</span> <span class="cls">ValueError</span>(<span class="str">"LLM.generate() is only supported for generative models."</span>)
+
+    <span class="kw">if</span> sampling_params <span class="kw">is None</span>:
+        sampling_params = self.<span class="fn">get_default_sampling_params</span>()
+
+    <span class="kw">return</span> self.<span class="fn">_run_completion</span>(
+        prompts=prompts, params=sampling_params,
+        output_type=<span class="cls">RequestOutput</span>, use_tqdm=use_tqdm,
+        lora_request=lora_request, priority=priority,
+    )</code></pre>
+
+<h3>6.3 Enqueue/Wait Pattern</h3>
+
+<p>
+V1 also supports an asynchronous enqueue-wait pattern for more control over batching:
+</p>
+
+<pre><code><span class="cmt"># Enqueue requests without blocking</span>
+request_ids = llm.<span class="fn">enqueue</span>(prompts, sampling_params)
+
+<span class="cmt"># Process queue and collect results</span>
+outputs = llm.<span class="fn">wait_for_completion</span>(use_tqdm=<span class="kw">True</span>)</code></pre>
+
+<h3>6.4 Prompt Types Accepted</h3>
+
+<p>
+The <code>PromptType</code> union allows flexible input formats:
+</p>
+
+<div class="info-grid">
+<div class="info-card">
+  <div class="card-title">String Prompt</div>
+  <div class="card-body"><code>"What is the capital of France?"</code></div>
+</div>
+<div class="info-card green">
+  <div class="card-title">Token IDs</div>
+  <div class="card-body"><code>{"prompt_token_ids": [1, 2048, ...]}</code></div>
+</div>
+<div class="info-card orange">
+  <div class="card-title">Text + Multi-Modal</div>
+  <div class="card-body"><code>{"prompt": "Describe this image:", "multi_modal_data": {"image": img}}</code></div>
+</div>
+<div class="info-card purple">
+  <div class="card-title">Embeddings</div>
+  <div class="card-body"><code>{"prompt_embeds": tensor, ...}</code></div>
+</div>
+</div>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 7: Tokenization -->
+<!-- ================================================================== -->
+<section id="tokenization">
+<h2><span class="num num-pink">7</span> Tokenization: HuggingFace Tokenizers in vLLM</h2>
+
+<p>
+Tokenization in vLLM V1 is handled through the <code>Renderer</code> abstraction, which wraps
+HuggingFace tokenizers and processors. The tokenizer is loaded during engine
+initialization and shared across all serving handlers.
+</p>
+
+<h3>7.1 Tokenizer Loading Chain</h3>
+
+<p>
+The tokenizer is loaded as part of the model configuration. The <code>tokenizer_mode</code>
+parameter controls whether to use the "fast" (Rust-based) or "slow" (Python-based)
+tokenizer from HuggingFace:
+</p>
+
+<pre><code><span class="cmt"># In LLM.__init__:</span>
+engine_args = <span class="cls">EngineArgs</span>(
+    model=model,
+    tokenizer=tokenizer,         <span class="cmt"># Optional custom tokenizer path</span>
+    tokenizer_mode=<span class="str">"auto"</span>,       <span class="cmt"># "auto" | "slow" | "fast" | "mistral"</span>
+    skip_tokenizer_init=<span class="kw">False</span>,
+    trust_remote_code=trust_remote_code,
+    <span class="cmt">...</span>
+)
+
+<span class="cmt"># The LLMEngine creates the renderer which holds the tokenizer</span>
+self.llm_engine = <span class="cls">LLMEngine</span>.from_engine_args(engine_args)
+self.renderer = self.llm_engine.renderer
+
+<span class="cmt"># Access tokenizer via renderer</span>
+tokenizer = self.renderer.tokenizer
+<span class="cmt"># Or via the engine method:</span>
+tokenizer = self.llm_engine.get_tokenizer()</code></pre>
+
+<h3>7.2 TokenizeParams: Configuration Per-Request</h3>
+
+<p>
+Each request builds a <code>TokenizeParams</code> object that controls how tokenization
+is performed. The parameters vary between chat and completion requests:
+</p>
+
+<pre><code><span class="cmt"># From ChatCompletionRequest.build_tok_params():</span>
+<span class="kw">def</span> <span class="fn">build_tok_params</span>(self, model_config: <span class="cls">ModelConfig</span>) -> <span class="cls">TokenizeParams</span>:
+    <span class="kw">return</span> <span class="cls">TokenizeParams</span>(
+        max_total_tokens=model_config.max_model_len,
+        max_output_tokens=self.max_completion_tokens <span class="kw">or</span> <span class="num-lit">0</span>,
+        truncate_prompt_tokens=self.truncate_prompt_tokens,
+        add_special_tokens=self.add_special_tokens,  <span class="cmt"># Default False for chat</span>
+        needs_detokenization=<span class="fn">bool</span>(self.echo <span class="kw">and not</span> self.return_token_ids),
+        max_total_tokens_param=<span class="str">"max_model_len"</span>,
+        max_output_tokens_param=<span class="str">"max_completion_tokens"</span>,
+    )
+
+<span class="cmt"># From CompletionRequest.build_tok_params():</span>
+<span class="kw">def</span> <span class="fn">build_tok_params</span>(self, model_config) -> <span class="cls">TokenizeParams</span>:
+    <span class="kw">return</span> <span class="cls">TokenizeParams</span>(
+        <span class="cmt">...</span>
+        add_special_tokens=self.add_special_tokens,  <span class="cmt"># Default True for completion</span>
+        <span class="cmt">...</span>
+    )</code></pre>
+
+<div class="callout warn">
+<strong>Important difference:</strong> Chat requests default to <code>add_special_tokens=False</code> because
+the chat template handles special tokens. Completion requests default to <code>True</code>
+to add BOS tokens automatically.
+</div>
+
+<h3>7.3 Input Preprocessing Pipeline</h3>
+
+<p>
+The <code>renderers/inputs/preprocess.py</code> module provides utilities for normalizing
+prompts into the internal <code>EngineInput</code> format:
+</p>
+
+<pre><code><span class="cmt"># Normalize single prompt or list of prompts</span>
+<span class="kw">def</span> <span class="fn">prompt_to_seq</span>(
+    prompt_or_prompts: <span class="tp">PromptType</span> | <span class="tp">Sequence</span>[<span class="tp">PromptType</span>],
+) -> <span class="tp">Sequence</span>[<span class="tp">PromptType</span>]:
+    <span class="kw">if</span> <span class="fn">isinstance</span>(prompt_or_prompts, (<span class="tp">dict</span>, <span class="tp">str</span>, <span class="tp">bytes</span>)):
+        <span class="kw">return</span> [prompt_or_prompts]  <span class="cmt"># Wrap single prompt in list</span>
+    <span class="kw">return</span> prompt_or_prompts        <span class="cmt"># Already a sequence</span>
+
+
+<span class="cmt"># Normalize single conversation or list of conversations</span>
+<span class="kw">def</span> <span class="fn">conversation_to_seq</span>(
+    conversation_or_conversations: ...,
+) -> <span class="tp">Sequence</span>[<span class="tp">list</span>[<span class="cls">ChatCompletionMessageParam</span>]]:
+    <span class="kw">if</span> is_list_of(conversation_or_conversations, <span class="tp">dict</span>):
+        <span class="kw">return</span> [conversation_or_conversations]
+    <span class="kw">return</span> conversation_or_conversations</code></pre>
+
+<h3>7.4 Prompt Type Taxonomy</h3>
+
+<pre><code><span class="cmt"># vllm/renderers/inputs/preprocess.py</span>
+<span class="tp">DecoderOnlyDictPrompt</span>: TypeAlias = <span class="cls">TextPrompt</span> | <span class="cls">TokensPrompt</span> | <span class="cls">EmbedsPrompt</span>
+<span class="tp">EncoderDictPrompt</span>: TypeAlias = <span class="cls">TextPrompt</span> | <span class="cls">TokensPrompt</span>
+<span class="tp">DecoderDictPrompt</span>: TypeAlias = <span class="cls">TextPrompt</span> | <span class="cls">TokensPrompt</span>
+
+<span class="kw">class</span> <span class="cls">EncoderDecoderDictPrompt</span>(<span class="cls">TypedDict</span>):
+    encoder_prompt: <span class="tp">EncoderDictPrompt</span>
+    decoder_prompt: <span class="tp">DecoderDictPrompt</span> | <span class="kw">None</span></code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 8: Chat Templates -->
+<!-- ================================================================== -->
+<section id="chat-templates">
+<h2><span class="num num-teal">8</span> Chat Template Application and Message Formatting</h2>
+
+<p>
+vLLM uses Jinja2-based chat templates (from HuggingFace <code>tokenizer_config.json</code>)
+to convert a list of message objects into a single string or token sequence that the
+model understands.
+</p>
+
+<h3>8.1 Chat Template Loading</h3>
+
+<span class="file-path">vllm/entrypoints/chat_utils.py (referenced)</span>
+<pre><code><span class="cmt"># load_chat_template() accepts:</span>
+<span class="cmt"># 1. A file path to a .jinja template</span>
+<span class="cmt"># 2. A Jinja template string</span>
+<span class="cmt"># 3. None (use model's built-in template)</span>
+
+resolved_chat_template = <span class="fn">load_chat_template</span>(args.chat_template)
+
+<span class="cmt"># The template is stored in app state and passed to all serving handlers</span>
+state.openai_serving_chat = <span class="cls">OpenAIServingChat</span>(
+    <span class="cmt">...</span>
+    chat_template=resolved_chat_template,
+    chat_template_content_format=args.chat_template_content_format,
+    trust_request_chat_template=args.trust_request_chat_template,
+)</code></pre>
+
+<h3>8.2 Per-Request Chat Template Override</h3>
+
+<p>
+Clients can pass a custom <code>chat_template</code> in the request body. This is gated by the
+<code>--trust-request-chat-template</code> flag for security:
+</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">ChatCompletionRequest</span>(<span class="cls">OpenAIBaseModel</span>):
+    chat_template: <span class="tp">str</span> | <span class="kw">None</span> = <span class="fn">Field</span>(
+        default=<span class="kw">None</span>,
+        description=<span class="str">"A Jinja template to use for this conversion."</span>,
+    )
+    chat_template_kwargs: <span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">Any</span>] | <span class="kw">None</span> = <span class="fn">Field</span>(
+        default=<span class="kw">None</span>,
+        description=<span class="str">"Additional keyword args to pass to the template renderer."</span>,
+    )</code></pre>
+
+<h3>8.3 ChatParams: Template Rendering Configuration</h3>
+
+<p>
+The request's template parameters are bundled into a <code>ChatParams</code> object that
+the renderer uses:
+</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">build_chat_params</span>(self, default_template, default_template_content_format):
+    <span class="kw">return</span> <span class="cls">ChatParams</span>(
+        chat_template=self.chat_template <span class="kw">or</span> default_template,
+        chat_template_content_format=default_template_content_format,
+        chat_template_kwargs=<span class="fn">merge_kwargs</span>(
+            self.chat_template_kwargs,
+            <span class="tp">dict</span>(
+                add_generation_prompt=self.add_generation_prompt,
+                continue_final_message=self.continue_final_message,
+                documents=self.documents,
+                reasoning_effort=self.reasoning_effort,
+            ),
+        ),
+        media_io_kwargs=self.media_io_kwargs,
+    )</code></pre>
+
+<h3>8.4 Content Format Resolution</h3>
+
+<p>
+The <code>chat_template_content_format</code> controls how message content is represented
+when passed to the template:
+</p>
+
+<pre><code><span class="cmt"># Passed in by user (CLI or request)</span>
+<span class="tp">ChatTemplateContentFormatOption</span> = <span class="tp">Literal</span>[<span class="str">"auto"</span>, <span class="str">"string"</span>, <span class="str">"openai"</span>]
+
+<span class="cmt"># After resolving "auto"</span>
+<span class="tp">ChatTemplateContentFormat</span> = <span class="tp">Literal</span>[<span class="str">"string"</span>, <span class="str">"openai"</span>]
+
+<span class="cmt"># "string" - content is passed as a plain string to the template</span>
+<span class="cmt"># "openai" - content is passed as a list of {"type": ..., ...} objects</span>
+<span class="cmt"># "auto"   - automatically detects the right format</span></code></pre>
+
+<h3>8.5 ConversationMessage: Internal Representation</h3>
+
+<pre><code><span class="kw">class</span> <span class="cls">ConversationMessage</span>(<span class="cls">TypedDict</span>, total=<span class="kw">False</span>):
+    role: <span class="tp">Required</span>[<span class="tp">str</span>]
+    content: <span class="tp">str</span> | <span class="kw">None</span> | <span class="tp">list</span>[<span class="tp">dict</span>[<span class="tp">str</span>, <span class="tp">str</span>]]
+    tool_call_id: <span class="tp">str</span> | <span class="kw">None</span>
+    name: <span class="tp">str</span> | <span class="kw">None</span>
+    tool_calls: <span class="tp">Iterable</span>[<span class="cls">ChatCompletionMessageToolCallParam</span>] | <span class="kw">None</span>
+    reasoning: <span class="tp">str</span> | <span class="kw">None</span>           <span class="cmt"># interleaved thinking</span>
+    reasoning_content: <span class="tp">str</span> | <span class="kw">None</span>   <span class="cmt"># deprecated alias</span>
+    tools: <span class="tp">list</span>[<span class="cls">ChatCompletionFunctionToolParam</span>] | <span class="kw">None</span></code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- SECTION 9: Diagrams -->
+<!-- ================================================================== -->
+<section id="diagrams">
+<h2><span class="num num-blue">D</span> Architecture Diagrams</h2>
+
+<h3>Diagram A: Request Flow from HTTP to Engine</h3>
+
+<div class="diagram-container">
+<h4>HTTP Request &rarr; Engine Processing Pipeline</h4>
+<svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:900px;">
+  <!-- Background -->
+  <rect width="900" height="520" fill="#0e1419" rx="8"/>
+
+  <!-- Client -->
+  <rect x="20" y="20" width="120" height="50" rx="8" fill="#1a1e2e" stroke="#58a6ff" stroke-width="2"/>
+  <text x="80" y="50" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">HTTP Client</text>
+
+  <!-- Arrow 1 -->
+  <line x1="140" y1="45" x2="180" y2="45" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="160" y="38" text-anchor="middle" fill="#8b949e" font-size="9">POST</text>
+
+  <!-- Uvicorn -->
+  <rect x="180" y="15" width="130" height="60" rx="8" fill="#1a2e1e" stroke="#3fb950" stroke-width="2"/>
+  <text x="245" y="38" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Uvicorn</text>
+  <text x="245" y="55" text-anchor="middle" fill="#8b949e" font-size="10">ASGI Server</text>
+
+  <!-- Arrow 2 -->
+  <line x1="310" y1="45" x2="350" y2="45" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- FastAPI -->
+  <rect x="350" y="15" width="130" height="60" rx="8" fill="#2e1a2e" stroke="#bc8cff" stroke-width="2"/>
+  <text x="415" y="38" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="700">FastAPI App</text>
+  <text x="415" y="55" text-anchor="middle" fill="#8b949e" font-size="10">Middleware Stack</text>
+
+  <!-- Arrow 3 -->
+  <line x1="480" y1="45" x2="520" y2="45" stroke="#bc8cff" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- Route Handler -->
+  <rect x="520" y="15" width="160" height="60" rx="8" fill="#2e261a" stroke="#d29922" stroke-width="2"/>
+  <text x="600" y="38" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">Route Handler</text>
+  <text x="600" y="55" text-anchor="middle" fill="#8b949e" font-size="10">api_router.py</text>
+
+  <!-- Arrow 4 -->
+  <line x1="700" y1="45" x2="740" y2="45" stroke="#d29922" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+  <!-- Pydantic -->
+  <rect x="740" y="15" width="140" height="60" rx="8" fill="#2e1a1a" stroke="#f85149" stroke-width="2"/>
+  <text x="810" y="38" text-anchor="middle" fill="#f85149" font-size="12" font-weight="700">Pydantic</text>
+  <text x="810" y="55" text-anchor="middle" fill="#8b949e" font-size="10">Request Validation</text>
+
+  <!-- Second row: Processing -->
+  <line x1="810" y1="75" x2="810" y2="110" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+  <!-- Serving Class -->
+  <rect x="690" y="110" width="180" height="60" rx="8" fill="#1a2e2e" stroke="#56d4dd" stroke-width="2"/>
+  <text x="780" y="133" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="700">OpenAIServingChat</text>
+  <text x="780" y="150" text-anchor="middle" fill="#8b949e" font-size="10">serving.py</text>
+
+  <line x1="690" y1="140" x2="650" y2="140" stroke="#56d4dd" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Render -->
+  <rect x="470" y="110" width="180" height="60" rx="8" fill="#1a1e2e" stroke="#58a6ff" stroke-width="2"/>
+  <text x="560" y="133" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">OpenAIServingRender</text>
+  <text x="560" y="150" text-anchor="middle" fill="#8b949e" font-size="10">Chat Template + Tokenize</text>
+
+  <line x1="470" y1="140" x2="430" y2="140" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- IO Processor -->
+  <rect x="250" y="110" width="180" height="60" rx="8" fill="#1a2e1e" stroke="#3fb950" stroke-width="2"/>
+  <text x="340" y="133" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">IO Processor</text>
+  <text x="340" y="150" text-anchor="middle" fill="#8b949e" font-size="10">Multimodal + Embeds</text>
+
+  <line x1="250" y1="140" x2="210" y2="140" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- EngineInput -->
+  <rect x="40" y="110" width="170" height="60" rx="8" fill="#2e1a2e" stroke="#bc8cff" stroke-width="2"/>
+  <text x="125" y="133" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="700">EngineInput</text>
+  <text x="125" y="150" text-anchor="middle" fill="#8b949e" font-size="10">token_ids + mm_data</text>
+
+  <!-- Third row: Engine -->
+  <line x1="125" y1="170" x2="125" y2="210" stroke="#bc8cff" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- SamplingParams -->
+  <rect x="250" y="195" width="180" height="50" rx="8" fill="#2e261a" stroke="#d29922" stroke-width="2"/>
+  <text x="340" y="215" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">SamplingParams</text>
+  <text x="340" y="232" text-anchor="middle" fill="#8b949e" font-size="10">request.to_sampling_params()</text>
+
+  <line x1="250" y1="220" x2="210" y2="220" stroke="#d29922" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrowOrange)"/>
+
+  <!-- Engine generate() -->
+  <rect x="40" y="195" width="170" height="50" rx="8" fill="#2e1a1a" stroke="#f85149" stroke-width="2"/>
+  <text x="125" y="215" text-anchor="middle" fill="#f85149" font-size="12" font-weight="700">engine.generate()</text>
+  <text x="125" y="232" text-anchor="middle" fill="#8b949e" font-size="10">AsyncLLM / LLMEngine</text>
+
+  <!-- Fourth row: Engine internals -->
+  <line x1="125" y1="245" x2="125" y2="280" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+  <!-- Scheduler -->
+  <rect x="40" y="280" width="140" height="50" rx="8" fill="#1a2e2e" stroke="#56d4dd" stroke-width="2"/>
+  <text x="110" y="300" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="700">Scheduler</text>
+  <text x="110" y="317" text-anchor="middle" fill="#8b949e" font-size="10">PagedAttention</text>
+
+  <line x1="180" y1="305" x2="230" y2="305" stroke="#56d4dd" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Model Runner -->
+  <rect x="230" y="280" width="150" height="50" rx="8" fill="#1a1e2e" stroke="#58a6ff" stroke-width="2"/>
+  <text x="305" y="300" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">Model Runner</text>
+  <text x="305" y="317" text-anchor="middle" fill="#8b949e" font-size="10">GPU Forward Pass</text>
+
+  <line x1="380" y1="305" x2="430" y2="305" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Sampler -->
+  <rect x="430" y="280" width="140" height="50" rx="8" fill="#1a2e1e" stroke="#3fb950" stroke-width="2"/>
+  <text x="500" y="300" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Sampler</text>
+  <text x="500" y="317" text-anchor="middle" fill="#8b949e" font-size="10">Token Selection</text>
+
+  <line x1="570" y1="305" x2="620" y2="305" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- Detokenizer -->
+  <rect x="620" y="280" width="150" height="50" rx="8" fill="#2e1a2e" stroke="#bc8cff" stroke-width="2"/>
+  <text x="695" y="300" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="700">Detokenizer</text>
+  <text x="695" y="317" text-anchor="middle" fill="#8b949e" font-size="10">Incremental Decode</text>
+
+  <!-- Fifth row: Output -->
+  <line x1="695" y1="330" x2="695" y2="365" stroke="#bc8cff" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- RequestOutput -->
+  <rect x="600" y="365" width="180" height="50" rx="8" fill="#2e261a" stroke="#d29922" stroke-width="2"/>
+  <text x="690" y="385" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">RequestOutput</text>
+  <text x="690" y="402" text-anchor="middle" fill="#8b949e" font-size="10">text + token_ids + logprobs</text>
+
+  <line x1="600" y1="390" x2="560" y2="390" stroke="#d29922" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+  <!-- Response Builder -->
+  <rect x="350" y="365" width="210" height="50" rx="8" fill="#2e1a1a" stroke="#f85149" stroke-width="2"/>
+  <text x="455" y="385" text-anchor="middle" fill="#f85149" font-size="12" font-weight="700">Response Builder</text>
+  <text x="455" y="402" text-anchor="middle" fill="#8b949e" font-size="10">chat_completion_stream_generator</text>
+
+  <line x1="350" y1="390" x2="310" y2="390" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+  <!-- SSE Response -->
+  <rect x="120" y="365" width="190" height="50" rx="8" fill="#1a2e2e" stroke="#56d4dd" stroke-width="2"/>
+  <text x="215" y="385" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="700">SSE / JSON Response</text>
+  <text x="215" y="402" text-anchor="middle" fill="#8b949e" font-size="10">StreamingResponse</text>
+
+  <line x1="120" y1="390" x2="80" y2="390" stroke="#56d4dd" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Back to Client -->
+  <rect x="20" y="445" width="120" height="50" rx="8" fill="#1a1e2e" stroke="#58a6ff" stroke-width="2"/>
+  <text x="80" y="475" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">HTTP Client</text>
+  <line x1="80" y1="415" x2="80" y2="445" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#bc8cff"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#d29922"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#f85149"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#56d4dd"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<h3>Diagram B: Streaming vs Non-Streaming Paths</h3>
+
+<div class="diagram-container">
+<h4>Branching Logic: stream=true vs stream=false</h4>
+<svg viewBox="0 0 900 460" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:900px;">
+  <rect width="900" height="460" fill="#0e1419" rx="8"/>
+
+  <!-- Common path -->
+  <rect x="300" y="15" width="300" height="45" rx="8" fill="#1a1e2e" stroke="#58a6ff" stroke-width="2"/>
+  <text x="450" y="43" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">create_chat_completion(request)</text>
+
+  <line x1="450" y1="60" x2="450" y2="85" stroke="#8b949e" stroke-width="2"/>
+
+  <!-- Render step -->
+  <rect x="300" y="85" width="300" height="45" rx="8" fill="#1a2e1e" stroke="#3fb950" stroke-width="2"/>
+  <text x="450" y="100" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">render_chat_request(request)</text>
+  <text x="450" y="118" text-anchor="middle" fill="#8b949e" font-size="10">Template + Tokenize + MM</text>
+
+  <line x1="450" y1="130" x2="450" y2="155" stroke="#8b949e" stroke-width="2"/>
+
+  <!-- Engine submit -->
+  <rect x="300" y="155" width="300" height="45" rx="8" fill="#2e1a2e" stroke="#bc8cff" stroke-width="2"/>
+  <text x="450" y="170" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">engine_client.generate()</text>
+  <text x="450" y="188" text-anchor="middle" fill="#8b949e" font-size="10">Returns AsyncGenerator[RequestOutput]</text>
+
+  <line x1="450" y1="200" x2="450" y2="230" stroke="#8b949e" stroke-width="2"/>
+
+  <!-- Decision diamond -->
+  <polygon points="450,230 530,265 450,300 370,265" fill="#2e261a" stroke="#d29922" stroke-width="2"/>
+  <text x="450" y="269" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">stream?</text>
+
+  <!-- Streaming path (left) -->
+  <line x1="370" y1="265" x2="230" y2="265" stroke="#f85149" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <text x="300" y="258" text-anchor="middle" fill="#f85149" font-size="11" font-weight="600">True</text>
+
+  <rect x="30" y="240" width="200" height="50" rx="8" fill="#2e1a1a" stroke="#f85149" stroke-width="2"/>
+  <text x="130" y="258" text-anchor="middle" fill="#f85149" font-size="12" font-weight="700">Stream Generator</text>
+  <text x="130" y="275" text-anchor="middle" fill="#8b949e" font-size="10">chat_completion_stream_generator</text>
+
+  <line x1="130" y1="290" x2="130" y2="320" stroke="#f85149" stroke-width="2"/>
+
+  <!-- SSE chunks -->
+  <rect x="20" y="320" width="80" height="35" rx="6" fill="#1a1e2e" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="60" y="342" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">Chunk 1</text>
+  <text x="60" y="332" text-anchor="middle" fill="#8b949e" font-size="8">role</text>
+
+  <rect x="105" y="320" width="80" height="35" rx="6" fill="#1a1e2e" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="145" y="342" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="600">Chunk N</text>
+  <text x="145" y="332" text-anchor="middle" fill="#8b949e" font-size="8">delta text</text>
+
+  <rect x="190" y="320" width="80" height="35" rx="6" fill="#1a1e2e" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="230" y="342" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">Usage</text>
+  <text x="230" y="332" text-anchor="middle" fill="#8b949e" font-size="8">final</text>
+
+  <line x1="130" y1="355" x2="130" y2="380" stroke="#8b949e" stroke-width="2"/>
+
+  <rect x="50" y="380" width="160" height="35" rx="6" fill="#2e1a1a" stroke="#f85149" stroke-width="1.5"/>
+  <text x="130" y="402" text-anchor="middle" fill="#f85149" font-size="11" font-weight="600">data: [DONE]</text>
+
+  <line x1="130" y1="415" x2="130" y2="435" stroke="#f85149" stroke-width="2"/>
+
+  <rect x="20" y="435" width="220" height="20" rx="4" fill="none" stroke="#f85149" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="130" y="449" text-anchor="middle" fill="#f85149" font-size="10">StreamingResponse(text/event-stream)</text>
+
+  <!-- Non-streaming path (right) -->
+  <line x1="530" y1="265" x2="670" y2="265" stroke="#3fb950" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="600" y="258" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">False</text>
+
+  <rect x="670" y="240" width="210" height="50" rx="8" fill="#1a2e1e" stroke="#3fb950" stroke-width="2"/>
+  <text x="775" y="258" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Full Generator</text>
+  <text x="775" y="275" text-anchor="middle" fill="#8b949e" font-size="10">chat_completion_full_generator</text>
+
+  <line x1="775" y1="290" x2="775" y2="320" stroke="#3fb950" stroke-width="2"/>
+
+  <!-- Collect all outputs -->
+  <rect x="670" y="320" width="210" height="50" rx="8" fill="#1a2e2e" stroke="#56d4dd" stroke-width="2"/>
+  <text x="775" y="338" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="600">Collect All Outputs</text>
+  <text x="775" y="355" text-anchor="middle" fill="#8b949e" font-size="10">async for res in generator</text>
+
+  <line x1="775" y1="370" x2="775" y2="400" stroke="#56d4dd" stroke-width="2"/>
+
+  <!-- Build response -->
+  <rect x="670" y="400" width="210" height="50" rx="8" fill="#2e261a" stroke="#d29922" stroke-width="2"/>
+  <text x="775" y="418" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">ChatCompletionResponse</text>
+  <text x="775" y="435" text-anchor="middle" fill="#8b949e" font-size="10">JSONResponse(content=...)</text>
+
+  <!-- Key difference annotations -->
+  <rect x="320" y="350" width="300" height="90" rx="8" fill="rgba(88,166,255,0.08)" stroke="#58a6ff" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="470" y="370" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="700">Key Difference in SamplingParams:</text>
+  <text x="470" y="390" text-anchor="middle" fill="#f85149" font-size="10">stream=True  -> output_kind=DELTA</text>
+  <text x="470" y="408" text-anchor="middle" fill="#8b949e" font-size="9">  (yields incremental text per token)</text>
+  <text x="470" y="425" text-anchor="middle" fill="#3fb950" font-size="10">stream=False -> output_kind=FINAL_ONLY</text>
+  <text x="470" y="440" text-anchor="middle" fill="#8b949e" font-size="9">  (collects all, returns at end)</text>
+</svg>
+</div>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- Init App State: Connecting it all -->
+<!-- ================================================================== -->
+<section id="init-state">
+<h2><span class="num num-orange">+</span> init_app_state: Wiring Handlers to the FastAPI App</h2>
+
+<p>
+The <code>init_app_state()</code> function is where all the serving handler classes are
+instantiated and stored on <code>app.state</code>. This is the central wiring point:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/api_server.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">init_app_state</span>(engine_client, state, args, supported_tasks):
+    vllm_config = engine_client.vllm_config
+
+    <span class="cmt"># 1. Model registry</span>
+    state.openai_serving_models = <span class="cls">OpenAIServingModels</span>(
+        engine_client=engine_client,
+        base_model_paths=[<span class="cls">BaseModelPath</span>(name=name, model_path=args.model)
+                          <span class="kw">for</span> name <span class="kw">in</span> served_model_names],
+        lora_modules=lora_modules,
+    )
+    <span class="kw">await</span> state.openai_serving_models.init_static_loras()
+
+    <span class="cmt"># 2. Render service (chat template + tokenization)</span>
+    state.openai_serving_render = <span class="cls">OpenAIServingRender</span>(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        io_processor=engine_client.io_processor,
+        model_registry=state.openai_serving_models.registry,
+        chat_template=resolved_chat_template,
+        <span class="cmt">...</span>
+    )
+
+    <span class="cmt"># 3. Tokenization endpoint service</span>
+    state.openai_serving_tokenization = <span class="cls">OpenAIServingTokenization</span>(
+        engine_client, state.openai_serving_models, state.openai_serving_render,
+        <span class="cmt">...</span>
+    )
+
+    <span class="cmt"># 4. Generate endpoints (chat, completion, responses, anthropic)</span>
+    <span class="kw">if</span> <span class="str">"generate"</span> <span class="kw">in</span> supported_tasks:
+        <span class="kw">await</span> <span class="fn">init_generate_state</span>(engine_client, state, args, request_logger, supported_tasks)</code></pre>
+
+<span class="file-path">vllm/entrypoints/openai/generate/api_router.py</span>
+<pre><code><span class="kw">async def</span> <span class="fn">init_generate_state</span>(engine_client, state, args, request_logger, supported_tasks):
+    <span class="cmt"># Chat handler with tool parsing and reasoning support</span>
+    state.openai_serving_chat = <span class="cls">OpenAIServingChat</span>(
+        engine_client=engine_client,
+        models=state.openai_serving_models,
+        response_role=args.response_role,
+        openai_serving_render=state.openai_serving_render,
+        chat_template=resolved_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        <span class="cmt">...</span>
+    )
+
+    <span class="cmt"># Completion handler</span>
+    state.openai_serving_completion = <span class="cls">OpenAIServingCompletion</span>(
+        engine_client=engine_client,
+        models=state.openai_serving_models,
+        openai_serving_render=state.openai_serving_render,
+        <span class="cmt">...</span>
+    )
+
+    <span class="cmt"># Responses API handler (OpenAI's newer API)</span>
+    state.openai_serving_responses = <span class="cls">OpenAIServingResponses</span>(
+        engine_client, state.openai_serving_models, state.openai_serving_render,
+        <span class="cmt">...</span>
+    )
+
+    <span class="cmt"># Anthropic-compatible handler</span>
+    state.anthropic_serving_messages = <span class="cls">AnthropicServingMessages</span>(
+        engine_client, state.openai_serving_models, <span class="cmt">...</span>
+    )</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- The OpenAIServing Base Class -->
+<!-- ================================================================== -->
+<section id="base-serving">
+<h2><span class="num num-purple">+</span> OpenAIServing: The Base Serving Engine</h2>
+
+<p>
+All serving handlers (<code>OpenAIServingChat</code>, <code>OpenAIServingCompletion</code>,
+<code>OpenAIServingResponses</code>) inherit from <code>OpenAIServing</code>, which provides shared
+infrastructure:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/engine/serving.py</span>
+<pre><code><span class="kw">class</span> <span class="cls">OpenAIServing</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, engine_client, models, *, request_logger, return_tokens_as_token_ids):
+        self.engine_client = engine_client    <span class="cmt"># AsyncLLM instance</span>
+        self.models = models                  <span class="cmt"># OpenAIServingModels</span>
+        self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
+
+        <span class="cmt"># Derived from engine client</span>
+        self.model_config = engine_client.model_config
+        self.renderer = engine_client.renderer       <span class="cmt"># Holds tokenizer</span>
+        self.io_processor = engine_client.io_processor
+        self.input_processor = engine_client.input_processor
+
+    <span class="cmt"># Shared methods available to all handlers:</span>
+    <span class="kw">async def</span> <span class="fn">_check_model</span>(self, request): ...      <span class="cmt"># Validate model name + LoRA</span>
+    <span class="kw">def</span> <span class="fn">_maybe_get_adapters</span>(self, request): ...     <span class="cmt"># Resolve LoRA adapter</span>
+    <span class="kw">async def</span> <span class="fn">beam_search</span>(self, prompt, ...): ...    <span class="cmt"># Beam search implementation</span>
+    <span class="kw">def</span> <span class="fn">_log_inputs</span>(self, request_id, ...): ...      <span class="cmt"># Request logging</span>
+    <span class="kw">def</span> <span class="fn">create_error_response</span>(self, msg): ...       <span class="cmt"># Error response factory</span>
+    <span class="kw">def</span> <span class="fn">create_streaming_error_response</span>(self, e): ...<span class="cmt"># Streaming error</span></code></pre>
+
+<h3>Type Aliases for Request Routing</h3>
+
+<pre><code><span class="cmt"># All request types that go through the completion path:</span>
+<span class="tp">CompletionLikeRequest</span>: TypeAlias = (
+    <span class="cls">CompletionRequest</span> | <span class="cls">TokenizeCompletionRequest</span> |
+    <span class="cls">DetokenizeRequest</span> | <span class="cls">RerankRequest</span> |
+    <span class="cls">ScoreRequest</span> | <span class="cls">PoolingCompletionRequest</span>
+)
+
+<span class="cmt"># All request types that go through the chat path:</span>
+<span class="tp">ChatLikeRequest</span>: TypeAlias = (
+    <span class="cls">ChatCompletionRequest</span> | <span class="cls">BatchChatCompletionRequest</span> |
+    <span class="cls">TokenizeChatRequest</span> | <span class="cls">PoolingChatRequest</span>
+)
+
+<span class="cmt"># The full union of all request types:</span>
+<span class="tp">AnyRequest</span>: TypeAlias = (
+    <span class="tp">CompletionLikeRequest</span> | <span class="tp">ChatLikeRequest</span> |
+    <span class="tp">SpeechToTextRequest</span> | <span class="cls">ResponsesRequest</span> |
+    <span class="cls">IOProcessorRequest</span> | <span class="cls">GenerateRequest</span>
+)</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- The Completion Handler -->
+<!-- ================================================================== -->
+<section id="completion-handler">
+<h2><span class="num num-red">+</span> Completion Handler: /v1/completions</h2>
+
+<p>
+The completion handler follows a similar pattern to chat but with simpler prompt
+processing (no chat template). It supports multiple prompts in a single request
+via <code>merge_async_iterators()</code>:
+</p>
+
+<span class="file-path">vllm/entrypoints/openai/completion/serving.py</span>
+<pre><code><span class="kw">class</span> <span class="cls">OpenAIServingCompletion</span>(<span class="cls">OpenAIServing</span>):
+    <span class="kw">async def</span> <span class="fn">create_completion</span>(self, request, raw_request):
+        <span class="cmt"># 1. Render (tokenize the prompt without chat template)</span>
+        result = <span class="kw">await</span> self.<span class="fn">render_completion_request</span>(request)
+        <span class="kw">if</span> <span class="fn">isinstance</span>(result, <span class="cls">ErrorResponse</span>):
+            <span class="kw">return</span> result
+        engine_inputs = result
+
+        <span class="cmt"># 2. Create generators for each prompt</span>
+        generators = []
+        <span class="kw">for</span> i, engine_input <span class="kw">in</span> <span class="fn">enumerate</span>(engine_inputs):
+            max_tokens = <span class="fn">get_max_tokens</span>(
+                max_model_len, request.max_tokens,
+                self._extract_prompt_len(engine_input),
+                self.default_sampling_params, self.override_max_tokens,
+            )
+            sampling_params = request.<span class="fn">to_sampling_params</span>(
+                max_tokens, self.default_sampling_params)
+
+            generator = self.engine_client.<span class="fn">generate</span>(
+                engine_input, sampling_params, request_id_item,
+                lora_request=lora_request, priority=request.priority,
+            )
+            generators.append(generator)
+
+        <span class="cmt"># 3. Merge generators and branch on streaming</span>
+        result_generator = <span class="fn">merge_async_iterators</span>(*generators)
+
+        <span class="kw">if</span> request.stream:
+            <span class="kw">return</span> self.<span class="fn">completion_stream_generator</span>(...)
+
+        <span class="cmt"># 4. Non-streaming: collect all results</span>
+        final_res_batch = [<span class="kw">None</span>] * num_prompts
+        <span class="kw">async for</span> i, res <span class="kw">in</span> result_generator:
+            final_res_batch[i] = res
+        <span class="kw">return</span> self.<span class="fn">request_output_to_completion_response</span>(final_res_batch, ...)</code></pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- Summary Table -->
+<!-- ================================================================== -->
+<section id="summary">
+<h2><span class="num num-green">S</span> Summary: File Map</h2>
+
+<table>
+<tr>
+  <th>File</th>
+  <th>Purpose</th>
+</tr>
+<tr>
+  <td><code>entrypoints/cli/main.py</code></td>
+  <td>CLI dispatcher: parses <code>vllm [subcommand]</code>, routes to handler</td>
+</tr>
+<tr>
+  <td><code>entrypoints/cli/serve.py</code></td>
+  <td><code>vllm serve</code> command: single/multi/headless server launch</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/api_server.py</code></td>
+  <td>FastAPI app construction, engine client creation, state initialization</td>
+</tr>
+<tr>
+  <td><code>entrypoints/launcher.py</code></td>
+  <td>Uvicorn server wrapper with SSL and header limit support</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/generate/api_router.py</code></td>
+  <td>Registers chat, completion, responses, and anthropic routers</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/chat_completion/api_router.py</code></td>
+  <td><code>/v1/chat/completions</code> route function</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/chat_completion/serving.py</code></td>
+  <td><code>OpenAIServingChat</code>: full chat completion logic, streaming, tool parsing</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/chat_completion/protocol.py</code></td>
+  <td>Pydantic models: <code>ChatCompletionRequest</code>, response types</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/completion/api_router.py</code></td>
+  <td><code>/v1/completions</code> route function</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/completion/serving.py</code></td>
+  <td><code>OpenAIServingCompletion</code>: text completion logic</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/completion/protocol.py</code></td>
+  <td>Pydantic models: <code>CompletionRequest</code>, response types</td>
+</tr>
+<tr>
+  <td><code>entrypoints/openai/engine/serving.py</code></td>
+  <td><code>OpenAIServing</code> base class: shared logic, beam search, model check</td>
+</tr>
+<tr>
+  <td><code>entrypoints/chat_utils.py</code></td>
+  <td>Chat message types, multimodal content part types, template loading</td>
+</tr>
+<tr>
+  <td><code>entrypoints/llm.py</code></td>
+  <td><code>LLM</code> class for offline batch inference</td>
+</tr>
+<tr>
+  <td><code>renderers/inputs/preprocess.py</code></td>
+  <td>Prompt normalization, type parsing, encoder-decoder handling</td>
+</tr>
+<tr>
+  <td><code>entrypoints/serve/__init__.py</code></td>
+  <td>Registers always-on routers: LoRA, profile, sleep, cache, tokenize</td>
+</tr>
+<tr>
+  <td><code>scripts.py</code></td>
+  <td>Deprecated shim redirecting to <code>entrypoints/cli/main.py</code></td>
+</tr>
+</table>
+
+</section>
+
+</div>
+
+<footer>
+  vLLM V1 Entrypoints Deep Dive &mdash; Generated from source code analysis of vllm-project/vllm
+</footer>
+
+</body>
+</html>

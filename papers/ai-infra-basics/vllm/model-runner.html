@@ -1,0 +1,1434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM V1 GPUModelRunner Deep Dive - Attention Backends, Sampling &amp; CUDA Graphs</title>
+<style>
+:root {
+  --dark: #16213e;
+  --mid: #0f3460;
+  --primary: #e94560;
+  --green: #2ecc71;
+  --amber: #f5a623;
+  --purple: #9b59b6;
+  --blue: #3498db;
+  --cyan: #00d2d3;
+  --teal: #1abc9c;
+  --orange: #e67e22;
+  --code-bg: #1e1e2e;
+  --card-bg: #1a2744;
+  --text: #e0e0e0;
+  --text-muted: #a0aec0;
+  --border: #2d3e5e;
+  --surface: #1e2d4a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--dark);
+  color: var(--text);
+  line-height: 1.7;
+}
+
+/* ---- Sticky Nav ---- */
+nav {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: rgba(15, 52, 96, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 2rem;
+}
+nav ul {
+  display: flex;
+  list-style: none;
+  max-width: 1200px;
+  margin: 0 auto;
+  gap: 0.25rem;
+  overflow-x: auto;
+}
+nav ul li a {
+  display: block;
+  padding: 0.85rem 1rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 0.2s, border-bottom 0.2s;
+  border-bottom: 2px solid transparent;
+}
+nav ul li a:hover {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+/* ---- Hero ---- */
+.hero {
+  text-align: center;
+  padding: 4rem 2rem 3rem;
+  background: linear-gradient(135deg, #0f3460 0%, #16213e 60%, #1a1a2e 100%);
+  border-bottom: 2px solid var(--primary);
+}
+.hero h1 {
+  font-size: 2.4rem;
+  color: #fff;
+  margin-bottom: 0.5rem;
+}
+.hero .subtitle {
+  font-size: 1.15rem;
+  color: var(--text-muted);
+  max-width: 800px;
+  margin: 0.5rem auto 1.5rem;
+}
+.hero .badge {
+  display: inline-block;
+  padding: 0.3rem 1rem;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin: 0.2rem;
+}
+.badge-red { background: rgba(233,69,96,0.25); color: var(--primary); border: 1px solid var(--primary); }
+.badge-green { background: rgba(46,204,113,0.25); color: var(--green); border: 1px solid var(--green); }
+.badge-blue { background: rgba(52,152,219,0.25); color: var(--blue); border: 1px solid var(--blue); }
+.badge-purple { background: rgba(155,89,182,0.25); color: var(--purple); border: 1px solid var(--purple); }
+.badge-amber { background: rgba(245,166,35,0.25); color: var(--amber); border: 1px solid var(--amber); }
+
+/* ---- Container ---- */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+/* ---- Section ---- */
+section {
+  margin-bottom: 3.5rem;
+}
+section h2 {
+  font-size: 1.7rem;
+  color: var(--primary);
+  margin-bottom: 1.2rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border);
+}
+section h3 {
+  font-size: 1.25rem;
+  color: var(--amber);
+  margin: 1.5rem 0 0.8rem;
+}
+section h4 {
+  font-size: 1.05rem;
+  color: var(--cyan);
+  margin: 1rem 0 0.5rem;
+}
+p { margin-bottom: 1rem; }
+
+/* ---- Code ---- */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.2rem;
+  overflow-x: auto;
+  margin: 1rem 0 1.5rem;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  color: #c9d1d9;
+}
+.kw { color: #ff79c6; }
+.fn { color: #50fa7b; }
+.str { color: #f1fa8c; }
+.cm { color: #6272a4; }
+.num { color: #bd93f9; }
+.type { color: #8be9fd; }
+.op { color: #ff79c6; }
+.param { color: #ffb86c; }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin: 1rem 0;
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+.card h4 {
+  margin-top: 0;
+}
+
+/* ---- Diagram ---- */
+.diagram {
+  background: linear-gradient(135deg, #0d1b2a 0%, #1b2838 100%);
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  text-align: center;
+  overflow-x: auto;
+}
+.diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ---- Key insight ---- */
+.insight {
+  background: linear-gradient(135deg, rgba(233,69,96,0.12) 0%, rgba(155,89,182,0.08) 100%);
+  border-left: 4px solid var(--primary);
+  border-radius: 0 8px 8px 0;
+  padding: 1rem 1.2rem;
+  margin: 1rem 0;
+}
+.insight strong { color: var(--primary); }
+
+/* ---- Comparison table ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+th {
+  background: var(--mid);
+  color: var(--amber);
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border: 1px solid var(--border);
+}
+td {
+  padding: 0.65rem 1rem;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+}
+tr:nth-child(even) td {
+  background: var(--surface);
+}
+
+/* ---- Tag ---- */
+.file-ref {
+  display: inline-block;
+  background: rgba(52,152,219,0.2);
+  color: var(--blue);
+  border: 1px solid rgba(52,152,219,0.4);
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-family: monospace;
+  margin: 0 0.2rem;
+}
+</style>
+</head>
+<body>
+
+<!-- ==================== NAV ==================== -->
+<nav>
+<ul>
+  <li><a href="#overview">Overview</a></li>
+  <li><a href="#execute-model">execute_model()</a></li>
+  <li><a href="#input-batch">InputBatch</a></li>
+  <li><a href="#prepare-inputs">_prepare_inputs</a></li>
+  <li><a href="#attn-backends">Attention Backends</a></li>
+  <li><a href="#sampling">Sampling</a></li>
+  <li><a href="#cuda-graphs">CUDA Graphs</a></li>
+  <li><a href="#memory">Memory Budget</a></li>
+  <li><a href="#executors">Executors</a></li>
+</ul>
+</nav>
+
+<!-- ==================== HERO ==================== -->
+<div class="hero">
+  <h1>vLLM V1 GPUModelRunner Deep Dive</h1>
+  <p class="subtitle">
+    Attention Backends, Sampling Pipeline, CUDA Graphs, and Memory Management --
+    traced through actual source code from vllm/v1/worker/
+  </p>
+  <span class="badge badge-red">GPUModelRunner</span>
+  <span class="badge badge-green">FlashAttention</span>
+  <span class="badge badge-blue">FlashInfer</span>
+  <span class="badge badge-purple">Sampling</span>
+  <span class="badge badge-amber">CUDA Graphs</span>
+</div>
+
+<div class="container">
+
+<!-- ==================== S1: OVERVIEW ==================== -->
+<section id="overview">
+<h2>1. Architecture Overview</h2>
+
+<p>
+vLLM V1 restructures the worker-side execution around a <strong>persistent batch</strong> paradigm.
+Instead of rebuilding input tensors from scratch each iteration, the <code>GPUModelRunner</code> keeps
+a long-lived <code>InputBatch</code> on the CPU, only applying deltas (adds/removes) between steps.
+This eliminates the O(batch_size) per-step overhead that dominated V0.
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 920 380" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <defs>
+    <linearGradient id="gTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a2744"/>
+      <stop offset="100%" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+
+  <!-- Title -->
+  <text x="460" y="30" text-anchor="middle" fill="#e94560" font-size="16" font-weight="bold">GPUModelRunner.execute_model() Forward Pass Pipeline</text>
+
+  <!-- Step boxes -->
+  <!-- 1. _update_states -->
+  <rect x="20" y="55" width="170" height="70" rx="10" fill="#1e3a5f" stroke="#e94560" stroke-width="2"/>
+  <text x="105" y="80" text-anchor="middle" fill="#e94560" font-size="12" font-weight="bold">_update_states()</text>
+  <text x="105" y="98" text-anchor="middle" fill="#a0aec0" font-size="9">Remove finished reqs</text>
+  <text x="105" y="112" text-anchor="middle" fill="#a0aec0" font-size="9">Add new/resumed reqs</text>
+
+  <!-- Arrow -->
+  <path d="M195 90 L225 90" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#f5a623"/></marker></defs>
+
+  <!-- 2. _prepare_inputs -->
+  <rect x="230" y="55" width="170" height="70" rx="10" fill="#1e3a5f" stroke="#f5a623" stroke-width="2"/>
+  <text x="315" y="80" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="bold">_prepare_inputs()</text>
+  <text x="315" y="98" text-anchor="middle" fill="#a0aec0" font-size="9">Build positions, token_ids</text>
+  <text x="315" y="112" text-anchor="middle" fill="#a0aec0" font-size="9">Commit block table to GPU</text>
+
+  <!-- Arrow -->
+  <path d="M405 90 L435 90" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 3. _build_attention_metadata -->
+  <rect x="440" y="55" width="170" height="70" rx="10" fill="#1e3a5f" stroke="#2ecc71" stroke-width="2"/>
+  <text x="525" y="80" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">build_attn_metadata()</text>
+  <text x="525" y="98" text-anchor="middle" fill="#a0aec0" font-size="9">FlashAttn / FlashInfer</text>
+  <text x="525" y="112" text-anchor="middle" fill="#a0aec0" font-size="9">Cascade / TRTLLM paths</text>
+
+  <!-- Arrow -->
+  <path d="M615 90 L645 90" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 4. model.forward -->
+  <rect x="650" y="55" width="170" height="70" rx="10" fill="#2a1a3f" stroke="#9b59b6" stroke-width="2"/>
+  <text x="735" y="80" text-anchor="middle" fill="#9b59b6" font-size="12" font-weight="bold">model.forward()</text>
+  <text x="735" y="98" text-anchor="middle" fill="#a0aec0" font-size="9">Transformer layers</text>
+  <text x="735" y="112" text-anchor="middle" fill="#a0aec0" font-size="9">CUDA Graph replay</text>
+
+  <!-- Down arrow from model.forward -->
+  <path d="M735 130 L735 160" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 5. compute_logits -->
+  <rect x="650" y="165" width="170" height="50" rx="10" fill="#1e3a5f" stroke="#3498db" stroke-width="2"/>
+  <text x="735" y="188" text-anchor="middle" fill="#3498db" font-size="12" font-weight="bold">compute_logits()</text>
+  <text x="735" y="202" text-anchor="middle" fill="#a0aec0" font-size="9">hidden[logits_indices] x lm_head</text>
+
+  <!-- Down arrow -->
+  <path d="M735 220 L735 250" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 6. sample_tokens -->
+  <rect x="650" y="255" width="170" height="55" rx="10" fill="#1a3a2a" stroke="#2ecc71" stroke-width="2"/>
+  <text x="735" y="278" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">sample_tokens()</text>
+  <text x="735" y="295" text-anchor="middle" fill="#a0aec0" font-size="9">Greedy / Temperature / Top-k,p</text>
+
+  <!-- Parallel CPU operations -->
+  <rect x="20" y="165" width="380" height="145" rx="10" fill="rgba(46,204,113,0.06)" stroke="#2ecc71" stroke-width="1" stroke-dasharray="5"/>
+  <text x="210" y="185" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">CPU-side (overlapped with GPU model.forward)</text>
+
+  <rect x="35" y="200" width="165" height="40" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="117" y="224" text-anchor="middle" fill="#00d2d3" font-size="10">SamplingMetadata copy</text>
+
+  <rect x="215" y="200" width="170" height="40" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="300" y="224" text-anchor="middle" fill="#00d2d3" font-size="10">Grammar bitmask apply</text>
+
+  <rect x="35" y="250" width="350" height="40" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="210" y="274" text-anchor="middle" fill="#00d2d3" font-size="10">_update_states_after_model_execute() -- bookkeeping</text>
+
+  <!-- Output -->
+  <rect x="650" y="325" width="170" height="40" rx="10" fill="#3a1a1a" stroke="#e94560" stroke-width="2"/>
+  <text x="735" y="350" text-anchor="middle" fill="#e94560" font-size="12" font-weight="bold">ModelRunnerOutput</text>
+  <path d="M735 315 L735 322" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>
+</div>
+
+<div class="insight">
+  <strong>Key V1 Innovation:</strong> <code>execute_model()</code> now returns <code>None</code> and stores
+  ephemeral state in <code>ExecuteModelState</code>. The engine then calls <code>sample_tokens(grammar_output)</code>
+  separately, allowing structured-output grammar bitmasks to be applied between the forward pass and sampling.
+  This two-phase design enables overlap between GPU computation and CPU-side grammar processing.
+</div>
+
+<h3>Source File Map</h3>
+<div class="card-grid">
+  <div class="card">
+    <h4>Core Runner</h4>
+    <p><span class="file-ref">vllm/v1/worker/gpu_model_runner.py</span> -- 6000+ lines. Contains <code>GPUModelRunner</code>: the main orchestrator for all V1 GPU inference.</p>
+  </div>
+  <div class="card">
+    <h4>Persistent Batch</h4>
+    <p><span class="file-ref">vllm/v1/worker/gpu_input_batch.py</span> -- <code>InputBatch</code>: maintains CPU-side arrays for token IDs, sampling params, block tables.</p>
+  </div>
+  <div class="card">
+    <h4>Block Table</h4>
+    <p><span class="file-ref">vllm/v1/worker/block_table.py</span> -- <code>BlockTable</code> and <code>MultiGroupBlockTable</code>: maps virtual blocks to physical KV cache pages.</p>
+  </div>
+  <div class="card">
+    <h4>Worker</h4>
+    <p><span class="file-ref">vllm/v1/worker/gpu_worker.py</span> -- <code>Worker</code>: initializes device, loads model, profiles memory, delegates to GPUModelRunner.</p>
+  </div>
+</div>
+</section>
+
+<!-- ==================== S2: EXECUTE_MODEL ==================== -->
+<section id="execute-model">
+<h2>2. execute_model() -- The Main Entry Point</h2>
+
+<p>
+The <code>execute_model</code> method is the heartbeat of each inference step. It receives a
+<code>SchedulerOutput</code> from the engine core and orchestrates the entire forward pass.
+The two-phase split (execute_model + sample_tokens) was introduced to support structured output
+grammars that need to compute bitmasks in parallel with the forward pass.
+</p>
+
+<pre><code><span class="cm"># gpu_model_runner.py line 3755</span>
+<span class="kw">def</span> <span class="fn">execute_model</span>(<span class="param">self</span>,
+    <span class="param">scheduler_output</span>: <span class="str">"SchedulerOutput"</span>,
+    <span class="param">intermediate_tensors</span>: IntermediateTensors | <span class="type">None</span> = <span class="type">None</span>,
+) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | <span class="type">None</span>:
+
+    <span class="kw">with</span> record_function_or_nullcontext(<span class="str">"gpu_model_runner: preprocess"</span>):
+        <span class="cm"># Phase 1: Update persistent batch states</span>
+        deferred_state_corrections_fn = <span class="param">self</span>._update_states(scheduler_output)
+
+        <span class="cm"># Phase 2: Build GPU input tensors from persistent batch</span>
+        logits_indices, spec_decode_metadata = <span class="param">self</span>._prepare_inputs(
+            scheduler_output, num_scheduled_tokens_np)
+
+        <span class="cm"># Phase 3: Build attention metadata for the chosen backend</span>
+        attn_metadata, spec_decode_common_attn_metadata = (
+            <span class="param">self</span>._build_attention_metadata(...))
+
+    <span class="cm"># Phase 4: Run the actual model forward</span>
+    <span class="kw">with</span> set_forward_context(attn_metadata, ...):
+        model_output = <span class="param">self</span>._model_forward(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds, **model_kwargs)
+
+    <span class="cm"># Phase 5: Extract hidden states, compute logits</span>
+    sample_hidden_states = hidden_states[logits_indices]
+    logits = <span class="param">self</span>.model.compute_logits(sample_hidden_states)
+
+    <span class="cm"># Store state for sample_tokens() to pick up</span>
+    <span class="param">self</span>.execute_model_state = ExecuteModelState(
+        scheduler_output, logits, spec_decode_metadata, ...)
+    <span class="kw">return</span> <span class="type">None</span>  <span class="cm"># Signal: call sample_tokens() next</span>
+</code></pre>
+
+<h3>ExecuteModelState: The Bridge Between Phases</h3>
+<pre><code><span class="cm"># gpu_model_runner.py line 372</span>
+<span class="kw">class</span> <span class="type">ExecuteModelState</span>(NamedTuple):
+    <span class="str">"""Ephemeral cached state transferred between execute_model()
+    and sample_tokens(), after execute_model() returns None."""</span>
+    scheduler_output: <span class="str">"SchedulerOutput"</span>
+    logits: torch.Tensor
+    spec_decode_metadata: SpecDecodeMetadata | <span class="type">None</span>
+    spec_decode_common_attn_metadata: CommonAttentionMetadata | <span class="type">None</span>
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    aux_hidden_states: <span class="kw">list</span>[torch.Tensor] | <span class="type">None</span>
+    ec_connector_output: ECConnectorOutput | <span class="type">None</span>
+    cudagraph_stats: CUDAGraphStat | <span class="type">None</span>
+    slot_mappings: <span class="kw">dict</span>[<span class="kw">str</span>, torch.Tensor] | <span class="type">None</span>
+</code></pre>
+
+<h3>sample_tokens() -- Phase 2</h3>
+<pre><code><span class="cm"># gpu_model_runner.py line 4107</span>
+@torch.inference_mode
+<span class="kw">def</span> <span class="fn">sample_tokens</span>(<span class="param">self</span>, grammar_output: <span class="str">"GrammarOutput | None"</span>):
+    <span class="cm"># Unpack ephemeral state from execute_model()</span>
+    (scheduler_output, logits, spec_decode_metadata, ...) = <span class="param">self</span>.execute_model_state
+    <span class="param">self</span>.execute_model_state = <span class="type">None</span>
+
+    <span class="cm"># Apply grammar bitmask if structured output is enabled</span>
+    <span class="kw">if</span> grammar_output <span class="kw">is not</span> <span class="type">None</span>:
+        apply_grammar_bitmask(scheduler_output, grammar_output,
+                              <span class="param">self</span>.input_batch, logits)
+
+    <span class="cm"># Actually sample</span>
+    sampler_output = <span class="param">self</span>._sample(logits, spec_decode_metadata)
+
+    <span class="cm"># Async bookkeeping: update output_token_ids, num_computed_tokens</span>
+    <span class="param">self</span>._update_states_after_model_execute(
+        sampler_output.sampled_token_ids, scheduler_output)
+</code></pre>
+</section>
+
+<!-- ==================== S3: INPUT BATCH ==================== -->
+<section id="input-batch">
+<h2>3. InputBatch -- Persistent CPU-Side State</h2>
+
+<p>
+<code>InputBatch</code> is one of V1's key optimizations. Rather than reconstructing every tensor from scratch
+each step, it maintains pre-allocated numpy/torch arrays sized to <code>max_num_reqs x max_model_len</code>.
+Requests are inserted/removed via index manipulation, and only the relevant slices are copied to GPU.
+</p>
+
+<div class="insight">
+  <strong>Why This Matters:</strong> In V0, each step rebuilt input tensors for the entire batch.
+  With a batch of 256 requests, that's 256 allocations + copies. In V1, consecutive batches share
+  ~95% of the same requests, so only deltas are applied. The persistent arrays also enable
+  <em>pinned memory</em> for async CPU-to-GPU transfers, overlapping data prep with GPU computation.
+</div>
+
+<h3>Pre-allocated Buffers</h3>
+<pre><code><span class="cm"># gpu_input_batch.py line 81</span>
+<span class="kw">class</span> <span class="type">InputBatch</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="param">self</span>, max_num_reqs, max_model_len, ...):
+        <span class="cm"># Token IDs: [max_num_reqs, max_model_len] -- NOT pinned (too large)</span>
+        <span class="param">self</span>.token_ids_cpu_tensor = torch.zeros(
+            (max_num_reqs, max_model_len), device=<span class="str">"cpu"</span>, dtype=torch.int32,
+            pin_memory=<span class="type">False</span>)
+        <span class="param">self</span>.token_ids_cpu = <span class="param">self</span>.token_ids_cpu_tensor.numpy()
+
+        <span class="cm"># Sequence lengths: [max_num_reqs] -- PINNED for fast GPU copy</span>
+        <span class="param">self</span>.num_computed_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,), device=<span class="str">"cpu"</span>, dtype=torch.int32,
+            pin_memory=pin_memory)
+
+        <span class="cm"># Sampling parameters -- each has CPU + GPU mirrors</span>
+        <span class="param">self</span>.temperature = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
+        <span class="param">self</span>.temperature_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float32, device=<span class="str">"cpu"</span>,
+            pin_memory=pin_memory)
+        <span class="param">self</span>.temperature_cpu = <span class="param">self</span>.temperature_cpu_tensor.numpy()
+
+        <span class="cm"># Top-p, top-k, penalties follow the same pattern:</span>
+        <span class="cm"># GPU tensor + pinned CPU tensor + numpy view</span>
+        <span class="param">self</span>.top_p = torch.empty(...)    <span class="cm"># GPU</span>
+        <span class="param">self</span>.top_p_cpu = ...              <span class="cm"># numpy view of pinned CPU</span>
+        <span class="param">self</span>.top_k = torch.empty(...)
+        <span class="param">self</span>.frequency_penalties = torch.empty(...)
+        <span class="param">self</span>.presence_penalties = torch.empty(...)
+        <span class="param">self</span>.repetition_penalties = torch.empty(...)
+
+        <span class="cm"># Track which reqs use which sampling type</span>
+        <span class="param">self</span>.greedy_reqs: <span class="kw">set</span>[<span class="kw">str</span>] = <span class="kw">set</span>()
+        <span class="param">self</span>.random_reqs: <span class="kw">set</span>[<span class="kw">str</span>] = <span class="kw">set</span>()
+</code></pre>
+
+<h3>Adding a Request to the Batch</h3>
+<pre><code><span class="cm"># gpu_input_batch.py line 316</span>
+<span class="kw">def</span> <span class="fn">add_request</span>(<span class="param">self</span>, request: CachedRequestState) -> <span class="kw">int</span>:
+    req_index = <span class="param">self</span>._register_add_request(request)
+
+    <span class="cm"># Copy prompt token ids into the persistent buffer</span>
+    num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+        request.prompt_token_ids, request.prompt_embeds)
+    <span class="param">self</span>.num_prompt_tokens[req_index] = num_prompt_tokens
+
+    <span class="kw">if</span> request.prompt_token_ids <span class="kw">is not</span> <span class="type">None</span>:
+        <span class="param">self</span>.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
+
+    <span class="cm"># Copy output token ids (for continued requests)</span>
+    start_idx = num_prompt_tokens
+    end_idx = start_idx + <span class="kw">len</span>(request.output_token_ids)
+    <span class="param">self</span>.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
+
+    <span class="cm"># Set sampling parameters at the request index</span>
+    <span class="param">self</span>.temperature_cpu[req_index] = request.sampling_params.temperature
+    <span class="param">self</span>.top_p_cpu[req_index] = request.sampling_params.top_p
+    <span class="param">self</span>.top_k_cpu[req_index] = request.sampling_params.top_k
+    ...
+</code></pre>
+
+<h3>The Dual-Array Pattern</h3>
+<div class="diagram">
+<svg viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg">
+  <text x="350" y="22" text-anchor="middle" fill="#f5a623" font-size="14" font-weight="bold">InputBatch Dual-Array Pattern (e.g., temperature)</text>
+
+  <!-- CPU side -->
+  <rect x="30" y="50" width="280" height="140" rx="10" fill="rgba(52,152,219,0.1)" stroke="#3498db" stroke-width="1.5"/>
+  <text x="170" y="72" text-anchor="middle" fill="#3498db" font-size="12" font-weight="bold">CPU Side</text>
+
+  <rect x="50" y="85" width="240" height="28" rx="5" fill="#1e3a5f" stroke="#3498db" stroke-width="1"/>
+  <text x="170" y="104" text-anchor="middle" fill="#e0e0e0" font-size="10">temperature_cpu_tensor (pinned)</text>
+
+  <rect x="50" y="120" width="240" height="28" rx="5" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="170" y="139" text-anchor="middle" fill="#e0e0e0" font-size="10">temperature_cpu = .numpy() view</text>
+
+  <text x="170" y="172" text-anchor="middle" fill="#a0aec0" font-size="9">Writes via numpy (zero-copy)</text>
+
+  <!-- Arrow -->
+  <path d="M320 120 L380 120" stroke="#2ecc71" stroke-width="2" marker-end="url(#arrow2)"/>
+  <text x="350" y="112" text-anchor="middle" fill="#2ecc71" font-size="9">non_blocking</text>
+  <text x="350" y="135" text-anchor="middle" fill="#2ecc71" font-size="9">copy_</text>
+  <defs><marker id="arrow2" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#2ecc71"/></marker></defs>
+
+  <!-- GPU side -->
+  <rect x="390" y="50" width="280" height="140" rx="10" fill="rgba(155,89,182,0.1)" stroke="#9b59b6" stroke-width="1.5"/>
+  <text x="530" y="72" text-anchor="middle" fill="#9b59b6" font-size="12" font-weight="bold">GPU Side</text>
+
+  <rect x="410" y="95" width="240" height="28" rx="5" fill="#2a1a3f" stroke="#9b59b6" stroke-width="1"/>
+  <text x="530" y="114" text-anchor="middle" fill="#e0e0e0" font-size="10">temperature (CUDA tensor)</text>
+
+  <text x="530" y="155" text-anchor="middle" fill="#a0aec0" font-size="9">Read by Sampler kernel</text>
+</svg>
+</div>
+
+<p>
+This pattern is repeated for every sampling parameter. The numpy view enables
+zero-copy writes on the CPU, while the pinned CPU tensor enables DMA transfers
+to the GPU without involving the CPU during the copy.
+</p>
+</section>
+
+<!-- ==================== S4: PREPARE INPUTS ==================== -->
+<section id="prepare-inputs">
+<h2>4. _prepare_inputs() -- Building GPU Tensors</h2>
+
+<p>
+This is the performance-critical bridge between CPU state and GPU computation. It reads from the
+persistent <code>InputBatch</code> and produces the exact tensors the model needs: input_ids, positions,
+attention metadata, and slot mappings.
+</p>
+
+<pre><code><span class="cm"># gpu_model_runner.py line 1784</span>
+<span class="kw">def</span> <span class="fn">_prepare_inputs</span>(<span class="param">self</span>, scheduler_output, num_scheduled_tokens):
+    num_reqs = <span class="param">self</span>.input_batch.num_reqs
+
+    <span class="cm"># OPTIMIZATION: Start block table GPU copy first (overlaps with CPU work)</span>
+    <span class="param">self</span>.input_batch.block_table.commit_block_table(num_reqs)
+
+    <span class="cm"># Build request indices: [2,5,3] -> [0,0,1,1,1,1,1,2,2,2]</span>
+    req_indices = np.repeat(<span class="param">self</span>.arange_np[:num_reqs], num_scheduled_tokens)
+
+    <span class="cm"># Cumulative tokens and per-token query position</span>
+    cu_num_tokens = <span class="param">self</span>._get_cumsum_and_arange(
+        num_scheduled_tokens, <span class="param">self</span>.query_pos.np)
+
+    <span class="cm"># Positions: num_computed_tokens[req] + query_offset</span>
+    positions_np = (
+        <span class="param">self</span>.input_batch.num_computed_tokens_cpu[req_indices]
+        + <span class="param">self</span>.query_pos.np[:cu_num_tokens[-1]])
+
+    <span class="cm"># Flatten token_ids from 2D [req, pos] to 1D via index_select</span>
+    token_indices = positions_np + req_indices * max_model_len
+    torch.index_select(
+        <span class="param">self</span>.input_batch.token_ids_cpu_tensor.flatten(), <span class="num">0</span>,
+        torch.from_numpy(token_indices),
+        out=<span class="param">self</span>.input_ids.cpu[:total_num_scheduled_tokens])
+
+    <span class="cm"># Prepare query_start_loc for attention</span>
+    <span class="param">self</span>.query_start_loc.np[<span class="num">0</span>] = <span class="num">0</span>
+    <span class="param">self</span>.query_start_loc.np[<span class="num">1</span>:num_reqs+<span class="num">1</span>] = cu_num_tokens
+    <span class="param">self</span>.query_start_loc.copy_to_gpu()
+
+    <span class="cm"># Compute slot_mapping via Triton kernel (GPU-side)</span>
+    <span class="param">self</span>.input_batch.block_table.compute_slot_mapping(
+        num_reqs, <span class="param">self</span>.query_start_loc.gpu[:num_reqs+<span class="num">1</span>],
+        <span class="param">self</span>.positions[:total_num_scheduled_tokens])
+</code></pre>
+
+<h3>Block Table and Slot Mapping</h3>
+
+<p>
+The <code>BlockTable</code> maintains a 2D mapping of [request, block_index] to physical block IDs.
+The slot mapping kernel converts (position) into (block_id * block_size + offset) for each token,
+which tells the attention kernel exactly where to read/write KV cache entries.
+</p>
+
+<pre><code><span class="cm"># block_table.py -- Triton kernel for slot mapping</span>
+<span class="cm"># _compute_slot_mapping_kernel computes:</span>
+<span class="cm">#   slot = block_table[req][position // block_size] * block_size + position % block_size</span>
+<span class="cm"># This runs on GPU to avoid CPU-GPU sync for position data.</span>
+
+<span class="cm"># block_table.py line 141</span>
+<span class="kw">def</span> <span class="fn">compute_slot_mapping</span>(<span class="param">self</span>, num_reqs, query_start_loc, positions):
+    _compute_slot_mapping_kernel[(<span class="param">num_reqs</span> + <span class="num">1</span>,)](
+        num_tokens, max_num_batched_tokens,
+        query_start_loc, positions,
+        <span class="param">self</span>.block_table.gpu, <span class="param">self</span>.block_table.gpu.stride(<span class="num">0</span>),
+        <span class="param">self</span>.block_size, <span class="param">self</span>.slot_mapping.gpu,
+        PAD_ID=PAD_SLOT_ID)
+</code></pre>
+
+<h3>Hybrid Block Sizes</h3>
+<pre><code><span class="cm"># block_table.py line 173 -- map_to_kernel_blocks</span>
+<span class="cm"># When allocation block size != kernel block size:</span>
+<span class="cm"># e.g., 32-token allocation blocks with 16-token kernel blocks</span>
+<span class="cm">#   kv_manager_block_id 0 -> kernel blocks [0, 1]</span>
+<span class="cm">#   kv_manager_block_id 1 -> kernel blocks [2, 3]</span>
+kernel_block_ids = (
+    kv_manager_block_ids.reshape(-<span class="num">1</span>, <span class="num">1</span>) * blocks_per_kv_block
+    + kernel_block_arange).reshape(-<span class="num">1</span>)
+</code></pre>
+</section>
+
+<!-- ==================== S5: ATTENTION BACKENDS ==================== -->
+<section id="attn-backends">
+<h2>5. Attention Backends -- FlashAttention vs FlashInfer</h2>
+
+<p>
+vLLM V1 supports multiple attention backends through a clean abstraction layer.
+Each backend provides three components: an <code>AttentionBackend</code> (static capabilities),
+an <code>AttentionMetadataBuilder</code> (builds per-step metadata), and an <code>AttentionImpl</code>
+(the actual kernel dispatch).
+</p>
+
+<h3>Backend Selection Architecture</h3>
+<div class="diagram">
+<svg viewBox="0 0 750 280" xmlns="http://www.w3.org/2000/svg">
+  <text x="375" y="22" text-anchor="middle" fill="#f5a623" font-size="14" font-weight="bold">Attention Backend Hierarchy</text>
+
+  <!-- Abstract -->
+  <rect x="250" y="40" width="250" height="45" rx="8" fill="#1e3a5f" stroke="#f5a623" stroke-width="2"/>
+  <text x="375" y="60" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="bold">AttentionBackend (abstract)</text>
+  <text x="375" y="76" text-anchor="middle" fill="#a0aec0" font-size="9">get_name(), get_builder_cls(), get_impl_cls()</text>
+
+  <!-- Lines down -->
+  <line x1="300" y1="85" x2="150" y2="120" stroke="#2ecc71" stroke-width="1.5"/>
+  <line x1="450" y1="85" x2="600" y2="120" stroke="#3498db" stroke-width="1.5"/>
+
+  <!-- FlashAttn -->
+  <rect x="30" y="120" width="240" height="55" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="2"/>
+  <text x="150" y="143" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="bold">FlashAttentionBackend</text>
+  <text x="150" y="163" text-anchor="middle" fill="#a0aec0" font-size="9">FA2/FA3, SM >= 8.0, block_size: MultipleOf(16)</text>
+
+  <!-- FlashInfer -->
+  <rect x="480" y="120" width="240" height="55" rx="8" fill="rgba(52,152,219,0.15)" stroke="#3498db" stroke-width="2"/>
+  <text x="600" y="143" text-anchor="middle" fill="#3498db" font-size="12" font-weight="bold">FlashInferBackend</text>
+  <text x="600" y="163" text-anchor="middle" fill="#a0aec0" font-size="9">SM 7.5-12.1, TRTLLM decode, block_size: 16/32/64</text>
+
+  <!-- Sub-components -->
+  <rect x="30" y="195" width="115" height="35" rx="5" fill="#1e3a5f" stroke="#2ecc71" stroke-width="1"/>
+  <text x="87" y="217" text-anchor="middle" fill="#2ecc71" font-size="9">FA MetadataBuilder</text>
+
+  <rect x="155" y="195" width="115" height="35" rx="5" fill="#1e3a5f" stroke="#2ecc71" stroke-width="1"/>
+  <text x="212" y="217" text-anchor="middle" fill="#2ecc71" font-size="9">FlashAttentionImpl</text>
+
+  <rect x="480" y="195" width="115" height="35" rx="5" fill="#1e3a5f" stroke="#3498db" stroke-width="1"/>
+  <text x="537" y="217" text-anchor="middle" fill="#3498db" font-size="9">FI MetadataBuilder</text>
+
+  <rect x="605" y="195" width="115" height="35" rx="5" fill="#1e3a5f" stroke="#3498db" stroke-width="1"/>
+  <text x="662" y="217" text-anchor="middle" fill="#3498db" font-size="9">FlashInferImpl</text>
+
+  <line x1="87" y1="175" x2="87" y2="195" stroke="#2ecc71" stroke-width="1"/>
+  <line x1="212" y1="175" x2="212" y2="195" stroke="#2ecc71" stroke-width="1"/>
+  <line x1="537" y1="175" x2="537" y2="195" stroke="#3498db" stroke-width="1"/>
+  <line x1="662" y1="175" x2="662" y2="195" stroke="#3498db" stroke-width="1"/>
+
+  <!-- TRTLLM sub-path for FlashInfer -->
+  <rect x="480" y="245" width="240" height="25" rx="5" fill="rgba(233,69,96,0.15)" stroke="#e94560" stroke-width="1"/>
+  <text x="600" y="262" text-anchor="middle" fill="#e94560" font-size="9">TRTLLM Decode Path (SM 10.0+ / Blackwell)</text>
+  <line x1="600" y1="230" x2="600" y2="245" stroke="#e94560" stroke-width="1" stroke-dasharray="3"/>
+</svg>
+</div>
+
+<h3>FlashAttention Metadata</h3>
+<pre><code><span class="cm"># flash_attn.py line 200</span>
+@dataclass
+<span class="kw">class</span> <span class="type">FlashAttentionMetadata</span>:
+    num_actual_tokens: <span class="kw">int</span>       <span class="cm"># Tokens excluding padding</span>
+    max_query_len: <span class="kw">int</span>          <span class="cm"># Max query length in batch</span>
+    query_start_loc: torch.Tensor   <span class="cm"># Cumulative query lengths [num_reqs+1]</span>
+    max_seq_len: <span class="kw">int</span>            <span class="cm"># Max full sequence length</span>
+    seq_lens: torch.Tensor          <span class="cm"># Per-request sequence lengths</span>
+    block_table: torch.Tensor       <span class="cm"># Block table [num_reqs, max_blocks]</span>
+    slot_mapping: torch.Tensor      <span class="cm"># Where to write K/V entries</span>
+
+    <span class="cm"># Cascade attention (shared prefix optimization)</span>
+    use_cascade: <span class="kw">bool</span>
+    common_prefix_len: <span class="kw">int</span>
+    cu_prefix_query_lens: torch.Tensor | <span class="type">None</span>
+
+    <span class="cm"># FA3 AOT scheduling metadata (pre-computed work distribution)</span>
+    scheduler_metadata: torch.Tensor | <span class="type">None</span>
+    max_num_splits: <span class="kw">int</span> = <span class="num">0</span>      <span class="cm"># 0 = use FA3 heuristics</span>
+</code></pre>
+
+<h3>FlashInfer Metadata -- Split Prefill/Decode</h3>
+<pre><code><span class="cm"># flashinfer.py line 486</span>
+@dataclass
+<span class="kw">class</span> <span class="type">FlashInferMetadata</span>:
+    num_actual_tokens: <span class="kw">int</span>
+    slot_mapping: torch.Tensor
+    q_data_type: torch.dtype
+
+    num_decodes: <span class="kw">int</span>              <span class="cm"># Number of decode requests</span>
+    num_decode_tokens: <span class="kw">int</span>
+    num_prefills: <span class="kw">int</span>             <span class="cm"># Number of prefill requests</span>
+    num_prefill_tokens: <span class="kw">int</span>
+
+    <span class="cm"># Separate dispatch paths for prefill and decode</span>
+    prefill: FIPrefill | TRTLLMPrefill | <span class="type">None</span>
+    decode: FIDecode | TRTLLMDecode | <span class="type">None</span>
+
+    <span class="cm"># Cascade attention (entire batch, distinct from prefill/decode)</span>
+    use_cascade: <span class="kw">bool</span>
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | <span class="type">None</span>
+</code></pre>
+
+<h3>Comparison Table</h3>
+<table>
+<tr>
+  <th>Feature</th>
+  <th>FlashAttention (FA2/FA3)</th>
+  <th>FlashInfer</th>
+</tr>
+<tr>
+  <td>Compute Capability</td>
+  <td>SM >= 8.0 (Ampere+)</td>
+  <td>SM 7.5 - 12.1 (Turing through Blackwell)</td>
+</tr>
+<tr>
+  <td>KV Cache Layout</td>
+  <td>(2, num_blocks, block_size, num_kv_heads, head_size)</td>
+  <td>(num_blocks, 2, block_size, num_kv_heads, head_size)</td>
+</tr>
+<tr>
+  <td>Block Sizes</td>
+  <td>MultipleOf(16) -- any multiple of 16</td>
+  <td>Fixed: 16, 32, 64</td>
+</tr>
+<tr>
+  <td>FP8 KV Cache</td>
+  <td>FA3 only (fp8_e4m3)</td>
+  <td>fp8_e4m3, fp8_e5m2</td>
+</tr>
+<tr>
+  <td>CUDA Graph Support</td>
+  <td>FA3: ALWAYS; FA2: UNIFORM_BATCH</td>
+  <td>UNIFORM_BATCH (with TRTLLM decode) or UNIFORM_SINGLE_TOKEN_DECODE</td>
+</tr>
+<tr>
+  <td>KV Cache Update</td>
+  <td>Separate (reshape_and_cache_flash)</td>
+  <td>Separate (forward_includes_kv_cache_update = False)</td>
+</tr>
+<tr>
+  <td>Prefill/Decode Split</td>
+  <td>Unified varlen API handles both</td>
+  <td>Separate BatchPrefillWrapper + BatchDecodeWrapper</td>
+</tr>
+<tr>
+  <td>AOT Scheduling</td>
+  <td>FA3 only -- pre-computes work distribution</td>
+  <td>No AOT; uses TRTLLM fast_decode_plan</td>
+</tr>
+<tr>
+  <td>Cascade Attention</td>
+  <td>Via prefix KV + suffix KV split</td>
+  <td>Via MultiLevelCascadeAttentionWrapper</td>
+</tr>
+<tr>
+  <td>Attention Sinks</td>
+  <td>FA3 on SM >= 9.0</td>
+  <td>Via TRTLLM on SM >= 10.0 (Blackwell)</td>
+</tr>
+</table>
+
+<h3>FlashInfer's TRTLLM Decode Path</h3>
+<p>
+On Blackwell (SM 10.0), FlashInfer can use the TensorRT-LLM attention kernel for decoding,
+which provides better performance for uniform decode batches. The builder checks this at initialization:
+</p>
+
+<pre><code><span class="cm"># flashinfer.py line 627</span>
+<span class="cm"># Prefer TRTLLM attention for decoding in all cases.</span>
+<span class="cm"># This allows AttentionCGSupport.UNIFORM_BATCH mode.</span>
+<span class="param">self</span>.use_trtllm_decode_attention = can_use_trtllm_attention(
+    <span class="param">self</span>.num_qo_heads, <span class="param">self</span>.num_kv_heads)
+
+<span class="cm"># FlashInfer builder tracks separate wrappers per batch size for CG</span>
+<span class="kw">if</span> <span class="param">self</span>.enable_cuda_graph:
+    <span class="param">self</span>._decode_wrappers_cudagraph: <span class="kw">dict</span>[<span class="kw">int</span>, BatchDecodeWrapper] = {}
+    <span class="param">self</span>._decode_cudagraph_max_bs = (<span class="num">1</span> + num_spec_tokens) * max_num_reqs
+</code></pre>
+
+<h3>FlashInfer Decode Wrapper Setup</h3>
+<pre><code><span class="cm"># flashinfer.py line 745</span>
+<span class="kw">def</span> <span class="fn">_get_decode_wrapper</span>(<span class="param">self</span>, batch_size, use_cudagraph=<span class="type">False</span>):
+    <span class="kw">if</span> use_cudagraph:
+        decode_wrapper = <span class="param">self</span>._decode_wrappers_cudagraph.get(batch_size)
+    <span class="kw">else</span>:
+        decode_wrapper = <span class="param">self</span>._decode_wrapper
+
+    <span class="kw">if</span> decode_wrapper <span class="kw">is</span> <span class="type">None</span>:
+        decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+            <span class="param">self</span>._get_workspace_buffer(),
+            get_kv_cache_layout(),
+            use_cuda_graph=use_cudagraph,
+            paged_kv_indptr_buffer=paged_kv_indptr,  <span class="cm"># Pre-allocated for CG</span>
+            paged_kv_indices_buffer=paged_kv_indices,
+            paged_kv_last_page_len_buffer=paged_kv_last_page_len,
+            use_tensor_cores=<span class="type">True</span>)  <span class="cm"># Always use tensor cores</span>
+    <span class="kw">return</span> decode_wrapper
+</code></pre>
+</section>
+
+<!-- ==================== S6: SAMPLING ==================== -->
+<section id="sampling">
+<h2>6. Sampling Pipeline</h2>
+
+<p>
+The <code>Sampler</code> in V1 follows a strict ordering of operations to ensure correctness.
+Logprobs are computed <em>before</em> any modifications to logits, and the sampling itself uses
+a clean split between greedy and random paths.
+</p>
+
+<h3>Sampler.forward() -- Step by Step</h3>
+<pre><code><span class="cm"># sampler.py line 67</span>
+<span class="kw">def</span> <span class="fn">forward</span>(<span class="param">self</span>, logits, sampling_metadata, ...):
+    <span class="cm"># Step 1: Compute raw logprobs BEFORE any modifications</span>
+    <span class="kw">if</span> num_logprobs <span class="kw">is not</span> <span class="type">None</span>:
+        <span class="kw">if</span> logprobs_mode == <span class="str">"raw_logprobs"</span>:
+            raw_logprobs = <span class="param">self</span>.compute_logprobs(logits)  <span class="cm"># log_softmax</span>
+        <span class="kw">elif</span> logprobs_mode == <span class="str">"raw_logits"</span>:
+            raw_logprobs = logits.to(torch.float32)
+
+    <span class="cm"># Step 2: Convert to float32</span>
+    logits = logits.to(torch.float32)
+
+    <span class="cm"># Step 3-6: Apply processors and penalties</span>
+    logits = <span class="param">self</span>.apply_logits_processors(logits, sampling_metadata, ...)
+
+    <span class="cm"># Step 7: Sample the next token</span>
+    sampled, processed_logprobs = <span class="param">self</span>.sample(logits, sampling_metadata)
+    sampled = sampled.long()  <span class="cm"># FlashInfer returns int32, need int64 for indexing</span>
+
+    <span class="cm"># Step 8: Gather top-k logprobs</span>
+    <span class="kw">if</span> num_logprobs:
+        logprobs_tensors = <span class="param">self</span>.gather_logprobs(raw_logprobs, num_logprobs, sampled)
+
+    <span class="cm"># Return as GPU tensors (async copy to CPU happens later)</span>
+    <span class="kw">return</span> SamplerOutput(
+        sampled_token_ids=sampled.to(torch.int32).unsqueeze(-<span class="num">1</span>),
+        logprobs_tensors=logprobs_tensors)
+</code></pre>
+
+<h3>The sample() Method -- Greedy vs Random</h3>
+<pre><code><span class="cm"># sampler.py line 147</span>
+<span class="kw">def</span> <span class="fn">sample</span>(<span class="param">self</span>, logits, sampling_metadata):
+    <span class="cm"># Fast path: all greedy</span>
+    <span class="kw">if</span> <span class="kw">not</span> sampling_metadata.all_random:
+        greedy_sampled = logits.argmax(dim=-<span class="num">1</span>).view(-<span class="num">1</span>)
+        <span class="kw">if</span> sampling_metadata.all_greedy:
+            <span class="kw">return</span> greedy_sampled, processed_logprobs
+
+    <span class="cm"># Apply temperature (in-place division)</span>
+    <span class="cm"># Avoids division by zero for greedy requests</span>
+    temp = torch.where(temp < <span class="num">1e-5</span>, <span class="num">1.0</span>, temp)
+    logits.div_(temp.unsqueeze(dim=<span class="num">1</span>))
+
+    <span class="cm"># Apply argmax-invariant logits processors (e.g., min_p)</span>
+    <span class="kw">for</span> processor <span class="kw">in</span> sampling_metadata.logitsprocs.argmax_invariant:
+        logits = processor.apply(logits)
+
+    <span class="cm"># Top-k and/or Top-p sampling via dedicated sampler</span>
+    random_sampled, processed_logprobs = <span class="param">self</span>.topk_topp_sampler(
+        logits, sampling_metadata.generators,
+        sampling_metadata.top_k, sampling_metadata.top_p)
+
+    <span class="cm"># Merge: use greedy for temp < epsilon, random otherwise</span>
+    <span class="kw">if</span> greedy_sampled <span class="kw">is</span> <span class="type">None</span>:
+        <span class="kw">return</span> random_sampled, processed_logprobs
+
+    sampled = torch.where(
+        sampling_metadata.temperature < <span class="num">1e-5</span>,
+        greedy_sampled, random_sampled, out=greedy_sampled)
+    <span class="kw">return</span> sampled, processed_logprobs
+</code></pre>
+
+<h3>Logits Processing Order</h3>
+<pre><code><span class="cm"># sampler.py line 266 -- apply_logits_processors</span>
+<span class="kw">def</span> <span class="fn">apply_logits_processors</span>(<span class="param">self</span>, logits, sampling_metadata, ...):
+    <span class="cm"># 1. Allowed token IDs whitelist (masked_fill_ with -inf)</span>
+    <span class="kw">if</span> sampling_metadata.allowed_token_ids_mask <span class="kw">is not</span> <span class="type">None</span>:
+        logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, <span class="kw">float</span>(<span class="str">"-inf"</span>))
+
+    <span class="cm"># 2. Bad words exclusion</span>
+    <span class="kw">if</span> bad_words_token_ids:
+        apply_bad_words(logits, bad_words_token_ids, output_token_ids)
+
+    <span class="cm"># 3. Non-argmax-invariant processors (min_tokens, logit_bias)</span>
+    <span class="kw">for</span> processor <span class="kw">in</span> sampling_metadata.logitsprocs.non_argmax_invariant:
+        logits = processor.apply(logits)
+
+    <span class="cm"># 4. Penalties (repetition, frequency, presence)</span>
+    logits = <span class="param">self</span>.apply_penalties(logits, sampling_metadata, output_token_ids)
+    <span class="kw">return</span> logits
+</code></pre>
+
+<div class="card-grid">
+  <div class="card">
+    <h4 style="color: var(--green);">Greedy Sampling</h4>
+    <p>Simple <code>argmax(dim=-1)</code>. Used when temperature &lt; 1e-5. No distribution sampling needed. V1 computes this regardless (as a fallback for mixed batches), then uses <code>torch.where</code> to select per-request.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--amber);">Temperature Scaling</h4>
+    <p>In-place <code>logits.div_(temp.unsqueeze(1))</code>. For greedy requests in mixed batches, temperature is set to 1.0 to avoid division by zero (the greedy result is used anyway via <code>torch.where</code>).</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--purple);">Top-k / Top-p</h4>
+    <p>Handled by <code>TopKTopPSampler</code> which uses optimized kernels. Top-k first filters to k candidates, then top-p (nucleus) further filters by cumulative probability. Per-request generators support seeded sampling.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--cyan);">Penalties</h4>
+    <p>Applied via <code>apply_all_penalties()</code>: repetition penalty multiplies logits of repeated tokens, frequency penalty subtracts by count, presence penalty subtracts by boolean presence. All use vectorized operations.</p>
+  </div>
+</div>
+</section>
+
+<!-- ==================== S7: CUDA GRAPHS ==================== -->
+<section id="cuda-graphs">
+<h2>7. CUDA Graph Capture and Replay</h2>
+
+<p>
+CUDA graphs eliminate kernel launch overhead by recording a sequence of GPU operations and replaying
+them as a single unit. vLLM V1 captures graphs for common batch configurations during warmup,
+then replays them during inference. The tricky part: attention metadata changes every step (different
+seq_lens, block_tables), so the system must carefully manage which fields are graph-compatible.
+</p>
+
+<h3>Graph Capture Modes</h3>
+<table>
+<tr>
+  <th>CUDAGraphMode</th>
+  <th>Description</th>
+  <th>When Used</th>
+</tr>
+<tr>
+  <td><code>NONE</code></td>
+  <td>No CUDA graphs; eager execution</td>
+  <td>Profiling, first step with KV scale calibration</td>
+</tr>
+<tr>
+  <td><code>FULL</code></td>
+  <td>Entire forward pass captured in one graph</td>
+  <td>FA3 (ALWAYS support), uniform decode batches</td>
+</tr>
+<tr>
+  <td><code>PIECEWISE</code></td>
+  <td>Graph captured per-layer (torch.compile)</td>
+  <td>Mixed prefill-decode with FA2</td>
+</tr>
+</table>
+
+<h3>Capture Process</h3>
+<pre><code><span class="cm"># gpu_model_runner.py line 6077</span>
+<span class="kw">def</span> <span class="fn">_capture_cudagraphs</span>(<span class="param">self</span>, batch_descriptors, cudagraph_runtime_mode):
+    <span class="kw">for</span> batch_desc <span class="kw">in</span> batch_descriptors:
+        <span class="cm"># Only capture ubatched graphs for FULL + uniform decode</span>
+        allow_microbatching = (
+            <span class="param">self</span>.parallel_config.use_ubatching
+            <span class="kw">and</span> cudagraph_runtime_mode == CUDAGraphMode.FULL
+            <span class="kw">and</span> uniform_decode
+            <span class="kw">and</span> check_ubatch_thresholds(...))
+
+        <span class="param">self</span>._warmup_and_capture(
+            batch_desc,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            allow_microbatching=allow_microbatching)
+        torch.accelerator.synchronize()
+</code></pre>
+
+<h3>AttentionCGSupport Levels</h3>
+<pre><code><span class="cm"># Each attention backend declares its CUDA graph compatibility</span>
+
+<span class="cm"># FlashAttention FA3: full cudagraph for all cases</span>
+_cudagraph_support = AttentionCGSupport.ALWAYS
+
+<span class="cm"># FlashAttention FA2: only works for uniform decode batches</span>
+<span class="cm"># (special max_query_len=1 packed-GQA handling breaks mixed prefill-decode)</span>
+_cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+
+<span class="cm"># FlashInfer with TRTLLM: UNIFORM_BATCH</span>
+<span class="cm"># FlashInfer without TRTLLM: UNIFORM_SINGLE_TOKEN_DECODE</span>
+<span class="kw">if</span> has_trtllm_support:
+    <span class="kw">return</span> AttentionCGSupport.UNIFORM_BATCH
+<span class="kw">else</span>:
+    <span class="kw">return</span> AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+</code></pre>
+
+<h3>FA3 AOT Scheduling for CUDA Graphs</h3>
+<pre><code><span class="cm"># flash_attn.py line 326 -- Pre-allocate scheduler_metadata for CUDA graphs</span>
+<span class="kw">if</span> <span class="param">self</span>.use_full_cuda_graph <span class="kw">and</span> <span class="param">self</span>.aot_schedule:
+    <span class="cm"># FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4</span>
+    <span class="cm"># The +1 is for tile_count_semaphore (synchronization)</span>
+    <span class="cm"># 4 slots per batch element: prepare_varlen + dynamic_split</span>
+    <span class="cm">#   + sort_batches + head_swizzle</span>
+    max_batch_size = <span class="kw">max</span>(max_num_seqs, max_cudagraph_capture_size <span class="kw">or</span> <span class="num">0</span>)
+    <span class="param">self</span>.scheduler_metadata = torch.zeros(
+        <span class="num">1</span> + round_up(max_batch_size, <span class="num">4</span>) * <span class="num">4</span>,
+        dtype=torch.int32, device=<span class="param">self</span>.device)
+
+    <span class="cm"># Upper bound splits for pre-allocation of intermediate buffers</span>
+    <span class="param">self</span>.max_num_splits = (
+        <span class="param">self</span>.attention_config.flash_attn_max_num_splits_for_cuda_graph)
+</code></pre>
+
+<div class="insight">
+  <strong>Why max_num_splits matters:</strong> Setting <code>max_num_splits > 1</code> during CUDA graph capture
+  forces FA3 to pre-allocate larger intermediate buffers <code>[num_splits, num_heads, num_tokens, head_size]</code>.
+  This ensures the graph has enough memory for any runtime configuration, but increases peak memory usage.
+  Outside of graph capture, <code>max_num_splits = 0</code> lets FA3 use its own heuristics.
+</div>
+
+<h3>FlashInfer CUDA Graph -- Per-Batch-Size Wrappers</h3>
+<p>
+Unlike FlashAttention, FlashInfer requires a separate decode wrapper per batch size when using
+CUDA graphs. This is because the wrapper's <code>plan()</code> method pre-allocates fixed buffers sized
+to the batch:
+</p>
+
+<pre><code><span class="cm"># flashinfer.py line 568</span>
+<span class="kw">if</span> <span class="param">self</span>.enable_cuda_graph:
+    <span class="cm"># One BatchDecodeWithPagedKVCacheWrapper per batch size</span>
+    <span class="param">self</span>._decode_wrappers_cudagraph: <span class="kw">dict</span>[<span class="kw">int</span>, BatchDecodeWrapper] = {}
+    <span class="param">self</span>._decode_cudagraph_max_bs = (<span class="num">1</span> + num_spec_tokens) * max_num_reqs
+</code></pre>
+</section>
+
+<!-- ==================== S8: MEMORY ==================== -->
+<section id="memory">
+<h2>8. GPU Memory Pre-allocation and Budget Calculation</h2>
+
+<p>
+vLLM's memory management follows a strict protocol: profile peak usage, calculate remaining budget,
+then allocate the KV cache to fill exactly that budget. This happens during initialization
+in <code>Worker.determine_available_memory()</code>.
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+  <text x="400" y="25" text-anchor="middle" fill="#f5a623" font-size="14" font-weight="bold">GPU Memory Layout After Initialization</text>
+
+  <!-- Total bar -->
+  <rect x="50" y="50" width="700" height="60" rx="8" fill="#1e1e2e" stroke="#4a5568" stroke-width="2"/>
+
+  <!-- Model weights -->
+  <rect x="52" y="52" width="200" height="56" rx="6" fill="rgba(155,89,182,0.5)" stroke="#9b59b6" stroke-width="1"/>
+  <text x="152" y="82" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">Model Weights</text>
+  <text x="152" y="98" text-anchor="middle" fill="#d4c5e0" font-size="9">(tagged "weights")</text>
+
+  <!-- Activations -->
+  <rect x="254" y="52" width="140" height="56" rx="6" fill="rgba(233,69,96,0.5)" stroke="#e94560" stroke-width="1"/>
+  <text x="324" y="82" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">Peak Activations</text>
+  <text x="324" y="98" text-anchor="middle" fill="#f0c5d0" font-size="9">(profiled)</text>
+
+  <!-- CUDA graphs -->
+  <rect x="396" y="52" width="100" height="56" rx="6" fill="rgba(245,166,35,0.5)" stroke="#f5a623" stroke-width="1"/>
+  <text x="446" y="82" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">CG Buffers</text>
+  <text x="446" y="98" text-anchor="middle" fill="#f5e0b0" font-size="9">(estimated)</text>
+
+  <!-- KV Cache -->
+  <rect x="498" y="52" width="240" height="56" rx="6" fill="rgba(46,204,113,0.5)" stroke="#2ecc71" stroke-width="2"/>
+  <text x="618" y="78" text-anchor="middle" fill="#fff" font-size="13" font-weight="bold">KV Cache</text>
+  <text x="618" y="98" text-anchor="middle" fill="#c5f0d0" font-size="9">(fills remaining budget)</text>
+
+  <!-- Unrequested -->
+  <rect x="740" y="52" width="8" height="56" rx="2" fill="rgba(100,100,100,0.3)" stroke="#666" stroke-width="1"/>
+
+  <!-- Labels below -->
+  <text x="50" y="140" fill="#a0aec0" font-size="10">0 GiB</text>
+  <text x="710" y="140" fill="#a0aec0" font-size="10">gpu_memory_utilization * total</text>
+  <text x="748" y="140" fill="#666" font-size="9">reserved</text>
+
+  <!-- Formula -->
+  <rect x="50" y="165" width="700" height="120" rx="8" fill="rgba(52,152,219,0.08)" stroke="#3498db" stroke-width="1"/>
+  <text x="400" y="190" text-anchor="middle" fill="#3498db" font-size="12" font-weight="bold">Budget Calculation (Worker.determine_available_memory)</text>
+  <text x="70" y="215" fill="#e0e0e0" font-size="11" font-family="monospace">requested_memory = gpu_memory_utilization * total_gpu_memory</text>
+  <text x="70" y="238" fill="#e0e0e0" font-size="11" font-family="monospace">non_kv_cache_memory = non_torch_increase + torch_peak_increase + weights_memory</text>
+  <text x="70" y="261" fill="#2ecc71" font-size="12" font-family="monospace" font-weight="bold">available_kv_cache = requested_memory - non_kv_cache_memory - cudagraph_estimate</text>
+</svg>
+</div>
+
+<h3>Memory Profiling Code</h3>
+<pre><code><span class="cm"># gpu_worker.py line 331</span>
+<span class="kw">def</span> <span class="fn">determine_available_memory</span>(<span class="param">self</span>) -> <span class="kw">int</span>:
+    <span class="cm"># Execute a forward pass with dummy inputs to profile peak usage</span>
+    <span class="kw">with</span> memory_profiling(
+        <span class="param">self</span>.init_snapshot,
+        weights_memory=<span class="kw">int</span>(<span class="param">self</span>.model_runner.model_memory_usage),
+    ) <span class="kw">as</span> profile_result:
+        <span class="param">self</span>.model_runner.profile_run()
+
+        profile_torch_peak = torch.accelerator.memory_stats(<span class="param">self</span>.device).get(
+            <span class="str">"allocated_bytes.all.peak"</span>, <span class="num">0</span>)
+
+        <span class="cm"># Profile CUDA graph memory if graphs will be captured</span>
+        cudagraph_memory_estimate = <span class="num">0</span>
+        <span class="kw">if not</span> <span class="param">self</span>.model_config.enforce_eager <span class="kw">and not</span> current_platform.is_rocm():
+            cudagraph_memory_estimate = <span class="param">self</span>.model_runner.profile_cudagraph_memory()
+
+    <span class="cm"># Calculate budget</span>
+    <span class="param">self</span>.available_kv_cache_memory_bytes = (
+        <span class="param">self</span>.requested_memory
+        - profile_result.non_kv_cache_memory
+        - cudagraph_memory_estimate)
+</code></pre>
+
+<h3>profile_run() -- What Gets Profiled</h3>
+<pre><code><span class="cm"># gpu_model_runner.py line 5712</span>
+<span class="kw">def</span> <span class="fn">profile_run</span>(<span class="param">self</span>):
+    <span class="cm"># 1. Profile multimodal encoder if applicable</span>
+    <span class="kw">if</span> <span class="param">self</span>.supports_mm_inputs:
+        dummy_encoder_outputs = <span class="param">self</span>.model.embed_multimodal(**batched_dummy_mm_inputs)
+        <span class="cm"># Cache them to simulate peak encoder cache usage</span>
+        <span class="kw">for</span> i, output <span class="kw">in</span> enumerate(dummy_encoder_outputs):
+            <span class="param">self</span>.encoder_cache[f<span class="str">"tmp_{i}"</span>] = output
+
+    <span class="cm"># 2. Run dummy forward with max_num_tokens (worst-case activation memory)</span>
+    hidden_states, last_hidden_states = <span class="param">self</span>._dummy_run(
+        <span class="param">self</span>.max_num_tokens, is_profile=<span class="type">True</span>)
+
+    <span class="cm"># 3. Run dummy sampler (for its memory overhead)</span>
+    <span class="kw">if</span> get_pp_group().is_last_rank:
+        output = <span class="param">self</span>._dummy_sampler_run(last_hidden_states)
+
+    <span class="param">self</span>._sync_device()
+    <span class="kw">del</span> hidden_states, output
+    <span class="param">self</span>.encoder_cache.clear()
+    gc.collect()
+</code></pre>
+</section>
+
+<!-- ==================== S9: EXECUTORS ==================== -->
+<section id="executors">
+<h2>9. Executor Hierarchy</h2>
+
+<p>
+Executors sit between the engine core and workers, handling the distributed execution strategy.
+The hierarchy provides three deployment modes: single-GPU, multi-process (same node), and
+Ray-based (multi-node).
+</p>
+
+<div class="diagram">
+<svg viewBox="0 0 800 340" xmlns="http://www.w3.org/2000/svg">
+  <text x="400" y="25" text-anchor="middle" fill="#f5a623" font-size="14" font-weight="bold">Executor Hierarchy: Engine Core to Workers</text>
+
+  <!-- Engine Core -->
+  <rect x="300" y="45" width="200" height="45" rx="10" fill="#3a1a1a" stroke="#e94560" stroke-width="2"/>
+  <text x="400" y="72" text-anchor="middle" fill="#e94560" font-size="12" font-weight="bold">EngineCore</text>
+
+  <!-- Down arrow -->
+  <path d="M400 90 L400 115" stroke="#f5a623" stroke-width="2" marker-end="url(#arrow3)"/>
+  <defs><marker id="arrow3" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#f5a623"/></marker></defs>
+
+  <!-- Executor base -->
+  <rect x="300" y="120" width="200" height="40" rx="8" fill="#1e3a5f" stroke="#f5a623" stroke-width="2"/>
+  <text x="400" y="145" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="bold">Executor (abstract)</text>
+
+  <!-- Three branches -->
+  <line x1="310" y1="160" x2="130" y2="195" stroke="#2ecc71" stroke-width="1.5"/>
+  <line x1="400" y1="160" x2="400" y2="195" stroke="#3498db" stroke-width="1.5"/>
+  <line x1="490" y1="160" x2="670" y2="195" stroke="#9b59b6" stroke-width="1.5"/>
+
+  <!-- UniProc -->
+  <rect x="30" y="195" width="200" height="55" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="2"/>
+  <text x="130" y="217" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="bold">UniProcExecutor</text>
+  <text x="130" y="237" text-anchor="middle" fill="#a0aec0" font-size="9">Single GPU, in-process</text>
+
+  <!-- MultiProc -->
+  <rect x="300" y="195" width="200" height="55" rx="8" fill="rgba(52,152,219,0.15)" stroke="#3498db" stroke-width="2"/>
+  <text x="400" y="217" text-anchor="middle" fill="#3498db" font-size="11" font-weight="bold">MultiprocExecutor</text>
+  <text x="400" y="237" text-anchor="middle" fill="#a0aec0" font-size="9">Multi-GPU, multiprocessing</text>
+
+  <!-- Ray -->
+  <rect x="570" y="195" width="200" height="55" rx="8" fill="rgba(155,89,182,0.15)" stroke="#9b59b6" stroke-width="2"/>
+  <text x="670" y="217" text-anchor="middle" fill="#9b59b6" font-size="11" font-weight="bold">RayExecutor</text>
+  <text x="670" y="237" text-anchor="middle" fill="#a0aec0" font-size="9">Multi-node, Ray actors</text>
+
+  <!-- Worker boxes -->
+  <line x1="130" y1="250" x2="130" y2="275" stroke="#2ecc71" stroke-width="1"/>
+  <rect x="55" y="275" width="150" height="35" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="130" y="297" text-anchor="middle" fill="#00d2d3" font-size="10">Worker + GPUModelRunner</text>
+
+  <line x1="340" y1="250" x2="340" y2="275" stroke="#3498db" stroke-width="1"/>
+  <rect x="265" y="275" width="70" height="35" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="300" y="297" text-anchor="middle" fill="#00d2d3" font-size="9">Worker 0</text>
+
+  <rect x="345" y="275" width="70" height="35" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="380" y="297" text-anchor="middle" fill="#00d2d3" font-size="9">Worker 1</text>
+
+  <rect x="425" y="275" width="70" height="35" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="460" y="297" text-anchor="middle" fill="#00d2d3" font-size="9">Worker N</text>
+
+  <text x="400" y="330" text-anchor="middle" fill="#a0aec0" font-size="9">MessageQueue IPC</text>
+
+  <line x1="670" y1="250" x2="670" y2="275" stroke="#9b59b6" stroke-width="1"/>
+  <rect x="595" y="275" width="150" height="35" rx="6" fill="#1e3a5f" stroke="#00d2d3" stroke-width="1"/>
+  <text x="670" y="297" text-anchor="middle" fill="#00d2d3" font-size="10">Ray Worker Actors</text>
+  <text x="670" y="330" text-anchor="middle" fill="#a0aec0" font-size="9">gRPC + Ray object store</text>
+</svg>
+</div>
+
+<h3>UniProcExecutor -- Single GPU</h3>
+<pre><code><span class="cm"># uniproc_executor.py line 26</span>
+<span class="kw">class</span> <span class="type">UniProcExecutor</span>(Executor):
+    <span class="kw">def</span> <span class="fn">_init_executor</span>(<span class="param">self</span>):
+        <span class="param">self</span>.driver_worker = WorkerWrapperBase(rpc_rank=<span class="num">0</span>)
+        distributed_init_method, rank, local_rank = <span class="param">self</span>._distributed_args()
+        kwargs = <span class="kw">dict</span>(
+            vllm_config=<span class="param">self</span>.vllm_config,
+            local_rank=local_rank, rank=rank,
+            distributed_init_method=distributed_init_method,
+            is_driver_worker=<span class="type">True</span>)
+
+        <span class="param">self</span>.driver_worker.init_worker(all_kwargs=[kwargs])
+        <span class="param">self</span>.driver_worker.init_device()
+        <span class="param">self</span>.driver_worker.load_model()
+
+    <span class="kw">def</span> <span class="fn">execute_model</span>(<span class="param">self</span>, scheduler_output, non_block=<span class="type">False</span>):
+        <span class="cm"># Direct method call -- no IPC overhead</span>
+        output = <span class="param">self</span>.collective_rpc(
+            <span class="str">"execute_model"</span>, args=(scheduler_output,),
+            non_block=non_block, single_value=<span class="type">True</span>)
+        <span class="kw">return</span> output
+
+    <span class="cm"># Async scheduling support: ThreadPoolExecutor for output processing</span>
+    <span class="kw">if</span> <span class="param">self</span>.max_concurrent_batches > <span class="num">1</span>:
+        <span class="param">self</span>.async_output_thread = ThreadPoolExecutor(max_workers=<span class="num">1</span>)
+</code></pre>
+
+<h3>MultiprocExecutor -- Multi-GPU Same Node</h3>
+<pre><code><span class="cm"># multiproc_executor.py line 96</span>
+<span class="kw">class</span> <span class="type">MultiprocExecutor</span>(Executor):
+    supports_pp: <span class="kw">bool</span> = <span class="type">True</span>
+
+    <span class="kw">def</span> <span class="fn">_init_executor</span>(<span class="param">self</span>):
+        tp_size, pp_size, pcp_size = <span class="param">self</span>._get_parallel_sizes()
+        <span class="kw">assert</span> <span class="param">self</span>.world_size == tp_size * pp_size * pcp_size
+
+        <span class="cm"># Use loopback address for local communication</span>
+        distributed_init_method = get_distributed_init_method(
+            get_loopback_ip(), get_open_port())
+
+        <span class="cm"># Set up MessageQueue for efficient SchedulerOutput broadcasting</span>
+        <span class="param">self</span>.rpc_broadcast_mq = MessageQueue(
+            <span class="param">self</span>.world_size, <span class="param">self</span>.local_world_size,
+            max_chunk_bytes=max_chunk_bytes)
+
+        <span class="cm"># Spawn worker processes (one per GPU)</span>
+        <span class="cm"># Each worker process runs Worker.init_device() + Worker.load_model()</span>
+        <span class="cm"># Communication via shared memory MessageQueue</span>
+</code></pre>
+
+<h3>Worker -- The GPU-Side Orchestrator</h3>
+<pre><code><span class="cm"># gpu_worker.py line 105</span>
+<span class="kw">class</span> <span class="type">Worker</span>(WorkerBase):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="param">self</span>, vllm_config, local_rank, rank, ...):
+        <span class="cm"># Configure float32 matmul precision</span>
+        precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
+        torch.set_float32_matmul_precision(precision)
+
+    <span class="kw">def</span> <span class="fn">init_device</span>(<span class="param">self</span>):
+        <span class="cm"># Set CUDA device, init distributed, take memory snapshot</span>
+        <span class="param">self</span>.device = torch.device(f<span class="str">"cuda:{self.local_rank}"</span>)
+        init_worker_distributed_environment(...)
+
+        <span class="cm"># Construct the model runner</span>
+        <span class="param">self</span>.model_runner = GPUModelRunner(<span class="param">self</span>.vllm_config, <span class="param">self</span>.device)
+
+        <span class="cm"># Take baseline memory snapshot for budget calculation</span>
+        <span class="param">self</span>.init_snapshot = MemorySnapshot(device=<span class="param">self</span>.device)
+        <span class="param">self</span>.requested_memory = request_memory(init_snapshot, <span class="param">self</span>.cache_config)
+
+    <span class="kw">def</span> <span class="fn">load_model</span>(<span class="param">self</span>):
+        <span class="kw">with</span> <span class="param">self</span>._maybe_get_memory_pool_context(tag=<span class="str">"weights"</span>):
+            <span class="param">self</span>.model_runner.load_model()
+
+    <span class="kw">def</span> <span class="fn">determine_available_memory</span>(<span class="param">self</span>) -> <span class="kw">int</span>:
+        <span class="cm"># Profile model, compute KV cache budget</span>
+        ...
+</code></pre>
+
+<h3>Sleep/Wake Protocol</h3>
+<p>
+vLLM V1 supports a sleep mode where the worker offloads model weights to free GPU memory
+(e.g., for resource sharing). The Worker has two levels:
+</p>
+
+<pre><code><span class="cm"># gpu_worker.py line 157</span>
+<span class="kw">def</span> <span class="fn">sleep</span>(<span class="param">self</span>, level=<span class="num">1</span>):
+    <span class="cm"># Level 1: offload weights only (tag="weights")</span>
+    <span class="cm"># Level 2: save all buffers to CPU, offload everything</span>
+    <span class="kw">if</span> level == <span class="num">2</span>:
+        <span class="param">self</span>._sleep_saved_buffers = {
+            name: buffer.cpu().clone()
+            <span class="kw">for</span> name, buffer <span class="kw">in</span> model.named_buffers()}
+
+    allocator = CuMemAllocator.get_instance()
+    allocator.sleep(offload_tags=(<span class="str">"weights"</span>,) <span class="kw">if</span> level == <span class="num">1</span> <span class="kw">else</span> <span class="kw">tuple</span>())
+
+<span class="kw">def</span> <span class="fn">wake_up</span>(<span class="param">self</span>, tags=<span class="type">None</span>):
+    allocator.wake_up(tags)
+    <span class="cm"># Restore saved buffers</span>
+    <span class="kw">for</span> name, buffer <span class="kw">in</span> model.named_buffers():
+        <span class="kw">if</span> name <span class="kw">in</span> <span class="param">self</span>._sleep_saved_buffers:
+            buffer.data.copy_(<span class="param">self</span>._sleep_saved_buffers[name].data)
+</code></pre>
+</section>
+
+<!-- ==================== SUMMARY ==================== -->
+<section>
+<h2>Summary of Key Design Decisions</h2>
+
+<div class="card-grid">
+  <div class="card">
+    <h4 style="color: var(--primary);">Persistent Batch</h4>
+    <p>InputBatch maintains pre-allocated arrays across steps. Only deltas are applied -- dramatically reducing per-step CPU overhead compared to V0's per-step reconstruction.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--green);">Two-Phase Execution</h4>
+    <p>execute_model() + sample_tokens() split allows grammar bitmask computation to overlap with GPU forward, and enables future optimizations like speculative decoding interleaving.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--blue);">Backend Abstraction</h4>
+    <p>Clean AttentionBackend / MetadataBuilder / Impl separation means FlashAttention, FlashInfer, and future backends (e.g., Triton-based) can coexist. The system even supports different backends for different layer groups.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--purple);">Overlap Everywhere</h4>
+    <p>Block table GPU copy starts before CPU input prep finishes. Sampling output copies to CPU via a separate CUDA stream. Slot mapping runs as a Triton kernel on GPU while CPU computes positions.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--amber);">CUDA Graph Flexibility</h4>
+    <p>Three CG modes (NONE, FULL, PIECEWISE) adapt to backend capabilities. FA3 gets ALWAYS support; FA2 and FlashInfer fall back to UNIFORM_BATCH or single-token decode only.</p>
+  </div>
+  <div class="card">
+    <h4 style="color: var(--cyan);">Memory-First Design</h4>
+    <p>Memory is profiled by running the actual model at max batch size, then subtracting from the user's gpu_memory_utilization budget. CUDA graph memory is separately estimated to avoid double-counting.</p>
+  </div>
+</div>
+
+<h3>File Reference Quick Index</h3>
+<table>
+<tr><th>File</th><th>Key Classes/Functions</th><th>Lines Read</th></tr>
+<tr><td><span class="file-ref">vllm/v1/worker/gpu_model_runner.py</span></td><td>GPUModelRunner, execute_model, _update_states, _prepare_inputs, _sample, _capture_cudagraphs</td><td>6000+</td></tr>
+<tr><td><span class="file-ref">vllm/v1/worker/gpu_worker.py</span></td><td>Worker, init_device, determine_available_memory, sleep/wake_up</td><td>~500</td></tr>
+<tr><td><span class="file-ref">vllm/v1/worker/gpu_input_batch.py</span></td><td>InputBatch, CachedRequestState, add_request, SamplingMetadata</td><td>~350</td></tr>
+<tr><td><span class="file-ref">vllm/v1/worker/block_table.py</span></td><td>BlockTable, MultiGroupBlockTable, compute_slot_mapping, map_to_kernel_blocks</td><td>~300</td></tr>
+<tr><td><span class="file-ref">vllm/v1/attention/backends/flash_attn.py</span></td><td>FlashAttentionBackend, FlashAttentionMetadata, FlashAttentionMetadataBuilder</td><td>~600</td></tr>
+<tr><td><span class="file-ref">vllm/v1/attention/backends/flashinfer.py</span></td><td>FlashInferBackend, FlashInferMetadata, FlashInferMetadataBuilder, TRTLLM paths</td><td>~1050</td></tr>
+<tr><td><span class="file-ref">vllm/v1/sample/sampler.py</span></td><td>Sampler, forward, sample, apply_temperature, apply_logits_processors</td><td>~320</td></tr>
+<tr><td><span class="file-ref">vllm/v1/executor/uniproc_executor.py</span></td><td>UniProcExecutor, collective_rpc, execute_model</td><td>~150</td></tr>
+<tr><td><span class="file-ref">vllm/v1/executor/multiproc_executor.py</span></td><td>MultiprocExecutor, MessageQueue IPC, FutureWrapper</td><td>~150</td></tr>
+</table>
+</section>
+
+</div><!-- /container -->
+</body>
+</html>

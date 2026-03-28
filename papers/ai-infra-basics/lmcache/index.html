@@ -1,0 +1,1593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LMCache Deep Dive: Source Code Architecture</title>
+<style>
+:root {
+  --bg-dark: #0f1117;
+  --bg-card: #1a1d2e;
+  --bg-code: #141622;
+  --accent-green: #00e68a;
+  --accent-teal: #00ccb4;
+  --accent-blue: #3b82f6;
+  --accent-purple: #8b5cf6;
+  --accent-orange: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-pink: #ec4899;
+  --accent-cyan: #22d3ee;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border-color: #2d3148;
+  --hero-gradient: linear-gradient(135deg, #0f1117 0%, #1a1040 50%, #0f2027 100%);
+  --tier-gpu: #ef4444;
+  --tier-cpu: #f59e0b;
+  --tier-disk: #3b82f6;
+  --tier-remote: #8b5cf6;
+  --tier-p2p: #ec4899;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-dark);
+  color: var(--text-primary);
+  line-height: 1.7;
+}
+a { color: var(--accent-teal); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Sticky Navigation */
+.nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(15, 17, 23, 0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0.6rem 2rem;
+}
+.nav-inner {
+  max-width: 1200px; margin: 0 auto;
+  display: flex; align-items: center; gap: 1.5rem;
+  overflow-x: auto; white-space: nowrap;
+}
+.nav-inner a {
+  color: var(--text-secondary); font-size: 0.85rem;
+  font-weight: 500; padding: 0.3rem 0;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.nav-inner a:hover, .nav-inner a.active {
+  color: var(--accent-teal);
+  border-bottom-color: var(--accent-teal);
+  text-decoration: none;
+}
+
+/* Hero */
+.hero {
+  background: var(--hero-gradient);
+  padding: 4rem 2rem 3rem;
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+.hero h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-teal), var(--accent-blue), var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.8rem;
+}
+.hero .subtitle {
+  font-size: 1.15rem;
+  color: var(--text-secondary);
+  max-width: 800px;
+  margin: 0 auto 1.5rem;
+}
+.hero-badges {
+  display: flex; gap: 0.8rem;
+  justify-content: center; flex-wrap: wrap;
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  background: rgba(59,130,246,0.12);
+  border: 1px solid rgba(59,130,246,0.25);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+  font-size: 0.82rem;
+  color: var(--accent-blue);
+}
+
+/* Container */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+/* Sections */
+section {
+  margin-bottom: 3rem;
+}
+section h2 {
+  font-size: 1.7rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border-color);
+  display: flex; align-items: center; gap: 0.5rem;
+}
+section h2 .sec-num {
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 4px;
+  font-weight: 600;
+}
+h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.6rem;
+  color: var(--accent-teal);
+}
+h4 {
+  font-size: 1rem;
+  color: var(--accent-orange);
+  margin: 1rem 0 0.4rem;
+}
+p, li { color: var(--text-secondary); }
+p { margin-bottom: 0.8rem; }
+ul, ol { margin-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.card-header {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.8rem;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.card-header .file-badge {
+  font-size: 0.72rem;
+  background: rgba(139,92,246,0.15);
+  color: var(--accent-purple);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Code Blocks */
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85em;
+}
+.inline-code {
+  background: rgba(59,130,246,0.12);
+  color: var(--accent-blue);
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+/* Syntax highlighting */
+.kw { color: #c792ea; }      /* keyword */
+.fn { color: #82aaff; }      /* function */
+.str { color: #c3e88d; }     /* string */
+.cmt { color: #546e7a; }     /* comment */
+.cls { color: #ffcb6b; }     /* class */
+.num { color: #f78c6c; }     /* number */
+.dec { color: #f07178; }     /* decorator */
+.op { color: #89ddff; }      /* operator */
+.typ { color: #00e68a; }     /* type */
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+th, td {
+  padding: 0.7rem 1rem;
+  text-align: left;
+  border: 1px solid var(--border-color);
+}
+th {
+  background: rgba(59,130,246,0.1);
+  color: var(--accent-blue);
+  font-weight: 600;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+td { color: var(--text-secondary); }
+tr:nth-child(even) { background: rgba(26,29,46,0.5); }
+
+/* Diagrams */
+.diagram-container {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+.diagram-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+.diagram-svg { display: block; margin: 0 auto; }
+
+/* Tier colors */
+.tier-gpu { color: var(--tier-gpu); }
+.tier-cpu { color: var(--tier-cpu); }
+.tier-disk { color: var(--tier-disk); }
+.tier-remote { color: var(--tier-remote); }
+.tier-p2p { color: var(--tier-p2p); }
+
+/* Grids */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+}
+
+/* Callouts */
+.callout {
+  border-left: 4px solid var(--accent-blue);
+  background: rgba(59,130,246,0.06);
+  padding: 1rem 1.2rem;
+  border-radius: 0 8px 8px 0;
+  margin: 1rem 0;
+}
+.callout.warn {
+  border-left-color: var(--accent-orange);
+  background: rgba(245,158,11,0.06);
+}
+.callout.success {
+  border-left-color: var(--accent-green);
+  background: rgba(0,230,138,0.06);
+}
+.callout-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.3rem;
+}
+
+/* Flow steps */
+.flow-steps {
+  display: flex; flex-direction: column; gap: 0;
+  margin: 1rem 0;
+}
+.flow-step {
+  display: flex; align-items: flex-start; gap: 1rem;
+  padding: 0.8rem 0;
+  border-left: 3px solid var(--border-color);
+  padding-left: 1.2rem;
+  position: relative;
+}
+.flow-step::before {
+  content: '';
+  position: absolute;
+  left: -7px; top: 1.1rem;
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: var(--accent-teal);
+  border: 2px solid var(--bg-dark);
+}
+.flow-step .step-num {
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  min-width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.flow-step .step-content { flex: 1; }
+.flow-step .step-content strong { color: var(--text-primary); }
+
+/* Policy cards */
+.policy-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem;
+  text-align: center;
+}
+.policy-card h4 {
+  margin: 0 0 0.5rem;
+  color: var(--text-primary);
+}
+.policy-card .policy-badge {
+  display: inline-block;
+  background: rgba(0,230,138,0.12);
+  color: var(--accent-green);
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="../index.html">AI Infra Overview</a>
+    <a href="#engine">Cache Engine</a>
+    <a href="#chunking">Token Chunking</a>
+    <a href="#keys">Content-Addressable Keys</a>
+    <a href="#storage">Multi-Tier Storage</a>
+    <a href="#manager">StorageManager</a>
+    <a href="#vllm">vLLM Integration</a>
+    <a href="#sglang">SGLang Integration</a>
+    <a href="#blend">CacheBlend</a>
+    <a href="#eviction">Eviction Policies</a>
+  </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+  <h1>LMCache Deep Dive</h1>
+  <p class="subtitle">
+    Complete source code architecture analysis of LMCache v1 -- the multi-tier KV cache engine
+    for LLM inference. Every code snippet is extracted directly from the repository.
+  </p>
+  <div class="hero-badges">
+    <span class="hero-badge">Source: lmcache/v1/</span>
+    <span class="hero-badge">chunk_size = 256 tokens</span>
+    <span class="hero-badge">4-Tier Storage</span>
+    <span class="hero-badge">vLLM + SGLang</span>
+    <span class="hero-badge">LRU / LFU / FIFO / MRU</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ================================================================== -->
+<!-- Section 1: LMCacheEngine -->
+<!-- ================================================================== -->
+<section id="engine">
+<h2><span class="sec-num">1</span> LMCacheEngine: The Central Orchestrator</h2>
+
+<div class="card">
+<div class="card-header">
+  Class Hierarchy
+  <span class="file-badge">v1/cache_engine.py</span>
+</div>
+<p>
+  <code class="inline-code">LMCacheEngine</code> is the main entry point for all KV cache operations.
+  It owns the <code class="inline-code">StorageManager</code>, a <code class="inline-code">TokenDatabase</code>,
+  and a <code class="inline-code">GPUConnectorInterface</code>. The three core APIs -- <strong>lookup</strong>,
+  <strong>retrieve</strong>, and <strong>store</strong> -- form the entire external interface.
+</p>
+</div>
+
+<pre><span class="kw">class</span> <span class="cls">LMCacheEngine</span>:
+    <span class="str">"""The main class for the cache engine.
+    When storing the KV caches into the cache engine, it takes GPU KV
+    caches from the serving engine and convert them into MemoryObjs that
+    resides in the CPU. The MemoryObjs are then being stored into the
+    StorageBackends in an asynchronous manner.
+    """</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        <span class="kw">self</span>,
+        config: <span class="cls">LMCacheEngineConfig</span>,
+        metadata: <span class="cls">LMCacheMetadata</span>,
+        token_database: <span class="cls">TokenDatabase</span>,
+        gpu_connector: Optional[<span class="cls">GPUConnectorInterface</span>],
+        broadcast_fn: Callable[[torch.Tensor, <span class="kw">int</span>], <span class="kw">None</span>],
+        broadcast_object_fn: Callable[[Any, <span class="kw">int</span>], Any],
+    ):
+        <span class="kw">self</span>.config = config
+        <span class="kw">self</span>.token_database = token_database
+        <span class="kw">self</span>.gpu_connector = gpu_connector
+        <span class="kw">self</span>.storage_manager: Optional[<span class="cls">StorageManager</span>] = <span class="kw">None</span>
+        <span class="kw">self</span>.use_layerwise = config.use_layerwise
+        <span class="kw">self</span>.num_layers = metadata.kv_shape[<span class="num">0</span>]
+        <span class="kw">self</span>.remove_after_retrieve = config.enable_pd <span class="kw">and</span> config.pd_role == <span class="str">"receiver"</span></pre>
+
+<h3>1.1 lookup() -- Prefix-Match Cache Probe</h3>
+
+<p>The <code class="inline-code">lookup()</code> method checks how many prefix tokens already exist in the cache.
+It chunks tokens, generates content-addressable keys, and calls <code class="inline-code">batched_contains()</code>
+on the storage backends. Returns the count of cached prefix tokens.</p>
+
+<pre><span class="dec">@_lmcache_nvtx_annotate</span>
+<span class="kw">def</span> <span class="fn">lookup</span>(
+    <span class="kw">self</span>,
+    tokens: Optional[Union[torch.Tensor, list[<span class="kw">int</span>]]] = <span class="kw">None</span>,
+    hashes: Optional[List[<span class="kw">int</span>]] = <span class="kw">None</span>,
+    offsets: Optional[List[<span class="kw">int</span>]] = <span class="kw">None</span>,
+    search_range: Optional[List[<span class="kw">str</span>]] = <span class="kw">None</span>,
+    lookup_id: Optional[<span class="kw">str</span>] = <span class="kw">None</span>,
+    pin: <span class="kw">bool</span> = <span class="kw">False</span>,
+    request_configs: Optional[<span class="kw">dict</span>] = <span class="kw">None</span>,
+) -> <span class="kw">int</span>:
+    <span class="str">"""Checks the existence of KV cache prefix tokens.
+    :return: An int indicating how many prefix tokens exist inside LMCache."""</span>
+
+    <span class="cmt"># Health check: block operation if LMCache is unhealthy</span>
+    <span class="kw">if not</span> <span class="kw">self</span>.is_healthy():
+        <span class="kw">return</span> <span class="num">0</span>
+
+    chunk_info_iterator = <span class="kw">self</span>.token_database.process_tokens(
+        tokens=tokens, hashes=hashes, offsets=offsets,
+        request_configs=request_configs,
+    )
+
+    <span class="cmt"># Collect all keys then batch-check against storage backends</span>
+    keys = []
+    <span class="kw">for</span> chunk_info <span class="kw">in</span> chunk_info_iterator:
+        keys.append(chunk_info[<span class="num">2</span>])  <span class="cmt"># (start, end, key)</span>
+
+    <span class="cmt"># Prefix-match: hit_chunks is the count of contiguous prefix hits</span>
+    hit_chunks, block_mapping = <span class="kw">self</span>.storage_manager.batched_contains(
+        keys, search_range, pin
+    )
+
+    res = <span class="num">0</span>
+    <span class="kw">for</span> idx, (start, end, key) <span class="kw">in</span> enumerate(chunk_info_list):
+        <span class="kw">if</span> idx < hit_chunks:
+            res = end
+            <span class="kw">continue</span>
+        <span class="kw">return</span> res</pre>
+
+<h3>1.2 store() -- GPU-to-CPU KV Offload</h3>
+
+<p>The <code class="inline-code">store()</code> method chunks tokens, allocates <code class="inline-code">MemoryObj</code>s from the allocator backend,
+copies KV data from GPU via the GPUConnector, then submits to storage backends asynchronously.</p>
+
+<pre><span class="dec">@_lmcache_nvtx_annotate</span>
+<span class="dec">@torch.inference_mode()</span>
+<span class="kw">def</span> <span class="fn">store</span>(<span class="kw">self</span>, tokens, hashes, offsets, mask, **kwargs) -> <span class="kw">None</span>:
+    <span class="cmt"># Step 1: Chunk tokens and generate content-addressable keys</span>
+    <span class="kw">for</span> start, end, key <span class="kw">in</span> <span class="kw">self</span>.token_database.process_tokens(tokens, hashes, offsets, mask):
+        <span class="cmt"># Step 2: Allocate CPU memory from the allocator backend</span>
+        memory_obj = <span class="kw">self</span>.storage_manager.allocate(kv_shapes, kv_dtypes, fmt=<span class="kw">self</span>.fmt)
+        <span class="kw">if</span> memory_obj <span class="kw">is None</span>:
+            logger.warning(<span class="str">"Local cpu memory under pressure, partial store"</span>)
+            <span class="kw">break</span>
+        keys.append(key)
+        memory_objs.append(memory_obj)
+
+    <span class="cmt"># Step 3: Batch copy from GPU to CPU memory objects</span>
+    <span class="kw">self</span>.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+
+    <span class="cmt"># Step 4: Submit to all storage backends (async for remote/disk)</span>
+    <span class="kw">self</span>.storage_manager.batched_put(keys, memory_objs, location=<span class="kw">self</span>.store_location)</pre>
+
+<h3>1.3 retrieve() -- Cache-to-GPU KV Onload</h3>
+
+<p>The <code class="inline-code">retrieve()</code> method fetches <code class="inline-code">MemoryObj</code>s from storage backends and pushes them to GPU
+via the GPUConnector. Returns a boolean mask of which tokens were successfully retrieved.</p>
+
+<pre><span class="dec">@_lmcache_nvtx_annotate</span>
+<span class="dec">@torch.inference_mode()</span>
+<span class="kw">def</span> <span class="fn">retrieve</span>(<span class="kw">self</span>, tokens, mask, **kwargs) -> torch.Tensor:
+    <span class="str">"""Retrieve KV caches and put them into the serving engine.
+    :return: boolean mask -- True where tokens are retrieved."""</span>
+
+    ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device=<span class="str">"cpu"</span>)
+    reordered_chunks = <span class="kw">self</span>._process_tokens_internal(tokens, mask, ret_mask, **kwargs)
+
+    <span class="cmt"># Batch copy from CPU memory objects to GPU KV cache</span>
+    _, memory_objs, starts, ends = zip(*reordered_chunks)
+    <span class="kw">self</span>.gpu_connector.batched_to_gpu(list(memory_objs), list(starts), list(ends), **kwargs)
+
+    <span class="cmt"># Optionally remove after retrieve (PD disaggregation receiver)</span>
+    <span class="kw">for</span> key, memory_obj, _, _ <span class="kw">in</span> reordered_chunks:
+        <span class="kw">if</span> <span class="kw">self</span>.remove_after_retrieve:
+            <span class="kw">self</span>.storage_manager.remove(key, <span class="kw">self</span>.retrieve_locations)
+        memory_obj.ref_count_down()
+
+    <span class="kw">return</span> ret_mask</pre>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 2: Token Chunking -->
+<!-- ================================================================== -->
+<section id="chunking">
+<h2><span class="sec-num">2</span> Token Chunking: Sequences to 256-Token Chunks</h2>
+
+<!-- Diagram: Token Chunking Flow -->
+<div class="diagram-container">
+<div class="diagram-title">Token Chunking and Rolling Hash Flow</div>
+<svg class="diagram-svg" width="900" height="320" viewBox="0 0 900 320">
+  <!-- Input sequence -->
+  <rect x="20" y="20" width="860" height="40" rx="6" fill="#1e293b" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="450" y="45" text-anchor="middle" fill="#94a3b8" font-size="13" font-family="monospace">Input Token Sequence: [t0, t1, t2, ... t511, t512, ... t700]</text>
+
+  <!-- Arrow -->
+  <path d="M450 60 L450 85" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <defs><marker id="arrowBlue" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3b82f6"/></marker></defs>
+
+  <!-- Chunking step -->
+  <rect x="150" y="90" width="600" height="35" rx="6" fill="rgba(139,92,246,0.12)" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="450" y="112" text-anchor="middle" fill="#8b5cf6" font-size="12" font-weight="600">_chunk_tokens(): Split into chunk_size=256 blocks</text>
+
+  <!-- Arrow -->
+  <path d="M450 125 L450 155" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <defs><marker id="arrowPurple" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#8b5cf6"/></marker></defs>
+
+  <!-- Chunks -->
+  <rect x="40" y="160" width="240" height="40" rx="6" fill="rgba(0,230,138,0.1)" stroke="#00e68a" stroke-width="1.5"/>
+  <text x="160" y="184" text-anchor="middle" fill="#00e68a" font-size="12" font-family="monospace">Chunk 0: [t0..t255]</text>
+
+  <rect x="310" y="160" width="240" height="40" rx="6" fill="rgba(0,230,138,0.1)" stroke="#00e68a" stroke-width="1.5"/>
+  <text x="430" y="184" text-anchor="middle" fill="#00e68a" font-size="12" font-family="monospace">Chunk 1: [t256..t511]</text>
+
+  <rect x="580" y="160" width="280" height="40" rx="6" fill="rgba(245,158,11,0.1)" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="720" y="184" text-anchor="middle" fill="#f59e0b" font-size="12" font-family="monospace">Chunk 2: [t512..t700] (partial)</text>
+
+  <!-- Rolling hash arrows -->
+  <path d="M160 200 L160 230" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <path d="M430 200 L430 230" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <path d="M720 200 L720 230" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <defs><marker id="arrowCyan" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#22d3ee"/></marker></defs>
+
+  <!-- Hashes -->
+  <rect x="40" y="235" width="240" height="35" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="160" y="257" text-anchor="middle" fill="#22d3ee" font-size="11" font-family="monospace">H0 = hash(NONE, [t0..t255], ())</text>
+
+  <rect x="310" y="235" width="240" height="35" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="430" y="257" text-anchor="middle" fill="#22d3ee" font-size="11" font-family="monospace">H1 = hash(H0, [t256..t511], ())</text>
+
+  <rect x="580" y="235" width="280" height="35" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="720" y="257" text-anchor="middle" fill="#22d3ee" font-size="11" font-family="monospace">H2 = hash(H1, [t512..t700], ())</text>
+
+  <!-- Dependency arrows between hashes -->
+  <path d="M280 252 L310 252" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowCyan)"/>
+  <path d="M550 252 L580 252" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowCyan)"/>
+
+  <!-- Note -->
+  <text x="450" y="300" text-anchor="middle" fill="#64748b" font-size="11" font-style="italic">Each hash is a rolling prefix hash: hash(prev_hash, token_chunk, extra_keys)</text>
+</svg>
+</div>
+
+<div class="card">
+<div class="card-header">
+  ChunkedTokenDatabase
+  <span class="file-badge">v1/token_database.py:269</span>
+</div>
+
+<pre><span class="kw">class</span> <span class="cls">ChunkedTokenDatabase</span>(<span class="cls">TokenDatabase</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, metadata):
+        <span class="kw">self</span>.chunk_size = config.chunk_size  <span class="cmt"># default: 256</span>
+
+    <span class="kw">def</span> <span class="fn">_chunk_tokens</span>(<span class="kw">self</span>, tokens):
+        <span class="str">"""Chunk tokens into blocks of size chunk_size."""</span>
+        save_unfull_chunk = <span class="kw">self</span>.config.save_unfull_chunk <span class="kw">if</span> <span class="kw">self</span>.config <span class="kw">else True</span>
+        end = len(tokens) <span class="kw">if</span> save_unfull_chunk <span class="kw">else</span> (len(tokens) - len(tokens) % <span class="kw">self</span>.chunk_size)
+        <span class="kw">for</span> i <span class="kw">in</span> range(<span class="num">0</span>, end, <span class="kw">self</span>.chunk_size):
+            <span class="kw">yield</span> tokens[i : i + <span class="kw">self</span>.chunk_size]
+
+    <span class="kw">def</span> <span class="fn">_prefix_hash</span>(<span class="kw">self</span>, token_chunks):
+        <span class="str">"""Rolling prefix hash: each chunk hash depends on the previous."""</span>
+        prefix_hash = <span class="kw">self</span>._get_init_hash()  <span class="cmt"># NONE_HASH (typically 0)</span>
+        <span class="kw">for</span> token_chunk <span class="kw">in</span> token_chunks:
+            prefix_hash = <span class="kw">self</span>._hash_tokens(token_chunk, prefix_hash)
+            <span class="kw">yield</span> prefix_hash</pre>
+</div>
+
+<div class="callout">
+  <div class="callout-title">Rolling Hash Design</div>
+  <p>Each chunk's hash incorporates the <strong>previous chunk's hash</strong> as a prefix.
+  This means the hash for chunk N encodes the <em>entire prefix</em> [0..N*256],
+  enabling content-addressable deduplication -- two requests sharing the same system prompt
+  will have identical chunk hashes for overlapping prefixes.</p>
+</div>
+
+<pre><span class="cmt"># The canonical hash computation from TokenDatabase base class</span>
+<span class="kw">def</span> <span class="fn">_hash_tokens</span>(<span class="kw">self</span>, tokens, prefix_hash=<span class="kw">None</span>, extra_keys=<span class="kw">None</span>):
+    tokens_tuple = tuple(tokens.cpu().tolist()) <span class="kw">if</span> isinstance(tokens, torch.Tensor) <span class="kw">else</span> tuple(tokens)
+
+    <span class="cmt"># Canonicalize inputs for consistent cross-process hashing</span>
+    canon_prefix = prefix_hash <span class="kw">if</span> prefix_hash <span class="kw">is not None else</span> NONE_HASH
+    canon_tokens = tokens_tuple
+    canon_extra = tuple(extra_keys) <span class="kw">if</span> extra_keys <span class="kw">else</span> ()
+
+    <span class="kw">return</span> <span class="kw">self</span>.hash_func((canon_prefix, canon_tokens, canon_extra))</pre>
+
+<h3>2.1 process_tokens() -- Full Pipeline</h3>
+
+<pre><span class="kw">def</span> <span class="fn">process_tokens</span>(<span class="kw">self</span>, tokens, hashes, offsets, mask, make_key=<span class="kw">True</span>, request_configs=<span class="kw">None</span>):
+    <span class="cmt"># Mask validation: false count must be multiple of chunk_size</span>
+    num_falses = mask.numel() - mask.long().sum().item() <span class="kw">if</span> mask <span class="kw">else</span> <span class="num">0</span>
+    <span class="kw">if</span> num_falses % <span class="kw">self</span>.chunk_size != <span class="num">0</span>:
+        <span class="kw">raise</span> ValueError(<span class="str">"Falses in mask must be multiple of chunk_size"</span>)
+
+    <span class="kw">if</span> tokens <span class="kw">is not None</span>:
+        token_chunks = <span class="kw">self</span>._chunk_tokens(tokens)
+        prefix_hashes = <span class="kw">self</span>._prefix_hash(token_chunks)
+        <span class="kw">for</span> chunk_id, hash_val <span class="kw">in</span> enumerate(prefix_hashes):
+            start_idx = chunk_id * <span class="kw">self</span>.chunk_size
+            end_idx = min(start_idx + <span class="kw">self</span>.chunk_size, len(tokens))
+            <span class="kw">if</span> start_idx < num_falses:
+                <span class="kw">continue</span>  <span class="cmt"># Skip masked prefix chunks</span>
+            <span class="kw">yield</span> (start_idx, end_idx, <span class="kw">self</span>._make_key_by_hash(hash_val, request_configs))</pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 3: Content-Addressable Keys -->
+<!-- ================================================================== -->
+<section id="keys">
+<h2><span class="sec-num">3</span> Content-Addressable Keys: CacheEngineKey</h2>
+
+<div class="card">
+<div class="card-header">
+  CacheEngineKey Structure
+  <span class="file-badge">lmcache/utils.py:340</span>
+</div>
+
+<pre><span class="dec">@dataclass</span>
+<span class="kw">class</span> <span class="cls">CacheEngineKey</span>:
+    model_name: <span class="kw">str</span>         <span class="cmt"># e.g., "meta-llama/Llama-3-8B"</span>
+    world_size: <span class="kw">int</span>         <span class="cmt"># tensor parallel size</span>
+    worker_id: <span class="kw">int</span>          <span class="cmt"># which TP rank</span>
+    chunk_hash: <span class="kw">int</span>         <span class="cmt"># rolling prefix hash of this chunk</span>
+    dtype: torch.dtype       <span class="cmt"># e.g., torch.float16</span>
+    request_configs: Optional[<span class="kw">dict</span>]  <span class="cmt"># per-request tags (LoRA ID, etc.)</span>
+    tags: Optional[tuple]    <span class="cmt"># derived from request_configs["lmcache.tag.*"]</span>
+
+    <span class="kw">def</span> <span class="fn">__hash__</span>(<span class="kw">self</span>):
+        <span class="kw">return</span> hash((
+            <span class="kw">self</span>.model_name, <span class="kw">self</span>.world_size, <span class="kw">self</span>.worker_id,
+            <span class="kw">self</span>.chunk_hash, <span class="kw">self</span>._dtype_str, <span class="kw">self</span>.tags,
+        ))
+
+    <span class="kw">def</span> <span class="fn">to_string</span>(<span class="kw">self</span>):
+        <span class="cmt"># Format: "model@worldsize@workerid@chunkhash_hex@dtype[@tag1%val1@...]"</span>
+        s = f<span class="str">"{self.model_name}@{self.world_size}@{self.worker_id}@{self.chunk_hash_hex}@{self._dtype_str}"</span>
+        <span class="kw">if</span> <span class="kw">self</span>.tags:
+            tags = [f<span class="str">"{k}%{v}"</span> <span class="kw">for</span> k, v <span class="kw">in</span> <span class="kw">self</span>.tags]
+            s += <span class="str">"@"</span> + <span class="str">"@"</span>.join(tags)
+        <span class="kw">return</span> s</pre>
+</div>
+
+<table>
+<tr><th>Field</th><th>Purpose</th><th>Example Value</th></tr>
+<tr><td><code class="inline-code">model_name</code></td><td>Prevents cross-model cache collisions</td><td><code>meta-llama/Llama-3-8B</code></td></tr>
+<tr><td><code class="inline-code">world_size</code></td><td>TP-aware: different shard counts produce different KVs</td><td><code>4</code></td></tr>
+<tr><td><code class="inline-code">worker_id</code></td><td>Which TP rank's KV shard this belongs to</td><td><code>0</code></td></tr>
+<tr><td><code class="inline-code">chunk_hash</code></td><td>Rolling prefix hash -- content-addressable</td><td><code>0x3a7f...</code> (64-bit)</td></tr>
+<tr><td><code class="inline-code">dtype</code></td><td>Prevents mixing float16/bfloat16 caches</td><td><code>torch.bfloat16</code></td></tr>
+<tr><td><code class="inline-code">tags</code></td><td>Per-request metadata (LoRA, custom tags)</td><td><code>(("lora", "adapter1"),)</code></td></tr>
+</table>
+
+<div class="callout success">
+  <div class="callout-title">LayerCacheEngineKey for Layerwise Mode</div>
+  <p>When <code class="inline-code">use_layerwise=True</code>, each chunk key is split into per-layer keys via
+  <code class="inline-code">key.split_layers(num_layers)</code>, producing <code class="inline-code">LayerCacheEngineKey</code>
+  objects with an additional <code class="inline-code">layer_id</code> field. This allows independent per-layer storage and retrieval.</p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 4: Multi-Tier Storage -->
+<!-- ================================================================== -->
+<section id="storage">
+<h2><span class="sec-num">4</span> Multi-Tier Storage Architecture</h2>
+
+<!-- Diagram: Multi-Tier Storage -->
+<div class="diagram-container">
+<div class="diagram-title">Multi-Tier Storage Architecture: L1 CPU DRAM / L2 Disk / L3 Remote / L4 P2P</div>
+<svg class="diagram-svg" width="920" height="440" viewBox="0 0 920 440">
+  <!-- GPU -->
+  <rect x="350" y="15" width="220" height="50" rx="8" fill="rgba(239,68,68,0.15)" stroke="#ef4444" stroke-width="2"/>
+  <text x="460" y="45" text-anchor="middle" fill="#ef4444" font-size="14" font-weight="700">GPU KV Cache</text>
+  <text x="460" y="58" text-anchor="middle" fill="#ef4444" font-size="9">(vLLM / SGLang paged buffer)</text>
+
+  <!-- Arrow GPU to L1 -->
+  <path d="M460 65 L460 100" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowOrange)"/>
+  <defs><marker id="arrowOrange" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f59e0b"/></marker></defs>
+  <text x="490" y="88" fill="#64748b" font-size="10">GPUConnector</text>
+
+  <!-- L1: CPU DRAM -->
+  <rect x="260" y="105" width="400" height="65" rx="8" fill="rgba(245,158,11,0.1)" stroke="#f59e0b" stroke-width="2"/>
+  <text x="280" y="130" fill="#f59e0b" font-size="13" font-weight="700">L1: LocalCPUBackend</text>
+  <text x="280" y="150" fill="#94a3b8" font-size="11">Pinned CPU DRAM -- PagedTensorMemoryAllocator</text>
+  <text x="280" y="162" fill="#64748b" font-size="10">Default: 5 GB | LRU eviction | Synchronous put</text>
+
+  <!-- Arrow L1 to L2 -->
+  <path d="M460 170 L460 205" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="490" y="192" fill="#64748b" font-size="10">async spill</text>
+
+  <!-- L2: Local Disk -->
+  <rect x="260" y="210" width="400" height="65" rx="8" fill="rgba(59,130,246,0.1)" stroke="#3b82f6" stroke-width="2"/>
+  <text x="280" y="235" fill="#3b82f6" font-size="13" font-weight="700">L2: LocalDiskBackend</text>
+  <text x="280" y="255" fill="#94a3b8" font-size="11">NVMe / SSD with optional O_DIRECT</text>
+  <text x="280" y="267" fill="#64748b" font-size="10">AsyncPQThreadPoolExecutor | Priority queue (prefetch > put)</text>
+
+  <!-- Arrow L2 to L3 -->
+  <path d="M460 275 L460 310" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  <text x="490" y="297" fill="#64748b" font-size="10">serde + network</text>
+
+  <!-- L3: Remote -->
+  <rect x="260" y="315" width="400" height="65" rx="8" fill="rgba(139,92,246,0.1)" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="280" y="340" fill="#8b5cf6" font-size="13" font-weight="700">L3: RemoteBackend</text>
+  <text x="280" y="360" fill="#94a3b8" font-size="11">Redis / Valkey / S3 / InfiniStore / Mooncake / LMDB</text>
+  <text x="280" y="372" fill="#64748b" font-size="10">Serializer: naive / CacheGen / KiVi | Auto-reconnect with backoff</text>
+
+  <!-- L4: P2P (side panel) -->
+  <rect x="700" y="120" width="200" height="260" rx="8" fill="rgba(236,72,153,0.1)" stroke="#ec4899" stroke-width="2"/>
+  <text x="720" y="148" fill="#ec4899" font-size="13" font-weight="700">L4: P2PBackend</text>
+  <text x="720" y="168" fill="#94a3b8" font-size="11">GPU-to-GPU via</text>
+  <text x="720" y="183" fill="#94a3b8" font-size="11">ZMQ + TransferChannel</text>
+  <text x="720" y="210" fill="#64748b" font-size="10">RDMA / NVLink direct</text>
+  <text x="720" y="225" fill="#64748b" font-size="10">memory access</text>
+
+  <!-- PD Backend (inside P2P) -->
+  <rect x="715" y="245" width="170" height="50" rx="6" fill="rgba(236,72,153,0.06)" stroke="#ec4899" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="800" y="268" text-anchor="middle" fill="#ec4899" font-size="11">PDBackend</text>
+  <text x="800" y="282" text-anchor="middle" fill="#64748b" font-size="10">Prefill/Decode disagg</text>
+
+  <!-- Arrow from L1 to P2P -->
+  <path d="M660 137 L700 137" stroke="#ec4899" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowPink)"/>
+  <defs><marker id="arrowPink" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ec4899"/></marker></defs>
+
+  <!-- StorageManager label -->
+  <rect x="20" y="105" width="210" height="280" rx="8" fill="rgba(0,204,180,0.06)" stroke="#00ccb4" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="125" y="135" text-anchor="middle" fill="#00ccb4" font-size="12" font-weight="700">StorageManager</text>
+  <text x="125" y="155" text-anchor="middle" fill="#64748b" font-size="10">Orchestrates all tiers</text>
+  <text x="125" y="175" text-anchor="middle" fill="#64748b" font-size="10">WeightedSemaphore</text>
+  <text x="125" y="195" text-anchor="middle" fill="#64748b" font-size="10">AsyncMultiSerializer</text>
+  <text x="125" y="215" text-anchor="middle" fill="#64748b" font-size="10">Tier promotion on get()</text>
+  <text x="125" y="235" text-anchor="middle" fill="#64748b" font-size="10">Freeze mode</text>
+  <text x="125" y="255" text-anchor="middle" fill="#64748b" font-size="10">Backend bypass</text>
+  <text x="125" y="280" text-anchor="middle" fill="#64748b" font-size="10">Event-based prefetch</text>
+
+  <!-- Legend -->
+  <text x="20" y="420" fill="#64748b" font-size="10">Latency:  L1 ~microseconds  |  L2 ~100us-1ms  |  L3 ~1-10ms  |  L4 ~10-100us (RDMA)</text>
+</svg>
+</div>
+
+<h3>4.1 L1: LocalCPUBackend -- CPU DRAM Hot Cache</h3>
+<div class="card">
+<div class="card-header"><span class="file-badge">v1/storage_backend/local_cpu_backend.py</span></div>
+<pre><span class="kw">class</span> <span class="cls">LocalCPUBackend</span>(<span class="cls">AllocatorBackendInterface</span>):
+    <span class="str">"""Even if local_cpu is False, contains(), insert_key(), remove(),
+    get_blocking(), get_keys(), and clear() are still callable."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, metadata, dst_device=<span class="str">"cuda"</span>, ...):
+        <span class="kw">self</span>.cache_policy = get_cache_policy(config.cache_policy)  <span class="cmt"># LRU default</span>
+        <span class="kw">self</span>.hot_cache = <span class="kw">self</span>.cache_policy.init_mutable_mapping()
+        <span class="kw">self</span>.use_hot = config.local_cpu  <span class="cmt"># True by default</span>
+        <span class="kw">self</span>.memory_allocator = <span class="kw">self</span>.initialize_allocator(config, metadata)
+        <span class="kw">self</span>.cpu_lock = threading.Lock()
+
+    <span class="kw">def</span> <span class="fn">contains</span>(<span class="kw">self</span>, key, pin=<span class="kw">False</span>):
+        <span class="kw">with</span> <span class="kw">self</span>.cpu_lock:
+            <span class="kw">if</span> key <span class="kw">not in</span> <span class="kw">self</span>.hot_cache: <span class="kw">return False</span>
+            <span class="kw">if</span> pin: <span class="kw">self</span>.hot_cache[key].pin()  <span class="cmt"># Pin to prevent eviction during retrieve</span>
+            <span class="kw">return True</span>
+
+    <span class="kw">def</span> <span class="fn">submit_put_task</span>(<span class="kw">self</span>, key, memory_obj, on_complete_callback=<span class="kw">None</span>):
+        <span class="str">"""Synchronous put into the hot cache."""</span>
+        <span class="kw">with</span> <span class="kw">self</span>.cpu_lock:
+            <span class="kw">if</span> key <span class="kw">in</span> <span class="kw">self</span>.hot_cache: <span class="kw">return None</span>
+            memory_obj.ref_count_up()
+            <span class="kw">self</span>.hot_cache[key] = memory_obj
+            <span class="kw">self</span>.cache_policy.update_on_put(key)</pre>
+</div>
+
+<h3>4.2 L2: LocalDiskBackend -- NVMe/SSD</h3>
+<div class="card">
+<div class="card-header"><span class="file-badge">v1/storage_backend/local_disk_backend.py</span></div>
+<pre><span class="kw">class</span> <span class="cls">LocalDiskBackend</span>(<span class="cls">StorageBackendInterface</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, loop, local_cpu_backend, ...):
+        <span class="kw">self</span>.path = config.local_disk           <span class="cmt"># e.g., "/tmp/lmcache_disk/"</span>
+        <span class="kw">self</span>.max_cache_size = <span class="kw">int</span>(config.max_local_disk_size * <span class="num">1024</span>**<span class="num">3</span>)
+        <span class="kw">self</span>.disk_worker = <span class="cls">LocalDiskWorker</span>(loop)  <span class="cmt"># AsyncPQThreadPoolExecutor</span>
+        <span class="kw">self</span>.use_odirect = config.extra_config.get(<span class="str">"use_odirect"</span>, <span class="kw">False</span>)
+
+    <span class="kw">def</span> <span class="fn">_key_to_path</span>(<span class="kw">self</span>, key):
+        <span class="kw">return</span> os.path.join(<span class="kw">self</span>.path, key.to_string().replace(<span class="str">"/"</span>, <span class="str">"-"</span>) + <span class="str">".pt"</span>)</pre>
+
+<p>The disk backend uses a <strong>priority queue executor</strong>: prefetch tasks (priority 0) run before
+delete (priority 1) and put (priority 2). This ensures that reads are not blocked by writes.</p>
+</div>
+
+<h3>4.3 L3: RemoteBackend -- Redis/Valkey/S3/InfiniStore</h3>
+<div class="card">
+<div class="card-header"><span class="file-badge">v1/storage_backend/remote_backend.py</span></div>
+<pre><span class="kw">class</span> <span class="cls">RemoteBackend</span>(<span class="cls">StorageBackendInterface</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, metadata, loop, local_cpu_backend, ...):
+        <span class="kw">self</span>.remote_url = config.remote_url  <span class="cmt"># e.g., "redis://host:6379"</span>
+        <span class="kw">self</span>.connection = <span class="cls">CreateConnector</span>(config.remote_url, loop, ...)
+        <span class="kw">self</span>.serializer, <span class="kw">self</span>.deserializer = <span class="cls">CreateSerde</span>(config.remote_serde, metadata, config)
+        <span class="kw">self</span>.min_reconnect_interval = <span class="num">10</span>  <span class="cmt"># seconds</span>
+        <span class="kw">self</span>._mla_worker_id_as0_mode = ...  <span class="cmt"># MLA key normalization</span>
+
+    <span class="kw">def</span> <span class="fn">contains</span>(<span class="kw">self</span>, key, pin=<span class="kw">False</span>):
+        <span class="kw">if</span> <span class="kw">self</span>.connection <span class="kw">is None</span>: <span class="kw">return False</span>
+        <span class="kw">if</span> <span class="kw">self</span>._mla_worker_id_as0_mode:
+            key = key.with_new_worker_id(<span class="num">0</span>)  <span class="cmt"># normalize for MLA sharing</span>
+        <span class="kw">return</span> <span class="kw">self</span>.connection.exists_sync(key)</pre>
+
+<p>Supported remote connectors (each a plugin):</p>
+<table>
+<tr><th>Connector</th><th>URL Prefix</th><th>Notes</th></tr>
+<tr><td>Redis</td><td><code>redis://</code></td><td>Most common; async I/O via aioredis</td></tr>
+<tr><td>Valkey</td><td><code>valkey://</code></td><td>Redis-compatible fork</td></tr>
+<tr><td>S3</td><td><code>s3://</code></td><td>Object storage; high latency, high capacity</td></tr>
+<tr><td>InfiniStore</td><td><code>infinistore://</code></td><td>RDMA-based key-value store</td></tr>
+<tr><td>Mooncake</td><td><code>mooncake://</code></td><td>Distributed cache system</td></tr>
+<tr><td>Filesystem</td><td><code>file://</code></td><td>Shared filesystem (NFS/Lustre)</td></tr>
+<tr><td>LMConnector</td><td><code>lm://</code></td><td>LMCache-native remote protocol</td></tr>
+</table>
+</div>
+
+<h3>4.4 L4: P2PBackend -- GPU-to-GPU Transfer</h3>
+<div class="card">
+<div class="card-header"><span class="file-badge">v1/storage_backend/p2p_backend.py</span></div>
+<pre><span class="cmt"># P2P uses ZMQ for control plane and TransferChannel for data plane</span>
+<span class="kw">class</span> <span class="cls">BatchedLookupAndGetMsg</span>(P2PMsgBase):
+    lookup_id: <span class="kw">str</span>
+    receiver_id: <span class="kw">str</span>
+    keys: list[<span class="kw">str</span>]           <span class="cmt"># CacheEngineKey in string form</span>
+    mem_indexes: list[<span class="kw">int</span>]    <span class="cmt"># Remote memory object indexes (to be written)</span>
+
+<span class="kw">class</span> <span class="cls">PeerInfo</span>:
+    peer_init_url: <span class="kw">str</span>       <span class="cmt"># ZMQ endpoint for peer initialization</span>
+    peer_lookup_url: <span class="kw">str</span>     <span class="cmt"># ZMQ endpoint for lookup requests</span>
+    lookup_lock: asyncio.Lock
+    lookup_socket: zmq.asyncio.Socket</pre>
+
+<p>P2P enables direct GPU memory transfer between inference instances via RDMA or NVLink,
+coordinated by a central controller. The <code class="inline-code">PDBackend</code> extends this for
+Prefill/Decode disaggregation where the prefill node pushes KV caches directly to the decode node.</p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 5: StorageManager -->
+<!-- ================================================================== -->
+<section id="manager">
+<h2><span class="sec-num">5</span> StorageManager: Async Prefetching and Tier Orchestration</h2>
+
+<div class="card">
+<div class="card-header">
+  StorageManager Core
+  <span class="file-badge">v1/storage_backend/storage_manager.py</span>
+</div>
+
+<pre><span class="kw">class</span> <span class="cls">StorageManager</span>:
+    <span class="str">"""Responsible for managing all storage backends."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, metadata, event_manager, ...):
+        <span class="kw">self</span>.loop = asyncio.new_event_loop()
+        <span class="kw">self</span>.thread = threading.Thread(
+            target=start_loop_in_thread_with_exceptions,
+            args=(<span class="kw">self</span>.loop,), name=<span class="str">"storage-manger-event-loop"</span>
+        )
+        <span class="kw">self</span>.thread.start()
+
+        <span class="kw">self</span>.storage_backends: OrderedDict[<span class="kw">str</span>, StorageBackendInterface] = OrderedDict()
+        <span class="kw">self</span>.create_backends()
+
+        <span class="kw">self</span>.allocator_backend = <span class="kw">self</span>._get_allocator_backend(config)
+        <span class="kw">self</span>._freeze = <span class="kw">False</span>          <span class="cmt"># Freeze mode: protect hot cache</span>
+        <span class="kw">self</span>._bypassed_backends = set()  <span class="cmt"># Skip unhealthy backends</span></pre>
+</div>
+
+<h3>5.1 WeightedSemaphore -- Concurrency Control</h3>
+
+<pre><span class="kw">class</span> <span class="cls">WeightedSemaphore</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, chunk_budget):
+        <span class="cmt"># Physically impossible to have >50% fragmentation with uniform chunks</span>
+        <span class="kw">self</span>._concurrent_budget_cap = chunk_budget // <span class="num">2</span>
+        <span class="kw">self</span>._chunk_budget_cap = chunk_budget
+        <span class="kw">self</span>._current_chunks = <span class="kw">self</span>._concurrent_budget_cap
+        <span class="kw">self</span>._cond = asyncio.Condition()
+
+    <span class="kw">async def</span> <span class="fn">acquire</span>(<span class="kw">self</span>, n=<span class="num">1</span>):
+        <span class="kw">async with</span> <span class="kw">self</span>._cond:
+            <span class="kw">if</span> n <= <span class="kw">self</span>._concurrent_budget_cap:
+                <span class="kw">await</span> <span class="kw">self</span>._cond.wait_for(<span class="kw">lambda</span>: <span class="kw">self</span>._current_chunks >= n)
+                <span class="kw">self</span>._current_chunks -= n
+            <span class="kw">else</span>:
+                <span class="cmt"># Oversized: require exclusive access to all budgets</span>
+                <span class="kw">await</span> <span class="kw">self</span>._cond.wait_for(
+                    <span class="kw">lambda</span>: <span class="kw">self</span>._current_chunks == <span class="kw">self</span>._concurrent_budget_cap
+                )
+                <span class="kw">self</span>._current_chunks = <span class="num">0</span></pre>
+
+<h3>5.2 Tier Promotion on get()</h3>
+
+<p>When a <code class="inline-code">get()</code> fetches data from L2/L3/L4, the StorageManager automatically
+promotes it to L1 (CPU DRAM) for faster subsequent access:</p>
+
+<pre><span class="kw">def</span> <span class="fn">get</span>(<span class="kw">self</span>, key, location=<span class="kw">None</span>):
+    <span class="str">"""Blocking get with automatic tier promotion."""</span>
+    <span class="kw">for</span> backend_name, backend <span class="kw">in</span> <span class="kw">self</span>.get_active_storage_backends(location):
+        memory_obj = backend.get_blocking(key)
+        <span class="kw">if</span> memory_obj:
+            <span class="cmt"># Auto-promote to L1 if retrieved from L2/L3/L4</span>
+            <span class="kw">if</span> backend_name <span class="kw">not in</span> [<span class="str">"LocalCPUBackend"</span>, <span class="str">"PDBackend"</span>] \
+               <span class="kw">and</span> <span class="str">"LocalCPUBackend"</span> <span class="kw">in</span> <span class="kw">self</span>.storage_backends:
+                local_cpu = <span class="kw">self</span>.storage_backends[<span class="str">"LocalCPUBackend"</span>]
+                local_cpu.submit_put_task(key, memory_obj)
+            <span class="kw">return</span> memory_obj
+    <span class="kw">return None</span></pre>
+
+<h3>5.3 batched_put() -- Fan-Out to All Tiers</h3>
+
+<pre><span class="kw">def</span> <span class="fn">batched_put</span>(<span class="kw">self</span>, keys, memory_objs, transfer_spec=<span class="kw">None</span>, location=<span class="kw">None</span>):
+    <span class="str">"""Non-blocking fan-out to all active storage backends."""</span>
+    obj_dict = {}
+    obj_dict[get_backend_cname(<span class="kw">self</span>.allocator_backend)] = (keys, memory_objs)
+
+    <span class="kw">for</span> backend_name, backend <span class="kw">in</span> <span class="kw">self</span>.storage_backends.items():
+        <span class="kw">if</span> location <span class="kw">and</span> backend_name != location: <span class="kw">continue</span>
+        <span class="kw">if</span> backend_name <span class="kw">in</span> <span class="kw">self</span>._bypassed_backends: <span class="kw">continue</span>
+
+        <span class="cmt"># Allocate and copy for backends needing their own memory pool</span>
+        allocator_backend = backend.get_allocator_backend()
+        cname = get_backend_cname(allocator_backend)
+        <span class="kw">if</span> cname <span class="kw">not in</span> obj_dict:
+            new_keys, new_objs = allocate_and_copy_objects(
+                allocator_backend, keys, memory_objs, <span class="kw">self</span>.internal_copy_stream
+            )
+            obj_dict[cname] = (new_keys, new_objs)
+
+        ks, objs = obj_dict[cname]
+        backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)</pre>
+
+<h3>5.4 Async Prefetch with Event Callbacks</h3>
+
+<p>The <code class="inline-code">prefetch_all_done_callback</code> handles multi-tier prefetch completion. It enforces
+<strong>prefix continuity</strong>: if tier N retrieves fewer chunks than expected, all subsequent tier results are discarded.</p>
+
+<pre><span class="kw">def</span> <span class="fn">prefetch_all_done_callback</span>(<span class="kw">self</span>, task, lookup_id, cum_chunk_lengths, tier_expected):
+    res = task.result()  <span class="cmt"># [[tier0_objs], [tier1_objs], [tier2_objs]]</span>
+
+    total_retrieved = <span class="num">0</span>
+    <span class="kw">for</span> tier_idx, tier_result <span class="kw">in</span> enumerate(res):
+        actual = len(tier_result)
+        expected = tier_expected[tier_idx]
+        total_retrieved += actual
+        <span class="kw">if</span> actual < expected:
+            <span class="cmt"># Gap detected: release all subsequent tier chunks</span>
+            <span class="kw">for</span> subsequent_tier <span class="kw">in</span> res[tier_idx + <span class="num">1</span>:]:
+                <span class="kw">for</span> mem_obj <span class="kw">in</span> subsequent_tier:
+                    mem_obj.ref_count_down()
+            <span class="kw">break</span>
+
+    retrieved_length = cum_chunk_lengths[total_retrieved]</pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 6: vLLM Integration -->
+<!-- ================================================================== -->
+<section id="vllm">
+<h2><span class="sec-num">6</span> vLLM Integration: KVConnectorBase_V1</h2>
+
+<!-- Diagram: vLLM Integration Points -->
+<div class="diagram-container">
+<div class="diagram-title">vLLM Integration Architecture: Scheduler and Worker Paths</div>
+<svg class="diagram-svg" width="900" height="360" viewBox="0 0 900 360">
+  <!-- vLLM Scheduler -->
+  <rect x="30" y="30" width="200" height="110" rx="8" fill="rgba(59,130,246,0.1)" stroke="#3b82f6" stroke-width="2"/>
+  <text x="130" y="58" text-anchor="middle" fill="#3b82f6" font-size="13" font-weight="700">vLLM Scheduler</text>
+  <text x="130" y="78" text-anchor="middle" fill="#94a3b8" font-size="11">build_connector_meta()</text>
+  <text x="130" y="98" text-anchor="middle" fill="#94a3b8" font-size="11">update_state_after_alloc()</text>
+  <text x="130" y="118" text-anchor="middle" fill="#64748b" font-size="10">lookup() per new request</text>
+
+  <!-- Arrow -->
+  <path d="M230 85 L310 85" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="270" y="78" fill="#64748b" font-size="10">SchedulerOutput</text>
+
+  <!-- Connector Metadata -->
+  <rect x="310" y="30" width="280" height="110" rx="8" fill="rgba(0,230,138,0.1)" stroke="#00e68a" stroke-width="2"/>
+  <text x="450" y="58" text-anchor="middle" fill="#00e68a" font-size="13" font-weight="700">LMCacheConnectorMetadata</text>
+  <text x="450" y="78" text-anchor="middle" fill="#94a3b8" font-size="11">List[ReqMeta] -- per request:</text>
+  <text x="450" y="93" text-anchor="middle" fill="#94a3b8" font-size="10">token_ids, slot_mapping,</text>
+  <text x="450" y="106" text-anchor="middle" fill="#94a3b8" font-size="10">LoadSpec, SaveSpec, DisaggSpec</text>
+  <text x="450" y="122" text-anchor="middle" fill="#64748b" font-size="10">Serialized to workers</text>
+
+  <!-- Arrow -->
+  <path d="M590 85 L670 85" stroke="#00e68a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <defs><marker id="arrowGreen" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#00e68a"/></marker></defs>
+
+  <!-- vLLM Worker -->
+  <rect x="670" y="20" width="210" height="130" rx="8" fill="rgba(245,158,11,0.1)" stroke="#f59e0b" stroke-width="2"/>
+  <text x="775" y="48" text-anchor="middle" fill="#f59e0b" font-size="13" font-weight="700">vLLM Worker</text>
+  <text x="775" y="68" text-anchor="middle" fill="#94a3b8" font-size="11">start_load_kv()</text>
+  <text x="775" y="85" text-anchor="middle" fill="#94a3b8" font-size="11">wait_for_layer_load()</text>
+  <text x="775" y="102" text-anchor="middle" fill="#94a3b8" font-size="11">save_kv_layer()</text>
+  <text x="775" y="119" text-anchor="middle" fill="#94a3b8" font-size="11">wait_for_save()</text>
+  <text x="775" y="140" text-anchor="middle" fill="#64748b" font-size="10">Per-layer pipeline</text>
+
+  <!-- LMCache Engine -->
+  <rect x="310" y="190" width="280" height="140" rx="8" fill="rgba(139,92,246,0.1)" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="450" y="218" text-anchor="middle" fill="#8b5cf6" font-size="13" font-weight="700">LMCacheEngine</text>
+  <text x="450" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">lookup() -- prefix match</text>
+  <text x="450" y="258" text-anchor="middle" fill="#94a3b8" font-size="11">retrieve() / retrieve_layer()</text>
+  <text x="450" y="276" text-anchor="middle" fill="#94a3b8" font-size="11">store() / store_layer()</text>
+  <text x="450" y="294" text-anchor="middle" fill="#94a3b8" font-size="11">async_lookup_and_prefetch()</text>
+  <text x="450" y="312" text-anchor="middle" fill="#64748b" font-size="10">Token chunking + Storage tiers</text>
+
+  <!-- Arrows from scheduler and worker to engine -->
+  <path d="M130 140 L130 260 L310 260" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowBlue)"/>
+  <text x="160" y="200" fill="#3b82f6" font-size="10">lookup()</text>
+
+  <path d="M775 150 L775 260 L590 260" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+  <text x="700" y="215" fill="#f59e0b" font-size="10">retrieve/store</text>
+</svg>
+</div>
+
+<div class="card">
+<div class="card-header">
+  LMCacheConnectorV1Impl
+  <span class="file-badge">integration/vllm/vllm_v1_adapter.py</span>
+</div>
+
+<p>The vLLM adapter implements <code class="inline-code">KVConnectorBase_V1</code>. The <strong>scheduler</strong> calls
+<code class="inline-code">build_connector_meta()</code> (which calls <code class="inline-code">lookup()</code> to determine cache hits),
+and the <strong>worker</strong> calls <code class="inline-code">start_load_kv()</code> / <code class="inline-code">save_kv_layer()</code>.</p>
+
+<pre><span class="kw">class</span> <span class="cls">LMCacheConnectorV1Impl</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, vllm_config, role, parent):
+        config = lmcache_get_or_create_config()
+        service_factory = <span class="cls">VllmServiceFactory</span>(config, vllm_config, role.name.lower())
+        <span class="kw">self</span>._manager = <span class="cls">LMCacheManager</span>(config, service_factory, connector=<span class="kw">self</span>)
+        <span class="kw">self</span>._manager.start_services()</pre>
+</div>
+
+<h3>6.1 start_load_kv() -- Load from Cache to GPU</h3>
+
+<pre><span class="kw">def</span> <span class="fn">start_load_kv</span>(<span class="kw">self</span>, forward_context, **kwargs):
+    <span class="str">"""Start loading KV cache from connector buffer to vLLM's paged KV buffer."""</span>
+    metadata = <span class="kw">self</span>._parent._get_connector_metadata()
+    kvcaches = list(<span class="kw">self</span>.kv_caches.values())
+
+    <span class="kw">for</span> request <span class="kw">in</span> metadata.requests:
+        <span class="kw">if</span> request.load_spec <span class="kw">is None or not</span> request.load_spec.can_load:
+            <span class="kw">continue</span>
+
+        tokens = request.token_ids
+        slot_mapping = request.slot_mapping.to(<span class="kw">self</span>.device)
+
+        <span class="cmt"># Build mask: skip tokens already cached in vLLM</span>
+        token_mask = torch.ones(len(tokens), dtype=torch.bool)
+        masked_count = request.load_spec.vllm_cached_tokens // <span class="kw">self</span>._lmcache_chunk_size * <span class="kw">self</span>._lmcache_chunk_size
+        token_mask[:masked_count] = <span class="kw">False</span>
+
+        <span class="kw">if</span> <span class="kw">self</span>.use_layerwise:
+            <span class="cmt"># Layer-by-layer pipeline: retrieve 2 layers ahead</span>
+            retriever = <span class="kw">self</span>.lmcache_engine.retrieve_layer(tokens, token_mask, ...)
+            next(retriever); next(retriever)  <span class="cmt"># Pre-fetch first 2 layers</span>
+            <span class="kw">self</span>.layerwise_retrievers.append(retriever)
+        <span class="kw">else</span>:
+            ret_mask = <span class="kw">self</span>.lmcache_engine.retrieve(tokens, token_mask, kvcaches=kvcaches, ...)</pre>
+
+<h3>6.2 save_kv_layer() -- Layerwise Save Pipeline</h3>
+
+<pre><span class="kw">def</span> <span class="fn">save_kv_layer</span>(<span class="kw">self</span>, layer_name, kv_layer, attn_metadata, **kwargs):
+    <span class="str">"""Save one layer of KV cache from vLLM's paged buffer."""</span>
+    <span class="kw">for</span> request <span class="kw">in</span> connector_metadata.requests:
+        layerwise_storer = <span class="kw">self</span>._layerwise_save_storers.get(request.req_id)
+        <span class="kw">if</span> layerwise_storer <span class="kw">is None</span>:
+            <span class="cmt"># Initialize the generator on first layer</span>
+            skip_leading = save_spec.skip_leading_tokens // <span class="kw">self</span>._lmcache_chunk_size * <span class="kw">self</span>._lmcache_chunk_size
+            store_mask = torch.ones(len(token_ids), dtype=torch.bool)
+            store_mask[:skip_leading] = <span class="kw">False</span>
+
+            layerwise_storer = <span class="kw">self</span>.lmcache_engine.store_layer(
+                token_ids, mask=store_mask, kvcaches=kvcaches, slot_mapping=slot_mapping, ...
+            )
+            <span class="kw">self</span>._layerwise_save_storers[request.req_id] = layerwise_storer
+
+        next(layerwise_storer)  <span class="cmt"># Process one layer per call</span></pre>
+
+<h3>6.3 LoadSpec / SaveSpec -- Scheduler Decisions</h3>
+
+<table>
+<tr><th>Spec Type</th><th>Field</th><th>Meaning</th></tr>
+<tr><td rowspan="3"><code class="inline-code">LoadSpec</code></td><td><code>vllm_cached_tokens</code></td><td>Tokens already in vLLM's page cache</td></tr>
+<tr><td><code>lmcache_cached_tokens</code></td><td>Tokens found in LMCache (from lookup)</td></tr>
+<tr><td><code>can_load</code></td><td>Whether scheduler permits loading</td></tr>
+<tr><td rowspan="2"><code class="inline-code">SaveSpec</code></td><td><code>skip_leading_tokens</code></td><td>Already-stored prefix to skip</td></tr>
+<tr><td><code>can_save</code></td><td>Whether scheduler permits saving</td></tr>
+</table>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 7: SGLang Integration -->
+<!-- ================================================================== -->
+<section id="sglang">
+<h2><span class="sec-num">7</span> SGLang Integration: Direct Single-Process Calls</h2>
+
+<div class="card">
+<div class="card-header">
+  LMCacheConnector for SGLang
+  <span class="file-badge">integration/sglang/sglang_adapter.py</span>
+</div>
+
+<p>Unlike vLLM's multi-process scheduler/worker split, SGLang integration is <strong>single-process and direct</strong>.
+The connector wraps the LMCacheEngine and exposes simple <code class="inline-code">load_kv()</code> / <code class="inline-code">store_kv()</code> methods.</p>
+
+<pre><span class="kw">class</span> <span class="cls">LMCacheConnector</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, sgl_config, tp_size, rank, k_pool, v_pool):
+        kv_dtype = k_pool[<span class="num">0</span>].dtype
+        local_rank = k_pool[<span class="num">0</span>].device.index  <span class="cmt"># GPU device from buffer</span>
+        <span class="kw">self</span>.lmcache_engine = init_lmcache_engine(sgl_config, tp_size, local_rank, rank, kv_dtype)
+        <span class="kw">self</span>.kvcaches = k_pool + v_pool  <span class="cmt"># Concatenate K and V pools</span>
+        <span class="kw">self</span>.lmcache_engine.post_init(kvcaches=<span class="kw">self</span>.kvcaches)
+
+    <span class="kw">def</span> <span class="fn">load_kv</span>(<span class="kw">self</span>, load_metadata):
+        <span class="str">"""Direct retrieve -- no scheduler coordination needed."""</span>
+        token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
+        slot_mapping = load_metadata.slot_mapping.cuda()
+        load_mask = torch.ones_like(token_ids, dtype=torch.bool)
+        load_mask[:load_metadata.offset] = <span class="kw">False</span>
+
+        ret_mask = <span class="kw">self</span>.lmcache_engine.retrieve(
+            token_ids, mask=load_mask,
+            kvcaches=<span class="kw">self</span>.kvcaches, slot_mapping=slot_mapping,
+            offset=load_metadata.offset,
+        )
+        <span class="kw">return</span> ret_mask.sum().item()
+
+    <span class="kw">def</span> <span class="fn">store_kv</span>(<span class="kw">self</span>, store_metadata):
+        <span class="str">"""Direct store -- synchronous single-process call."""</span>
+        token_ids = torch.tensor(store_metadata.token_ids, dtype=torch.int64).cuda()
+        slot_mapping = store_metadata.kv_indices.to(torch.int64).cuda()
+        store_mask = torch.ones_like(token_ids, dtype=torch.bool)
+
+        <span class="kw">self</span>.lmcache_engine.store(
+            token_ids, mask=store_mask,
+            kvcaches=<span class="kw">self</span>.kvcaches, slot_mapping=slot_mapping,
+            offset=store_metadata.offset,
+        )</pre>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">vLLM Integration</div>
+    <ul>
+      <li>Multi-process: separate scheduler + worker(s)</li>
+      <li>Scheduler calls <code class="inline-code">lookup()</code></li>
+      <li>Worker calls <code class="inline-code">start_load_kv()</code> / <code class="inline-code">save_kv_layer()</code></li>
+      <li>KVConnectorMetadata serialized between processes</li>
+      <li>Layerwise pipeline with generators</li>
+      <li>LMCacheManager handles service lifecycle</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-header">SGLang Integration</div>
+    <ul>
+      <li>Single-process: direct engine calls</li>
+      <li>No separate scheduler coordination</li>
+      <li><code class="inline-code">load_kv()</code> / <code class="inline-code">store_kv()</code> wrappers</li>
+      <li>k_pool + v_pool passed directly at init</li>
+      <li>Uses <code class="inline-code">mock_up_broadcast_fn</code> (no TP broadcast)</li>
+      <li>Simpler metadata: StoreMetadata / LoadMetadata</li>
+    </ul>
+  </div>
+</div>
+
+<pre><span class="cmt"># SGLang initialization: constructing metadata from ModelConfig</span>
+<span class="kw">def</span> <span class="fn">init_lmcache_engine</span>(model_config, tp_size, local_rank, global_rank, kv_dtype):
+    config = lmcache_get_config()
+    kv_shape = (
+        model_config.num_hidden_layers,  <span class="cmt"># num_layer</span>
+        <span class="num">2</span>,                               <span class="cmt"># K and V</span>
+        config.chunk_size,               <span class="cmt"># 256 tokens</span>
+        model_config.get_num_kv_heads(tp_size),
+        model_config.head_dim,
+    )
+    metadata = <span class="cls">LMCacheMetadata</span>(
+        model_name=model_config.model_path,
+        world_size=tp_size, worker_id=global_rank,
+        kv_dtype=kv_dtype, kv_shape=kv_shape,
+    )
+    gpu_connector = <span class="cls">CreateGPUConnector</span>(config, metadata, EngineType.SGLANG)
+    <span class="kw">return</span> <span class="cls">LMCacheEngineBuilder</span>.get_or_create(ENGINE_NAME, config, metadata, gpu_connector, ...)</pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 8: CacheBlend -->
+<!-- ================================================================== -->
+<section id="blend">
+<h2><span class="sec-num">8</span> CacheBlend: Non-Contiguous KV Chunk Reuse</h2>
+
+<div class="card">
+<div class="card-header">CacheBlend Configuration</div>
+<p>CacheBlend enables reusing KV cache chunks that may not form a contiguous prefix.
+When <code class="inline-code">enable_blending=True</code>, the engine uses <code class="inline-code">SegmentTokenDatabase</code> to split tokens
+at special separator strings, and the <code class="inline-code">LMCBlender</code> performs selective recomputation
+to maintain attention quality.</p>
+</div>
+
+<pre><span class="cmt"># Config definitions for CacheBlend (from v1/config.py)</span>
+<span class="str">"enable_blending"</span>:       { <span class="str">"type"</span>: <span class="kw">bool</span>,  <span class="str">"default"</span>: <span class="kw">False</span> },
+<span class="str">"blend_recompute_ratios"</span>: { <span class="str">"type"</span>: list[<span class="kw">float</span>], <span class="str">"default"</span>: <span class="kw">None</span> },
+<span class="str">"blend_thresholds"</span>:       { <span class="str">"type"</span>: list[<span class="kw">float</span>], <span class="str">"default"</span>: <span class="kw">None</span> },
+<span class="str">"blend_check_layers"</span>:     { <span class="str">"type"</span>: list[<span class="kw">int</span>],   <span class="str">"default"</span>: <span class="kw">None</span> },
+<span class="str">"blend_min_tokens"</span>:       { <span class="str">"type"</span>: <span class="kw">int</span>,   <span class="str">"default"</span>: <span class="num">256</span> },
+<span class="str">"blend_special_str"</span>:      { <span class="str">"type"</span>: <span class="kw">str</span>,   <span class="str">"default"</span>: <span class="str">" # # "</span> },</pre>
+
+<h3>8.1 SegmentTokenDatabase</h3>
+
+<pre><span class="kw">class</span> <span class="cls">SegmentTokenDatabase</span>(<span class="cls">TokenDatabase</span>):
+    <span class="str">"""Splits tokens at special separator patterns instead of fixed-size chunks."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config, metadata):
+        <span class="kw">self</span>.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
+        <span class="kw">self</span>.sep_tokens = <span class="kw">self</span>.tokenizer.encode(config.blend_special_str)[<span class="num">1</span>:]
+        <span class="kw">self</span>.sep_tokens = torch.tensor(<span class="kw">self</span>.sep_tokens, device=<span class="str">"cpu"</span>)
+
+    <span class="kw">def</span> <span class="fn">_fast_split_by_subtensor</span>(<span class="kw">self</span>, tokens):
+        <span class="str">"""Match sep_tokens with sliding windows."""</span>
+        windows = tokens.unfold(<span class="num">0</span>, <span class="kw">self</span>.sep_len, <span class="num">1</span>)
+        <span class="cmt"># Find positions where the window matches the separator</span>
+        ...</pre>
+
+<h3>8.2 How CacheBlend Works</h3>
+
+<div class="flow-steps">
+  <div class="flow-step">
+    <span class="step-num">1</span>
+    <div class="step-content">
+      <strong>Segment Detection:</strong> Input tokens are split at separator boundaries (e.g., " # # ")
+      into variable-length segments rather than fixed 256-token chunks.
+    </div>
+  </div>
+  <div class="flow-step">
+    <span class="step-num">2</span>
+    <div class="step-content">
+      <strong>Non-Contiguous Lookup:</strong> Each segment is independently hashed and looked up in the cache.
+      Segments can be cache hits even if surrounding segments are misses.
+    </div>
+  </div>
+  <div class="flow-step">
+    <span class="step-num">3</span>
+    <div class="step-content">
+      <strong>Selective Recomputation:</strong> For segments with cache hits, the <code class="inline-code">LMCBlender</code>
+      selectively recomputes a fraction (<code class="inline-code">blend_recompute_ratios</code>) of tokens at segment
+      boundaries to maintain attention quality between cached and fresh segments.
+    </div>
+  </div>
+  <div class="flow-step">
+    <span class="step-num">4</span>
+    <div class="step-content">
+      <strong>Quality Check:</strong> <code class="inline-code">blend_check_layers</code> specifies which transformer layers to
+      verify attention divergence. If the divergence at <code class="inline-code">blend_thresholds</code> is too high,
+      more tokens are recomputed.
+    </div>
+  </div>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title">Auto-Config When Blending Is Enabled</div>
+  <p>When <code class="inline-code">enable_blending=True</code>, the config validator automatically sets
+  <code class="inline-code">save_unfull_chunk=True</code> (required for variable-length segments) and
+  the memory format switches to <code class="inline-code">KV_2TD</code> for layerwise mode.</p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 9: Eviction Policies -->
+<!-- ================================================================== -->
+<section id="eviction">
+<h2><span class="sec-num">9</span> Eviction Policies: LRU, LFU, FIFO, MRU + Pin/Unpin</h2>
+
+<div class="card">
+<div class="card-header">
+  Policy Factory
+  <span class="file-badge">v1/storage_backend/cache_policy/__init__.py</span>
+</div>
+<pre>POLICY_MAPPING = {
+    <span class="str">"LRU"</span>:  <span class="cls">LRUCachePolicy</span>,
+    <span class="str">"LFU"</span>:  <span class="cls">LFUCachePolicy</span>,
+    <span class="str">"FIFO"</span>: <span class="cls">FIFOCachePolicy</span>,
+    <span class="str">"MRU"</span>:  <span class="cls">MRUCachePolicy</span>,
+}
+
+<span class="kw">def</span> <span class="fn">get_cache_policy</span>(policy_name: <span class="kw">str</span>) -> BaseCachePolicy:
+    <span class="kw">return</span> POLICY_MAPPING[policy_name.upper()]()</pre>
+</div>
+
+<div class="grid-2">
+
+<!-- LRU -->
+<div class="policy-card">
+  <span class="policy-badge">DEFAULT</span>
+  <h4>LRU (Least Recently Used)</h4>
+  <p style="font-size:0.85rem; color:var(--text-secondary);">
+    Uses <code class="inline-code">OrderedDict</code>. On hit, <code class="inline-code">move_to_end(key)</code>.
+    Evicts from the front (oldest access).
+  </p>
+<pre style="font-size:0.75rem; text-align:left;">
+<span class="kw">def</span> <span class="fn">update_on_hit</span>(<span class="kw">self</span>, key, cache_dict):
+    cache_dict.move_to_end(key)
+
+<span class="kw">def</span> <span class="fn">get_evict_candidates</span>(<span class="kw">self</span>, cache_dict, n=<span class="num">1</span>):
+    <span class="kw">for</span> key, cache <span class="kw">in</span> cache_dict.items():
+        <span class="kw">if</span> cache.can_evict:
+            evict_keys.append(key)
+        <span class="kw">if</span> len(evict_keys) == n: <span class="kw">break</span></pre>
+</div>
+
+<!-- FIFO -->
+<div class="policy-card">
+  <h4>FIFO (First In First Out)</h4>
+  <p style="font-size:0.85rem; color:var(--text-secondary);">
+    Uses plain <code class="inline-code">dict</code> (insertion-ordered in Python 3.7+).
+    <code class="inline-code">update_on_hit()</code> is a no-op -- access order does not matter.
+  </p>
+<pre style="font-size:0.75rem; text-align:left;">
+<span class="kw">def</span> <span class="fn">update_on_hit</span>(<span class="kw">self</span>, key, cache_dict):
+    <span class="kw">pass</span>  <span class="cmt"># No reordering</span>
+
+<span class="kw">def</span> <span class="fn">get_evict_candidates</span>(<span class="kw">self</span>, cache_dict, n=<span class="num">1</span>):
+    <span class="cmt"># Iterate from oldest insertion</span>
+    <span class="kw">for</span> key, cache <span class="kw">in</span> cache_dict.items():
+        <span class="kw">if</span> cache.can_evict:
+            evict_keys.append(key)</pre>
+</div>
+
+<!-- LFU -->
+<div class="policy-card">
+  <h4>LFU (Least Frequently Used)</h4>
+  <p style="font-size:0.85rem; color:var(--text-secondary);">
+    Uses <code class="inline-code">SortedDict</code> of frequency buckets. Each bucket is a FIFO dict.
+    Evicts from lowest-frequency bucket first.
+  </p>
+<pre style="font-size:0.75rem; text-align:left;">
+<span class="kw">def</span> <span class="fn">update_on_hit</span>(<span class="kw">self</span>, key, cache_dict):
+    curr_freq = <span class="kw">self</span>.key_to_freq[key]
+    <span class="kw">self</span>.freq_to_keys[curr_freq].pop(key)
+    curr_freq += <span class="num">1</span>
+    <span class="kw">self</span>.key_to_freq[key] = curr_freq
+    <span class="kw">self</span>.freq_to_keys[curr_freq][key] = <span class="kw">None</span>
+
+<span class="kw">def</span> <span class="fn">update_on_put</span>(<span class="kw">self</span>, key):
+    <span class="kw">self</span>.key_to_freq[key] = <span class="num">1</span>
+    <span class="kw">self</span>.freq_to_keys[<span class="num">1</span>][key] = <span class="kw">None</span></pre>
+</div>
+
+<!-- MRU -->
+<div class="policy-card">
+  <h4>MRU (Most Recently Used)</h4>
+  <p style="font-size:0.85rem; color:var(--text-secondary);">
+    Opposite of LRU: evicts the most recently accessed item. Uses <code class="inline-code">OrderedDict</code>
+    but evicts from the end.
+  </p>
+<pre style="font-size:0.75rem; text-align:left;">
+<span class="kw">def</span> <span class="fn">get_evict_candidates</span>(<span class="kw">self</span>, cache_dict, n=<span class="num">1</span>):
+    <span class="cmt"># Iterate in reverse (most recent first)</span>
+    <span class="kw">for</span> key <span class="kw">in</span> reversed(cache_dict):
+        <span class="kw">if</span> cache_dict[key].can_evict:
+            evict_keys.append(key)</pre>
+</div>
+</div>
+
+<h3>9.1 Pin/Unpin Mechanism</h3>
+
+<div class="card">
+<div class="card-header">
+  PinMonitor -- Timeout-Based Pin Protection
+  <span class="file-badge">v1/pin_monitor.py</span>
+</div>
+<p>Memory objects are <strong>pinned</strong> during lookup to prevent eviction between the lookup and retrieve steps.
+The <code class="inline-code">PinMonitor</code> (singleton) runs a background thread that forcibly unpins objects that exceed the timeout.</p>
+
+<pre><span class="kw">class</span> <span class="cls">PinMonitor</span>(PeriodicThread):
+    <span class="str">"""Global singleton: monitors pinned MemoryObj instances for timeout."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="kw">self</span>, config):
+        <span class="kw">self</span>._pinned_objects = {}  <span class="cmt"># {obj_id: (memory_obj, register_time)}</span>
+        <span class="kw">self</span>._pin_timeout_sec = config.pin_timeout_sec     <span class="cmt"># default: 300s</span>
+        <span class="kw">self</span>._check_interval = config.pin_check_interval_sec <span class="cmt"># default: 30s</span>
+
+    <span class="kw">def</span> <span class="fn">on_pin</span>(<span class="kw">self</span>, memory_obj):
+        <span class="str">"""Register a pinned object for timeout monitoring."""</span>
+        obj_id = id(memory_obj)
+        <span class="kw">self</span>._pinned_objects[obj_id] = (memory_obj, time.time())
+
+    <span class="kw">def</span> <span class="fn">on_unpin</span>(<span class="kw">self</span>, memory_obj):
+        <span class="str">"""Unregister from timeout monitoring."""</span>
+        <span class="kw">self</span>._pinned_objects.pop(id(memory_obj), <span class="kw">None</span>)</pre>
+</div>
+
+<table>
+<tr><th>Config Parameter</th><th>Default</th><th>Description</th></tr>
+<tr><td><code class="inline-code">cache_policy</code></td><td><code>LRU</code></td><td>Eviction policy: LRU, LFU, FIFO, MRU</td></tr>
+<tr><td><code class="inline-code">pin_timeout_sec</code></td><td><code>300</code></td><td>Max seconds a MemoryObj can remain pinned</td></tr>
+<tr><td><code class="inline-code">pin_check_interval_sec</code></td><td><code>30</code></td><td>How often PinMonitor scans for timeouts</td></tr>
+<tr><td><code class="inline-code">max_local_cpu_size</code></td><td><code>5.0</code></td><td>GB of CPU DRAM allocated for L1 cache</td></tr>
+<tr><td><code class="inline-code">max_local_disk_size</code></td><td><code>0.0</code></td><td>GB of disk space for L2 cache (0 = disabled)</td></tr>
+<tr><td><code class="inline-code">blocking_timeout_secs</code></td><td><code>10</code></td><td>Max wait time for blocking get operations</td></tr>
+</table>
+
+<h3>9.2 Eviction Safety: can_evict Checks</h3>
+
+<p>All eviction policies check <code class="inline-code">cache.can_evict</code> before evicting. A MemoryObj is <strong>not evictable</strong>
+when it is pinned (pin_count > 0). This prevents evicting cache entries that are in the middle of being retrieved.</p>
+
+<pre><span class="cmt"># From DiskCacheMetadata (similar pattern in MemoryObj)</span>
+<span class="dec">@property</span>
+<span class="kw">def</span> <span class="fn">can_evict</span>(<span class="kw">self</span>) -> <span class="kw">bool</span>:
+    <span class="kw">return not</span> <span class="kw">self</span>.is_pinned  <span class="cmt"># pin_count == 0</span></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- Cache Lookup/Store Flow Diagram -->
+<!-- ================================================================== -->
+<section id="flow">
+<h2><span class="sec-num">10</span> End-to-End Cache Lookup and Store Flow</h2>
+
+<div class="diagram-container">
+<div class="diagram-title">Complete Cache Lookup / Store Data Flow</div>
+<svg class="diagram-svg" width="920" height="520" viewBox="0 0 920 520">
+  <!-- Request arrives -->
+  <rect x="350" y="10" width="220" height="40" rx="6" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="2"/>
+  <text x="460" y="35" text-anchor="middle" fill="#3b82f6" font-size="12" font-weight="700">New Request Arrives</text>
+
+  <path d="M460 50 L460 75" stroke="#3b82f6" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Token chunking -->
+  <rect x="300" y="80" width="320" height="40" rx="6" fill="rgba(139,92,246,0.12)" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="460" y="105" text-anchor="middle" fill="#8b5cf6" font-size="11" font-weight="600">ChunkedTokenDatabase.process_tokens()</text>
+
+  <path d="M460 120 L460 145" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- Rolling hash -->
+  <rect x="300" y="150" width="320" height="40" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="460" y="175" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">_prefix_hash() -> CacheEngineKey per chunk</text>
+
+  <!-- Split into lookup and store paths -->
+  <path d="M460 190 L260 230" stroke="#00e68a" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <path d="M460 190 L660 230" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+  <!-- LOOKUP PATH -->
+  <rect x="110" y="235" width="300" height="35" rx="6" fill="rgba(0,230,138,0.12)" stroke="#00e68a" stroke-width="2"/>
+  <text x="260" y="258" text-anchor="middle" fill="#00e68a" font-size="12" font-weight="700">LOOKUP PATH</text>
+
+  <path d="M260 270 L260 295" stroke="#00e68a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <rect x="130" y="300" width="260" height="30" rx="5" fill="rgba(0,230,138,0.06)" stroke="#00e68a" stroke-width="1"/>
+  <text x="260" y="320" text-anchor="middle" fill="#94a3b8" font-size="10">batched_contains() across backends</text>
+
+  <path d="M260 330 L260 355" stroke="#00e68a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <rect x="130" y="360" width="260" height="30" rx="5" fill="rgba(0,230,138,0.06)" stroke="#00e68a" stroke-width="1"/>
+  <text x="260" y="380" text-anchor="middle" fill="#94a3b8" font-size="10">Prefix match: count contiguous hits</text>
+
+  <path d="M260 390 L260 415" stroke="#00e68a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <rect x="130" y="420" width="260" height="30" rx="5" fill="rgba(0,230,138,0.06)" stroke="#00e68a" stroke-width="1"/>
+  <text x="260" y="440" text-anchor="middle" fill="#94a3b8" font-size="10">Return hit_token_count to scheduler</text>
+
+  <path d="M260 450 L260 475" stroke="#00e68a" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+
+  <rect x="130" y="480" width="260" height="30" rx="5" fill="rgba(0,230,138,0.08)" stroke="#00e68a" stroke-width="1.5"/>
+  <text x="260" y="500" text-anchor="middle" fill="#00e68a" font-size="10" font-weight="600">retrieve() -> GPU via GPUConnector</text>
+
+  <!-- STORE PATH -->
+  <rect x="510" y="235" width="300" height="35" rx="6" fill="rgba(245,158,11,0.12)" stroke="#f59e0b" stroke-width="2"/>
+  <text x="660" y="258" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="700">STORE PATH</text>
+
+  <path d="M660 270 L660 295" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+  <rect x="530" y="300" width="260" height="30" rx="5" fill="rgba(245,158,11,0.06)" stroke="#f59e0b" stroke-width="1"/>
+  <text x="660" y="320" text-anchor="middle" fill="#94a3b8" font-size="10">allocate() MemoryObj from L1 pool</text>
+
+  <path d="M660 330 L660 355" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+  <rect x="530" y="360" width="260" height="30" rx="5" fill="rgba(245,158,11,0.06)" stroke="#f59e0b" stroke-width="1"/>
+  <text x="660" y="380" text-anchor="middle" fill="#94a3b8" font-size="10">batched_from_gpu() via GPUConnector</text>
+
+  <path d="M660 390 L660 415" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+  <rect x="530" y="420" width="260" height="30" rx="5" fill="rgba(245,158,11,0.06)" stroke="#f59e0b" stroke-width="1"/>
+  <text x="660" y="440" text-anchor="middle" fill="#94a3b8" font-size="10">batched_put() -> fan-out to all tiers</text>
+
+  <path d="M660 450 L660 475" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+
+  <rect x="530" y="480" width="260" height="30" rx="5" fill="rgba(245,158,11,0.08)" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="660" y="500" text-anchor="middle" fill="#f59e0b" font-size="10" font-weight="600">L1 sync | L2/L3/L4 async</text>
+</svg>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Configuration Reference -->
+<!-- ================================================================== -->
+<section id="config">
+<h2><span class="sec-num">11</span> LMCacheEngineConfig -- Complete Configuration Reference</h2>
+
+<div class="card">
+<div class="card-header">
+  Configuration System
+  <span class="file-badge">v1/config.py</span>
+</div>
+<p>Configuration is loaded from YAML files, environment variables (prefix <code class="inline-code">LMCACHE_</code>),
+or programmatic overrides. The system supports aliases for deprecated config names.</p>
+</div>
+
+<table>
+<tr><th>Category</th><th>Parameter</th><th>Default</th><th>Description</th></tr>
+<tr><td rowspan="5">Basic</td><td><code class="inline-code">chunk_size</code></td><td><code>256</code></td><td>Tokens per chunk for KV cache segmentation</td></tr>
+<tr><td><code class="inline-code">local_cpu</code></td><td><code>True</code></td><td>Enable L1 CPU DRAM hot cache</td></tr>
+<tr><td><code class="inline-code">max_local_cpu_size</code></td><td><code>5.0</code></td><td>GB allocated for L1 CPU cache</td></tr>
+<tr><td><code class="inline-code">local_disk</code></td><td><code>None</code></td><td>Path for L2 disk cache (None = disabled)</td></tr>
+<tr><td><code class="inline-code">remote_url</code></td><td><code>None</code></td><td>URL for L3 remote storage (redis://...)</td></tr>
+<tr><td rowspan="3">Features</td><td><code class="inline-code">use_layerwise</code></td><td><code>False</code></td><td>Enable per-layer KV cache storage</td></tr>
+<tr><td><code class="inline-code">save_decode_cache</code></td><td><code>False</code></td><td>Store KV cache during decode phase</td></tr>
+<tr><td><code class="inline-code">save_unfull_chunk</code></td><td><code>False</code></td><td>Store partial chunks (required for blending/PD)</td></tr>
+<tr><td rowspan="3">Blending</td><td><code class="inline-code">enable_blending</code></td><td><code>False</code></td><td>Enable CacheBlend non-contiguous reuse</td></tr>
+<tr><td><code class="inline-code">blend_recompute_ratios</code></td><td><code>None</code></td><td>Fraction of tokens to recompute per layer</td></tr>
+<tr><td><code class="inline-code">blend_special_str</code></td><td><code>" # # "</code></td><td>Separator string for segment splitting</td></tr>
+<tr><td rowspan="3">P2P</td><td><code class="inline-code">enable_p2p</code></td><td><code>False</code></td><td>Enable peer-to-peer GPU transfer</td></tr>
+<tr><td><code class="inline-code">enable_pd</code></td><td><code>False</code></td><td>Enable Prefill/Decode disaggregation</td></tr>
+<tr><td><code class="inline-code">pd_role</code></td><td><code>None</code></td><td>"producer" (prefill) or "receiver" (decode)</td></tr>
+<tr><td rowspan="2">Memory</td><td><code class="inline-code">enable_lazy_memory_allocator</code></td><td><code>False</code></td><td>Allocate memory on-demand (reduce footprint)</td></tr>
+<tr><td><code class="inline-code">lazy_memory_initial_ratio</code></td><td><code>0.2</code></td><td>Initial allocation as fraction of target</td></tr>
+<tr><td rowspan="2">Policy</td><td><code class="inline-code">cache_policy</code></td><td><code>LRU</code></td><td>Eviction policy: LRU, LFU, FIFO, MRU</td></tr>
+<tr><td><code class="inline-code">min_retrieve_tokens</code></td><td><code>0</code></td><td>Min hit tokens required to actually retrieve</td></tr>
+</table>
+
+<pre><span class="cmt"># Environment variable configuration example</span>
+export LMCACHE_CHUNK_SIZE=<span class="num">256</span>
+export LMCACHE_LOCAL_CPU=<span class="kw">true</span>
+export LMCACHE_MAX_LOCAL_CPU_SIZE=<span class="num">8.0</span>
+export LMCACHE_LOCAL_DISK=/tmp/lmcache_disk/
+export LMCACHE_MAX_LOCAL_DISK_SIZE=<span class="num">20.0</span>
+export LMCACHE_REMOTE_URL=redis://localhost:<span class="num">6379</span>
+export LMCACHE_CACHE_POLICY=LRU
+export LMCACHE_ENABLE_BLENDING=<span class="kw">false</span>
+export LMCACHE_USE_LAYERWISE=<span class="kw">true</span></pre>
+
+</section>
+
+<!-- Footer -->
+<div style="text-align:center; padding: 3rem 0 2rem; color: var(--text-muted); font-size: 0.85rem; border-top: 1px solid var(--border-color);">
+  <p>LMCache Source Code Architecture Deep Dive | All code from <code class="inline-code">lmcache/v1/</code></p>
+  <p style="margin-top: 0.5rem;">
+    <a href="../index.html">Back to AI Infrastructure Overview</a>
+  </p>
+</div>
+
+</div> <!-- container -->
+</body>
+</html>

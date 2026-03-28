@@ -1,0 +1,1511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang Deep Dive: ModelRunner, Attention Backends &amp; Speculative Decoding</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-code: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-purple: #bc8cff;
+    --accent-orange: #d29922;
+    --accent-red: #f85149;
+    --accent-cyan: #39d2c0;
+    --accent-pink: #f778ba;
+    --accent-yellow: #e3b341;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0;
+  }
+  a { color: var(--accent-blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Top nav */
+  .top-nav {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(13,17,23,0.95);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 24px;
+    display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+    font-size: 0.85rem;
+  }
+  .top-nav a { color: var(--accent-cyan); font-weight: 500; }
+  .top-nav .brand { color: var(--accent-green); font-weight: 700; font-size: 1rem; margin-right: 12px; }
+
+  /* Hero */
+  .hero {
+    max-width: 1100px; margin: 0 auto;
+    padding: 48px 24px 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero h1 {
+    font-size: 2.2rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue), var(--accent-purple));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  .hero .subtitle { color: var(--text-dim); font-size: 1.05rem; max-width: 800px; }
+  .hero .meta { margin-top: 14px; font-size: 0.82rem; color: var(--text-dim); }
+  .hero .meta span { margin-right: 18px; }
+
+  /* Container */
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 24px 60px; }
+
+  /* Section */
+  section { margin-top: 48px; }
+  section h2 {
+    font-size: 1.6rem; font-weight: 700; margin-bottom: 16px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+  }
+  section h3 { font-size: 1.2rem; font-weight: 600; margin: 20px 0 10px; color: var(--accent-green); }
+  section h4 { font-size: 1.05rem; font-weight: 600; margin: 14px 0 8px; color: var(--accent-orange); }
+  section p { margin-bottom: 12px; color: var(--text); }
+  section ul, section ol { margin: 8px 0 14px 24px; }
+  section li { margin-bottom: 6px; }
+
+  /* Code blocks */
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    margin: 10px 0 16px;
+  }
+  code {
+    font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.82rem;
+  }
+  p code, li code {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .kw { color: var(--accent-purple); }
+  .fn { color: var(--accent-blue); }
+  .cm { color: var(--text-dim); font-style: italic; }
+  .str { color: var(--accent-green); }
+  .num { color: var(--accent-orange); }
+  .cls { color: var(--accent-cyan); }
+  .dec { color: var(--accent-yellow); }
+  .op { color: var(--text-dim); }
+
+  /* Cards */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 14px 0;
+  }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card h4 { margin-top: 0; }
+
+  /* SVG diagrams */
+  .diagram-wrap {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin: 16px 0;
+    overflow-x: auto;
+    text-align: center;
+  }
+  .diagram-wrap svg { max-width: 100%; }
+  .diagram-caption {
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    margin-top: 8px;
+    font-style: italic;
+  }
+
+  /* Table of contents */
+  .toc {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0;
+  }
+  .toc h3 { color: var(--accent-blue); margin-top: 0; }
+  .toc ol { margin-left: 20px; }
+  .toc li { margin-bottom: 4px; }
+  .toc a { color: var(--accent-cyan); }
+
+  /* Badge */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); border: 1px solid rgba(188,140,255,0.3); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--accent-orange); border: 1px solid rgba(210,153,34,0.3); }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--accent-red); border: 1px solid rgba(248,81,73,0.3); }
+
+  /* Callout */
+  .callout {
+    border-left: 3px solid var(--accent-blue);
+    padding: 12px 16px;
+    margin: 12px 0;
+    background: rgba(88,166,255,0.06);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn { border-left-color: var(--accent-orange); background: rgba(210,153,34,0.06); }
+  .callout.key { border-left-color: var(--accent-green); background: rgba(63,185,80,0.06); }
+
+  /* File path */
+  .filepath {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    background: var(--bg-code);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== TOP NAV ==================== -->
+<nav class="top-nav">
+  <span class="brand">SGLang Internals</span>
+  <a href="#sec-modelrunner">ModelRunner</a>
+  <a href="#sec-forward-modes">Forward Modes</a>
+  <a href="#sec-cuda-graph">CUDA Graphs</a>
+  <a href="#sec-forward-batch">ForwardBatch</a>
+  <a href="#sec-flashinfer">FlashInfer</a>
+  <a href="#sec-flashattention">FlashAttention</a>
+  <a href="#sec-sampling">Sampling</a>
+  <a href="#sec-eagle">EAGLE</a>
+  <a href="#sec-moe">MoE Kernels</a>
+</nav>
+
+<!-- ==================== HERO ==================== -->
+<header class="hero">
+  <h1>SGLang Deep Dive: ModelRunner, Attention Backends &amp; Speculative Decoding</h1>
+  <p class="subtitle">
+    A comprehensive source-code walkthrough of SGLang's GPU execution engine -- from model loading
+    and CUDA graph capture, through FlashInfer/FlashAttention kernel dispatch, to EAGLE speculative
+    decoding and fused Mixture-of-Experts Triton kernels.
+  </p>
+  <div class="meta">
+    <span>Source: <code>sglang/python/sglang/srt/</code></span>
+    <span>Updated: 2026-03-26</span>
+    <span>Based on SGLang main branch</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ==================== TABLE OF CONTENTS ==================== -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#sec-modelrunner">ModelRunner Initialization -- Model Loading, Memory, Backend Selection</a></li>
+    <li><a href="#sec-forward-modes">forward_extend() vs forward_decode() -- The Two Primary Forward Modes</a></li>
+    <li><a href="#sec-cuda-graph">CUDA Graph Capture and Replay</a></li>
+    <li><a href="#sec-forward-batch">ForwardBatch -- Packing Tensors for the GPU</a></li>
+    <li><a href="#sec-flashinfer">FlashInfer Backend -- Memory Pool Integration</a></li>
+    <li><a href="#sec-flashattention">FlashAttention 3/4 Backend -- Comparison with FlashInfer</a></li>
+    <li><a href="#sec-sampling">Sampling -- Temperature, Top-p, Top-k, Min-p</a></li>
+    <li><a href="#sec-eagle">EAGLE Speculative Decoding -- Draft/Verify Loop</a></li>
+    <li><a href="#sec-moe">MoE Kernel Structure and Expert Parallelism</a></li>
+    <li><a href="#sec-diagrams">Architecture Diagrams</a></li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 1: ModelRunner Initialization                        -->
+<!-- ============================================================ -->
+<section id="sec-modelrunner">
+  <h2>1. ModelRunner Initialization</h2>
+  <p class="filepath">python/sglang/srt/model_executor/model_runner.py</p>
+
+  <p>
+    <code>ModelRunner</code> is the central class that owns the model weights, KV cache memory pools,
+    attention backend, CUDA graph runner, and sampler. It inherits from <code>ModelRunnerKVCacheMixin</code>
+    which provides KV cache management methods.
+  </p>
+
+  <h3>1.1 Constructor Signature</h3>
+  <pre><code><span class="kw">class</span> <span class="cls">ModelRunner</span>(<span class="cls">ModelRunnerKVCacheMixin</span>):
+    <span class="cm">"""ModelRunner runs the forward passes of the models."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        self,
+        model_config: <span class="cls">ModelConfig</span>,
+        mem_fraction_static: <span class="cls">float</span>,
+        gpu_id: <span class="cls">int</span>,
+        tp_rank: <span class="cls">int</span>,
+        tp_size: <span class="cls">int</span>,
+        moe_ep_rank: <span class="cls">int</span>,
+        moe_ep_size: <span class="cls">int</span>,
+        pp_rank: <span class="cls">int</span>,
+        pp_size: <span class="cls">int</span>,
+        nccl_port: <span class="cls">int</span>,
+        server_args: <span class="cls">ServerArgs</span>,
+        dp_rank: <span class="cls">Optional</span>[<span class="cls">int</span>] = <span class="kw">None</span>,
+        is_draft_worker: <span class="cls">bool</span> = <span class="kw">False</span>,
+        req_to_token_pool: <span class="cls">Optional</span>[<span class="cls">ReqToTokenPool</span>] = <span class="kw">None</span>,
+        token_to_kv_pool_allocator: <span class="cls">Optional</span>[<span class="cls">BaseTokenToKVPoolAllocator</span>] = <span class="kw">None</span>,
+        ...
+    ):</code></pre>
+
+  <p>Key fields parsed during construction:</p>
+  <ul>
+    <li><code>self.spec_algorithm</code> -- parsed from <code>server_args.speculative_algorithm</code> (EAGLE, EAGLE3, NGRAM, etc.)</li>
+    <li><code>self.use_mla_backend</code> -- set when <code>model_config.attention_arch == AttentionArch.MLA</code> (DeepSeek-V2/V3 MLA)</li>
+    <li><code>self.page_size</code> -- paged KV cache page size</li>
+    <li><code>self.is_hybrid_swa</code> -- sliding-window attention hybrid models</li>
+  </ul>
+
+  <h3>1.2 The <code>initialize()</code> Pipeline</h3>
+  <p>The constructor calls <code>self.initialize(pre_model_load_memory)</code> which executes a strict sequence:</p>
+
+  <pre><code><span class="kw">def</span> <span class="fn">initialize</span>(self, pre_model_load_memory):
+    <span class="cm"># 1. Create sampler</span>
+    self.sampler = <span class="fn">create_sampler</span>()
+
+    <span class="cm"># 2. Load model weights (VLLM loader, safetensors, etc.)</span>
+    self.<span class="fn">load_model</span>()
+
+    <span class="cm"># 3. Configure KV cache dtype (fp8_e4m3, bf16, etc.)</span>
+    self.<span class="fn">configure_kv_cache_dtype</span>()
+
+    <span class="cm"># 4. Allocate KV cache memory pools</span>
+    self.<span class="fn">init_memory_pool</span>(pre_model_load_memory)
+
+    <span class="cm"># 5. Init attention backend (FlashInfer, FA3, Triton, etc.)</span>
+    self.<span class="fn">init_attention_backend</span>()
+
+    <span class="cm"># 6. Warmup kernels (FlashInfer autotune)</span>
+    self.<span class="fn">kernel_warmup</span>()
+
+    <span class="cm"># 7. Capture CUDA graphs for decode batch sizes</span>
+    self.<span class="fn">init_device_graphs</span>()
+
+    <span class="cm"># 8. Initialize piecewise CUDA graphs for extend</span>
+    self.<span class="fn">init_piecewise_cuda_graphs</span>()</code></pre>
+
+  <h3>1.3 Model Loading</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">load_model</span>(self):
+    <span class="cm"># Uses the configurable model loader system</span>
+    self.loader = <span class="fn">get_model_loader</span>(
+        load_config=self.load_config,
+        model_config=self.model_config,
+    )
+    self.model = self.loader.<span class="fn">load_model</span>(
+        model_config=self.model_config,
+        device_config=<span class="cls">DeviceConfig</span>(self.device, self.gpu_id),
+    )
+    <span class="cm"># After loading: parse sliding_window_size, dtype, etc.</span>
+    self.sliding_window_size = <span class="kw">None</span>
+    <span class="kw">if</span> <span class="fn">hasattr</span>(self.model, <span class="str">'get_attention_sliding_window_size'</span>):
+        self.sliding_window_size = self.model.<span class="fn">get_attention_sliding_window_size</span>()</code></pre>
+
+  <h3>1.4 Attention Backend Selection</h3>
+  <p>The backend is chosen via a registry pattern defined in <code>attention_registry.py</code>:</p>
+
+  <pre><code><span class="cm"># attention_registry.py</span>
+ATTENTION_BACKENDS = {}
+
+<span class="kw">def</span> <span class="fn">register_attention_backend</span>(name):
+    <span class="kw">def</span> <span class="fn">decorator</span>(fn):
+        ATTENTION_BACKENDS[name] = fn
+        <span class="kw">return</span> fn
+    <span class="kw">return</span> decorator
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"flashinfer"</span>)
+<span class="kw">def</span> <span class="fn">create_flashinfer_backend</span>(runner):
+    <span class="kw">if not</span> runner.use_mla_backend:
+        <span class="kw">return</span> <span class="cls">FlashInferAttnBackend</span>(runner)
+    <span class="kw">else</span>:
+        <span class="kw">return</span> <span class="cls">FlashInferMLAAttnBackend</span>(runner)
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"fa3"</span>)
+<span class="kw">def</span> <span class="fn">create_flashattention_v3_backend</span>(runner):
+    <span class="kw">return</span> <span class="cls">FlashAttentionBackend</span>(runner)
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"fa4"</span>)
+<span class="kw">def</span> <span class="fn">create_flashattention_v4_backend</span>(runner):
+    <span class="kw">return</span> <span class="cls">FlashAttentionBackend</span>(runner, fa_impl_ver=<span class="num">4</span>)
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"triton"</span>)
+<span class="kw">def</span> <span class="fn">create_triton_backend</span>(runner): ...
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"flashmla"</span>)
+<span class="kw">def</span> <span class="fn">create_flashmla_backend</span>(runner): ...
+
+<span class="dec">@register_attention_backend</span>(<span class="str">"cutlass_mla"</span>)
+<span class="kw">def</span> <span class="fn">create_cutlass_mla_backend</span>(runner): ...</code></pre>
+
+  <p>The model runner dispatches to the selected backend:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">_get_attention_backend_from_str</span>(self, backend_str, init_new_workspace=<span class="kw">False</span>):
+    <span class="kw">if</span> backend_str <span class="kw">not in</span> ATTENTION_BACKENDS:
+        <span class="kw">raise</span> <span class="cls">ValueError</span>(f<span class="str">"Invalid attention backend: {backend_str}"</span>)
+    full_attention_backend = ATTENTION_BACKENDS[backend_str](self)
+    <span class="kw">return</span> <span class="fn">attn_backend_wrapper</span>(self, full_attention_backend)</code></pre>
+
+  <div class="callout key">
+    <strong>Key insight:</strong> SGLang supports hybrid decode/prefill backends via <code>HybridAttnBackend</code>,
+    allowing e.g. FlashMLA for decode + FlashInfer for prefill.
+    The supported MLA backends list: <code>["aiter", "flashinfer", "fa3", "fa4", "triton", "flashmla", "cutlass_mla", "trtllm_mla", "ascend", "nsa"]</code>.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 2: Forward Modes                                     -->
+<!-- ============================================================ -->
+<section id="sec-forward-modes">
+  <h2>2. forward_extend() vs forward_decode()</h2>
+  <p class="filepath">python/sglang/srt/model_executor/model_runner.py : lines 2507-2588</p>
+
+  <h3>2.1 The Central <code>_forward_raw()</code> Dispatcher</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">_forward_raw</span>(self, forward_batch, skip_attn_backend_init, pp_proxy_tensors, ...):
+    <span class="cm"># Check if we can use CUDA graph (decode + graph runner available)</span>
+    can_run_graph = <span class="fn">bool</span>(
+        forward_batch.forward_mode.<span class="fn">is_cuda_graph</span>()
+        <span class="kw">and</span> self.graph_runner
+        <span class="kw">and</span> self.graph_runner.<span class="fn">can_run</span>(forward_batch)
+    )
+
+    <span class="kw">if</span> can_run_graph:
+        ret = self.graph_runner.<span class="fn">replay</span>(forward_batch, ...)
+        <span class="kw">return</span> <span class="cls">ModelRunnerOutput</span>(logits_output=ret, can_run_graph=can_run_graph)
+
+    <span class="cm"># Fallback to eager execution</span>
+    <span class="kw">if</span> forward_batch.forward_mode.<span class="fn">is_decode</span>():
+        ret = self.<span class="fn">forward_decode</span>(forward_batch, ...)
+    <span class="kw">elif</span> forward_batch.forward_mode.<span class="fn">is_extend</span>(include_draft_extend_v2=<span class="kw">True</span>):
+        ret, can_run_graph = self.<span class="fn">forward_extend</span>(forward_batch, ...)
+    <span class="kw">elif</span> forward_batch.forward_mode.<span class="fn">is_idle</span>():
+        ret = self.<span class="fn">forward_idle</span>(forward_batch, ...)
+    <span class="kw">elif</span> forward_batch.forward_mode.<span class="fn">is_split_prefill</span>():
+        ret = self.<span class="fn">forward_split_prefill</span>(forward_batch, ...)</code></pre>
+
+  <h3>2.2 forward_decode()</h3>
+  <p>Decode processes <strong>one new token per request</strong>. It is the hot path that benefits most from CUDA graphs.</p>
+  <pre><code><span class="kw">def</span> <span class="fn">forward_decode</span>(self, forward_batch, skip_attn_backend_init=<span class="kw">False</span>, pp_proxy_tensors=<span class="kw">None</span>):
+    <span class="kw">if not</span> skip_attn_backend_init:
+        self.attn_backend.<span class="fn">init_forward_metadata</span>(forward_batch)
+    <span class="kw">return</span> self.model.<span class="fn">forward</span>(
+        forward_batch.input_ids,
+        forward_batch.positions,
+        forward_batch,
+        **kwargs,
+    )</code></pre>
+
+  <h3>2.3 forward_extend()</h3>
+  <p>Extend (prefill) processes <strong>variable-length token sequences</strong>. It also checks if piecewise CUDA graphs can be used:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">forward_extend</span>(self, forward_batch, skip_attn_backend_init=<span class="kw">False</span>, pp_proxy_tensors=<span class="kw">None</span>):
+    can_run_graph = (
+        self.piecewise_cuda_graph_runner <span class="kw">is not None</span>
+        <span class="kw">and</span> self.piecewise_cuda_graph_runner.<span class="fn">can_run</span>(forward_batch)
+    )
+
+    <span class="kw">if</span> can_run_graph:
+        <span class="kw">return</span> (
+            self.piecewise_cuda_graph_runner.<span class="fn">replay</span>(forward_batch, **kwargs),
+            can_run_graph,
+        )
+
+    <span class="kw">if not</span> skip_attn_backend_init:
+        self.attn_backend.<span class="fn">init_forward_metadata</span>(forward_batch)
+
+    <span class="kw">return</span> (
+        self.model.<span class="fn">forward</span>(forward_batch.input_ids, forward_batch.positions, forward_batch, **kwargs),
+        can_run_graph,
+    )</code></pre>
+
+  <h3>2.4 forward_idle()</h3>
+  <p>In data-parallel attention, some workers may have no sequences. IDLE batches are padded for MLP sync:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">forward_idle</span>(self, forward_batch, pp_proxy_tensors=<span class="kw">None</span>):
+    <span class="cm"># Reinit metadata for padded IDLE batches</span>
+    <span class="kw">if</span> forward_batch.batch_size > <span class="num">0</span>:
+        self.attn_backend.<span class="fn">init_forward_metadata</span>(forward_batch)
+    <span class="kw">return</span> self.model.<span class="fn">forward</span>(forward_batch.input_ids, forward_batch.positions, forward_batch, **kwargs)</code></pre>
+
+  <div class="callout">
+    <strong>ForwardMode enum:</strong> EXTEND (prefill), DECODE (autoregressive), MIXED (chunked prefill),
+    IDLE (DP no-op), TARGET_VERIFY (spec decode verify), DRAFT_EXTEND (spec decode draft),
+    SPLIT_PREFILL (PD multiplexing), DLLM_EXTEND (draft LLM).
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 3: CUDA Graph Capture and Replay                     -->
+<!-- ============================================================ -->
+<section id="sec-cuda-graph">
+  <h2>3. CUDA Graph Capture and Replay</h2>
+  <p class="filepath">python/sglang/srt/model_executor/cuda_graph_runner.py</p>
+
+  <h3>3.1 CudaGraphRunner Constructor</h3>
+  <pre><code><span class="kw">class</span> <span class="cls">CudaGraphRunner</span>:
+    <span class="cm">"""Runs the forward pass with cuda graph and torch.compile."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model_runner: <span class="cls">ModelRunner</span>):
+        self.graphs = {}            <span class="cm"># bs -> captured CUDAGraph</span>
+        self.output_buffers = {}    <span class="cm"># bs -> LogitsProcessorOutput</span>
+
+        <span class="cm"># Determine capture forward mode</span>
+        self.capture_forward_mode = <span class="cls">ForwardMode</span>.DECODE
+        self.num_tokens_per_bs = <span class="num">1</span>
+        <span class="kw">if</span> model_runner.spec_algorithm.<span class="fn">is_eagle</span>():
+            self.capture_forward_mode = <span class="cls">ForwardMode</span>.TARGET_VERIFY
+            self.num_tokens_per_bs = server_args.speculative_num_draft_tokens
+
+        <span class="cm"># Batch sizes to capture</span>
+        self.capture_bs, self.compile_bs = <span class="fn">get_batch_sizes_to_capture</span>(model_runner)
+        <span class="cm"># e.g., [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, ...]</span></code></pre>
+
+  <h3>3.2 Batch Size Selection</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">get_batch_sizes_to_capture</span>(model_runner, num_tokens_per_bs=<span class="num">1</span>):
+    capture_bs = server_args.cuda_graph_bs
+    num_max_requests = model_runner.req_to_token_pool.size
+
+    <span class="cm"># Filter: bs * tokens_per_bs must be multiple of attn_tp_size</span>
+    mul_base = <span class="num">1</span>
+    <span class="kw">if</span> server_args.enable_two_batch_overlap:
+        mul_base *= <span class="num">2</span>
+    <span class="kw">if</span> <span class="fn">require_gathered_buffer</span>(server_args):
+        mul_base *= <span class="fn">get_attention_tp_size</span>()
+
+    capture_bs = [bs <span class="kw">for</span> bs <span class="kw">in</span> capture_bs <span class="kw">if</span> bs * num_tokens_per_bs % mul_base == <span class="num">0</span>]
+    capture_bs = [bs <span class="kw">for</span> bs <span class="kw">in</span> capture_bs <span class="kw">if</span> bs <= num_max_requests]
+    <span class="kw">return</span> <span class="fn">sorted</span>(<span class="fn">set</span>(capture_bs)), compile_bs</code></pre>
+
+  <h3>3.3 Capture: <code>capture_one_batch_size()</code></h3>
+  <p>For each batch size, a full forward pass is captured into a CUDA graph:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">capture_one_batch_size</span>(self, bs, forward, stream_idx=<span class="kw">None</span>):
+    buffers = self.buffers  <span class="cm"># DecodeInputBuffers -- preallocated GPU tensors</span>
+    graph = self.<span class="fn">_create_device_graph</span>()
+    num_tokens = bs * self.num_tokens_per_bs
+
+    <span class="cm"># Slice pre-allocated buffers to this batch size</span>
+    input_ids = buffers.input_ids[:num_tokens]
+    req_pool_indices = buffers.req_pool_indices[:bs]
+    seq_lens = buffers.seq_lens[:bs]
+    out_cache_loc = buffers.out_cache_loc[:num_tokens]
+    positions = buffers.positions[:num_tokens]
+
+    <span class="cm"># Create ForwardBatch for capture</span>
+    forward_batch = <span class="cls">ForwardBatch</span>(
+        forward_mode=self.capture_forward_mode,
+        batch_size=bs,
+        input_ids=input_ids,
+        req_pool_indices=req_pool_indices,
+        seq_lens=seq_lens,
+        out_cache_loc=out_cache_loc,
+        ...
+    )
+
+    <span class="cm"># Init attention backend for capture</span>
+    attn_backend.<span class="fn">init_forward_metadata_capture_cuda_graph</span>(
+        bs, num_tokens, req_pool_indices, seq_lens, encoder_lens,
+        forward_batch.forward_mode, forward_batch.spec_info,
+    )
+
+    <span class="cm"># Warm up (2 iterations) then capture</span>
+    <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(<span class="num">2</span>):
+        self.device_module.<span class="fn">synchronize</span>()
+        <span class="fn">run_once</span>()
+
+    <span class="cm"># Actual capture</span>
+    out = self.<span class="fn">_capture_graph</span>(graph, <span class="fn">get_global_graph_memory_pool</span>(), stream, run_once)
+    <span class="kw">return</span> graph, out</code></pre>
+
+  <h3>3.4 Replay: <code>replay()</code></h3>
+  <pre><code><span class="kw">def</span> <span class="fn">replay</span>(self, forward_batch, skip_attn_backend_init=<span class="kw">False</span>, pp_proxy_tensors=<span class="kw">None</span>):
+    <span class="kw">if not</span> skip_attn_backend_init:
+        self.<span class="fn">replay_prepare</span>(forward_batch, pp_proxy_tensors)
+
+    <span class="cm"># Find the right graph by batch size (bisect to nearest captured bs)</span>
+    graph_key = self.bs
+    self.graphs[graph_key].<span class="fn">replay</span>()
+    output = self.output_buffers[graph_key]
+
+    <span class="cm"># Slice output to actual batch size (remove padding)</span>
+    <span class="kw">return</span> <span class="cls">LogitsProcessorOutput</span>(
+        next_token_logits=output.next_token_logits[:self.raw_num_token],
+        hidden_states=output.hidden_states[:self.raw_num_token] <span class="kw">if</span> ... <span class="kw">else None</span>,
+    )</code></pre>
+
+  <h3>3.5 replay_prepare() -- Padding and Buffer Copy</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">replay_prepare</span>(self, forward_batch, pp_proxy_tensors=<span class="kw">None</span>):
+    raw_bs = forward_batch.batch_size
+    <span class="cm"># Round up to nearest captured batch size</span>
+    index = bisect.<span class="fn">bisect_left</span>(self.capture_bs, raw_bs)
+    bs = self.capture_bs[index]
+
+    <span class="cm"># Copy forward_batch tensors into pre-allocated buffers</span>
+    buffers.<span class="fn">populate_from_forward_batch</span>(
+        forward_batch=forward_batch,
+        raw_bs=raw_bs,
+        bs=bs,
+        seq_len_fill_value=self.seq_len_fill_value,
+        ...
+    )
+
+    <span class="cm"># Update attention backend metadata for replay</span>
+    attn_backend.<span class="fn">init_forward_metadata_replay_cuda_graph</span>(
+        bs, buffers.req_pool_indices[:bs], buffers.seq_lens[:bs], ...
+    )</code></pre>
+
+  <div class="callout warn">
+    <strong>Memory pool:</strong> All CUDA graph runners share a single <code>global_graph_memory_pool</code>
+    to avoid allocating duplicate GPU memory. The pool handle is created on first capture via
+    <code>torch.cuda.graph_pool_handle()</code>.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 4: ForwardBatch                                      -->
+<!-- ============================================================ -->
+<section id="sec-forward-batch">
+  <h2>4. ForwardBatch -- Packing Tensors for the GPU</h2>
+  <p class="filepath">python/sglang/srt/model_executor/forward_batch_info.py</p>
+
+  <p>The data flow is: <code>ScheduleBatch</code> (CPU scheduler) &rarr; <code>ModelWorkerBatch</code> (TP worker) &rarr; <code>ForwardBatch</code> (GPU model runner).</p>
+
+  <h3>4.1 ForwardBatch Fields</h3>
+  <pre><code><span class="dec">@dataclass</span>
+<span class="kw">class</span> <span class="cls">ForwardBatch</span>(<span class="cls">ForwardBatchDeepSeekMHAMixin</span>):
+    <span class="cm">"""Store all inputs of a forward pass."""</span>
+
+    <span class="cm"># Core fields</span>
+    forward_mode: <span class="cls">ForwardMode</span>        <span class="cm"># EXTEND, DECODE, MIXED, IDLE, TARGET_VERIFY, ...</span>
+    batch_size: <span class="cls">int</span>
+    input_ids: torch.<span class="cls">Tensor</span>         <span class="cm"># [num_tokens] -- flattened token IDs</span>
+    req_pool_indices: torch.<span class="cls">Tensor</span>  <span class="cm"># [batch_size] -- index into req_to_token_pool</span>
+    seq_lens: torch.<span class="cls">Tensor</span>          <span class="cm"># [batch_size] -- current sequence lengths</span>
+    out_cache_loc: torch.<span class="cls">Tensor</span>     <span class="cm"># [num_tokens] -- where to write KV cache</span>
+    seq_lens_sum: <span class="cls">int</span>               <span class="cm"># sum of all seq_lens</span>
+
+    <span class="cm"># Position encoding</span>
+    positions: torch.<span class="cls">Tensor</span>         <span class="cm"># [num_tokens] -- absolute positions</span>
+
+    <span class="cm"># Extend-specific (prefill)</span>
+    extend_num_tokens: <span class="cls">Optional</span>[<span class="cls">int</span>]           <span class="cm"># total tokens being extended</span>
+    extend_seq_lens: <span class="cls">Optional</span>[torch.<span class="cls">Tensor</span>]    <span class="cm"># [batch_size] -- new tokens per request</span>
+    extend_prefix_lens: <span class="cls">Optional</span>[torch.<span class="cls">Tensor</span>] <span class="cm"># [batch_size] -- cached prefix per request</span>
+    extend_start_loc: <span class="cls">Optional</span>[torch.<span class="cls">Tensor</span>]   <span class="cm"># [batch_size] -- start index in flattened</span>
+
+    <span class="cm"># Attention backend reference</span>
+    attn_backend: <span class="cls">Optional</span>[<span class="cls">AttentionBackend</span>]
+    req_to_token_pool: <span class="cls">Optional</span>[<span class="cls">ReqToTokenPool</span>]
+    token_to_kv_pool: <span class="cls">Optional</span>[<span class="cls">KVCache</span>]
+
+    <span class="cm"># Speculative decoding</span>
+    spec_info: <span class="cls">Optional</span>[<span class="cls">SpecInput</span>]
+    spec_algorithm: <span class="cls">Optional</span>[<span class="cls">SpeculativeAlgorithm</span>]
+
+    <span class="cm"># Sampling metadata</span>
+    sampling_info: <span class="cls">Optional</span>[<span class="cls">SamplingBatchInfo</span>]
+    temperature: torch.<span class="cls">Tensor</span>
+    top_p: torch.<span class="cls">Tensor</span></code></pre>
+
+  <h3>4.2 DecodeInputBuffers -- Pre-allocated GPU Buffers</h3>
+  <p>For CUDA graph capture, all input tensors must be pre-allocated. <code>DecodeInputBuffers</code> allocates
+  maximally-sized tensors once:</p>
+  <pre><code><span class="dec">@dataclass</span>
+<span class="kw">class</span> <span class="cls">DecodeInputBuffers</span>(<span class="cls">ForwardInputBuffers</span>):
+    input_ids: torch.<span class="cls">Tensor</span>          <span class="cm"># [max_num_token]</span>
+    req_pool_indices: torch.<span class="cls">Tensor</span>  <span class="cm"># [max_bs]</span>
+    seq_lens: torch.<span class="cls">Tensor</span>          <span class="cm"># [max_bs]</span>
+    out_cache_loc: torch.<span class="cls">Tensor</span>     <span class="cm"># [max_num_token]</span>
+    positions: torch.<span class="cls">Tensor</span>         <span class="cm"># [max_num_token]</span>
+    next_token_logits_buffer: torch.<span class="cls">Tensor</span>  <span class="cm"># [max_num_token, vocab_size]</span>
+
+    <span class="dec">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">create</span>(cls, *, device, max_bs, max_num_token, hidden_size, vocab_size, dtype, ...):
+        <span class="kw">with</span> torch.<span class="fn">device</span>(device):
+            input_ids = torch.<span class="fn">zeros</span>((max_num_token,), dtype=torch.int64)
+            req_pool_indices = torch.<span class="fn">zeros</span>((max_bs,), dtype=torch.int64)
+            seq_lens = torch.<span class="fn">full</span>((max_bs,), seq_len_fill_value, dtype=torch.int32)
+            ...</code></pre>
+
+  <h3>4.3 populate_from_forward_batch() -- Efficient Bulk Copy</h3>
+  <p>During CUDA graph replay, data is copied from <code>ForwardBatch</code> into these buffers using
+  a batched <code>torch._foreach_copy_</code> grouped by dtype pairs:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">_grouped_foreach_copy_</span>(dsts, srcs):
+    <span class="cm">"""Call torch._foreach_copy_ grouped by (dst_dtype, src_dtype) pairs."""</span>
+    groups = {}
+    <span class="kw">for</span> dst, src <span class="kw">in</span> <span class="fn">zip</span>(dsts, srcs):
+        key = (dst.dtype, src.dtype)
+        groups.<span class="fn">setdefault</span>(key, ([], []))
+        groups[key][<span class="num">0</span>].<span class="fn">append</span>(dst)
+        groups[key][<span class="num">1</span>].<span class="fn">append</span>(src)
+    <span class="kw">for</span> group_dsts, group_srcs <span class="kw">in</span> groups.<span class="fn">values</span>():
+        torch.<span class="fn">_foreach_copy_</span>(group_dsts, group_srcs)</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 5: FlashInfer Backend                                -->
+<!-- ============================================================ -->
+<section id="sec-flashinfer">
+  <h2>5. FlashInfer Backend</h2>
+  <p class="filepath">python/sglang/srt/layers/attention/flashinfer_backend.py</p>
+
+  <h3>5.1 Architecture</h3>
+  <p>FlashInfer uses <strong>paged KV cache</strong> with plan/execute separation. It wraps three types of wrappers:</p>
+  <ul>
+    <li><code>BatchPrefillWithRaggedKVCacheWrapper</code> -- for extend when all prefix lengths are zero (new sequences)</li>
+    <li><code>BatchPrefillWithPagedKVCacheWrapper</code> -- for extend with cached prefix</li>
+    <li><code>BatchDecodeWithPagedKVCacheWrapper</code> -- for decode (one token per request)</li>
+  </ul>
+
+  <h3>5.2 Constructor</h3>
+  <pre><code><span class="kw">class</span> <span class="cls">FlashInferAttnBackend</span>(<span class="cls">AttentionBackend</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model_runner, skip_prefill=<span class="kw">False</span>, ...):
+        self.decode_use_tensor_cores = <span class="fn">should_use_tensor_core</span>(
+            kv_cache_dtype=model_runner.kv_cache_dtype,
+            num_attention_heads=...,
+            num_kv_heads=...,
+        )
+        self.max_context_len = model_runner.model_config.context_len
+
+        <span class="cm"># Allocate shared workspace buffer (default 256MB, up to 2GB for deterministic)</span>
+        <span class="kw">global</span> global_workspace_buffer
+        <span class="kw">if</span> global_workspace_buffer <span class="kw">is None</span>:
+            global_workspace_buffer = torch.<span class="fn">empty</span>(
+                envs.SGLANG_FLASHINFER_WORKSPACE_SIZE.<span class="fn">get</span>(),
+                dtype=torch.uint8, device=model_runner.device,
+            )
+        self.workspace_buffer = global_workspace_buffer
+
+        <span class="cm"># Allocate kv_indptr for tracking page boundaries</span>
+        max_bs = model_runner.req_to_token_pool.size
+        self.kv_indptr = [
+            torch.<span class="fn">zeros</span>((max_bs + <span class="num">1</span>,), dtype=torch.int32, device=model_runner.device)
+            <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(self.num_wrappers)
+        ]
+
+        <span class="cm"># Create wrappers</span>
+        self.prefill_wrapper_ragged = <span class="cls">BatchPrefillWithRaggedKVCacheWrapper</span>(
+            self.workspace_buffer, <span class="str">"NHD"</span>, backend=fmha_backend
+        )
+        <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(self.num_wrappers):
+            self.prefill_wrappers_paged.<span class="fn">append</span>(
+                <span class="cls">BatchPrefillWithPagedKVCacheWrapper</span>(self.workspace_buffer, <span class="str">"NHD"</span>)
+            )
+            self.decode_wrappers.<span class="fn">append</span>(
+                <span class="cls">BatchDecodeWithPagedKVCacheWrapper</span>(
+                    self.workspace_buffer, <span class="str">"NHD"</span>,
+                    use_tensor_cores=self.decode_use_tensor_cores,
+                )
+            )</code></pre>
+
+  <h3>5.3 init_forward_metadata()</h3>
+  <p>This method dispatches based on the forward mode, updating wrapper indices:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">init_forward_metadata</span>(self, forward_batch):
+    <span class="kw">if</span> forward_batch.forward_mode.<span class="fn">is_decode_or_idle</span>():
+        self.indices_updater_decode.<span class="fn">update</span>(
+            forward_batch.req_pool_indices,
+            forward_batch.seq_lens,
+            forward_batch.seq_lens_cpu,
+            forward_batch.seq_lens_sum,
+            decode_wrappers=self.decode_wrappers,
+            ...
+        )
+        self.forward_metadata = <span class="cls">DecodeMetadata</span>(self.decode_wrappers)
+    <span class="kw">else</span>:  <span class="cm"># extend</span>
+        use_ragged = <span class="kw">not</span> self.enable_deterministic <span class="kw">and not</span> <span class="fn">is_in_piecewise_cuda_graph</span>()
+        extend_no_prefix = <span class="kw">not</span> <span class="fn">any</span>(forward_batch.extend_prefix_lens_cpu)
+
+        self.indices_updater_prefill.<span class="fn">update</span>(
+            forward_batch.req_pool_indices,
+            forward_batch.seq_lens,
+            forward_batch.seq_lens_cpu,
+            forward_batch.seq_lens_sum,
+            prefix_lens,
+            prefill_wrappers=self.prefill_wrappers_paged,
+            use_ragged=use_ragged,
+            ...
+        )
+        self.forward_metadata = <span class="cls">PrefillMetadata</span>(
+            self.prefill_wrappers_paged, use_ragged, extend_no_prefix
+        )</code></pre>
+
+  <h3>5.4 Wrapper Dispatch (Sliding Window / Cross Attention)</h3>
+  <p>FlashInfer supports dual wrappers for hybrid attention models:</p>
+  <pre><code><span class="kw">if</span> model_runner.sliding_window_size <span class="kw">is not None</span>:
+    self.num_wrappers = <span class="num">2</span>
+    self.dispatch_reason = <span class="cls">WrapperDispatch</span>.SLIDING_WINDOW
+<span class="kw">elif</span> model_runner.model_config.is_encoder_decoder:
+    self.num_wrappers = <span class="num">2</span>
+    self.dispatch_reason = <span class="cls">WrapperDispatch</span>.CROSS_ATTENTION
+<span class="kw">else</span>:
+    self.num_wrappers = <span class="num">1</span></code></pre>
+
+  <h3>5.5 CUDA Graph State for FlashInfer</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">init_cuda_graph_state</span>(self, max_bs, max_num_tokens):
+    <span class="cm"># Pre-allocate KV indices buffer for CUDA graph</span>
+    cuda_graph_kv_indices = torch.<span class="fn">zeros</span>(
+        (max_num_tokens * self.max_context_len,),
+        dtype=torch.int32, device=<span class="str">"cuda"</span>,
+    )
+    self.cuda_graph_kv_indices = [cuda_graph_kv_indices] + [
+        cuda_graph_kv_indices.<span class="fn">clone</span>() <span class="kw">for</span> _ <span class="kw">in</span> <span class="fn">range</span>(self.num_wrappers - <span class="num">1</span>)
+    ]</code></pre>
+
+  <div class="callout key">
+    <strong>Performance note:</strong> For Qwen2/Qwen3 models, FlashInfer workspace is automatically
+    increased to 512MB. For deterministic inference, it goes up to 2GB with tensor-core decode forced on.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 6: FlashAttention 3/4 Backend                        -->
+<!-- ============================================================ -->
+<section id="sec-flashattention">
+  <h2>6. FlashAttention 3/4 Backend</h2>
+  <p class="filepath">python/sglang/srt/layers/attention/flashattention_backend.py</p>
+
+  <h3>6.1 Key Differences from FlashInfer</h3>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="badge badge-blue">FlashInfer</span> Plan/Execute</h4>
+      <ul>
+        <li>Uses FlashInfer library wrappers</li>
+        <li>Plan phase: builds page tables, kv_indptr on GPU</li>
+        <li>Supports ragged KV for zero-prefix extends</li>
+        <li>Native paged KV cache integration</li>
+        <li>Workspace buffer shared across all wrappers</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-purple">FlashAttention 3/4</span> Direct Kernel Calls</h4>
+      <ul>
+        <li>Uses <code>sgl_kernel.flash_attn</code> (FA3) or <code>flash_attention_v4</code> (FA4)</li>
+        <li>Page table based -- builds <code>block_table</code> tensors</li>
+        <li>Native local attention via virtual batch splitting</li>
+        <li>SM80+ required for FA3; SM100+ for FA4</li>
+        <li>Metadata stored in <code>FlashAttentionMetadata</code> dataclass</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>6.2 FlashAttentionBackend Constructor</h3>
+  <pre><code><span class="kw">class</span> <span class="cls">FlashAttentionBackend</span>(<span class="cls">AttentionBackend</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, model_runner, skip_prefill=<span class="kw">False</span>,
+                 speculative_step_id=<span class="num">0</span>, topk=<span class="num">0</span>,
+                 speculative_num_steps=<span class="num">0</span>, fa_impl_ver=<span class="num">3</span>):
+        self.forward_metadata: <span class="cls">FlashAttentionMetadata</span> = <span class="kw">None</span>
+        self.max_context_len = model_runner.model_config.context_len
+        self.decode_cuda_graph_metadata = {}
+        <span class="cm"># fa_impl_ver selects between FA3 and FA4 kernel implementations</span></code></pre>
+
+  <h3>6.3 FlashAttentionMetadata</h3>
+  <pre><code><span class="dec">@dataclass</span>
+<span class="kw">class</span> <span class="cls">FlashAttentionMetadata</span>:
+    cache_seqlens_int32: torch.<span class="cls">Tensor</span>   <span class="cm"># [batch_size] -- KV cache seq lens</span>
+    max_seq_len_q: <span class="cls">int</span>                  <span class="cm"># max query length</span>
+    max_seq_len_k: <span class="cls">int</span>                  <span class="cm"># max key length</span>
+    cu_seqlens_q: torch.<span class="cls">Tensor</span>         <span class="cm"># cumulative query lengths</span>
+    cu_seqlens_k: torch.<span class="cls">Tensor</span>         <span class="cm"># cumulative key lengths</span>
+    window_size: <span class="cls">tuple</span>                  <span class="cm"># sliding window (-1, -1) for full</span>
+    page_table: torch.<span class="cls">Tensor</span>           <span class="cm"># [batch_size, max_pages] -- page indices</span>
+
+    <span class="cm"># Local attention metadata (for chunked models like Qwen-1M)</span>
+    <span class="dec">@dataclass</span>
+    <span class="kw">class</span> <span class="cls">LocalAttentionMetadata</span>:
+        local_query_start_loc: torch.<span class="cls">Tensor</span>
+        local_seqused_k: torch.<span class="cls">Tensor</span>
+        local_block_table: torch.<span class="cls">Tensor</span>
+        local_max_query_len: <span class="cls">int</span>
+        local_max_seq_len: <span class="cls">int</span></code></pre>
+
+  <h3>6.4 Local Attention (Virtual Batch Splitting)</h3>
+  <p>FlashAttention implements local attention by breaking sequences into "virtual batches" aligned to <code>attn_chunk_size</code>:</p>
+  <pre><code><span class="kw">def</span> <span class="fn">make_local_attention_virtual_batches</span>(
+    attn_chunk_size, query_start_loc_np, seq_lens_np, block_table, page_size
+):
+    <span class="cm"># Example: chunk_size=4, q_seqlens=[4,10,5], k_seqlens=[6,17,9]</span>
+    <span class="cm"># Result:  seqlens_q_local=[2,2,1,4,4,1,4,1]  (8 virtual batches)</span>
+    q_tokens_in_first_block = np.<span class="fn">minimum</span>(
+        attn_chunk_size - ((seq_lens_np - q_seqlens) % attn_chunk_size),
+        q_seqlens
+    )
+    local_blocks = <span class="num">1</span> + <span class="fn">cdiv</span>(q_seqlens - q_tokens_in_first_block, attn_chunk_size)
+    ...</code></pre>
+
+  <div class="callout">
+    <strong>FA3 vs FA4:</strong> The backend selects the kernel implementation via <code>fa_impl_ver</code> parameter.
+    FA3 uses <code>sgl_kernel.flash_attn.flash_attn_varlen_func</code>, while FA4 uses
+    <code>sglang.jit_kernel.flash_attention_v4.flash_attn_varlen_func</code>. Both share the same
+    <code>FlashAttentionBackend</code> class and metadata structure.
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 7: Sampling                                          -->
+<!-- ============================================================ -->
+<section id="sec-sampling">
+  <h2>7. Sampling -- Temperature, Top-p, Top-k, Min-p</h2>
+  <p class="filepath">python/sglang/srt/layers/sampler.py</p>
+
+  <h3>7.1 Sampler Architecture</h3>
+  <pre><code><span class="kw">class</span> <span class="cls">Sampler</span>(nn.<span class="cls">Module</span>):
+    <span class="kw">def</span> <span class="fn">forward</span>(self, logits_output, sampling_info, return_logprob, top_logprobs_nums, ...):
+        logits = logits_output.next_token_logits
+
+        <span class="cm"># 1. Preprocess: custom logit processors + NaN detection</span>
+        logits = self.<span class="fn">_preprocess_logits</span>(logits, sampling_info)
+
+        <span class="cm"># 2. Greedy fast path</span>
+        <span class="kw">if</span> sampling_info.is_all_greedy:
+            batch_next_token_ids = torch.<span class="fn">argmax</span>(logits, <span class="num">-1</span>)
+
+        <span class="cm"># 3. Standard sampling path</span>
+        <span class="kw">else</span>:
+            <span class="cm"># Apply temperature scaling (in-place division)</span>
+            logits.<span class="fn">div_</span>(sampling_info.temperatures)
+
+            <span class="cm"># Softmax to get probabilities (in-place for memory savings)</span>
+            logits[:] = torch.<span class="fn">softmax</span>(logits, dim=<span class="num">-1</span>)
+            probs = logits
+
+            <span class="cm"># Sample from probabilities</span>
+            batch_next_token_ids = self.<span class="fn">_sample_from_probs</span>(
+                probs, sampling_info, positions, simple_sampling_case
+            )</code></pre>
+
+  <h3>7.2 FlashInfer Sampling Backend</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">_sample_from_probs</span>(self, probs, sampling_info, positions, simple_sampling_case):
+    <span class="kw">if</span> simple_sampling_case:
+        <span class="cm"># Direct multinomial (no top-k/top-p/min-p)</span>
+        batch_next_token_ids = <span class="fn">sampling_from_probs_torch</span>(
+            probs, sampling_seed=sampling_info.sampling_seed, positions=positions
+        )
+    <span class="kw">else</span>:
+        backend = <span class="fn">get_global_server_args</span>().sampling_backend
+        <span class="kw">if</span> backend == <span class="str">"flashinfer"</span>:
+            <span class="kw">if</span> sampling_info.need_min_p_sampling:
+                <span class="cm"># Top-k renorm -> Top-p renorm -> Min-p sampling</span>
+                probs = <span class="fn">top_k_renorm_prob</span>(probs, sampling_info.top_ks)
+                probs = <span class="fn">top_p_renorm_prob</span>(probs, sampling_info.top_ps)
+                batch_next_token_ids = <span class="fn">min_p_sampling_from_probs</span>(probs, sampling_info.min_ps)
+            <span class="kw">else</span>:
+                <span class="cm"># Joint top-k + top-p sampling</span>
+                batch_next_token_ids = <span class="fn">top_k_top_p_sampling_from_probs</span>(
+                    probs.<span class="fn">contiguous</span>(),
+                    sampling_info.top_ks,
+                    sampling_info.top_ps,
+                    filter_apply_order=<span class="str">"joint"</span>,
+                )
+        <span class="kw">elif</span> backend == <span class="str">"pytorch"</span>:
+            <span class="cm"># Fallback with torch native operations</span>
+            batch_next_token_ids = <span class="fn">top_k_top_p_min_p_sampling_from_probs_torch</span>(
+                probs, sampling_info.top_ks, sampling_info.top_ps, sampling_info.min_ps, ...
+            )</code></pre>
+
+  <h3>7.3 Deterministic RL On-Policy Sampling</h3>
+  <pre><code><span class="cm"># For RL training: sample from log-softmax using Gumbel trick</span>
+<span class="kw">def</span> <span class="fn">_sample_from_logprobs</span>(self, logprobs, sampling_info, positions):
+    <span class="cm">"""Deterministic sampling with seeded randomness."""</span>
+    <span class="kw">assert</span> sampling_info.sampling_seed <span class="kw">is not None</span>
+    sampled_index = <span class="fn">multinomial_with_seed</span>(logprobs, sampling_info.sampling_seed, positions)
+    <span class="kw">return</span> sampled_index.<span class="fn">view</span>(<span class="num">-1</span>).<span class="fn">to</span>(torch.int32)</code></pre>
+
+  <h3>7.4 TP Synchronization</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">_sync_token_ids_across_tp</span>(self, batch_next_token_ids, sampling_info):
+    <span class="cm"># By default, SGLang skips this sync for performance.</span>
+    <span class="cm"># Enable via SYNC_TOKEN_IDS_ACROSS_TP env var or when grammars are used.</span>
+    <span class="kw">if</span> SYNC_TOKEN_IDS_ACROSS_TP <span class="kw">or</span> sampling_info.grammars:
+        torch.distributed.<span class="fn">all_reduce</span>(
+            batch_next_token_ids,
+            op=dist.ReduceOp.MIN,
+            group=self.tp_sync_group,
+        )</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 8: EAGLE Speculative Decoding                        -->
+<!-- ============================================================ -->
+<section id="sec-eagle">
+  <h2>8. EAGLE Speculative Decoding</h2>
+  <p class="filepath">python/sglang/srt/speculative/eagle_worker.py</p>
+
+  <h3>8.1 EAGLEWorker Structure</h3>
+  <p><code>EAGLEWorker</code> extends <code>TpModelWorker</code> and holds both a <strong>draft model</strong>
+  (lightweight EAGLE head) and a reference to the <strong>target model</strong>:</p>
+
+  <pre><code><span class="kw">class</span> <span class="cls">EAGLEWorker</span>(<span class="cls">TpModelWorker</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, server_args, gpu_id, tp_rank, dp_rank, ..., target_worker):
+        self.topk = server_args.speculative_eagle_topk
+        self.speculative_num_steps = server_args.speculative_num_steps
+        self.speculative_num_draft_tokens = server_args.speculative_num_draft_tokens
+        self.target_worker = target_worker
+
+        <span class="cm"># Share req_to_token_pool and token_to_kv_pool_allocator with target</span>
+        self.req_to_token_pool, self.token_to_kv_pool_allocator = (
+            target_worker.<span class="fn">get_memory_pool</span>()
+        )
+
+        <span class="cm"># Init draft model as a TpModelWorker (is_draft_worker=True)</span>
+        <span class="kw">super</span>().<span class="fn">__init__</span>(
+            server_args=server_args, ..., is_draft_worker=<span class="kw">True</span>,
+            req_to_token_pool=self.req_to_token_pool,
+            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+        )
+
+        <span class="cm"># Share embeddings and lm_head from target model</span>
+        embed, head = self.target_worker.model_runner.model.<span class="fn">get_embed_and_head</span>()
+        self.draft_model_runner.model.<span class="fn">set_embed_and_head</span>(embed, head)</code></pre>
+
+  <h3>8.2 The forward_batch_generation() Entry Point</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">forward_batch_generation</span>(self, batch):
+    <span class="kw">if</span> batch.forward_mode.<span class="fn">is_extend</span>():
+        <span class="cm"># PREFILL: target extend -> draft extend (fill draft KV cache)</span>
+        logits_output, next_token_ids, seq_lens_cpu, can_run_graph = (
+            self.<span class="fn">forward_target_extend</span>(batch)
+        )
+        self.<span class="fn">forward_draft_extend</span>(batch, logits_output.hidden_states, next_token_ids, ...)
+        <span class="kw">return</span> <span class="cls">GenerationBatchResult</span>(logits_output=logits_output, ...)
+
+    <span class="kw">else</span>:
+        <span class="cm"># DECODE: draft multi-step -> target verify -> accept/reject</span>
+        spec_info = self.<span class="fn">draft</span>(batch)                  <span class="cm"># draft multi-step forward</span>
+        logits_output, verify_output, _, can_run_graph = (
+            self.<span class="fn">verify</span>(batch, spec_info)               <span class="cm"># target verify</span>
+        )
+        self.<span class="fn">forward_draft_extend_after_decode</span>(batch)  <span class="cm"># update draft state</span>
+        <span class="kw">return</span> <span class="cls">GenerationBatchResult</span>(
+            next_token_ids=verify_output.verified_id,
+            num_accepted_tokens=<span class="fn">sum</span>(verify_output.accept_length_per_req_cpu),
+        )</code></pre>
+
+  <h3>8.3 Draft Multi-Step Forward</h3>
+  <pre><code><span class="kw">def</span> <span class="fn">draft_forward</span>(self, forward_batch):
+    spec_info = forward_batch.spec_info
+    out_cache_loc = forward_batch.out_cache_loc
+    topk_p, topk_index, hidden_states = spec_info.topk_p, spec_info.topk_index, spec_info.hidden_states
+
+    score_list, token_list, parents_list = [], [], []
+
+    <span class="cm"># Forward multiple speculative steps</span>
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(self.speculative_num_steps):
+        <span class="cm"># Select top-k tokens from current step</span>
+        input_ids, hidden_states, scores, tree_info = <span class="fn">select_top_k_tokens</span>(
+            i, topk_p, topk_index, hidden_states, scores, self.topk
+        )
+        score_list.<span class="fn">append</span>(tree_info[<span class="num">0</span>])
+        token_list.<span class="fn">append</span>(tree_info[<span class="num">1</span>])
+        parents_list.<span class="fn">append</span>(tree_info[<span class="num">2</span>])
+
+        <span class="kw">if</span> i == self.speculative_num_steps - <span class="num">1</span>:
+            <span class="kw">break</span>
+
+        <span class="cm"># Run draft model forward</span>
+        forward_batch.input_ids = input_ids
+        forward_batch.out_cache_loc = out_cache_loc[i]
+        forward_batch.positions.<span class="fn">add_</span>(<span class="num">1</span>)
+        forward_batch.attn_backend = self.draft_attn_backend.attn_backends[i]
+
+        logits_output = self.draft_model_runner.<span class="fn">forward</span>(forward_batch, skip_attn_backend_init=<span class="kw">True</span>)
+        probs = torch.<span class="fn">softmax</span>(logits_output.next_token_logits, dim=<span class="num">-1</span>)
+        topk_p, topk_index = <span class="fn">fast_topk</span>(probs, self.topk, dim=<span class="num">-1</span>)
+        hidden_states = logits_output.hidden_states
+
+    <span class="cm"># Organize results into tree structure</span>
+    parent_list, top_scores_index, draft_tokens = <span class="fn">organize_draft_results</span>(
+        score_list, token_list, parents_list, self.speculative_num_draft_tokens
+    )
+    <span class="kw">return</span> parent_list, top_scores_index, draft_tokens</code></pre>
+
+  <h3>8.4 Tree Construction and Verification</h3>
+  <pre><code><span class="cm"># After draft, build the verification tree</span>
+(tree_mask, position, retrive_index, retrive_next_token,
+ retrive_next_sibling, draft_tokens) = <span class="fn">build_tree_kernel_efficient</span>(
+    spec_info.verified_id, parent_list, top_scores_index, draft_tokens,
+    batch.seq_lens, batch.seq_lens_sum,
+    self.topk, self.speculative_num_steps, self.speculative_num_draft_tokens,
+)
+
+<span class="cm"># Verify: run target model on the tree</span>
+<span class="kw">def</span> <span class="fn">verify</span>(self, batch, spec_info):
+    spec_info.<span class="fn">prepare_for_verify</span>(batch, self.page_size)
+    batch.forward_mode = <span class="cls">ForwardMode</span>.TARGET_VERIFY
+    batch.spec_info = spec_info
+
+    <span class="cm"># Forward with target model</span>
+    batch_result = self.target_worker.<span class="fn">forward_batch_generation</span>(model_worker_batch)
+    logits_output = batch_result.logits_output
+
+    <span class="cm"># Verify: compare draft predictions with target logits</span>
+    res = spec_info.<span class="fn">verify</span>(batch, logits_output, self.token_to_kv_pool_allocator, ...)
+
+    <span class="cm"># Pick accepted indices</span>
+    logits_output.next_token_logits = logits_output.next_token_logits[res.accepted_indices]
+    logits_output.hidden_states = logits_output.hidden_states[res.accepted_indices]
+
+    <span class="cm"># Update batch for next draft iteration</span>
+    batch.forward_mode = <span class="cls">ForwardMode</span>.DECODE
+    batch.spec_info = res.draft_input
+    <span class="kw">return</span> logits_output, res, model_worker_batch, can_run_cuda_graph</code></pre>
+
+  <div class="callout key">
+    <strong>EAGLE3 vs EAGLE:</strong> EAGLE3 models have their own <code>hot_token_id</code> mapping built into the draft model config.
+    They may also use <code>use_aux_hidden_state</code> to capture auxiliary hidden states from specific target model layers
+    (configured via <code>eagle_aux_hidden_state_layer_ids</code>).
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 9: MoE Kernel Structure                              -->
+<!-- ============================================================ -->
+<section id="sec-moe">
+  <h2>9. MoE Kernel Structure and Expert Parallelism</h2>
+  <p class="filepath">python/sglang/srt/layers/moe/fused_moe_triton/</p>
+
+  <h3>9.1 Directory Structure</h3>
+  <pre><code>fused_moe_triton/
+  __init__.py
+  configs/                       <span class="cm"># Kernel config tuning files per model</span>
+  fused_moe.py                   <span class="cm"># Main fused MoE dispatch logic</span>
+  fused_moe_triton_config.py     <span class="cm"># Config dtype selection and optimal config lookup</span>
+  fused_moe_triton_kernels.py    <span class="cm"># Triton kernel definitions (@triton.jit)</span>
+  layer.py                       <span class="cm"># FusedMoE nn.Module</span>
+  moe_align_block_size.py        <span class="cm"># Token-to-expert alignment for blocked execution</span>
+  fused_marlin_moe.py            <span class="cm"># Marlin-quantized MoE dispatch</span>
+  triton_kernels_moe.py          <span class="cm"># Additional Triton MoE kernels</span></code></pre>
+
+  <h3>9.2 Core fused_moe.py Entry Point</h3>
+  <pre><code><span class="cm"># Register as custom op for torch.compile compatibility</span>
+<span class="dec">@register_custom_op</span>(mutates_args=[<span class="str">"hidden_states"</span>])
+<span class="kw">def</span> <span class="fn">inplace_fused_experts</span>(
+    hidden_states: torch.<span class="cls">Tensor</span>,
+    w1: torch.<span class="cls">Tensor</span>,            <span class="cm"># gate/up projection weights [num_experts, 2*intermediate, hidden]</span>
+    w2: torch.<span class="cls">Tensor</span>,            <span class="cm"># down projection weights [num_experts, hidden, intermediate]</span>
+    topk_weights: torch.<span class="cls">Tensor</span>,  <span class="cm"># [num_tokens, topk] -- routing weights</span>
+    topk_ids: torch.<span class="cls">Tensor</span>,      <span class="cm"># [num_tokens, topk] -- selected expert IDs</span>
+    activation: <span class="cls">str</span> = <span class="str">"silu"</span>,
+    is_gated: <span class="cls">bool</span> = <span class="kw">True</span>,
+    use_fp8_w8a8: <span class="cls">bool</span> = <span class="kw">False</span>,
+    use_int8_w8a8: <span class="cls">bool</span> = <span class="kw">False</span>,
+    w1_scale: <span class="cls">Optional</span>[torch.<span class="cls">Tensor</span>] = <span class="kw">None</span>,
+    w2_scale: <span class="cls">Optional</span>[torch.<span class="cls">Tensor</span>] = <span class="kw">None</span>,
+    ...
+):</code></pre>
+
+  <h3>9.3 Triton Kernel Highlights</h3>
+  <pre><code><span class="cm"># fused_moe_triton_kernels.py</span>
+<span class="cm"># SM90 optimization: swap_ab for better performance with small M, large N</span>
+<span class="dec">@functools.lru_cache</span>(maxsize=<span class="num">8</span>)
+<span class="kw">def</span> <span class="fn">should_enable_swap_ab</span>(BLOCK_SIZE_M, BLOCK_SIZE_N):
+    <span class="kw">return</span> <span class="fn">is_sm90_supported</span>() <span class="kw">and</span> BLOCK_SIZE_M < <span class="num">64</span> <span class="kw">and</span> BLOCK_SIZE_N >= <span class="num">64</span>
+
+<span class="cm"># Activation fused kernels from sgl_kernel:</span>
+<span class="cm"># - silu_and_mul    (SiLU gating)</span>
+<span class="cm"># - gelu_and_mul    (GELU gating)</span>
+<span class="cm"># - moe_sum_reduce  (reduce expert outputs)</span>
+
+<span class="cm"># Quantization support:</span>
+<span class="cm"># - per_token_group_quant_fp8   (FP8 token-group quantization)</span>
+<span class="cm"># - per_token_group_quant_int8  (INT8 token-group quantization)</span>
+<span class="cm"># - scaled_fp8_quant            (scaled FP8 quantization)</span></code></pre>
+
+  <h3>9.4 Expert Parallelism (EP)</h3>
+  <p>SGLang supports multiple expert parallelism strategies:</p>
+  <ul>
+    <li><strong>Expert Parallelism (EP):</strong> Experts are sharded across GPUs. Configured via <code>--ep-size</code>.</li>
+    <li><strong>Expert Load Balancing (EPLB):</strong> Dynamic expert migration via <code>EPLBManager</code>. Enabled via <code>--enable-eplb</code>.</li>
+    <li><strong>Elastic EP:</strong> Fault-tolerant expert parallelism with <code>ElasticEPStateManager</code>.</li>
+    <li><strong>DeepEP:</strong> All-to-all communication backend for expert dispatching with <code>DeepEPBuffer</code>.</li>
+    <li><strong>MoE-DP:</strong> Data parallelism within MoE layers via <code>--moe-dp-size</code>.</li>
+  </ul>
+
+  <pre><code><span class="cm"># From model_runner.py -- EPLB rebalance on rank faults</span>
+elastic_ep_state = <span class="cls">ElasticEPStateManager</span>.<span class="fn">instance</span>()
+<span class="kw">if</span> elastic_ep_state <span class="kw">is not None and not</span> elastic_ep_state.<span class="fn">is_active_equal_last</span>():
+    elastic_ep_state.<span class="fn">snapshot_active_to_last</span>()
+    elastic_ep_state.<span class="fn">sync_active_to_cpu</span>()
+    gen = self.eplb_manager.<span class="fn">rebalance</span>()
+    <span class="kw">while True</span>:
+        <span class="kw">try</span>: <span class="fn">next</span>(gen)
+        <span class="kw">except</span> <span class="cls">StopIteration</span>: <span class="kw">break</span></code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 10: Architecture Diagrams                            -->
+<!-- ============================================================ -->
+<section id="sec-diagrams">
+  <h2>10. Architecture Diagrams</h2>
+
+  <!-- Diagram (a): Forward Pass Pipeline -->
+  <h3>Diagram (a): Forward Pass Pipeline</h3>
+  <div class="diagram-wrap">
+    <svg width="980" height="520" viewBox="0 0 980 520" xmlns="http://www.w3.org/2000/svg">
+      <!-- Background -->
+      <rect width="980" height="520" fill="#161b22" rx="12"/>
+
+      <!-- Title -->
+      <text x="490" y="32" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">SGLang Forward Pass Pipeline</text>
+
+      <!-- ScheduleBatch -->
+      <rect x="30" y="60" width="140" height="48" rx="8" fill="#1f6feb" fill-opacity="0.2" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="100" y="88" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">ScheduleBatch</text>
+      <text x="100" y="100" text-anchor="middle" fill="#8b949e" font-size="9">(CPU Scheduler)</text>
+
+      <!-- Arrow -->
+      <line x1="170" y1="84" x2="210" y2="84" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <!-- ModelWorkerBatch -->
+      <rect x="210" y="60" width="150" height="48" rx="8" fill="#238636" fill-opacity="0.2" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="285" y="88" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">ModelWorkerBatch</text>
+      <text x="285" y="100" text-anchor="middle" fill="#8b949e" font-size="9">(TP Worker)</text>
+
+      <!-- Arrow -->
+      <line x1="360" y1="84" x2="400" y2="84" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <!-- ForwardBatch -->
+      <rect x="400" y="60" width="150" height="48" rx="8" fill="#8957e5" fill-opacity="0.2" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="475" y="88" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">ForwardBatch</text>
+      <text x="475" y="100" text-anchor="middle" fill="#8b949e" font-size="9">(GPU Tensors)</text>
+
+      <!-- Arrow down -->
+      <line x1="475" y1="108" x2="475" y2="140" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <!-- _forward_raw dispatcher -->
+      <rect x="370" y="140" width="210" height="40" rx="8" fill="#d29922" fill-opacity="0.2" stroke="#d29922" stroke-width="1.5"/>
+      <text x="475" y="164" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">_forward_raw() dispatcher</text>
+
+      <!-- Branches -->
+      <!-- CUDA Graph branch -->
+      <line x1="410" y1="180" x2="140" y2="220" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+      <rect x="40" y="220" width="200" height="44" rx="8" fill="#238636" fill-opacity="0.15" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="140" y="240" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">CUDA Graph Replay</text>
+      <text x="140" y="254" text-anchor="middle" fill="#8b949e" font-size="9">graph_runner.replay()</text>
+
+      <!-- Decode branch -->
+      <line x1="440" y1="180" x2="370" y2="220" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+      <rect x="270" y="220" width="200" height="44" rx="8" fill="#1f6feb" fill-opacity="0.15" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="370" y="240" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">forward_decode()</text>
+      <text x="370" y="254" text-anchor="middle" fill="#8b949e" font-size="9">1 token/req, hot path</text>
+
+      <!-- Extend branch -->
+      <line x1="510" y1="180" x2="600" y2="220" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+      <rect x="500" y="220" width="200" height="44" rx="8" fill="#8957e5" fill-opacity="0.15" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="600" y="240" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">forward_extend()</text>
+      <text x="600" y="254" text-anchor="middle" fill="#8b949e" font-size="9">prefill, var-length</text>
+
+      <!-- Idle branch -->
+      <line x1="540" y1="180" x2="830" y2="220" stroke="#f85149" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+      <rect x="730" y="220" width="200" height="44" rx="8" fill="#f85149" fill-opacity="0.15" stroke="#f85149" stroke-width="1.5"/>
+      <text x="830" y="240" text-anchor="middle" fill="#f85149" font-size="11" font-weight="600">forward_idle()</text>
+      <text x="830" y="254" text-anchor="middle" fill="#8b949e" font-size="9">DP no-op padding</text>
+
+      <!-- All converge to model.forward -->
+      <line x1="140" y1="264" x2="475" y2="310" stroke="#30363d" stroke-width="1" stroke-dasharray="4"/>
+      <line x1="370" y1="264" x2="475" y2="310" stroke="#30363d" stroke-width="1" stroke-dasharray="4"/>
+      <line x1="600" y1="264" x2="475" y2="310" stroke="#30363d" stroke-width="1" stroke-dasharray="4"/>
+
+      <rect x="350" y="310" width="250" height="44" rx="8" fill="#39d2c0" fill-opacity="0.2" stroke="#39d2c0" stroke-width="1.5"/>
+      <text x="475" y="330" text-anchor="middle" fill="#39d2c0" font-size="12" font-weight="700">model.forward(input_ids, positions, batch)</text>
+      <text x="475" y="344" text-anchor="middle" fill="#8b949e" font-size="9">Attention + MLP layers</text>
+
+      <!-- Output -->
+      <line x1="475" y1="354" x2="475" y2="380" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <!-- LogitsProcessor -->
+      <rect x="350" y="380" width="250" height="38" rx="8" fill="#d29922" fill-opacity="0.15" stroke="#d29922" stroke-width="1.5"/>
+      <text x="475" y="403" text-anchor="middle" fill="#d29922" font-size="11" font-weight="600">LogitsProcessor + Sampler</text>
+
+      <!-- Final output -->
+      <line x1="475" y1="418" x2="475" y2="448" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+      <rect x="370" y="448" width="210" height="38" rx="8" fill="#3fb950" fill-opacity="0.2" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="475" y="471" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">ModelRunnerOutput</text>
+
+      <!-- Legend -->
+      <text x="710" y="80" fill="#8b949e" font-size="10">is_cuda_graph() = True</text>
+      <line x1="680" y1="77" x2="705" y2="77" stroke="#3fb950" stroke-width="2"/>
+
+      <text x="710" y="96" fill="#8b949e" font-size="10">Eager decode/extend/idle</text>
+      <line x1="680" y1="93" x2="705" y2="93" stroke="#58a6ff" stroke-width="2"/>
+
+      <!-- Arrowhead marker -->
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
+        </marker>
+      </defs>
+    </svg>
+    <div class="diagram-caption">Figure 1: Forward pass pipeline from ScheduleBatch through model execution to output</div>
+  </div>
+
+  <!-- Diagram (b): CUDA Graph Capture/Replay -->
+  <h3>Diagram (b): CUDA Graph Capture and Replay</h3>
+  <div class="diagram-wrap">
+    <svg width="920" height="440" viewBox="0 0 920 440" xmlns="http://www.w3.org/2000/svg">
+      <rect width="920" height="440" fill="#161b22" rx="12"/>
+      <text x="460" y="30" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">CUDA Graph Lifecycle</text>
+
+      <!-- CAPTURE PHASE -->
+      <rect x="20" y="50" width="420" height="370" rx="10" fill="#1f6feb" fill-opacity="0.06" stroke="#58a6ff" stroke-width="1" stroke-dasharray="4"/>
+      <text x="230" y="72" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="700">CAPTURE PHASE (Server Startup)</text>
+
+      <rect x="40" y="88" width="180" height="36" rx="6" fill="#58a6ff" fill-opacity="0.15" stroke="#58a6ff"/>
+      <text x="130" y="110" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">init_device_graphs()</text>
+
+      <line x1="130" y1="124" x2="130" y2="146" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <rect x="40" y="146" width="380" height="36" rx="6" fill="#d29922" fill-opacity="0.15" stroke="#d29922"/>
+      <text x="230" y="168" text-anchor="middle" fill="#d29922" font-size="10" font-weight="600">for bs in [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, ...]:</text>
+
+      <line x1="230" y1="182" x2="230" y2="204" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+      <rect x="60" y="204" width="360" height="32" rx="6" fill="#3fb950" fill-opacity="0.12" stroke="#3fb950"/>
+      <text x="240" y="224" text-anchor="middle" fill="#3fb950" font-size="10">1. Allocate DecodeInputBuffers (max_bs pre-allocated)</text>
+
+      <rect x="60" y="244" width="360" height="32" rx="6" fill="#3fb950" fill-opacity="0.12" stroke="#3fb950"/>
+      <text x="240" y="264" text-anchor="middle" fill="#3fb950" font-size="10">2. attn_backend.init_forward_metadata_capture_cuda_graph()</text>
+
+      <rect x="60" y="284" width="360" height="32" rx="6" fill="#3fb950" fill-opacity="0.12" stroke="#3fb950"/>
+      <text x="240" y="304" text-anchor="middle" fill="#3fb950" font-size="10">3. Warm up: run_once() x 2 iterations</text>
+
+      <rect x="60" y="324" width="360" height="32" rx="6" fill="#f85149" fill-opacity="0.12" stroke="#f85149"/>
+      <text x="240" y="344" text-anchor="middle" fill="#f85149" font-size="10">4. torch.cuda.CUDAGraph.capture(run_once, pool=global_pool)</text>
+
+      <rect x="60" y="364" width="360" height="32" rx="6" fill="#bc8cff" fill-opacity="0.12" stroke="#bc8cff"/>
+      <text x="240" y="384" text-anchor="middle" fill="#bc8cff" font-size="10">5. Store: self.graphs[bs] = graph, self.output_buffers[bs] = out</text>
+
+      <!-- REPLAY PHASE -->
+      <rect x="480" y="50" width="420" height="370" rx="10" fill="#238636" fill-opacity="0.06" stroke="#3fb950" stroke-width="1" stroke-dasharray="4"/>
+      <text x="690" y="72" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="700">REPLAY PHASE (Every Decode Step)</text>
+
+      <rect x="500" y="94" width="380" height="32" rx="6" fill="#58a6ff" fill-opacity="0.12" stroke="#58a6ff"/>
+      <text x="690" y="114" text-anchor="middle" fill="#58a6ff" font-size="10">1. bisect_left(capture_bs, raw_bs) -- find padded bs</text>
+
+      <rect x="500" y="138" width="380" height="32" rx="6" fill="#d29922" fill-opacity="0.12" stroke="#d29922"/>
+      <text x="690" y="158" text-anchor="middle" fill="#d29922" font-size="10">2. populate_from_forward_batch() -- _foreach_copy_ to buffers</text>
+
+      <rect x="500" y="182" width="380" height="32" rx="6" fill="#bc8cff" fill-opacity="0.12" stroke="#bc8cff"/>
+      <text x="690" y="202" text-anchor="middle" fill="#bc8cff" font-size="10">3. attn_backend.init_forward_metadata_replay_cuda_graph()</text>
+
+      <rect x="500" y="226" width="380" height="36" rx="6" fill="#f85149" fill-opacity="0.15" stroke="#f85149" stroke-width="1.5"/>
+      <text x="690" y="248" text-anchor="middle" fill="#f85149" font-size="11" font-weight="700">4. self.graphs[bs].replay()  -- GPU kernel replay!</text>
+
+      <rect x="500" y="274" width="380" height="32" rx="6" fill="#3fb950" fill-opacity="0.12" stroke="#3fb950"/>
+      <text x="690" y="294" text-anchor="middle" fill="#3fb950" font-size="10">5. Slice output[:raw_num_token] -- remove padding</text>
+
+      <!-- Memory note -->
+      <rect x="510" y="330" width="360" height="60" rx="8" fill="#39d2c0" fill-opacity="0.08" stroke="#39d2c0" stroke-width="1"/>
+      <text x="690" y="350" text-anchor="middle" fill="#39d2c0" font-size="10" font-weight="600">Memory Pool: global_graph_memory_pool</text>
+      <text x="690" y="366" text-anchor="middle" fill="#8b949e" font-size="9">Shared across all CudaGraphRunners</text>
+      <text x="690" y="380" text-anchor="middle" fill="#8b949e" font-size="9">Created via torch.cuda.graph_pool_handle()</text>
+    </svg>
+    <div class="diagram-caption">Figure 2: CUDA graph capture (startup) vs replay (every decode step)</div>
+  </div>
+
+  <!-- Diagram (c): Attention Backend Selection Tree -->
+  <h3>Diagram (c): Attention Backend Selection Tree</h3>
+  <div class="diagram-wrap">
+    <svg width="950" height="560" viewBox="0 0 950 560" xmlns="http://www.w3.org/2000/svg">
+      <rect width="950" height="560" fill="#161b22" rx="12"/>
+      <text x="475" y="30" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Attention Backend Selection (attention_registry.py)</text>
+
+      <!-- Root: --attention-backend -->
+      <rect x="340" y="50" width="270" height="40" rx="8" fill="#d29922" fill-opacity="0.2" stroke="#d29922" stroke-width="2"/>
+      <text x="475" y="74" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">--attention-backend &lt;name&gt;</text>
+
+      <!-- FlashInfer branch -->
+      <line x1="380" y1="90" x2="120" y2="130" stroke="#58a6ff" stroke-width="1.5"/>
+      <rect x="20" y="130" width="200" height="40" rx="8" fill="#1f6feb" fill-opacity="0.15" stroke="#58a6ff" stroke-width="1.5"/>
+      <text x="120" y="154" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">"flashinfer"</text>
+
+      <!-- FlashInfer sub-branches -->
+      <line x1="80" y1="170" x2="60" y2="200" stroke="#58a6ff" stroke-width="1"/>
+      <rect x="10" y="200" width="110" height="32" rx="6" fill="#58a6ff" fill-opacity="0.08" stroke="#58a6ff"/>
+      <text x="65" y="220" text-anchor="middle" fill="#58a6ff" font-size="9">FlashInferAttn</text>
+      <text x="65" y="240" text-anchor="middle" fill="#8b949e" font-size="8">!use_mla_backend</text>
+
+      <line x1="160" y1="170" x2="180" y2="200" stroke="#58a6ff" stroke-width="1"/>
+      <rect x="130" y="200" width="110" height="32" rx="6" fill="#58a6ff" fill-opacity="0.08" stroke="#58a6ff"/>
+      <text x="185" y="220" text-anchor="middle" fill="#58a6ff" font-size="9">FlashInferMLA</text>
+      <text x="185" y="240" text-anchor="middle" fill="#8b949e" font-size="8">use_mla_backend</text>
+
+      <!-- FA3 branch -->
+      <line x1="430" y1="90" x2="350" y2="130" stroke="#bc8cff" stroke-width="1.5"/>
+      <rect x="270" y="130" width="160" height="40" rx="8" fill="#8957e5" fill-opacity="0.15" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="350" y="148" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">"fa3"</text>
+      <text x="350" y="162" text-anchor="middle" fill="#8b949e" font-size="8">SM80+/SM90</text>
+
+      <!-- FA4 branch -->
+      <line x1="490" y1="90" x2="530" y2="130" stroke="#bc8cff" stroke-width="1.5"/>
+      <rect x="460" y="130" width="140" height="40" rx="8" fill="#8957e5" fill-opacity="0.15" stroke="#bc8cff" stroke-width="1.5"/>
+      <text x="530" y="148" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">"fa4"</text>
+      <text x="530" y="162" text-anchor="middle" fill="#8b949e" font-size="8">SM100+ (B200)</text>
+
+      <!-- Both FA3/FA4 point to FlashAttentionBackend -->
+      <line x1="350" y1="170" x2="440" y2="210" stroke="#bc8cff" stroke-width="1" stroke-dasharray="3"/>
+      <line x1="530" y1="170" x2="440" y2="210" stroke="#bc8cff" stroke-width="1" stroke-dasharray="3"/>
+      <rect x="360" y="210" width="160" height="28" rx="6" fill="#bc8cff" fill-opacity="0.08" stroke="#bc8cff"/>
+      <text x="440" y="228" text-anchor="middle" fill="#bc8cff" font-size="9">FlashAttentionBackend</text>
+
+      <!-- Triton branch -->
+      <line x1="540" y1="90" x2="680" y2="130" stroke="#3fb950" stroke-width="1.5"/>
+      <rect x="620" y="130" width="120" height="40" rx="8" fill="#238636" fill-opacity="0.15" stroke="#3fb950" stroke-width="1.5"/>
+      <text x="680" y="154" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">"triton"</text>
+
+      <!-- Triton sub-branches -->
+      <line x1="650" y1="170" x2="630" y2="200" stroke="#3fb950" stroke-width="1"/>
+      <rect x="580" y="200" width="100" height="28" rx="6" fill="#3fb950" fill-opacity="0.08" stroke="#3fb950"/>
+      <text x="630" y="218" text-anchor="middle" fill="#3fb950" font-size="9">TritonAttn</text>
+
+      <line x1="710" y1="170" x2="730" y2="200" stroke="#3fb950" stroke-width="1"/>
+      <rect x="690" y="200" width="100" height="28" rx="6" fill="#3fb950" fill-opacity="0.08" stroke="#3fb950"/>
+      <text x="740" y="218" text-anchor="middle" fill="#3fb950" font-size="9">DoubleSparse</text>
+
+      <!-- FlashMLA branch -->
+      <line x1="560" y1="90" x2="840" y2="130" stroke="#39d2c0" stroke-width="1.5"/>
+      <rect x="790" y="130" width="130" height="40" rx="8" fill="#39d2c0" fill-opacity="0.15" stroke="#39d2c0" stroke-width="1.5"/>
+      <text x="855" y="154" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">"flashmla"</text>
+
+      <!-- More backends in lower row -->
+      <text x="475" y="290" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="600">Additional Backends:</text>
+
+      <rect x="20" y="310" width="130" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="85" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"cutlass_mla"</text>
+
+      <rect x="170" y="310" width="120" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="230" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"trtllm_mla"</text>
+
+      <rect x="310" y="310" width="100" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="360" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"aiter"</text>
+
+      <rect x="430" y="310" width="100" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="480" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"wave"</text>
+
+      <rect x="550" y="310" width="100" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="600" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"nsa"</text>
+
+      <rect x="670" y="310" width="120" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="730" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"torch_native"</text>
+
+      <rect x="810" y="310" width="120" height="32" rx="6" fill="#f778ba" fill-opacity="0.1" stroke="#f778ba"/>
+      <text x="870" y="330" text-anchor="middle" fill="#f778ba" font-size="10">"flex_attention"</text>
+
+      <!-- Hybrid Backend -->
+      <rect x="260" y="380" width="430" height="50" rx="10" fill="#d29922" fill-opacity="0.08" stroke="#d29922" stroke-width="1.5"/>
+      <text x="475" y="400" text-anchor="middle" fill="#d29922" font-size="11" font-weight="700">HybridAttnBackend</text>
+      <text x="475" y="416" text-anchor="middle" fill="#8b949e" font-size="9">Different backends for decode vs prefill (e.g., flashmla decode + flashinfer prefill)</text>
+
+      <!-- Base class -->
+      <rect x="310" y="460" width="330" height="40" rx="8" fill="#39d2c0" fill-opacity="0.12" stroke="#39d2c0" stroke-width="1"/>
+      <text x="475" y="478" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">AttentionBackend (ABC)</text>
+      <text x="475" y="492" text-anchor="middle" fill="#8b949e" font-size="8">init_forward_metadata() | init_cuda_graph_state() | forward_extend() | forward_decode()</text>
+
+      <!-- Connection lines from all to base -->
+      <line x1="475" y1="430" x2="475" y2="460" stroke="#30363d" stroke-width="1" stroke-dasharray="3"/>
+
+      <!-- MLA backends annotation -->
+      <rect x="20" y="370" width="200" height="76" rx="8" fill="#e3b341" fill-opacity="0.06" stroke="#e3b341"/>
+      <text x="120" y="390" text-anchor="middle" fill="#e3b341" font-size="10" font-weight="600">MLA_ATTENTION_BACKENDS</text>
+      <text x="120" y="406" text-anchor="middle" fill="#8b949e" font-size="8">flashinfer, fa3, fa4, triton,</text>
+      <text x="120" y="418" text-anchor="middle" fill="#8b949e" font-size="8">flashmla, cutlass_mla,</text>
+      <text x="120" y="430" text-anchor="middle" fill="#8b949e" font-size="8">trtllm_mla, aiter, ascend, nsa</text>
+
+      <!-- SM requirement annotations -->
+      <rect x="700" y="380" width="230" height="76" rx="8" fill="#f85149" fill-opacity="0.06" stroke="#f85149"/>
+      <text x="815" y="398" text-anchor="middle" fill="#f85149" font-size="10" font-weight="600">SM Requirements</text>
+      <text x="815" y="414" text-anchor="middle" fill="#8b949e" font-size="9">FlashInfer: SM75+</text>
+      <text x="815" y="428" text-anchor="middle" fill="#8b949e" font-size="9">FA3: SM80+ (H100/H200)</text>
+      <text x="815" y="442" text-anchor="middle" fill="#8b949e" font-size="9">FA4: SM100+ (B200)</text>
+    </svg>
+    <div class="diagram-caption">Figure 3: Attention backend selection tree based on --attention-backend flag and model architecture</div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION: Quick Reference                                     -->
+<!-- ============================================================ -->
+<section>
+  <h2>Quick Reference: Key Files</h2>
+  <div class="card-grid">
+    <div class="card">
+      <h4>Core Execution</h4>
+      <ul>
+        <li><code>model_executor/model_runner.py</code> -- ModelRunner class, forward dispatch</li>
+        <li><code>model_executor/forward_batch_info.py</code> -- ForwardBatch, ForwardMode enum</li>
+        <li><code>model_executor/cuda_graph_runner.py</code> -- CudaGraphRunner, DecodeInputBuffers</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Attention Backends</h4>
+      <ul>
+        <li><code>layers/attention/base_attn_backend.py</code> -- AttentionBackend ABC</li>
+        <li><code>layers/attention/attention_registry.py</code> -- Backend registry</li>
+        <li><code>layers/attention/flashinfer_backend.py</code> -- FlashInfer</li>
+        <li><code>layers/attention/flashattention_backend.py</code> -- FA3/FA4</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Sampling &amp; Speculative</h4>
+      <ul>
+        <li><code>layers/sampler.py</code> -- Sampler class, temp/top-p/top-k</li>
+        <li><code>speculative/eagle_worker.py</code> -- EAGLEWorker, draft/verify</li>
+        <li><code>speculative/eagle_utils.py</code> -- Tree building</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>MoE Kernels</h4>
+      <ul>
+        <li><code>layers/moe/fused_moe_triton/fused_moe.py</code> -- Dispatch</li>
+        <li><code>layers/moe/fused_moe_triton/fused_moe_triton_kernels.py</code> -- Triton JIT</li>
+        <li><code>layers/moe/fused_moe_triton/layer.py</code> -- FusedMoE Module</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION: ForwardMode Full Enum                               -->
+<!-- ============================================================ -->
+<section>
+  <h2>Appendix: ForwardMode Complete Enum</h2>
+  <pre><code><span class="kw">class</span> <span class="cls">ForwardMode</span>(<span class="cls">IntEnum</span>):
+    EXTEND = auto()           <span class="cm"># Prefill / extend with cached prefix</span>
+    DECODE = auto()           <span class="cm"># Decode one token per request</span>
+    MIXED = auto()            <span class="cm"># Chunked prefill: both extend and decode</span>
+    IDLE = auto()             <span class="cm"># No sequences (DP attention padding)</span>
+    TARGET_VERIFY = auto()    <span class="cm"># Speculative: verify in target model</span>
+    DRAFT_EXTEND = auto()     <span class="cm"># Speculative: extend in draft model</span>
+    DRAFT_EXTEND_V2 = auto()  <span class="cm"># Eagle V2 fixed-shape logits</span>
+    PREBUILT = auto()         <span class="cm"># Disagg decode: KV cache ready</span>
+    SPLIT_PREFILL = auto()    <span class="cm"># PD multiplexing split prefill</span>
+    DLLM_EXTEND = auto()      <span class="cm"># Draft LLM extend</span>
+
+    <span class="kw">def</span> <span class="fn">is_cuda_graph</span>(self):
+        <span class="cm"># Only DECODE, TARGET_VERIFY, IDLE, and DLLM_EXTEND use CUDA graphs</span>
+        <span class="kw">return</span> self <span class="kw">in</span> (DECODE, TARGET_VERIFY, IDLE, DLLM_EXTEND)</code></pre>
+</section>
+
+</div><!-- container -->
+</body>
+</html>

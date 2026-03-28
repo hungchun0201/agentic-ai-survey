@@ -1,0 +1,1614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang RadixCache &amp; Memory Management -- Deep Dive from Source</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg2: #161b22;
+    --bg3: #1c2333;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #7ee787;
+    --accent3: #d2a8ff;
+    --accent4: #f0883e;
+    --accent5: #ff7b72;
+    --accent6: #79c0ff;
+    --yellow: #e3b341;
+    --cyan: #56d4dd;
+    --pink: #f778ba;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .wrapper {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* Header */
+  header {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #1a1e2e 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 0 36px;
+  }
+  header h1 {
+    font-size: 2.2em;
+    color: var(--accent);
+    margin-bottom: 8px;
+    font-weight: 700;
+  }
+  header .subtitle {
+    color: var(--accent3);
+    font-size: 1.1em;
+    margin-bottom: 6px;
+  }
+  header .meta {
+    color: var(--text-dim);
+    font-size: 0.85em;
+  }
+
+  /* Navigation */
+  nav {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  nav .wrapper {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  nav a {
+    color: var(--accent6);
+    text-decoration: none;
+    font-size: 0.78em;
+    padding: 4px 10px;
+    border-radius: 4px;
+    transition: background .15s;
+    white-space: nowrap;
+  }
+  nav a:hover { background: var(--bg3); color: var(--accent); }
+
+  /* Sections */
+  section {
+    padding: 40px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  section:last-child { border-bottom: none; }
+  h2 {
+    color: var(--accent);
+    font-size: 1.6em;
+    margin-bottom: 20px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+  }
+  h3 {
+    color: var(--accent3);
+    font-size: 1.2em;
+    margin: 24px 0 12px;
+  }
+  h4 {
+    color: var(--accent4);
+    font-size: 1.05em;
+    margin: 18px 0 8px;
+  }
+  p { margin-bottom: 14px; }
+  ul, ol { margin: 10px 0 14px 28px; }
+  li { margin-bottom: 6px; }
+
+  /* Code */
+  pre {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 14px 0 18px;
+    font-size: 0.88em;
+    line-height: 1.6;
+  }
+  code {
+    font-family: inherit;
+  }
+  p code, li code {
+    background: var(--bg3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent2);
+    font-size: 0.92em;
+  }
+
+  /* Syntax highlighting classes */
+  .kw { color: var(--accent5); }
+  .fn { color: var(--accent3); }
+  .str { color: var(--accent2); }
+  .cm { color: var(--text-dim); font-style: italic; }
+  .num { color: var(--accent4); }
+  .cls { color: var(--cyan); }
+  .var { color: var(--accent6); }
+  .op { color: var(--yellow); }
+  .dec { color: var(--pink); }
+
+  /* Diagrams */
+  .diagram-box {
+    background: var(--bg2);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .diagram-box .title {
+    color: var(--accent4);
+    font-size: 1em;
+    font-weight: 700;
+    margin-bottom: 14px;
+    text-align: center;
+  }
+  svg {
+    display: block;
+    margin: 0 auto;
+  }
+  .diagram-box pre {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    text-align: center;
+    font-size: 0.82em;
+  }
+
+  /* Info cards */
+  .card {
+    background: var(--bg2);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    margin: 16px 0;
+  }
+  .card.warn { border-left-color: var(--accent4); }
+  .card.success { border-left-color: var(--accent2); }
+  .card.purple { border-left-color: var(--accent3); }
+  .card .card-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  /* Table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 0.88em;
+  }
+  th {
+    background: var(--bg3);
+    color: var(--accent);
+  }
+  td { color: var(--text); }
+
+  /* Filename tag */
+  .file-tag {
+    display: inline-block;
+    background: var(--bg3);
+    color: var(--accent4);
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 0.82em;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+  }
+  .file-tag::before { content: ""; }
+
+  /* Footer */
+  footer {
+    background: var(--bg2);
+    border-top: 1px solid var(--border);
+    padding: 24px 0;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.82em;
+  }
+</style>
+</head>
+<body>
+
+<!-- ====== HEADER ====== -->
+<header>
+  <div class="wrapper">
+    <h1>SGLang RadixCache &amp; Memory Management</h1>
+    <div class="subtitle">Deep Dive from Actual Source Code</div>
+    <div class="meta">
+      Source: sglang/python/sglang/srt/mem_cache/ | Analysis of radix_cache.py, memory_pool.py, allocator.py, hiradix_cache.py, session_aware_cache.py, radix_attention.py
+    </div>
+  </div>
+</header>
+
+<!-- ====== NAVIGATION ====== -->
+<nav>
+  <div class="wrapper">
+    <a href="#overview">Overview</a>
+    <a href="#treenode">TreeNode</a>
+    <a href="#radixcache">RadixCache</a>
+    <a href="#match-prefix">match_prefix()</a>
+    <a href="#insert">insert()</a>
+    <a href="#eviction">Eviction Policies</a>
+    <a href="#refcount">Reference Counting</a>
+    <a href="#memory-pools">Memory Pools</a>
+    <a href="#allocator">Allocator</a>
+    <a href="#hiradix">HiRadixCache</a>
+    <a href="#session-cache">SessionAwareCache</a>
+    <a href="#radix-attention">RadixAttention</a>
+  </div>
+</nav>
+
+<main class="wrapper">
+
+<!-- ====== SECTION 1: OVERVIEW ====== -->
+<section id="overview">
+<h2>1. Architectural Overview</h2>
+
+<p>SGLang's RadixCache is the signature innovation of the SGLang inference engine. It uses a <strong>radix tree</strong> (compressed trie) to store and reuse <strong>KV cache entries</strong> across requests that share common token prefixes. This enables massive speedups for multi-turn conversations, few-shot prompting, and shared system prompts.</p>
+
+<div class="card">
+<div class="card-title" style="color:var(--accent)">Three-Layer Memory Architecture</div>
+<p>SGLang organizes GPU memory for KV cache into three conceptual layers:</p>
+<ul>
+<li><code>ReqToTokenPool</code> -- maps each request slot to its token positions</li>
+<li><code>TokenToKVPoolAllocator</code> -- manages free/allocated indices into the KV buffers</li>
+<li><code>KVCache</code> (e.g., <code>MHATokenToKVPool</code>) -- holds the actual K/V tensor buffers on GPU</li>
+</ul>
+</div>
+
+<p>On top of this, the <strong>RadixCache</strong> radix tree tracks which token sequences have their KV cache already computed and stored at specific indices. When a new request arrives with a prefix that matches an existing cache entry, SGLang skips the prefill computation for that prefix entirely.</p>
+
+<!-- Diagram A: Overall Architecture -->
+<div class="diagram-box">
+<div class="title">Diagram A: SGLang Cache Architecture Overview</div>
+<svg viewBox="0 0 800 420" width="800" height="420" xmlns="http://www.w3.org/2000/svg" font-family="monospace" font-size="12">
+  <!-- Background -->
+  <rect x="0" y="0" width="800" height="420" fill="#161b22" rx="12"/>
+
+  <!-- Incoming Request -->
+  <rect x="20" y="20" width="160" height="50" rx="8" fill="#1c2333" stroke="#58a6ff" stroke-width="2"/>
+  <text x="100" y="40" fill="#58a6ff" text-anchor="middle" font-weight="bold" font-size="11">Incoming Request</text>
+  <text x="100" y="55" fill="#8b949e" text-anchor="middle" font-size="10">[1,2,3,4,5,6,7,8]</text>
+
+  <!-- Arrow -->
+  <line x1="180" y1="45" x2="230" y2="45" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- RadixCache -->
+  <rect x="230" y="10" width="340" height="130" rx="10" fill="#1c2333" stroke="#d2a8ff" stroke-width="2"/>
+  <text x="400" y="32" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="13">RadixCache (Radix Tree)</text>
+
+  <!-- Tree nodes inside -->
+  <circle cx="400" cy="60" r="12" fill="#0d1117" stroke="#7ee787" stroke-width="2"/>
+  <text x="400" y="64" fill="#7ee787" text-anchor="middle" font-size="9">root</text>
+
+  <line x1="388" y1="72" x2="340" y2="95" stroke="#58a6ff" stroke-width="1.5"/>
+  <line x1="412" y1="72" x2="460" y2="95" stroke="#58a6ff" stroke-width="1.5"/>
+
+  <rect x="305" y="95" width="70" height="24" rx="5" fill="#0d1117" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="340" y="111" fill="#58a6ff" text-anchor="middle" font-size="9">[1,2,3]</text>
+
+  <rect x="425" y="95" width="70" height="24" rx="5" fill="#0d1117" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="460" y="111" fill="#f0883e" text-anchor="middle" font-size="9">[8,9,10]</text>
+
+  <line x1="325" y1="119" x2="300" y2="130" stroke="#7ee787" stroke-width="1"/>
+  <line x1="355" y1="119" x2="380" y2="130" stroke="#7ee787" stroke-width="1"/>
+
+  <!-- Match result arrow -->
+  <path d="M400 140 L400 170" stroke="#d2a8ff" stroke-width="2" marker-end="url(#arrowPurple)" stroke-dasharray="6,3"/>
+  <text x="470" y="160" fill="#d2a8ff" font-size="10">match_prefix() returns</text>
+  <text x="470" y="173" fill="#d2a8ff" font-size="10">KV indices + last_node</text>
+
+  <!-- ReqToTokenPool -->
+  <rect x="20" y="180" width="230" height="80" rx="10" fill="#1c2333" stroke="#f0883e" stroke-width="2"/>
+  <text x="135" y="200" fill="#f0883e" text-anchor="middle" font-weight="bold" font-size="11">ReqToTokenPool</text>
+  <text x="135" y="218" fill="#8b949e" text-anchor="middle" font-size="10">req_to_token[size, max_ctx_len]</text>
+  <text x="135" y="233" fill="#c9d1d9" text-anchor="middle" font-size="9">Maps req_pool_idx -> token locs</text>
+  <text x="135" y="248" fill="#c9d1d9" text-anchor="middle" font-size="9">torch.int32 on device</text>
+
+  <!-- Arrow to Allocator -->
+  <line x1="250" y1="220" x2="290" y2="220" stroke="#f0883e" stroke-width="2" marker-end="url(#arrowOrange)"/>
+
+  <!-- TokenToKVPoolAllocator -->
+  <rect x="290" y="180" width="230" height="80" rx="10" fill="#1c2333" stroke="#7ee787" stroke-width="2"/>
+  <text x="405" y="200" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="11">TokenToKVPoolAllocator</text>
+  <text x="405" y="218" fill="#8b949e" text-anchor="middle" font-size="10">free_pages: torch.int64 tensor</text>
+  <text x="405" y="233" fill="#c9d1d9" text-anchor="middle" font-size="9">alloc(need_size) -> indices</text>
+  <text x="405" y="248" fill="#c9d1d9" text-anchor="middle" font-size="9">free(indices) -> return to pool</text>
+
+  <!-- Arrow to KVCache -->
+  <line x1="520" y1="220" x2="560" y2="220" stroke="#7ee787" stroke-width="2" marker-end="url(#arrowGreen)"/>
+
+  <!-- KVCache -->
+  <rect x="560" y="180" width="220" height="80" rx="10" fill="#1c2333" stroke="#56d4dd" stroke-width="2"/>
+  <text x="670" y="200" fill="#56d4dd" text-anchor="middle" font-weight="bold" font-size="11">MHATokenToKVPool</text>
+  <text x="670" y="218" fill="#8b949e" text-anchor="middle" font-size="10">k_buffer[layer][size,H,D]</text>
+  <text x="670" y="233" fill="#8b949e" text-anchor="middle" font-size="10">v_buffer[layer][size,H,D]</text>
+  <text x="670" y="248" fill="#c9d1d9" text-anchor="middle" font-size="9">Actual GPU tensor storage</text>
+
+  <!-- GPU Memory -->
+  <rect x="20" y="290" width="760" height="110" rx="10" fill="#0d1117" stroke="#e3b341" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="400" y="312" fill="#e3b341" text-anchor="middle" font-weight="bold" font-size="12">GPU HBM</text>
+
+  <rect x="40" y="325" width="140" height="30" rx="4" fill="#1a2332" stroke="#58a6ff"/>
+  <text x="110" y="344" fill="#58a6ff" text-anchor="middle" font-size="9">K Buffer Layer 0</text>
+
+  <rect x="190" y="325" width="140" height="30" rx="4" fill="#1a2332" stroke="#58a6ff"/>
+  <text x="260" y="344" fill="#58a6ff" text-anchor="middle" font-size="9">V Buffer Layer 0</text>
+
+  <rect x="340" y="325" width="140" height="30" rx="4" fill="#1a2332" stroke="#d2a8ff"/>
+  <text x="410" y="344" fill="#d2a8ff" text-anchor="middle" font-size="9">K Buffer Layer 1</text>
+
+  <rect x="490" y="325" width="140" height="30" rx="4" fill="#1a2332" stroke="#d2a8ff"/>
+  <text x="560" y="344" fill="#d2a8ff" text-anchor="middle" font-size="9">V Buffer Layer 1</text>
+
+  <rect x="640" y="325" width="130" height="30" rx="4" fill="#1a2332" stroke="#8b949e"/>
+  <text x="705" y="344" fill="#8b949e" text-anchor="middle" font-size="9">... Layer N</text>
+
+  <text x="400" y="380" fill="#8b949e" text-anchor="middle" font-size="9">Each buffer: [num_tokens + page_size, num_kv_heads, head_dim] indexed by allocator indices</text>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#d2a8ff"/></marker>
+    <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f0883e"/></marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#7ee787"/></marker>
+    <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#56d4dd"/></marker>
+    <marker id="arrowYellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#e3b341"/></marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ff7b72"/></marker>
+  </defs>
+</svg>
+</div>
+</section>
+
+<!-- ====== SECTION 2: TREENODE ====== -->
+<section id="treenode">
+<h2>2. TreeNode -- The Radix Tree Node</h2>
+
+<span class="file-tag">radix_cache.py : TreeNode (line 121)</span>
+
+<p>Every node in the radix tree is a <code>TreeNode</code> instance. The tree is a <strong>compressed trie</strong> where each edge stores a sequence of token IDs (not just a single token). This compression means a path like <code>[1,2,3]</code> is stored as a single node with <code>key = RadixKey([1,2,3])</code> rather than three separate nodes.</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">TreeNode</span>:
+    <span class="var">counter</span> = <span class="num">0</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">id</span>=<span class="kw">None</span>, <span class="var">priority</span>=<span class="num">0</span>):
+        <span class="var">self</span>.<span class="var">children</span>    = defaultdict(TreeNode)  <span class="cm"># child_key -> TreeNode</span>
+        <span class="var">self</span>.<span class="var">parent</span>      = <span class="kw">None</span>                  <span class="cm"># parent TreeNode</span>
+        <span class="var">self</span>.<span class="var">key</span>         = <span class="kw">None</span>                  <span class="cm"># RadixKey (list of token_ids)</span>
+        <span class="var">self</span>.<span class="var">value</span>       = <span class="kw">None</span>                  <span class="cm"># torch.Tensor of KV cache indices</span>
+        <span class="var">self</span>.<span class="var">lock_ref</span>    = <span class="num">0</span>                     <span class="cm"># active request count (prevents eviction)</span>
+        <span class="var">self</span>.<span class="var">pin_expiry</span>  = <span class="num">0.0</span>                   <span class="cm"># absolute expiry time for pinning</span>
+        <span class="var">self</span>.<span class="var">pin_ttl</span>     = <span class="num">0</span>                     <span class="cm"># TTL in seconds for refresh-on-hit</span>
+        <span class="var">self</span>.<span class="var">last_access_time</span> = time.monotonic()  <span class="cm"># for LRU eviction</span>
+        <span class="var">self</span>.<span class="var">creation_time</span>    = time.monotonic()  <span class="cm"># for FIFO eviction</span>
+        <span class="var">self</span>.<span class="var">hit_count</span>   = <span class="num">0</span>                     <span class="cm"># for LFU eviction</span>
+        <span class="var">self</span>.<span class="var">host_ref_counter</span> = <span class="num">0</span>               <span class="cm"># protects host KV from eviction</span>
+        <span class="var">self</span>.<span class="var">host_value</span>  = <span class="kw">None</span>                  <span class="cm"># CPU-side KV indices (HiRadixCache)</span>
+        <span class="var">self</span>.<span class="var">hash_value</span>  = <span class="kw">None</span>                  <span class="cm"># SHA256 per-page hashes</span>
+        <span class="var">self</span>.<span class="var">priority</span>    = priority              <span class="cm"># for priority-aware eviction</span>
+
+    <span class="dec">@property</span>
+    <span class="kw">def</span> <span class="fn">evicted</span>(<span class="var">self</span>):
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">value</span> <span class="kw">is</span> <span class="kw">None</span>  <span class="cm"># GPU value gone, but node may still have host_value</span>
+
+    <span class="dec">@property</span>
+    <span class="kw">def</span> <span class="fn">backuped</span>(<span class="var">self</span>):
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">host_value</span> <span class="kw">is not</span> <span class="kw">None</span>  <span class="cm"># has CPU backup (for HiRadixCache)</span></code></pre>
+
+<h3>RadixKey -- The Namespace-Aware Key</h3>
+
+<p>Keys are wrapped in a <code>RadixKey</code> object which carries both the <code>token_ids</code> list and an optional <code>extra_key</code> string. The <code>extra_key</code> allows isolation of KV cache for different LoRA adapters or cache salts -- entries that share identical token IDs but have different <code>extra_key</code> values never share prefix nodes.</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">RadixKey</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">token_ids</span>: List[int], <span class="var">extra_key</span>: Optional[str] = <span class="kw">None</span>,
+                 <span class="var">is_bigram</span>: bool = <span class="kw">False</span>):
+        <span class="var">self</span>.<span class="var">token_ids</span> = token_ids
+        <span class="var">self</span>.<span class="var">extra_key</span> = extra_key   <span class="cm"># e.g. lora_id, cache_salt</span>
+        <span class="var">self</span>.<span class="var">is_bigram</span> = is_bigram   <span class="cm"># for EAGLE speculative decoding</span></code></pre>
+
+<h3>Child Key Construction</h3>
+
+<p>When looking up children, the <code>get_child_key()</code> function constructs the dictionary key. For page_size=1, it is the first token ID. For page_size&gt;1, it is a tuple of the first <code>page_size</code> tokens. If <code>extra_key</code> is set, it becomes a tuple <code>(extra_key, plain_key)</code> to ensure namespace isolation:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">get_child_key</span>(<span class="var">key</span>: RadixKey, <span class="var">page_size</span>: int = <span class="num">1</span>):
+    <span class="kw">if</span> page_size == <span class="num">1</span>:
+        plain_key = key.token_ids[<span class="num">0</span>]
+    <span class="kw">else</span>:
+        plain_key = tuple(key.token_ids[:page_size])
+    <span class="kw">if</span> key.extra_key <span class="kw">is</span> <span class="kw">None</span>:
+        <span class="kw">return</span> plain_key
+    <span class="kw">else</span>:
+        <span class="kw">return</span> (key.extra_key, plain_key)</code></pre>
+
+<!-- Diagram B: Radix Tree Structure -->
+<div class="diagram-box">
+<div class="title">Diagram B: Radix Tree Structure with Example Branches</div>
+<svg viewBox="0 0 800 360" width="800" height="360" xmlns="http://www.w3.org/2000/svg" font-family="monospace" font-size="11">
+  <rect x="0" y="0" width="800" height="360" fill="#161b22" rx="12"/>
+
+  <!-- Root -->
+  <rect x="340" y="15" width="120" height="40" rx="8" fill="#0d1117" stroke="#7ee787" stroke-width="2"/>
+  <text x="400" y="32" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="11">ROOT</text>
+  <text x="400" y="46" fill="#8b949e" text-anchor="middle" font-size="9">key=[] lock_ref=1</text>
+
+  <!-- Branch 1: [1,2] -->
+  <line x1="370" y1="55" x2="200" y2="85" stroke="#58a6ff" stroke-width="2"/>
+  <rect x="120" y="85" width="160" height="44" rx="6" fill="#0d1117" stroke="#58a6ff" stroke-width="2"/>
+  <text x="200" y="102" fill="#58a6ff" text-anchor="middle" font-weight="bold" font-size="10">key=[1, 2]</text>
+  <text x="200" y="120" fill="#8b949e" text-anchor="middle" font-size="9">value=[idx5, idx6] ref=0</text>
+
+  <!-- Branch 1a: [3] -->
+  <line x1="170" y1="129" x2="100" y2="165" stroke="#7ee787" stroke-width="1.5"/>
+  <rect x="30" y="165" width="140" height="44" rx="6" fill="#0d1117" stroke="#7ee787" stroke-width="1.5"/>
+  <text x="100" y="182" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="10">key=[3]</text>
+  <text x="100" y="200" fill="#8b949e" text-anchor="middle" font-size="9">value=[idx7] ref=1</text>
+  <text x="100" y="216" fill="#ff7b72" text-anchor="middle" font-size="8">LOCKED (active req)</text>
+
+  <!-- Branch 1b: [4,5] -->
+  <line x1="230" y1="129" x2="280" y2="165" stroke="#d2a8ff" stroke-width="1.5"/>
+  <rect x="210" y="165" width="140" height="44" rx="6" fill="#0d1117" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="280" y="182" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="10">key=[4, 5]</text>
+  <text x="280" y="200" fill="#8b949e" text-anchor="middle" font-size="9">value=[idx8,idx9] ref=0</text>
+
+  <!-- Branch 1b -> [6,7] -->
+  <line x1="280" y1="209" x2="280" y2="240" stroke="#f0883e" stroke-width="1.5"/>
+  <rect x="210" y="240" width="140" height="44" rx="6" fill="#0d1117" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="280" y="257" fill="#f0883e" text-anchor="middle" font-weight="bold" font-size="10">key=[6, 7]</text>
+  <text x="280" y="275" fill="#8b949e" text-anchor="middle" font-size="9">value=[idxA,idxB] ref=0</text>
+  <text x="280" y="291" fill="#e3b341" text-anchor="middle" font-size="8">EVICTABLE LEAF</text>
+
+  <!-- Branch 2: [8,9,10,11,12] -->
+  <line x1="430" y1="55" x2="600" y2="85" stroke="#f0883e" stroke-width="2"/>
+  <rect x="500" y="85" width="200" height="44" rx="6" fill="#0d1117" stroke="#f0883e" stroke-width="2"/>
+  <text x="600" y="102" fill="#f0883e" text-anchor="middle" font-weight="bold" font-size="10">key=[8, 9, 10, 11, 12]</text>
+  <text x="600" y="120" fill="#8b949e" text-anchor="middle" font-size="9">value=[idxC..idxG] ref=0</text>
+
+  <!-- Legend -->
+  <rect x="460" y="180" width="320" height="160" rx="8" fill="#0d1117" stroke="#30363d"/>
+  <text x="480" y="200" fill="#c9d1d9" font-weight="bold" font-size="10">LEGEND</text>
+  <rect x="480" y="210" width="12" height="12" fill="#7ee787"/>
+  <text x="498" y="221" fill="#c9d1d9" font-size="9">Node with active request (lock_ref > 0)</text>
+  <rect x="480" y="230" width="12" height="12" fill="#e3b341"/>
+  <text x="498" y="241" fill="#c9d1d9" font-size="9">Evictable leaf (lock_ref=0, no active children)</text>
+  <rect x="480" y="250" width="12" height="12" fill="#58a6ff"/>
+  <text x="498" y="261" fill="#c9d1d9" font-size="9">Internal node (has children, not leaf)</text>
+  <text x="480" y="281" fill="#8b949e" font-size="9">value = tensor of KV cache allocator indices</text>
+  <text x="480" y="296" fill="#8b949e" font-size="9">Each edge represents a compressed token sequence</text>
+  <text x="480" y="311" fill="#8b949e" font-size="9">Node splitting occurs on partial match</text>
+  <text x="480" y="326" fill="#d2a8ff" font-size="9">Paths: [1,2,3] | [1,2,4,5,6,7] | [8,9,10,11,12]</text>
+</svg>
+</div>
+</section>
+
+<!-- ====== SECTION 3: RADIXCACHE ====== -->
+<section id="radixcache">
+<h2>3. RadixCache Initialization</h2>
+
+<span class="file-tag">radix_cache.py : RadixCache.__init__ (line 289)</span>
+
+<p>The <code>RadixCache</code> class is initialized with a <code>CacheInitParams</code> object. It sets up the eviction strategy, the key matching function (optimized for page_size=1 vs paged), and initializes the root node:</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">RadixCache</span>(BasePrefixCache):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">params</span>: CacheInitParams):
+        <span class="var">self</span>.<span class="var">disable</span> = params.disable
+        <span class="var">self</span>.<span class="var">req_to_token_pool</span> = params.req_to_token_pool
+        <span class="var">self</span>.<span class="var">token_to_kv_pool_allocator</span> = params.token_to_kv_pool_allocator
+        <span class="var">self</span>.<span class="var">page_size</span> = params.page_size
+
+        <span class="cm"># Select key matching: token-by-token for page_size=1, paged otherwise</span>
+        <span class="kw">if</span> <span class="var">self</span>.page_size == <span class="num">1</span>:
+            <span class="var">self</span>.<span class="var">key_match_fn</span> = _key_match_page_size1
+        <span class="kw">else</span>:
+            <span class="var">self</span>.<span class="var">key_match_fn</span> = partial(_key_match_paged, page_size=<span class="var">self</span>.page_size)
+
+        <span class="cm"># Select eviction strategy (7 options!)</span>
+        <span class="kw">if</span> <span class="var">self</span>.eviction_policy == <span class="str">"lru"</span>:
+            <span class="var">self</span>.<span class="var">eviction_strategy</span> = LRUStrategy()
+        <span class="kw">elif</span> <span class="var">self</span>.eviction_policy == <span class="str">"lfu"</span>:
+            <span class="var">self</span>.<span class="var">eviction_strategy</span> = LFUStrategy()
+        <span class="cm"># ... also: fifo, mru, filo, priority, slru</span>
+
+        <span class="var">self</span>.<span class="var">evictable_leaves</span> = set()
+        <span class="var">self</span>.reset()
+
+    <span class="kw">def</span> <span class="fn">reset</span>(<span class="var">self</span>):
+        <span class="var">self</span>.<span class="var">root_node</span> = TreeNode(priority=-sys.maxsize)
+        <span class="var">self</span>.<span class="var">root_node</span>.key = RadixKey(token_ids=[], extra_key=<span class="kw">None</span>)
+        <span class="var">self</span>.<span class="var">root_node</span>.value = []
+        <span class="var">self</span>.<span class="var">root_node</span>.lock_ref = <span class="num">1</span>  <span class="cm"># root is always locked</span>
+        <span class="var">self</span>.<span class="var">evictable_size_</span> = <span class="num">0</span>
+        <span class="var">self</span>.<span class="var">protected_size_</span> = <span class="num">0</span></code></pre>
+
+<div class="card success">
+<div class="card-title" style="color:var(--accent2)">Key Design Insight</div>
+<p>The root node always has <code>lock_ref = 1</code>, making it permanently immune to eviction. Every other node's lock_ref is incremented when an active request traverses through it (via <code>inc_lock_ref</code>) and decremented when the request finishes (via <code>dec_lock_ref</code>).</p>
+</div>
+</section>
+
+<!-- ====== SECTION 4: MATCH PREFIX ====== -->
+<section id="match-prefix">
+<h2>4. match_prefix() -- Finding the Longest Cached Prefix</h2>
+
+<span class="file-tag">radix_cache.py : match_prefix (line 378) / _match_prefix_helper (line 671)</span>
+
+<p>When a new request arrives, SGLang calls <code>match_prefix()</code> to find the longest prefix of the request's token IDs that already has KV cache stored in the tree. This is the core operation that enables <strong>prefix reuse</strong>.</p>
+
+<h3>The Public API</h3>
+
+<pre><code><span class="kw">def</span> <span class="fn">match_prefix</span>(<span class="var">self</span>, <span class="var">params</span>: MatchPrefixParams) -> MatchResult:
+    key = params.key
+    key, _ = <span class="var">self</span>.maybe_bigram_convert(key)  <span class="cm"># EAGLE bigram conversion if needed</span>
+
+    <span class="kw">if</span> <span class="var">self</span>.disable <span class="kw">or</span> len(key) == <span class="num">0</span>:
+        <span class="kw">return</span> empty_match_result()
+
+    <span class="cm"># For paged mode, truncate to page-aligned length</span>
+    <span class="kw">if</span> <span class="var">self</span>.page_size != <span class="num">1</span>:
+        page_aligned_len = len(key) // <span class="var">self</span>.page_size * <span class="var">self</span>.page_size
+        key = key[:page_aligned_len]
+
+    value, last_node = <span class="var">self</span>._match_prefix_helper(<span class="var">self</span>.root_node, key)
+    <span class="kw">if</span> value:
+        value = torch.cat(value)  <span class="cm"># concatenate KV indices from matched nodes</span>
+    <span class="kw">return</span> MatchResult(device_indices=value, last_device_node=last_node, ...)</code></pre>
+
+<h3>The Internal Tree Walk</h3>
+
+<p>The helper walks down the tree following matching children. At each node, it compares the node's key against the remaining query key using <code>key_match_fn</code>. If a match ends <strong>inside</strong> a node's key (partial match), it <strong>splits the node</strong> to create a precise boundary:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">_match_prefix_helper</span>(<span class="var">self</span>, <span class="var">node</span>, <span class="var">key</span>):
+    access_time = time.monotonic()
+    node.last_access_time = access_time  <span class="cm"># update for LRU</span>
+
+    child_key = <span class="var">self</span>.get_child_key_fn(key)
+    value = []
+
+    <span class="kw">while</span> len(key) > <span class="num">0</span> <span class="kw">and</span> child_key <span class="kw">in</span> node.children.keys():
+        child = node.children[child_key]
+        child.last_access_time = access_time
+
+        prefix_len = <span class="var">self</span>.key_match_fn(child.key, key)  <span class="cm"># how many tokens match?</span>
+
+        <span class="kw">if</span> prefix_len < len(child.key):
+            <span class="cm"># PARTIAL MATCH: split the node</span>
+            new_node = <span class="var">self</span>._split_node(child.key, child, prefix_len)
+            value.append(new_node.value)
+            node = new_node
+            <span class="kw">break</span>
+        <span class="kw">else</span>:
+            <span class="cm"># FULL MATCH: consume this node and continue</span>
+            value.append(child.value)
+            node = child
+            key = key[prefix_len:]
+            <span class="kw">if</span> len(key):
+                child_key = <span class="var">self</span>.get_child_key_fn(key)
+
+    <span class="kw">return</span> value, node  <span class="cm"># list of KV index tensors, last matched node</span></code></pre>
+
+<h3>Node Splitting (_split_node)</h3>
+
+<p>When a match ends at position <code>split_len</code> inside a node, the node is split into two: a new parent holding the matched prefix, and the existing node retaining the unmatched suffix:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">_split_node</span>(<span class="var">self</span>, <span class="var">key</span>, <span class="var">child</span>, <span class="var">split_len</span>):
+    <span class="cm"># Create new_node -> child</span>
+    new_node = TreeNode(priority=child.priority)
+    new_node.children = {<span class="var">self</span>.get_child_key_fn(key[split_len:]): child}
+    new_node.parent = child.parent
+    new_node.lock_ref = child.lock_ref  <span class="cm"># inherit lock count</span>
+    new_node.key = child.key[:split_len]
+    new_node.value = child.value[:split_len].clone()
+
+    child.parent = new_node
+    child.key = child.key[split_len:]
+    child.value = child.value[split_len:].clone()
+
+    new_node.parent.children[<span class="var">self</span>.get_child_key_fn(key)] = new_node
+    <span class="kw">return</span> new_node</code></pre>
+
+<!-- Diagram C: Cache Hit/Miss Flow -->
+<div class="diagram-box">
+<div class="title">Diagram C: Cache Hit/Miss Flow for match_prefix()</div>
+<svg viewBox="0 0 800 400" width="800" height="400" xmlns="http://www.w3.org/2000/svg" font-family="monospace" font-size="11">
+  <rect x="0" y="0" width="800" height="400" fill="#161b22" rx="12"/>
+
+  <!-- Request -->
+  <rect x="20" y="15" width="180" height="40" rx="6" fill="#0d1117" stroke="#58a6ff" stroke-width="2"/>
+  <text x="110" y="32" fill="#58a6ff" text-anchor="middle" font-weight="bold" font-size="10">Request tokens</text>
+  <text x="110" y="46" fill="#c9d1d9" text-anchor="middle" font-size="9">[1, 2, 3, 13, 14]</text>
+
+  <line x1="200" y1="35" x2="240" y2="35" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+
+  <!-- Step 1 -->
+  <rect x="240" y="15" width="140" height="40" rx="6" fill="#0d1117" stroke="#d2a8ff" stroke-width="2"/>
+  <text x="310" y="32" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="10">match_prefix()</text>
+  <text x="310" y="46" fill="#8b949e" text-anchor="middle" font-size="9">Walk radix tree</text>
+
+  <!-- Branch to decision -->
+  <line x1="380" y1="35" x2="420" y2="35" stroke="#d2a8ff" stroke-width="2" marker-end="url(#arrowPurple)"/>
+
+  <!-- Decision diamond -->
+  <polygon points="500,15 580,35 500,55 420,35" fill="#0d1117" stroke="#e3b341" stroke-width="2"/>
+  <text x="500" y="38" fill="#e3b341" text-anchor="middle" font-size="9">child_key in</text>
+  <text x="500" y="48" fill="#e3b341" text-anchor="middle" font-size="9">children?</text>
+
+  <!-- YES path down -->
+  <line x1="500" y1="55" x2="500" y2="85" stroke="#7ee787" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="510" y="75" fill="#7ee787" font-size="9">YES</text>
+
+  <!-- Match node [1,2] -->
+  <rect x="420" y="85" width="160" height="38" rx="6" fill="#0d1117" stroke="#7ee787" stroke-width="2"/>
+  <text x="500" y="100" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="10">Match node [1,2]</text>
+  <text x="500" y="114" fill="#8b949e" text-anchor="middle" font-size="9">prefix_len=2, consume key</text>
+
+  <!-- Continue -->
+  <line x1="500" y1="123" x2="500" y2="148" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="514" y="140" fill="#8b949e" font-size="8">remaining: [3,13,14]</text>
+
+  <!-- Match node [3] -->
+  <rect x="420" y="148" width="160" height="38" rx="6" fill="#0d1117" stroke="#7ee787" stroke-width="2"/>
+  <text x="500" y="163" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="10">Match node [3]</text>
+  <text x="500" y="177" fill="#8b949e" text-anchor="middle" font-size="9">prefix_len=1, consume key</text>
+
+  <!-- Continue to no match -->
+  <line x1="500" y1="186" x2="500" y2="212" stroke="#ff7b72" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <text x="514" y="203" fill="#8b949e" font-size="8">remaining: [13,14]</text>
+
+  <!-- No match -->
+  <rect x="420" y="212" width="160" height="38" rx="6" fill="#0d1117" stroke="#ff7b72" stroke-width="2"/>
+  <text x="500" y="227" fill="#ff7b72" text-anchor="middle" font-weight="bold" font-size="10">No child for 13</text>
+  <text x="500" y="241" fill="#8b949e" text-anchor="middle" font-size="9">STOP - end of prefix</text>
+
+  <!-- Result -->
+  <line x1="500" y1="250" x2="500" y2="280" stroke="#56d4dd" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <rect x="380" y="280" width="240" height="50" rx="8" fill="#0d1117" stroke="#56d4dd" stroke-width="2"/>
+  <text x="500" y="298" fill="#56d4dd" text-anchor="middle" font-weight="bold" font-size="10">MatchResult</text>
+  <text x="500" y="312" fill="#c9d1d9" text-anchor="middle" font-size="9">indices=[idx5,idx6,idx7] (3 tokens cached)</text>
+  <text x="500" y="324" fill="#c9d1d9" text-anchor="middle" font-size="9">last_node = node[3], need prefill [13,14]</text>
+
+  <!-- NO path (right) from decision -->
+  <line x1="580" y1="35" x2="640" y2="35" stroke="#ff7b72" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <text x="610" y="28" fill="#ff7b72" font-size="9">NO</text>
+
+  <rect x="640" y="15" width="140" height="40" rx="6" fill="#0d1117" stroke="#ff7b72" stroke-width="1.5"/>
+  <text x="710" y="32" fill="#ff7b72" text-anchor="middle" font-weight="bold" font-size="10">CACHE MISS</text>
+  <text x="710" y="46" fill="#8b949e" text-anchor="middle" font-size="9">Full prefill required</text>
+
+  <!-- Split scenario -->
+  <rect x="20" y="100" width="370" height="140" rx="8" fill="#0d1117" stroke="#d2a8ff" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="205" y="120" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="10">Node Splitting Example</text>
+  <text x="205" y="140" fill="#c9d1d9" font-size="9" text-anchor="middle">Query [1,2] hits node with key=[1,2,3]</text>
+  <text x="205" y="156" fill="#c9d1d9" font-size="9" text-anchor="middle">prefix_len=2 &lt; len(node.key)=3</text>
+  <text x="40" y="178" fill="#f0883e" font-size="9">Before: parent -> [1,2,3]</text>
+  <text x="40" y="196" fill="#7ee787" font-size="9">After:  parent -> new[1,2] -> old[3]</text>
+  <text x="40" y="214" fill="#8b949e" font-size="9">new_node.value = old.value[:2].clone()</text>
+  <text x="40" y="230" fill="#8b949e" font-size="9">old.value = old.value[2:].clone()</text>
+
+  <!-- Performance note -->
+  <rect x="20" y="260" width="350" height="65" rx="8" fill="#0d1117" stroke="#7ee787" stroke-width="1.5"/>
+  <text x="195" y="280" fill="#7ee787" text-anchor="middle" font-weight="bold" font-size="10">Performance Impact</text>
+  <text x="195" y="298" fill="#c9d1d9" text-anchor="middle" font-size="9">3 tokens cached = 3 fewer tokens to prefill</text>
+  <text x="195" y="316" fill="#c9d1d9" text-anchor="middle" font-size="9">Saves ~O(n^2) attention computation per token</text>
+
+  <!-- Key match functions -->
+  <rect x="20" y="340" width="760" height="50" rx="8" fill="#0d1117" stroke="#30363d"/>
+  <text x="30" y="358" fill="#f0883e" font-size="9">_key_match_page_size1: Token-by-token comparison, returns first mismatch position</text>
+  <text x="30" y="376" fill="#58a6ff" font-size="9">_key_match_paged: Compares in page_size chunks, returns page-aligned mismatch position</text>
+</svg>
+</div>
+</section>
+
+<!-- ====== SECTION 5: INSERT ====== -->
+<section id="insert">
+<h2>5. insert() -- Adding New KV Cache Entries</h2>
+
+<span class="file-tag">radix_cache.py : insert (line 450) / _insert_helper (line 727)</span>
+
+<p>After a request completes its prefill computation, the new KV cache entries are inserted into the tree via <code>insert()</code>. The insert operation walks the tree much like match_prefix, but it also <strong>creates new nodes</strong> for the unmatched suffix and <strong>deduplicates</strong> against existing entries.</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">_insert_helper</span>(<span class="var">self</span>, <span class="var">node</span>, <span class="var">key</span>, <span class="var">value</span>, <span class="var">priority</span>=<span class="num">0</span>, <span class="var">chunked</span>=<span class="kw">False</span>):
+    access_time = time.monotonic()
+    node.last_access_time = access_time
+    node.priority = max(node.priority, priority)  <span class="cm"># propagate higher priority</span>
+
+    <span class="kw">if</span> len(key) == <span class="num">0</span>:
+        <span class="kw">return</span> <span class="num">0</span>
+
+    child_key = <span class="var">self</span>.get_child_key_fn(key)
+    total_prefix_length = <span class="num">0</span>
+
+    <span class="cm"># Walk down existing matching nodes</span>
+    <span class="kw">while</span> len(key) > <span class="num">0</span> <span class="kw">and</span> child_key <span class="kw">in</span> node.children.keys():
+        node = node.children[child_key]
+        node.last_access_time = access_time
+        prefix_len = <span class="var">self</span>.key_match_fn(node.key, key)
+        total_prefix_length += prefix_len
+        key = key[prefix_len:]     <span class="cm"># consume matched portion</span>
+        value = value[prefix_len:] <span class="cm"># skip already-cached KV indices</span>
+
+        <span class="kw">if</span> prefix_len < len(node.key):
+            <span class="cm"># Partial match: split and stop</span>
+            new_node = <span class="var">self</span>._split_node(node.key, node, prefix_len)
+            <span class="var">self</span>._inc_hit_count(new_node, chunked)
+            node = new_node
+        <span class="kw">else</span>:
+            <span class="var">self</span>._inc_hit_count(node, chunked)
+
+        <span class="kw">if</span> len(key):
+            child_key = <span class="var">self</span>.get_child_key_fn(key)
+
+    <span class="cm"># Create new node for unmatched suffix</span>
+    <span class="kw">if</span> len(key):
+        new_node = TreeNode(priority=priority)
+        new_node.parent = node
+        new_node.key = key
+        new_node.value = value.clone()
+        node.children[child_key] = new_node
+        <span class="var">self</span>.evictable_size_ += len(key)
+        <span class="var">self</span>._update_leaf_status(node)
+        <span class="var">self</span>._update_leaf_status(new_node)
+
+    <span class="kw">return</span> total_prefix_length  <span class="cm"># how much was already in the tree</span></code></pre>
+
+<h3>cache_finished_req -- The Full Lifecycle</h3>
+
+<p>When a request finishes, <code>cache_finished_req()</code> orchestrates the insertion and deduplication:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">cache_finished_req</span>(<span class="var">self</span>, <span class="var">req</span>, <span class="var">is_insert</span>=<span class="kw">True</span>):
+    token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
+    kv_indices = <span class="var">self</span>.req_to_token_pool.req_to_token[req.req_pool_idx, :len(token_ids)]
+
+    <span class="kw">if</span> is_insert:
+        result = <span class="var">self</span>.insert(InsertParams(key=radix_key, value=values, ...))
+        new_prefix_len = result.prefix_len
+        <span class="cm"># Free DUPLICATES: indices that were already in the tree</span>
+        <span class="var">self</span>.token_to_kv_pool_allocator.free(
+            kv_indices[req.cache_protected_len : new_prefix_len]
+        )
+
+    <span class="cm"># Free unaligned tail (page_size > 1 can leave a partial page)</span>
+    <span class="var">self</span>.token_to_kv_pool_allocator.free(kv_indices[len(keys):])
+
+    <span class="cm"># Release lock on the tree path</span>
+    <span class="var">self</span>.dec_lock_ref(req.last_node)</code></pre>
+
+<div class="card warn">
+<div class="card-title" style="color:var(--accent4)">Deduplication</div>
+<p>The return value <code>total_prefix_length</code> from <code>_insert_helper</code> tells the caller how many KV indices at the beginning of the inserted sequence were already in the tree. Those duplicates are freed back to the allocator, avoiding memory waste.</p>
+</div>
+</section>
+
+<!-- ====== SECTION 6: EVICTION ====== -->
+<section id="eviction">
+<h2>6. Eviction Policies</h2>
+
+<span class="file-tag">evict_policy.py (all strategies) | radix_cache.py : evict (line 586)</span>
+
+<p>SGLang supports <strong>seven different eviction strategies</strong>, all implementing the <code>EvictionStrategy</code> abstract class. Each strategy defines a <code>get_priority()</code> method; lower priority values are evicted first (using a min-heap).</p>
+
+<table>
+<thead>
+<tr><th>Strategy</th><th>Priority Key</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td style="color:var(--accent)">LRU</td><td><code>node.last_access_time</code></td><td>Least Recently Used -- oldest access evicted first</td></tr>
+<tr><td style="color:var(--accent2)">LFU</td><td><code>(node.hit_count, node.last_access_time)</code></td><td>Least Frequently Used -- fewest hits first, then LRU as tiebreaker</td></tr>
+<tr><td style="color:var(--accent3)">FIFO</td><td><code>node.creation_time</code></td><td>First In First Out -- oldest creation evicted first</td></tr>
+<tr><td style="color:var(--accent4)">MRU</td><td><code>-node.last_access_time</code></td><td>Most Recently Used -- newest access evicted first</td></tr>
+<tr><td style="color:var(--accent5)">FILO</td><td><code>-node.creation_time</code></td><td>First In Last Out -- newest creation evicted first</td></tr>
+<tr><td style="color:var(--cyan)">Priority</td><td><code>(node.priority, node.last_access_time)</code></td><td>Priority-aware -- lower priority evicted first, then LRU</td></tr>
+<tr><td style="color:var(--pink)">SLRU</td><td><code>(segment, node.last_access_time)</code></td><td>Segmented LRU -- probationary items (hit_count &lt; threshold) evicted before protected</td></tr>
+</tbody>
+</table>
+
+<h3>The Eviction Process</h3>
+
+<pre><code><span class="kw">def</span> <span class="fn">evict</span>(<span class="var">self</span>, <span class="var">params</span>: EvictParams) -> EvictResult:
+    num_tokens = params.num_tokens
+    leaves = list(<span class="var">self</span>.evictable_leaves)  <span class="cm"># pre-tracked set of evictable leaves</span>
+
+    <span class="cm"># Build min-heap using strategy priorities</span>
+    eviction_heap = [
+        (<span class="var">self</span>.eviction_strategy.get_priority(node), node)
+        <span class="kw">for</span> node <span class="kw">in</span> leaves
+    ]
+    heapq.heapify(eviction_heap)
+
+    num_evicted = <span class="num">0</span>
+    <span class="kw">while</span> num_evicted < num_tokens <span class="kw">and</span> len(eviction_heap):
+        _priority, x = heapq.heappop(eviction_heap)
+
+        <span class="cm"># Free the KV cache indices back to allocator</span>
+        <span class="var">self</span>.token_to_kv_pool_allocator.free(x.value)
+        num_evicted += len(x.value)
+
+        <span class="cm"># Remove leaf from tree</span>
+        <span class="var">self</span>._delete_leaf(x)
+
+        <span class="cm"># If parent becomes a childless unlocked node, add to heap</span>
+        <span class="kw">if</span> len(x.parent.children) == <span class="num">0</span> <span class="kw">and</span> x.parent.lock_ref == <span class="num">0</span>:
+            new_priority = <span class="var">self</span>.eviction_strategy.get_priority(x.parent)
+            heapq.heappush(eviction_heap, (new_priority, x.parent))
+
+    <span class="kw">return</span> EvictResult(num_tokens_evicted=num_evicted)</code></pre>
+
+<h3>Evictable Leaf Tracking</h3>
+
+<p>Rather than scanning the entire tree, SGLang maintains a <code>evictable_leaves</code> set that is updated incrementally. A node is an evictable leaf when:</p>
+<ol>
+<li>It is not evicted (<code>value is not None</code>)</li>
+<li>It has <code>lock_ref == 0</code> (no active requests using it)</li>
+<li>All its children are evicted (it is effectively a leaf in the non-evicted subtree)</li>
+</ol>
+
+<pre><code><span class="kw">def</span> <span class="fn">_update_leaf_status</span>(<span class="var">self</span>, <span class="var">node</span>):
+    <span class="kw">if</span> node.evicted <span class="kw">or</span> node.lock_ref > <span class="num">0</span>:
+        <span class="cm"># Remove from evictable set if present</span>
+        <span class="kw">if</span> node <span class="kw">in</span> <span class="var">self</span>.evictable_leaves:
+            <span class="var">self</span>.evictable_leaves.remove(node)
+        <span class="kw">return</span>
+
+    <span class="cm"># Check if any child is NOT evicted</span>
+    <span class="kw">for</span> child <span class="kw">in</span> node.children.values():
+        <span class="kw">if not</span> child.evicted:
+            <span class="kw">if</span> node <span class="kw">in</span> <span class="var">self</span>.evictable_leaves:
+                <span class="var">self</span>.evictable_leaves.remove(node)
+            <span class="kw">return</span>
+
+    <span class="cm"># All children evicted (or no children) -> this is an evictable leaf</span>
+    <span class="kw">if</span> node <span class="kw">not in</span> <span class="var">self</span>.evictable_leaves:
+        <span class="var">self</span>.evictable_leaves.add(node)</code></pre>
+</section>
+
+<!-- ====== SECTION 7: REFERENCE COUNTING ====== -->
+<section id="refcount">
+<h2>7. Reference Counting -- Protecting Active Requests</h2>
+
+<span class="file-tag">radix_cache.py : inc_lock_ref (line 615) / dec_lock_ref (line 630)</span>
+
+<p>The reference counting system prevents eviction of cache entries that are being actively used by in-flight requests. When a request matches a prefix and starts processing, <code>inc_lock_ref()</code> is called on the terminal node, and it propagates upward to the root:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">inc_lock_ref</span>(<span class="var">self</span>, <span class="var">node</span>) -> IncLockRefResult:
+    delta = <span class="num">0</span>
+    <span class="kw">while</span> node != <span class="var">self</span>.root_node:
+        <span class="kw">if</span> node.lock_ref == <span class="num">0</span>:
+            <span class="cm"># Transitioning from evictable to protected</span>
+            <span class="var">self</span>.evictable_size_ -= len(node.key)
+            <span class="var">self</span>.protected_size_ += len(node.key)
+            delta -= len(node.key)
+        node.lock_ref += <span class="num">1</span>
+        <span class="var">self</span>._update_leaf_status(node)
+        node = node.parent
+    <span class="kw">return</span> IncLockRefResult(delta=delta)
+
+<span class="kw">def</span> <span class="fn">dec_lock_ref</span>(<span class="var">self</span>, <span class="var">node</span>, ...) -> DecLockRefResult:
+    delta = <span class="num">0</span>
+    <span class="kw">while</span> node != <span class="var">self</span>.root_node:
+        <span class="kw">if</span> node.lock_ref == <span class="num">1</span>:
+            <span class="cm"># Transitioning from protected to evictable</span>
+            <span class="var">self</span>.evictable_size_ += len(node.key)
+            <span class="var">self</span>.protected_size_ -= len(node.key)
+            delta += len(node.key)
+        node.lock_ref -= <span class="num">1</span>
+        <span class="var">self</span>._update_leaf_status(node)
+        node = node.parent
+    <span class="kw">return</span> DecLockRefResult(delta=delta)</code></pre>
+
+<div class="card purple">
+<div class="card-title" style="color:var(--accent3)">Why Walk to Root?</div>
+<p>Locking propagates from the terminal matched node all the way up to the root because eviction works bottom-up (leaf nodes first). If a child is locked, the parent must also be protected -- otherwise evicting the parent would leave the child's KV cache in an inconsistent state. The sizes <code>evictable_size_</code> and <code>protected_size_</code> are tracked incrementally so the scheduler can make memory-aware decisions without scanning the tree.</p>
+</div>
+</section>
+
+<!-- ====== SECTION 8: MEMORY POOLS ====== -->
+<section id="memory-pools">
+<h2>8. Memory Pools: ReqToTokenPool &amp; MHATokenToKVPool</h2>
+
+<span class="file-tag">memory_pool.py : ReqToTokenPool (line 123) / MHATokenToKVPool (line 733)</span>
+
+<h3>ReqToTokenPool -- Request to Token Mapping</h3>
+
+<p>This pool maps each request slot to the token positions it occupies in the KV cache. It is a 2D tensor of shape <code>[size, max_context_len]</code> stored as <code>torch.int32</code> on the GPU device:</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">ReqToTokenPool</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">size</span>, <span class="var">max_context_len</span>, <span class="var">device</span>, <span class="var">enable_memory_saver</span>):
+        <span class="var">self</span>.<span class="var">req_to_token</span> = torch.zeros(
+            (size, max_context_len), dtype=torch.int32, device=device
+        )
+        <span class="var">self</span>.<span class="var">free_slots</span> = list(range(size))  <span class="cm"># Python list of available slot indices</span>
+
+    <span class="kw">def</span> <span class="fn">alloc</span>(<span class="var">self</span>, <span class="var">reqs</span>: list[Req]) -> Optional[List[int]]:
+        <span class="cm"># Reuse existing slots for chunked prefill (continuing across chunks)</span>
+        reusing = [i <span class="kw">for</span> i, r <span class="kw">in</span> enumerate(reqs) <span class="kw">if</span> r.req_pool_idx <span class="kw">is not</span> <span class="kw">None</span>]
+        need_size = len(reqs) - len(reusing)
+        <span class="kw">if</span> need_size > len(<span class="var">self</span>.free_slots):
+            <span class="kw">return</span> <span class="kw">None</span>  <span class="cm"># not enough request slots</span>
+        select_index = <span class="var">self</span>.free_slots[:need_size]
+        <span class="var">self</span>.free_slots = <span class="var">self</span>.free_slots[need_size:]
+        <span class="cm"># Assign req_pool_idx to each request</span>
+        offset = <span class="num">0</span>
+        <span class="kw">for</span> r <span class="kw">in</span> reqs:
+            <span class="kw">if</span> r.req_pool_idx <span class="kw">is</span> <span class="kw">None</span>:
+                r.req_pool_idx = select_index[offset]
+                offset += <span class="num">1</span>
+        <span class="kw">return</span> [r.req_pool_idx <span class="kw">for</span> r <span class="kw">in</span> reqs]
+
+    <span class="kw">def</span> <span class="fn">free</span>(<span class="var">self</span>, <span class="var">req</span>):
+        <span class="var">self</span>.free_slots.append(req.req_pool_idx)
+        req.req_pool_idx = <span class="kw">None</span></code></pre>
+
+<h3>MHATokenToKVPool -- The Actual KV Tensor Storage</h3>
+
+<p>This is where the GPU memory physically lives. For Multi-Head Attention (MHA), it stores separate K and V buffers per layer:</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">MHATokenToKVPool</span>(KVCache):
+    <span class="kw">def</span> <span class="fn">_create_buffers</span>(<span class="var">self</span>):
+        <span class="cm"># [size + page_size, head_num, head_dim] for each layer</span>
+        <span class="cm"># The padded slot 0 is used for dummy outputs from padded tokens</span>
+        <span class="var">self</span>.<span class="var">k_buffer</span> = [
+            torch.zeros(
+                (<span class="var">self</span>.size + <span class="var">self</span>.page_size, <span class="var">self</span>.head_num, <span class="var">self</span>.head_dim),
+                dtype=<span class="var">self</span>.store_dtype, device=<span class="var">self</span>.device
+            )
+            <span class="kw">for</span> _ <span class="kw">in</span> range(<span class="var">self</span>.layer_num)
+        ]
+        <span class="var">self</span>.<span class="var">v_buffer</span> = [
+            torch.zeros(
+                (<span class="var">self</span>.size + <span class="var">self</span>.page_size, <span class="var">self</span>.head_num, <span class="var">self</span>.v_head_dim),
+                dtype=<span class="var">self</span>.store_dtype, device=<span class="var">self</span>.device
+            )
+            <span class="kw">for</span> _ <span class="kw">in</span> range(<span class="var">self</span>.layer_num)
+        ]
+
+    <span class="kw">def</span> <span class="fn">set_kv_buffer</span>(<span class="var">self</span>, <span class="var">layer</span>, <span class="var">loc</span>, <span class="var">cache_k</span>, <span class="var">cache_v</span>, ...):
+        <span class="cm"># Called during forward pass to store computed K/V into cache</span>
+        <span class="cm"># Uses optimized store_cache JIT kernel when possible</span>
+        _set_kv_buffer_impl(
+            cache_k, cache_v,
+            <span class="var">self</span>.k_buffer[layer_id - <span class="var">self</span>.start_layer],
+            <span class="var">self</span>.v_buffer[layer_id - <span class="var">self</span>.start_layer],
+            loc, ...
+        )</code></pre>
+
+<!-- Diagram D: Memory Pool Layout -->
+<div class="diagram-box">
+<div class="title">Diagram D: Memory Pool Layout</div>
+<svg viewBox="0 0 800 350" width="800" height="350" xmlns="http://www.w3.org/2000/svg" font-family="monospace" font-size="11">
+  <rect x="0" y="0" width="800" height="350" fill="#161b22" rx="12"/>
+
+  <!-- ReqToTokenPool -->
+  <text x="20" y="30" fill="#f0883e" font-weight="bold" font-size="12">ReqToTokenPool</text>
+  <text x="20" y="48" fill="#8b949e" font-size="9">req_to_token: torch.int32[size, max_context_len]</text>
+
+  <!-- Grid header -->
+  <text x="30" y="72" fill="#8b949e" font-size="8">slot</text>
+  <text x="80" y="72" fill="#8b949e" font-size="8">pos 0</text>
+  <text x="130" y="72" fill="#8b949e" font-size="8">pos 1</text>
+  <text x="180" y="72" fill="#8b949e" font-size="8">pos 2</text>
+  <text x="230" y="72" fill="#8b949e" font-size="8">pos 3</text>
+  <text x="280" y="72" fill="#8b949e" font-size="8">pos 4</text>
+  <text x="330" y="72" fill="#8b949e" font-size="8">...</text>
+
+  <!-- Row 0 (used) -->
+  <rect x="20" y="78" width="340" height="22" rx="3" fill="#0d1117" stroke="#58a6ff"/>
+  <text x="42" y="93" fill="#58a6ff" font-size="9">0</text>
+  <text x="90" y="93" fill="#c9d1d9" font-size="9">42</text>
+  <text x="140" y="93" fill="#c9d1d9" font-size="9">43</text>
+  <text x="190" y="93" fill="#c9d1d9" font-size="9">108</text>
+  <text x="240" y="93" fill="#c9d1d9" font-size="9">109</text>
+  <text x="290" y="93" fill="#c9d1d9" font-size="9">255</text>
+
+  <!-- Row 1 (used) -->
+  <rect x="20" y="102" width="340" height="22" rx="3" fill="#0d1117" stroke="#7ee787"/>
+  <text x="42" y="117" fill="#7ee787" font-size="9">1</text>
+  <text x="90" y="117" fill="#c9d1d9" font-size="9">42</text>
+  <text x="140" y="117" fill="#c9d1d9" font-size="9">43</text>
+  <text x="190" y="117" fill="#c9d1d9" font-size="9">44</text>
+  <text x="240" y="117" fill="#c9d1d9" font-size="9">77</text>
+  <text x="290" y="117" fill="#c9d1d9" font-size="9">78</text>
+
+  <!-- Row 2 (free) -->
+  <rect x="20" y="126" width="340" height="22" rx="3" fill="#0d1117" stroke="#30363d"/>
+  <text x="42" y="141" fill="#8b949e" font-size="9">2</text>
+  <text x="100" y="141" fill="#8b949e" font-size="9">(free slot)</text>
+
+  <text x="30" y="164" fill="#8b949e" font-size="8">Rows 0 and 1 share indices 42,43 -- same prefix from RadixCache!</text>
+
+  <!-- Arrow connecting -->
+  <line x1="380" y1="95" x2="420" y2="210" stroke="#e3b341" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="385" y="155" fill="#e3b341" font-size="8" transform="rotate(52, 385, 155)">indices point into</text>
+
+  <!-- KV Cache -->
+  <text x="420" y="195" fill="#56d4dd" font-weight="bold" font-size="12">MHATokenToKVPool (GPU)</text>
+
+  <!-- Layer 0 K -->
+  <rect x="420" y="210" width="170" height="55" rx="6" fill="#0d1117" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="505" y="228" fill="#58a6ff" text-anchor="middle" font-weight="bold" font-size="9">k_buffer[0]</text>
+  <rect x="430" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#58a6ff"/>
+  <rect x="444" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#58a6ff"/>
+  <rect x="458" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#58a6ff"/>
+  <rect x="472" y="234" width="12" height="12" rx="2" fill="#7ee787" stroke="#7ee787"/>
+  <rect x="486" y="234" width="12" height="12" rx="2" fill="#7ee787" stroke="#7ee787"/>
+  <rect x="500" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#58a6ff"/>
+  <rect x="514" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#58a6ff"/>
+  <rect x="528" y="234" width="12" height="12" rx="2" fill="#d2a8ff" stroke="#d2a8ff"/>
+  <rect x="542" y="234" width="12" height="12" rx="2" fill="#d2a8ff" stroke="#d2a8ff"/>
+  <rect x="556" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#30363d"/>
+  <rect x="570" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#30363d"/>
+  <text x="505" y="260" fill="#8b949e" text-anchor="middle" font-size="8">[size+ps, H, D]  idx 42,43=shared prefix</text>
+
+  <!-- Layer 0 V -->
+  <rect x="600" y="210" width="170" height="55" rx="6" fill="#0d1117" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="685" y="228" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="9">v_buffer[0]</text>
+  <rect x="610" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#d2a8ff"/>
+  <rect x="624" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#d2a8ff"/>
+  <rect x="638" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#d2a8ff"/>
+  <rect x="652" y="234" width="12" height="12" rx="2" fill="#7ee787" stroke="#7ee787"/>
+  <rect x="666" y="234" width="12" height="12" rx="2" fill="#7ee787" stroke="#7ee787"/>
+  <rect x="680" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#d2a8ff"/>
+  <rect x="694" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#d2a8ff"/>
+  <rect x="708" y="234" width="12" height="12" rx="2" fill="#d2a8ff" stroke="#d2a8ff"/>
+  <rect x="722" y="234" width="12" height="12" rx="2" fill="#d2a8ff" stroke="#d2a8ff"/>
+  <rect x="736" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#30363d"/>
+  <rect x="750" y="234" width="12" height="12" rx="2" fill="#1a2332" stroke="#30363d"/>
+  <text x="685" y="260" fill="#8b949e" text-anchor="middle" font-size="8">[size+ps, H, V_D]  same indexing</text>
+
+  <!-- More layers -->
+  <text x="420" y="290" fill="#8b949e" font-size="9">k_buffer[1], v_buffer[1] ... k_buffer[N-1], v_buffer[N-1]</text>
+
+  <!-- Legend -->
+  <rect x="420" y="300" width="360" height="40" rx="6" fill="#0d1117" stroke="#30363d"/>
+  <rect x="430" y="310" width="12" height="12" rx="2" fill="#7ee787"/>
+  <text x="448" y="320" fill="#c9d1d9" font-size="8">Allocated (shared prefix)</text>
+  <rect x="560" y="310" width="12" height="12" rx="2" fill="#d2a8ff"/>
+  <text x="578" y="320" fill="#c9d1d9" font-size="8">Allocated (unique)</text>
+  <rect x="670" y="310" width="12" height="12" rx="2" fill="#1a2332" stroke="#30363d"/>
+  <text x="688" y="320" fill="#c9d1d9" font-size="8">Free</text>
+
+  <!-- Allocator -->
+  <text x="20" y="200" fill="#7ee787" font-weight="bold" font-size="12">TokenToKVPoolAllocator</text>
+  <rect x="20" y="210" width="350" height="55" rx="6" fill="#0d1117" stroke="#7ee787" stroke-width="1.5"/>
+  <text x="30" y="228" fill="#7ee787" font-size="9">free_pages: [5, 6, 10, 11, 15, 16, ...]</text>
+  <text x="30" y="244" fill="#8b949e" font-size="9">alloc(3) -> [5,6,10], free_pages=[11,15,16,...]</text>
+  <text x="30" y="258" fill="#8b949e" font-size="9">free([42,43]) -> free_pages=[42,43,11,15,16,...]</text>
+
+  <rect x="20" y="275" width="350" height="55" rx="6" fill="#0d1117" stroke="#e3b341" stroke-width="1.5"/>
+  <text x="30" y="293" fill="#e3b341" font-size="9">release_pages: [old freed indices, unsorted]</text>
+  <text x="30" y="309" fill="#8b949e" font-size="9">merge_and_sort_free() merges + sorts both</text>
+  <text x="30" y="322" fill="#8b949e" font-size="9">need_sort flag controls when merge happens</text>
+</svg>
+</div>
+</section>
+
+<!-- ====== SECTION 9: ALLOCATOR ====== -->
+<section id="allocator">
+<h2>9. TokenToKVPoolAllocator -- Allocation &amp; Deallocation</h2>
+
+<span class="file-tag">allocator.py : TokenToKVPoolAllocator (line 117) / PagedTokenToKVPoolAllocator (line 356)</span>
+
+<p>SGLang provides two allocator variants. The base <code>TokenToKVPoolAllocator</code> operates at token granularity (page_size=1), while <code>PagedTokenToKVPoolAllocator</code> operates at page granularity for higher efficiency with paged attention.</p>
+
+<h3>TokenToKVPoolAllocator (page_size=1)</h3>
+
+<pre><code><span class="kw">class</span> <span class="cls">TokenToKVPoolAllocator</span>(BaseTokenToKVPoolAllocator):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">size</span>, <span class="var">dtype</span>, <span class="var">device</span>, <span class="var">kvcache</span>, <span class="var">need_sort</span>):
+        super().__init__(size, <span class="num">1</span>, dtype, device, kvcache, need_sort)
+        <span class="var">self</span>.clear()
+
+    <span class="kw">def</span> <span class="fn">clear</span>(<span class="var">self</span>):
+        <span class="cm"># Slot 0 is reserved as a padding dummy slot</span>
+        <span class="var">self</span>.<span class="var">free_pages</span> = torch.arange(<span class="num">1</span>, <span class="var">self</span>.size + <span class="num">1</span>,
+                                        dtype=torch.int64, device=<span class="var">self</span>.device)
+        <span class="var">self</span>.<span class="var">release_pages</span> = torch.empty((<span class="num">0</span>,), dtype=torch.int64, device=<span class="var">self</span>.device)
+
+    <span class="kw">def</span> <span class="fn">alloc</span>(<span class="var">self</span>, <span class="var">need_size</span>):
+        <span class="cm"># If sorted mode and insufficient free pages, merge with release_pages</span>
+        <span class="kw">if</span> <span class="var">self</span>.need_sort <span class="kw">and</span> need_size > len(<span class="var">self</span>.free_pages):
+            <span class="var">self</span>.merge_and_sort_free()
+
+        <span class="kw">if</span> need_size > len(<span class="var">self</span>.free_pages):
+            <span class="kw">return</span> <span class="kw">None</span>  <span class="cm"># OOM</span>
+
+        select_index = <span class="var">self</span>.free_pages[:need_size]
+        <span class="var">self</span>.free_pages = <span class="var">self</span>.free_pages[need_size:]
+        <span class="kw">return</span> select_index
+
+    <span class="kw">def</span> <span class="fn">free</span>(<span class="var">self</span>, <span class="var">free_index</span>):
+        <span class="kw">if</span> free_index.numel() == <span class="num">0</span>:
+            <span class="kw">return</span>
+        <span class="kw">if</span> <span class="var">self</span>.is_not_in_free_group:
+            <span class="kw">if</span> <span class="var">self</span>.need_sort:
+                <span class="cm"># Deferred: add to release_pages (will be merged later)</span>
+                <span class="var">self</span>.release_pages = torch.cat((<span class="var">self</span>.release_pages, free_index))
+            <span class="kw">else</span>:
+                <span class="cm"># Immediate: prepend to free_pages</span>
+                <span class="var">self</span>.free_pages = torch.cat((free_index, <span class="var">self</span>.free_pages))
+        <span class="kw">else</span>:
+            <span class="cm"># Batched free: accumulate in group, apply at free_group_end()</span>
+            <span class="var">self</span>.free_group.append(free_index)</code></pre>
+
+<h3>PagedTokenToKVPoolAllocator -- Triton-Accelerated Page Allocation</h3>
+
+<p>For paged operation, the allocator uses <strong>Triton kernels</strong> for batch allocation during extend and decode phases. The <code>alloc_extend_kernel</code> handles three parts: filling the old partial page, allocating full new pages, and filling a new partial page at the end.</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">PagedTokenToKVPoolAllocator</span>(BaseTokenToKVPoolAllocator):
+    <span class="kw">def</span> <span class="fn">alloc_extend</span>(<span class="var">self</span>, prefix_lens, ..., seq_lens, ..., last_loc, extend_num_tokens):
+        out_indices = torch.empty((extend_num_tokens,), dtype=torch.int64, device=...)
+
+        <span class="cm"># Triton kernel computes per-request page allocation in parallel on GPU</span>
+        alloc_extend_kernel[(bs,)](
+            prefix_lens, seq_lens, last_loc,
+            <span class="var">self</span>.free_pages, out_indices,
+            next_power_of_2(bs), <span class="var">self</span>.page_size
+        )
+        num_new_pages = get_num_new_pages(seq_lens=..., page_size=..., prefix_lens=...)
+        <span class="var">self</span>.free_pages = <span class="var">self</span>.free_pages[num_new_pages:]
+        <span class="kw">return</span> out_indices
+
+    <span class="kw">def</span> <span class="fn">free</span>(<span class="var">self</span>, <span class="var">free_index</span>):
+        <span class="cm"># Convert token indices back to page indices</span>
+        free_page_indices = torch.unique(free_index // <span class="var">self</span>.page_size)
+        <span class="var">self</span>.free_pages = torch.cat((free_page_indices, <span class="var">self</span>.free_pages))</code></pre>
+
+<div class="card">
+<div class="card-title" style="color:var(--accent)">Free Group Batching</div>
+<p>The allocator supports <strong>batched free</strong> via <code>free_group_begin()</code>/<code>free_group_end()</code>. Between these calls, all <code>free()</code> operations accumulate in a list and are applied as a single <code>torch.cat</code> at the end, reducing the number of tensor concatenation operations.</p>
+</div>
+
+<div class="card success">
+<div class="card-title" style="color:var(--accent2)">Sorted vs Unsorted Mode</div>
+<p>The <code>need_sort</code> flag controls whether freed indices go to <code>release_pages</code> (deferred, sorted at merge time) or directly to <code>free_pages</code>. Sorted allocation is important for some attention backends that benefit from locality of KV cache indices in GPU memory.</p>
+</div>
+</section>
+
+<!-- ====== SECTION 10: HIRADIXCACHE ====== -->
+<section id="hiradix">
+<h2>10. HiRadixCache -- Three-Tier Hierarchical Caching</h2>
+
+<span class="file-tag">hiradix_cache.py : HiRadixCache (line 56)</span>
+
+<p>The <code>HiRadixCache</code> extends <code>RadixCache</code> with a <strong>three-tier memory hierarchy</strong>: GPU (device) -> CPU (host) -> Storage (disk/remote). When GPU memory is exhausted, KV cache entries are demoted to CPU memory; when CPU memory is full, entries can be further spilled to persistent storage.</p>
+
+<h3>Initialization -- Setting Up the Hierarchy</h3>
+
+<pre><code><span class="kw">class</span> <span class="cls">HiRadixCache</span>(RadixCache):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">params</span>, <span class="var">server_args</span>):
+        <span class="var">self</span>.<span class="var">kv_cache</span> = params.token_to_kv_pool_allocator.get_kvcache()
+
+        <span class="cm"># Create CPU-side KV pool matching the GPU KV cache type</span>
+        <span class="kw">if</span> isinstance(<span class="var">self</span>.kv_cache, MHATokenToKVPool):
+            <span class="var">self</span>.<span class="var">token_to_kv_pool_host</span> = MHATokenToKVPoolHost(
+                <span class="var">self</span>.kv_cache, server_args.hicache_ratio,
+                server_args.hicache_size, <span class="var">self</span>.page_size, ...
+            )
+        <span class="kw">elif</span> isinstance(<span class="var">self</span>.kv_cache, MLATokenToKVPool):
+            <span class="var">self</span>.<span class="var">token_to_kv_pool_host</span> = MLATokenToKVPoolHost(...)
+
+        <span class="cm"># Cache controller manages async GPU<->CPU<->Storage transfers</span>
+        <span class="var">self</span>.<span class="var">cache_controller</span> = HiCacheController(
+            params.token_to_kv_pool_allocator,
+            <span class="var">self</span>.token_to_kv_pool_host,
+            <span class="var">self</span>.page_size, <span class="var">self</span>.tp_group,
+            write_policy=server_args.hicache_write_policy,    <span class="cm"># write_back | write_through</span>
+            storage_backend=server_args.hicache_storage_backend,
+            ...
+        )
+
+        <span class="cm"># Write-through: backup after hit_count reaches threshold</span>
+        <span class="var">self</span>.<span class="var">write_through_threshold</span> = (
+            <span class="num">1</span> <span class="kw">if</span> server_args.hicache_write_policy == <span class="str">"write_through"</span> <span class="kw">else</span> <span class="num">2</span>
+        )
+        <span class="var">self</span>.<span class="var">load_back_threshold</span> = <span class="num">10</span>  <span class="cm"># minimum tokens to justify a load-back</span>
+        <span class="var">self</span>.<span class="var">evictable_host_leaves</span> = set()  <span class="cm"># host-side evictable tracking</span></code></pre>
+
+<h3>Eviction with Host Backup</h3>
+
+<p>The eviction process in <code>HiRadixCache</code> is significantly more complex than in the base <code>RadixCache</code>. Instead of simply freeing GPU memory, it can <strong>demote</strong> entries to CPU:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">evict</span>(<span class="var">self</span>, <span class="var">params</span>) -> EvictResult:
+    <span class="cm"># Build eviction heap from evictable leaves (same as base)</span>
+    <span class="kw">while</span> num_evicted < num_tokens <span class="kw">and</span> len(eviction_heap):
+        _priority, x = heapq.heappop(eviction_heap)
+
+        <span class="kw">if</span> x.lock_ref > <span class="num">0</span>:
+            <span class="kw">continue</span>
+
+        <span class="kw">if</span> <span class="var">self</span>._is_pinned(x):
+            <span class="cm"># Pinned node: demote to host, keep in tree</span>
+            <span class="kw">if</span> x.backuped:
+                num_evicted += <span class="var">self</span>._evict_backuped(x)  <span class="cm"># just free GPU indices</span>
+            <span class="kw">else</span>:
+                written = <span class="var">self</span>.write_backup(x, write_back=<span class="kw">True</span>)
+                ...
+
+        <span class="kw">elif not</span> x.backuped:
+            <span class="kw">if</span> <span class="var">self</span>.cache_controller.write_policy == <span class="str">"write_back"</span>:
+                <span class="cm"># Write-back: backup to host before freeing GPU</span>
+                num_evicted += <span class="var">self</span>.write_backup(x, write_back=<span class="kw">True</span>)
+            <span class="kw">else</span>:
+                <span class="cm"># Write-through: already backed up, just free GPU</span>
+                num_evicted += <span class="var">self</span>._evict_regular(x)
+        <span class="kw">else</span>:
+            num_evicted += <span class="var">self</span>._evict_backuped(x)
+
+<span class="kw">def</span> <span class="fn">_evict_backuped</span>(<span class="var">self</span>, <span class="var">node</span>):
+    <span class="cm"># GPU -> CPU demotion: free device indices but keep node in tree</span>
+    num_evicted = <span class="var">self</span>.cache_controller.evict_device(node.value)
+    node.value = <span class="kw">None</span>   <span class="cm"># mark as evicted from GPU</span>
+    <span class="cm"># node.host_value still has the CPU indices</span>
+    <span class="var">self</span>._update_leaf_status(node)
+    <span class="var">self</span>._update_host_leaf_status(node)
+    <span class="kw">return</span> num_evicted</code></pre>
+
+<h3>Load-Back: CPU -> GPU Restoration</h3>
+
+<p>When a <code>match_prefix()</code> hits a node whose GPU data was evicted but still exists on CPU, <code>load_back()</code> restores it:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">load_back</span>(<span class="var">self</span>, <span class="var">node</span>, <span class="var">mem_quota</span>=<span class="kw">None</span>):
+    <span class="cm"># Walk up to find the nearest non-evicted ancestor</span>
+    last_hit_node = node
+    nodes_to_load = []
+    <span class="kw">while</span> node.evicted:
+        <span class="kw">assert</span> node.backuped  <span class="cm"># must have host backup</span>
+        nodes_to_load.insert(<span class="num">0</span>, node)
+        node = node.parent
+
+    <span class="cm"># Protect ancestor from eviction during load</span>
+    <span class="var">self</span>.inc_lock_ref(ancester_node)
+
+    <span class="cm"># Concatenate all host indices for batch transfer</span>
+    host_indices = torch.cat([n.host_value <span class="kw">for</span> n <span class="kw">in</span> nodes_to_load])
+
+    <span class="cm"># Skip if too small (< 10 tokens) or exceeds memory quota</span>
+    <span class="kw">if</span> len(host_indices) < <span class="var">self</span>.load_back_threshold:
+        <span class="kw">return</span> <span class="kw">None</span>
+
+    <span class="cm"># Allocate GPU space and initiate async DMA transfer</span>
+    device_indices = <span class="var">self</span>.cache_controller.load(host_indices=host_indices, ...)
+    <span class="kw">if</span> device_indices <span class="kw">is</span> <span class="kw">None</span>:
+        <span class="cm"># Not enough GPU memory, try evicting first</span>
+        <span class="var">self</span>.evict(EvictParams(num_tokens=len(host_indices)))
+        device_indices = <span class="var">self</span>.cache_controller.load(...)
+
+    <span class="cm"># Restore node values from device_indices</span>
+    offset = <span class="num">0</span>
+    <span class="kw">for</span> node <span class="kw">in</span> nodes_to_load:
+        node.value = device_indices[offset : offset + len(node.host_value)].clone()
+        offset += len(node.host_value)
+    <span class="var">self</span>.evictable_size_ += len(device_indices)</code></pre>
+
+<h3>Write-Through: Hit Count Triggered Backup</h3>
+
+<p>With the write-through policy, nodes are proactively backed up to CPU after reaching a hit count threshold:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">_inc_hit_count</span>(<span class="var">self</span>, <span class="var">node</span>, chunked=<span class="kw">False</span>):
+    <span class="kw">if</span> <span class="var">self</span>.cache_controller.write_policy == <span class="str">"write_back"</span> <span class="kw">or</span> chunked:
+        <span class="kw">return</span>
+    node.hit_count += <span class="num">1</span>
+    <span class="kw">if not</span> node.backuped:
+        <span class="kw">if</span> node.hit_count >= <span class="var">self</span>.write_through_threshold:
+            <span class="var">self</span>.write_backup(node)  <span class="cm"># async GPU->CPU copy</span></code></pre>
+
+<!-- Diagram E: Three-Tier HiRadixCache -->
+<div class="diagram-box">
+<div class="title">Diagram E: Three-Tier HiRadixCache Architecture</div>
+<svg viewBox="0 0 800 480" width="800" height="480" xmlns="http://www.w3.org/2000/svg" font-family="monospace" font-size="11">
+  <rect x="0" y="0" width="800" height="480" fill="#161b22" rx="12"/>
+
+  <!-- Title -->
+  <text x="400" y="25" fill="#c9d1d9" text-anchor="middle" font-weight="bold" font-size="14">HiRadixCache: GPU -> CPU -> Storage Hierarchy</text>
+
+  <!-- Tier 1: GPU -->
+  <rect x="30" y="45" width="740" height="120" rx="10" fill="#0d1117" stroke="#7ee787" stroke-width="2"/>
+  <text x="50" y="68" fill="#7ee787" font-weight="bold" font-size="13">TIER 1: GPU (Device)</text>
+  <text x="50" y="86" fill="#8b949e" font-size="9">MHATokenToKVPool / MLATokenToKVPool -- fastest, most limited</text>
+
+  <rect x="50" y="96" width="160" height="55" rx="6" fill="#1c2333" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="130" y="114" fill="#58a6ff" text-anchor="middle" font-weight="bold" font-size="10">Active Nodes</text>
+  <text x="130" y="128" fill="#c9d1d9" text-anchor="middle" font-size="8">lock_ref > 0</text>
+  <text x="130" y="142" fill="#7ee787" text-anchor="middle" font-size="8">PROTECTED from eviction</text>
+
+  <rect x="230" y="96" width="160" height="55" rx="6" fill="#1c2333" stroke="#e3b341" stroke-width="1.5"/>
+  <text x="310" y="114" fill="#e3b341" text-anchor="middle" font-weight="bold" font-size="10">Evictable Nodes</text>
+  <text x="310" y="128" fill="#c9d1d9" text-anchor="middle" font-size="8">lock_ref == 0, value != None</text>
+  <text x="310" y="142" fill="#e3b341" text-anchor="middle" font-size="8">CAN be evicted by LRU/LFU</text>
+
+  <rect x="410" y="96" width="170" height="55" rx="6" fill="#1c2333" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="495" y="114" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="10">Backed-Up Nodes</text>
+  <text x="495" y="128" fill="#c9d1d9" text-anchor="middle" font-size="8">value != None, host_value != None</text>
+  <text x="495" y="142" fill="#d2a8ff" text-anchor="middle" font-size="8">SAFE to free GPU (host copy exists)</text>
+
+  <rect x="600" y="96" width="155" height="55" rx="6" fill="#1c2333" stroke="#ff7b72" stroke-width="1.5"/>
+  <text x="678" y="114" fill="#ff7b72" text-anchor="middle" font-weight="bold" font-size="10">Evicted Nodes</text>
+  <text x="678" y="128" fill="#c9d1d9" text-anchor="middle" font-size="8">value == None (GPU freed)</text>
+  <text x="678" y="142" fill="#ff7b72" text-anchor="middle" font-size="8">host_value still available</text>
+
+  <!-- Arrow: GPU -> CPU Eviction -->
+  <path d="M400 165 L400 190" stroke="#f0883e" stroke-width="3" marker-end="url(#arrowOrange)"/>
+  <text x="430" y="180" fill="#f0883e" font-weight="bold" font-size="10">evict() / write_backup()</text>
+  <text x="430" y="193" fill="#8b949e" font-size="8">Async DMA: GPU -> CPU pinned memory</text>
+
+  <!-- Tier 2: CPU -->
+  <rect x="30" y="200" width="740" height="100" rx="10" fill="#0d1117" stroke="#56d4dd" stroke-width="2"/>
+  <text x="50" y="223" fill="#56d4dd" font-weight="bold" font-size="13">TIER 2: CPU (Host)</text>
+  <text x="50" y="241" fill="#8b949e" font-size="9">MHATokenToKVPoolHost / MLATokenToKVPoolHost -- large, medium speed</text>
+
+  <rect x="50" y="250" width="200" height="38" rx="6" fill="#1c2333" stroke="#56d4dd" stroke-width="1.5"/>
+  <text x="150" y="268" fill="#56d4dd" text-anchor="middle" font-weight="bold" font-size="10">Host KV Buffers</text>
+  <text x="150" y="282" fill="#8b949e" text-anchor="middle" font-size="8">node.host_value indices</text>
+
+  <rect x="270" y="250" width="200" height="38" rx="6" fill="#1c2333" stroke="#d2a8ff" stroke-width="1.5"/>
+  <text x="370" y="268" fill="#d2a8ff" text-anchor="middle" font-weight="bold" font-size="10">host_ref_counter</text>
+  <text x="370" y="282" fill="#8b949e" text-anchor="middle" font-size="8">Protects during async ops</text>
+
+  <rect x="490" y="250" width="260" height="38" rx="6" fill="#1c2333" stroke="#e3b341" stroke-width="1.5"/>
+  <text x="620" y="268" fill="#e3b341" text-anchor="middle" font-weight="bold" font-size="10">evictable_host_leaves set</text>
+  <text x="620" y="282" fill="#8b949e" text-anchor="middle" font-size="8">Tracks CPU-evictable nodes</text>
+
+  <!-- Arrow: CPU -> GPU Load-back -->
+  <path d="M200 200 L200 165" stroke="#7ee787" stroke-width="3" marker-end="url(#arrowGreen)"/>
+  <text x="60" y="182" fill="#7ee787" font-weight="bold" font-size="10">load_back()</text>
+
+  <!-- Arrow: CPU -> Storage -->
+  <path d="M400 300 L400 330" stroke="#f778ba" stroke-width="3" marker-end="url(#arrowRed)"/>
+  <text x="430" y="318" fill="#f778ba" font-weight="bold" font-size="10">write_backup_storage()</text>
+  <text x="430" y="330" fill="#8b949e" font-size="8">Async: CPU -> Disk/Remote via HiCacheController</text>
+
+  <!-- Tier 3: Storage -->
+  <rect x="30" y="340" width="740" height="85" rx="10" fill="#0d1117" stroke="#f778ba" stroke-width="2"/>
+  <text x="50" y="363" fill="#f778ba" font-weight="bold" font-size="13">TIER 3: Storage (Persistent)</text>
+  <text x="50" y="381" fill="#8b949e" font-size="9">Optional: disk, NFS, nixl remote -- unlimited, slowest</text>
+
+  <rect x="50" y="390" width="220" height="28" rx="6" fill="#1c2333" stroke="#f778ba" stroke-width="1.5"/>
+  <text x="160" y="408" fill="#f778ba" text-anchor="middle" font-size="9">SHA256-hashed block keys</text>
+
+  <rect x="290" y="390" width="220" height="28" rx="6" fill="#1c2333" stroke="#f778ba" stroke-width="1.5"/>
+  <text x="400" y="408" fill="#f778ba" text-anchor="middle" font-size="9">Prefetch via hash_value matching</text>
+
+  <rect x="530" y="390" width="220" height="28" rx="6" fill="#1c2333" stroke="#f778ba" stroke-width="1.5"/>
+  <text x="640" y="408" fill="#f778ba" text-anchor="middle" font-size="9">Policies: best_effort | wait | timeout</text>
+
+  <!-- Arrow: Storage -> CPU Prefetch -->
+  <path d="M200 340 L200 300" stroke="#56d4dd" stroke-width="3" marker-end="url(#arrowCyan)"/>
+  <text x="60" y="320" fill="#56d4dd" font-weight="bold" font-size="10">prefetch()</text>
+
+  <!-- Write policies -->
+  <rect x="30" y="435" width="740" height="35" rx="6" fill="#0d1117" stroke="#30363d"/>
+  <text x="50" y="456" fill="#e3b341" font-size="9">Write Policies: write_through (backup on hit_count threshold) | write_back (backup only on eviction) | write_through_selective</text>
+
+</svg>
+</div>
+
+<h3>Host Eviction</h3>
+
+<p>When even CPU memory is exhausted, <code>evict_host()</code> removes entries from CPU, fully deleting the tree node:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">evict_host</span>(<span class="var">self</span>, <span class="var">num_tokens</span>):
+    <span class="cm"># Uses same eviction strategy but on evictable_host_leaves</span>
+    leaves = list(<span class="var">self</span>.evictable_host_leaves)
+    eviction_heap = [(<span class="var">self</span>.eviction_strategy.get_priority(n), n) <span class="kw">for</span> n <span class="kw">in</span> leaves]
+    heapq.heapify(eviction_heap)
+
+    <span class="kw">while</span> num_evicted < num_tokens <span class="kw">and</span> eviction_heap:
+        _priority, x = heapq.heappop(eviction_heap)
+        <span class="kw">if not</span> x.evicted:   <span class="cm"># only evict nodes already gone from GPU</span>
+            <span class="kw">continue</span>
+        <span class="kw">if</span> x.host_ref_counter > <span class="num">0</span>:  <span class="cm"># protected by ongoing prefetch/backup/pin</span>
+            <span class="kw">continue</span>
+
+        num_evicted += <span class="var">self</span>.cache_controller.evict_host(x.host_value)
+        <span class="cm"># Fully remove node from tree</span>
+        x.parent.children.pop(<span class="var">self</span>.get_child_key_fn(x.key))</code></pre>
+</section>
+
+<!-- ====== SECTION 11: SESSION AWARE CACHE ====== -->
+<section id="session-cache">
+<h2>11. SessionAwareCache -- Streaming Session KV Management</h2>
+
+<span class="file-tag">session_aware_cache.py : SessionAwareCache (line 112)</span>
+
+<p>The <code>SessionAwareCache</code> is a <strong>decorator</strong> (wrapper) around any <code>BasePrefixCache</code> implementation that adds support for <strong>streaming sessions</strong>. In streaming mode, KV cache is held across multiple request turns within the same session, avoiding re-computation between turns of a multi-turn conversation.</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">SessionAwareCache</span>(BasePrefixCache):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>, <span class="var">inner</span>: BasePrefixCache):
+        <span class="var">self</span>.<span class="var">inner</span> = inner                           <span class="cm"># wrapped cache (RadixCache, HiRadixCache, etc.)</span>
+        <span class="var">self</span>.<span class="var">slots</span>: Dict[str, SessionSlot] = {}       <span class="cm"># session_id -> slot</span></code></pre>
+
+<h3>SessionSlot -- Per-Session KV State</h3>
+
+<pre><code><span class="dec">@dataclass</span>
+<span class="kw">class</span> <span class="cls">SessionSlot</span>:
+    virtual_node: _VirtualNode = field(default_factory=_VirtualNode)
+    req_pool_idx: Optional[int] = <span class="kw">None</span>     <span class="cm"># allocated request pool slot</span>
+    kv_committed_len: int = <span class="num">0</span>               <span class="cm"># how many tokens have KV cached</span>
+    kv_allocated_len: int = <span class="num">0</span>               <span class="cm"># how many tokens are allocated</span>
+    last_node: Any = <span class="kw">None</span>                   <span class="cm"># radix tree node (for dec_lock_ref on close)</span>
+    cache_protected_len: int = <span class="num">0</span>            <span class="cm"># overlap with radix tree</span></code></pre>
+
+<p>The key insight is that for streaming sessions, <code>match_prefix()</code> directly restores KV state from the <code>SessionSlot</code> instead of walking the radix tree. The <code>_VirtualNode</code> sentinel allows <code>inc_lock_ref</code>/<code>dec_lock_ref</code> to be no-ops for session-managed KV, since the session itself holds the KV alive:</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">match_prefix</span>(<span class="var">self</span>, <span class="var">params</span>) -> MatchResult:
+    req = params.req
+    <span class="kw">if not</span> _is_streaming(req):
+        <span class="kw">return</span> <span class="var">self</span>.inner.match_prefix(params)  <span class="cm"># pass through for non-streaming</span>
+
+    slot = <span class="var">self</span>.slots.get(req.session.session_id)
+    <span class="kw">if</span> slot <span class="kw">is</span> <span class="kw">None</span> <span class="kw">or</span> slot.req_pool_idx <span class="kw">is</span> <span class="kw">None</span>:
+        <span class="kw">return</span> <span class="var">self</span>.inner.match_prefix(params)  <span class="cm"># first turn: use radix tree</span>
+
+    <span class="cm"># Subsequent turns: restore from session slot</span>
+    slot.restore_to_req(req)
+    prefix_len = min(req.kv_committed_len, max(len(params.key.token_ids) - <span class="num">1</span>, <span class="num">0</span>))
+    device_indices = <span class="var">self</span>.req_to_token_pool.req_to_token[req.req_pool_idx, :prefix_len]
+    <span class="kw">return</span> MatchResult(device_indices=device_indices, last_device_node=slot.virtual_node, ...)</code></pre>
+</section>
+
+<!-- ====== SECTION 12: RADIX ATTENTION ====== -->
+<section id="radix-attention">
+<h2>12. RadixAttention Layer -- Integrating Cache in Forward Pass</h2>
+
+<span class="file-tag">layers/radix_attention.py : RadixAttention (line 47)</span>
+
+<p>The <code>RadixAttention</code> module is the attention layer used in SGLang model implementations. Despite its name, it does not directly reference the radix cache tree -- instead, it delegates to the attention backend, which reads from the KV cache buffers at the indices provided by the cache system.</p>
+
+<pre><code><span class="kw">class</span> <span class="cls">RadixAttention</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="var">self</span>,
+        num_heads, head_dim, scaling, num_kv_heads, layer_id,
+        logit_cap=<span class="num">0.0</span>, v_head_dim=-<span class="num">1</span>, sliding_window_size=-<span class="num">1</span>,
+        is_cross_attention=<span class="kw">False</span>, pos_encoding_mode=<span class="str">"NONE"</span>, ...
+    ):
+        <span class="var">self</span>.<span class="var">tp_q_head_num</span> = num_heads
+        <span class="var">self</span>.<span class="var">tp_k_head_num</span> = num_kv_heads
+        <span class="var">self</span>.<span class="var">head_dim</span> = head_dim
+        <span class="var">self</span>.<span class="var">v_head_dim</span> = v_head_dim <span class="kw">if</span> v_head_dim != -<span class="num">1</span> <span class="kw">else</span> head_dim
+        <span class="var">self</span>.<span class="var">layer_id</span> = layer_id
+        <span class="var">self</span>.<span class="var">sliding_window_size</span> = sliding_window_size <span class="kw">or</span> -<span class="num">1</span>
+
+    <span class="kw">def</span> <span class="fn">forward</span>(<span class="var">self</span>, <span class="var">q</span>, <span class="var">k</span>, <span class="var">v</span>, <span class="var">forward_batch</span>: ForwardBatch,
+                <span class="var">save_kv_cache</span>=<span class="kw">True</span>, **kwargs):
+        <span class="kw">if</span> k <span class="kw">is not</span> <span class="kw">None</span>:
+            k = k.view(-<span class="num">1</span>, <span class="var">self</span>.tp_k_head_num, <span class="var">self</span>.qk_head_dim)
+            v = v.view(-<span class="num">1</span>, <span class="var">self</span>.tp_v_head_num, <span class="var">self</span>.v_head_dim)
+
+        <span class="cm"># For extend (prefill) mode with torch.compile context:</span>
+        <span class="kw">if</span> forward_batch.forward_mode.is_extend() <span class="kw">and</span> get_forward_context():
+            output = torch.empty_like(q) <span class="kw">if</span> ... <span class="kw">else</span> ...
+            unified_attention_with_output(q, k, v, output, save_kv_cache, <span class="var">self</span>.layer_id)
+            <span class="kw">return</span> output
+        <span class="kw">else</span>:
+            <span class="cm"># Delegate to attention backend (FlashAttention, Triton, etc.)</span>
+            <span class="kw">return</span> forward_batch.attn_backend.forward(
+                q, k, v, <span class="var">self</span>, forward_batch, save_kv_cache, **kwargs
+            )</code></pre>
+
+<h3>How Cache Integration Works in Practice</h3>
+
+<p>The integration flow between the cache and the attention layer is orchestrated by the scheduler and attention backend:</p>
+
+<ol>
+<li><strong>Scheduling:</strong> The scheduler calls <code>match_prefix()</code> on the radix cache to find cached KV indices for each request. These indices are written into <code>req_to_token_pool</code>.</li>
+<li><strong>Forward Pass:</strong> During the forward pass, the attention backend reads K/V from <code>MHATokenToKVPool.get_kv_buffer(layer_id)</code> at the indices stored in <code>req_to_token_pool</code>.</li>
+<li><strong>KV Storage:</strong> After computing attention for new tokens, <code>set_kv_buffer()</code> writes the new K/V into the pool. The <code>save_kv_cache</code> flag controls whether this happens (set to False for the last layer in speculative decoding verification).</li>
+<li><strong>Cache Update:</strong> When the request finishes, <code>cache_finished_req()</code> inserts the full token sequence into the radix tree, deduplicating against existing entries and freeing unused KV indices.</li>
+</ol>
+
+<pre><code><span class="cm"># unified_attention_with_output -- the torch.compile-compatible entry point</span>
+<span class="dec">@register_custom_op</span>(mutates_args=[<span class="str">"output"</span>])
+<span class="dec">@register_split_op</span>()
+<span class="kw">def</span> <span class="fn">unified_attention_with_output</span>(query, key, value, output, save_kv_cache, layer_id, ...):
+    context = get_forward_context()
+    forward_batch = context.forward_batch
+    attention_layer = context.attention_layers[layer_id]
+
+    <span class="cm"># The attn_backend.forward() handles:</span>
+    <span class="cm"># 1. Writing K/V to cache (set_kv_buffer) for new tokens</span>
+    <span class="cm"># 2. Reading K/V from cache for cached prefix tokens</span>
+    <span class="cm"># 3. Computing attention output</span>
+    ret = forward_batch.attn_backend.forward(
+        query, key, value, attention_layer, forward_batch, save_kv_cache, **kwargs
+    )
+    output.view(ret.shape).copy_(ret)</code></pre>
+
+<div class="card">
+<div class="card-title" style="color:var(--accent)">The Cache-Attention Contract</div>
+<p>The RadixAttention layer itself is cache-unaware -- it simply passes data to the attention backend. The magic happens in the <strong>attention backend</strong> (e.g., FlashInfer, Triton), which knows about the KV cache layout because the <code>ForwardBatch</code> carries all the index information (from <code>req_to_token_pool</code>) and the <code>MHATokenToKVPool</code> provides the buffer handles. This clean separation means the radix cache can be swapped, extended, or disabled without touching the attention computation code.</p>
+</div>
+</section>
+
+<!-- ====== SUMMARY TABLE ====== -->
+<section>
+<h2>Summary: Source File Map</h2>
+
+<table>
+<thead>
+<tr><th>Component</th><th>File</th><th>Key Classes/Functions</th><th>Role</th></tr>
+</thead>
+<tbody>
+<tr>
+<td style="color:var(--accent)">Radix Tree</td>
+<td style="color:var(--accent4)">radix_cache.py</td>
+<td><code>TreeNode</code>, <code>RadixKey</code>, <code>RadixCache</code></td>
+<td>Token->KV index mapping via compressed trie</td>
+</tr>
+<tr>
+<td style="color:var(--accent2)">Memory Pool</td>
+<td style="color:var(--accent4)">memory_pool.py</td>
+<td><code>ReqToTokenPool</code>, <code>MHATokenToKVPool</code></td>
+<td>Request slot management, GPU KV tensor storage</td>
+</tr>
+<tr>
+<td style="color:var(--accent3)">Allocator</td>
+<td style="color:var(--accent4)">allocator.py</td>
+<td><code>TokenToKVPoolAllocator</code>, <code>PagedTokenToKVPoolAllocator</code></td>
+<td>Free-list management of KV cache indices</td>
+</tr>
+<tr>
+<td style="color:var(--cyan)">Eviction</td>
+<td style="color:var(--accent4)">evict_policy.py</td>
+<td><code>LRUStrategy</code>, <code>LFUStrategy</code>, <code>SLRUStrategy</code>, ...</td>
+<td>7 pluggable eviction policies</td>
+</tr>
+<tr>
+<td style="color:var(--pink)">Hierarchical</td>
+<td style="color:var(--accent4)">hiradix_cache.py</td>
+<td><code>HiRadixCache</code></td>
+<td>GPU->CPU->Storage three-tier caching</td>
+</tr>
+<tr>
+<td style="color:var(--yellow)">Sessions</td>
+<td style="color:var(--accent4)">session_aware_cache.py</td>
+<td><code>SessionAwareCache</code>, <code>SessionSlot</code></td>
+<td>Multi-turn streaming session KV persistence</td>
+</tr>
+<tr>
+<td style="color:var(--accent5)">Chunk Cache</td>
+<td style="color:var(--accent4)">chunk_cache.py</td>
+<td><code>ChunkCache</code></td>
+<td>Fallback when RadixCache is disabled</td>
+</tr>
+<tr>
+<td style="color:var(--accent6)">Attention</td>
+<td style="color:var(--accent4)">radix_attention.py</td>
+<td><code>RadixAttention</code></td>
+<td>nn.Module layer delegating to attn backend</td>
+</tr>
+</tbody>
+</table>
+</section>
+
+</main>
+
+<!-- ====== FOOTER ====== -->
+<footer>
+  <div class="wrapper">
+    SGLang RadixCache Deep Dive | Source analysis from sglang repository
+    | Generated from actual source code at python/sglang/srt/mem_cache/ and python/sglang/srt/layers/
+  </div>
+</footer>
+
+</body>
+</html>

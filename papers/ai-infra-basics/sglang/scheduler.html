@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang Scheduler &amp; Overlap Scheduling -- Deep Dive</title>
+<style>
+/* ===== Reset & Base ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0a0e1a;color:#c9d1d9;line-height:1.72;overflow-x:hidden}
+
+/* ===== Sticky Nav ===== */
+.sticky-nav{position:sticky;top:0;z-index:1000;background:rgba(15,20,40,0.92);backdrop-filter:blur(12px);border-bottom:1px solid #1e3a5f;padding:10px 0}
+.sticky-nav .inner{max-width:1260px;margin:0 auto;display:flex;gap:18px;align-items:center;padding:0 24px;flex-wrap:wrap}
+.sticky-nav a{color:#7eb8da;text-decoration:none;font-size:0.88rem;padding:4px 12px;border-radius:6px;transition:background .2s}
+.sticky-nav a:hover,.sticky-nav a.active{background:#1e3a5f;color:#58d0ff}
+.sticky-nav .brand{font-weight:700;font-size:1.05rem;color:#58d0ff;margin-right:auto}
+
+/* ===== Hero ===== */
+.hero{background:linear-gradient(135deg,#16213e 0%,#0f3460 50%,#1a1a2e 100%);padding:80px 24px 60px;text-align:center;border-bottom:2px solid #e94560}
+.hero h1{font-size:2.8rem;font-weight:800;background:linear-gradient(90deg,#e94560,#ff6b6b,#feca57);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
+.hero .subtitle{font-size:1.15rem;color:#8899aa;max-width:800px;margin:0 auto}
+
+/* ===== Container ===== */
+.container{max-width:1260px;margin:0 auto;padding:40px 24px}
+
+/* ===== Section ===== */
+section{margin-bottom:56px}
+section h2{font-size:1.9rem;font-weight:700;color:#58d0ff;margin-bottom:8px;padding-bottom:10px;border-bottom:2px solid #1e3a5f}
+section h3{font-size:1.35rem;color:#feca57;margin:28px 0 12px}
+section h4{font-size:1.1rem;color:#e94560;margin:18px 0 8px}
+p{margin-bottom:14px;color:#b0bec5}
+
+/* ===== Code Blocks ===== */
+pre{background:#1e1e2e;border:1px solid #313244;border-radius:10px;padding:20px 24px;overflow-x:auto;margin:16px 0 24px;font-size:0.87rem;line-height:1.65;position:relative}
+pre::before{content:attr(data-label);position:absolute;top:0;right:0;background:#e94560;color:#fff;font-size:0.7rem;padding:2px 12px;border-radius:0 10px 0 8px;font-weight:600}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace}
+pre code{color:#cdd6f4}
+
+/* Syntax Highlighting */
+.kw{color:#cba6f7} /* keywords: class, def, if, for, return, import, while, with, else, elif, and, or, not, in, is, assert, from, True, False, None, break, continue, yield, lambda, try, except, finally, raise, as, pass, del, global, nonlocal, async, await */
+.fn{color:#89b4fa} /* function names */
+.cm{color:#6c7086;font-style:italic} /* comments */
+.st{color:#a6e3a1} /* strings */
+.nu{color:#fab387} /* numbers */
+.op{color:#89dceb} /* operators */
+.ty{color:#f9e2af} /* types/classes */
+.bi{color:#f38ba8} /* builtins */
+.dc{color:#94e2d5} /* decorators */
+
+/* ===== Tables ===== */
+table{width:100%;border-collapse:collapse;margin:16px 0 24px;font-size:0.9rem}
+th{background:#1e3a5f;color:#58d0ff;padding:12px 16px;text-align:left;font-weight:600;border:1px solid #2a4a6f}
+td{padding:10px 16px;border:1px solid #1e3050;color:#b0bec5}
+tr:nth-child(even){background:rgba(30,58,95,0.15)}
+tr:hover{background:rgba(30,58,95,0.3)}
+
+/* ===== Callouts ===== */
+.callout{border-radius:10px;padding:18px 22px;margin:18px 0 24px;font-size:0.92rem}
+.callout-blue{background:rgba(88,208,255,0.08);border-left:4px solid #58d0ff}
+.callout-yellow{background:rgba(254,202,87,0.08);border-left:4px solid #feca57}
+.callout-red{background:rgba(233,69,96,0.08);border-left:4px solid #e94560}
+.callout-green{background:rgba(166,227,161,0.08);border-left:4px solid #a6e3a1}
+.callout strong{color:#fff}
+
+/* ===== Diagrams ===== */
+.diagram-box{background:#111827;border:1px solid #1e3a5f;border-radius:12px;padding:28px;margin:20px 0 28px;overflow-x:auto}
+.diagram-box .title{color:#feca57;font-weight:700;font-size:1rem;margin-bottom:16px;text-align:center}
+.diagram-box pre{background:transparent;border:none;padding:0;margin:0;font-size:0.82rem;line-height:1.5}
+.diagram-box pre code{color:#94a3b8}
+
+/* ===== Two-Column ===== */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:16px 0}
+@media(max-width:860px){.two-col{grid-template-columns:1fr}}
+
+/* ===== TOC ===== */
+.toc{background:rgba(30,58,95,0.2);border:1px solid #1e3a5f;border-radius:12px;padding:24px 28px;margin-bottom:40px}
+.toc h3{color:#58d0ff;margin:0 0 14px;font-size:1.1rem}
+.toc ol{padding-left:22px}
+.toc li{margin:6px 0}
+.toc a{color:#7eb8da;text-decoration:none}
+.toc a:hover{color:#feca57;text-decoration:underline}
+
+/* ===== Footer ===== */
+footer{text-align:center;padding:40px 24px;color:#4a5568;font-size:0.8rem;border-top:1px solid #1e3a5f}
+</style>
+</head>
+<body>
+
+<!-- ===== Sticky Navigation ===== -->
+<nav class="sticky-nav">
+  <div class="inner">
+    <span class="brand">SGLang Internals</span>
+    <a href="index.html">Overview</a>
+    <a href="radix-cache.html">RadixCache</a>
+    <a href="scheduler.html" class="active">Scheduler</a>
+    <a href="model-runner.html">ModelRunner</a>
+  </div>
+</nav>
+
+<!-- ===== Hero ===== -->
+<div class="hero">
+  <h1>Scheduler &amp; Overlap Scheduling</h1>
+  <p class="subtitle">
+    A code-level deep dive into SGLang's scheduler architecture: the two event loops,
+    continuous batching, overlap scheduling innovation, request lifecycle management,
+    chunked prefill, and data-parallel dispatch.
+  </p>
+</div>
+
+<div class="container">
+
+<!-- ===== Table of Contents ===== -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#architecture">Architecture Overview &amp; Data Flow</a></li>
+    <li><a href="#event-loops">event_loop_normal vs event_loop_overlap</a></li>
+    <li><a href="#overlap-innovation">Overlap Scheduling Innovation</a></li>
+    <li><a href="#get-next-batch">get_next_batch_to_run() -- Batch Construction</a></li>
+    <li><a href="#process-result">process_batch_result() -- Result Handling</a></li>
+    <li><a href="#forward-mode">ForwardMode: Extend vs Decode</a></li>
+    <li><a href="#req-lifecycle">Request Lifecycle &amp; State Machine</a></li>
+    <li><a href="#prefix-cache">Prefix Cache Hits &amp; Scheduling</a></li>
+    <li><a href="#chunked-prefill">Chunked Prefill &amp; Long Prompts</a></li>
+    <li><a href="#data-parallel">Data-Parallel Scheduling</a></li>
+    <li><a href="#data-structures">Key Data Structures Reference</a></li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION 1: Architecture Overview -->
+<!-- ============================================================ -->
+<section id="architecture">
+<h2>1. Architecture Overview &amp; Data Flow</h2>
+
+<p>
+SGLang's serving engine is organized around a <strong>Scheduler</strong> that manages one or more
+tensor-parallel GPU workers. The scheduler runs a tight event loop on the CPU, receiving requests,
+constructing batches, dispatching forward passes, and processing results. The key data flow
+documented in the source is:
+</p>
+
+<pre data-label="schedule_batch.py -- data flow comment"><code><span class="cm">"""
+The following is the flow of data structures for a batch:
+
+ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
+
+- ScheduleBatch is managed by `scheduler.py::Scheduler`.
+  It contains high-level scheduling data. Most of the data is on the CPU.
+- ModelWorkerBatch is managed by `tp_worker.py::TpModelWorker`.
+  It is a subset of `ScheduleBatch` that only contains data related
+  to the model forward on GPU. It will be transformed from CPU scheduler
+  to GPU model runner.
+- ForwardBatch is managed by `model_runner.py::ModelRunner`.
+  It contains low-level tensor data. Most of the data consists of GPU tensors.
+"""</span></code></pre>
+
+<div class="diagram-box">
+<div class="title">Data Flow: Request to GPU Forward</div>
+<pre><code>
+  TokenizedGenerateReqInput          ScheduleBatch            ModelWorkerBatch          ForwardBatch
+  ========================     =====================    =======================    ==================
+  | rid, input_ids,      |    | reqs: List[Req]    |   | forward_mode         |   | GPU tensors:   |
+  | sampling_params,     | -> | forward_mode       | ->| input_ids (tensor)   | ->| input_ids      |
+  | mm_inputs, ...       |    | seq_lens, out_cache |   | seq_lens (tensor)    |   | positions      |
+  ========================    | sampling_info       |   | sampling_info        |   | attn metadata  |
+       (from tokenizer)       =====================    =======================    ==================
+                                   (CPU-side)              (CPU->GPU bridge)          (GPU-side)
+
+  recv_requests()         get_next_batch_to_run()    get_model_worker_batch()     ForwardBatch.init_new()
+</code></pre>
+</div>
+
+<p>The <code>Scheduler</code> class itself is built via mixin composition:</p>
+<pre data-label="scheduler.py:269-281"><code><span class="kw">class</span> <span class="ty">Scheduler</span>(
+    <span class="ty">SchedulerOutputProcessorMixin</span>,
+    <span class="ty">SchedulerUpdateWeightsMixin</span>,
+    <span class="ty">SchedulerProfilerMixin</span>,
+    <span class="ty">SchedulerMetricsMixin</span>,
+    <span class="ty">SchedulerDisaggregationDecodeMixin</span>,
+    <span class="ty">SchedulerDisaggregationPrefillMixin</span>,
+    <span class="ty">SchedulerMultiplexMixin</span>,
+    <span class="ty">SchedulerRuntimeCheckerMixin</span>,
+    <span class="ty">SchedulerPPMixin</span>,
+    <span class="ty">SchedulerDPAttnMixin</span>,
+    <span class="ty">SchedulerDllmMixin</span>,
+):
+    <span class="st">"""A scheduler that manages a tensor parallel GPU worker."""</span></code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 2: Event Loops -->
+<!-- ============================================================ -->
+<section id="event-loops">
+<h2>2. event_loop_normal vs event_loop_overlap</h2>
+
+<p>
+SGLang provides two event loop implementations. The dispatcher selects between them
+at startup based on <code>server_args.disable_overlap_schedule</code>:
+</p>
+
+<pre data-label="scheduler.py:3453-3465 -- dispatch_event_loop"><code><span class="kw">def</span> <span class="fn">dispatch_event_loop</span>(scheduler: <span class="ty">Scheduler</span>):
+    server_args = scheduler.server_args
+    disaggregation_mode = scheduler.disaggregation_mode
+    <span class="kw">if</span> disaggregation_mode == <span class="ty">DisaggregationMode</span>.NULL:
+        <span class="kw">if</span> scheduler.enable_pdmux:
+            scheduler.event_loop_pdmux()
+        <span class="kw">elif</span> server_args.pp_size > <span class="nu">1</span>:
+            scheduler.event_loop_pp()
+        <span class="kw">elif</span> scheduler.enable_overlap:
+            scheduler.<span class="fn">event_loop_overlap</span>()   <span class="cm"># <-- overlap scheduling (DEFAULT)</span>
+        <span class="kw">else</span>:
+            scheduler.<span class="fn">event_loop_normal</span>()    <span class="cm"># <-- simple sequential loop</span></code></pre>
+
+<h3>2.1 The Normal Event Loop</h3>
+<p>
+The normal loop is synchronous -- it waits for the GPU forward to finish before
+doing any CPU processing for the next batch:
+</p>
+<pre data-label="scheduler.py:1284-1311 -- event_loop_normal"><code><span class="dc">@DynamicGradMode()</span>
+<span class="kw">def</span> <span class="fn">event_loop_normal</span>(self):
+    <span class="st">"""A normal scheduler loop."""</span>
+    <span class="kw">while</span> <span class="kw">True</span>:
+        <span class="cm"># Receive requests</span>
+        recv_reqs = self.<span class="fn">recv_requests</span>()
+        self.<span class="fn">process_input_requests</span>(recv_reqs)
+        <span class="kw">if</span> self._engine_paused:
+            self.cancel_bubble_timer()
+            <span class="kw">continue</span>
+
+        <span class="cm"># Get the next batch to run</span>
+        batch = self.<span class="fn">get_next_batch_to_run</span>()
+        self.cur_batch = batch
+
+        <span class="cm"># Launch the current batch</span>
+        <span class="kw">if</span> batch:
+            result = self.<span class="fn">run_batch</span>(batch)
+            self.<span class="fn">process_batch_result</span>(batch, result)
+        <span class="kw">else</span>:
+            <span class="cm"># When the server is idle, do self-check and re-init some states.</span>
+            self.self_check_during_idle()
+
+        <span class="cm"># Update last_batch</span>
+        self.last_batch = batch</code></pre>
+
+<h3>2.2 The Overlap Event Loop</h3>
+<p>
+The overlap loop is the <strong>default and recommended</strong> mode. It pipelines CPU processing of the
+previous batch's results with the GPU forward of the current batch. This is the key
+performance innovation in SGLang:
+</p>
+<pre data-label="scheduler.py:1312-1366 -- event_loop_overlap"><code><span class="dc">@DynamicGradMode()</span>
+<span class="kw">def</span> <span class="fn">event_loop_overlap</span>(self):
+    <span class="st">"""A scheduler loop that overlaps CPU processing and GPU computation."""</span>
+    self.result_queue: <span class="ty">Deque</span>[
+        <span class="ty">Tuple</span>[<span class="ty">ScheduleBatch</span>, <span class="ty">Union</span>[<span class="ty">GenerationBatchResult</span>, <span class="ty">EmbeddingBatchResult</span>]]
+    ] = deque()
+
+    <span class="kw">def</span> <span class="fn">pop_and_process</span>():
+        <span class="cm"># Process the results of the last batch</span>
+        tmp_batch, tmp_result = self.result_queue.popleft()
+        self.<span class="fn">process_batch_result</span>(tmp_batch, tmp_result)
+
+    <span class="kw">while</span> <span class="kw">True</span>:
+        <span class="cm"># Receive requests</span>
+        recv_reqs = self.<span class="fn">recv_requests</span>()
+        self.<span class="fn">process_input_requests</span>(recv_reqs)
+        <span class="kw">if</span> self._engine_paused:
+            <span class="kw">continue</span>
+
+        <span class="cm"># Get the next batch to run</span>
+        batch = self.<span class="fn">get_next_batch_to_run</span>()
+        self.cur_batch = batch
+        disable_overlap_for_batch = self.<span class="fn">is_disable_overlap_for_batch</span>(batch)
+
+        <span class="cm"># If we do not need to overlap the current batch with the last batch,</span>
+        <span class="cm"># we can process the last batch immediately.</span>
+        <span class="kw">if</span> disable_overlap_for_batch:
+            <span class="fn">pop_and_process</span>()
+
+        <span class="cm"># Launch the current batch</span>
+        <span class="kw">if</span> batch:
+            batch_result = self.<span class="fn">run_batch</span>(batch)
+            self.result_queue.append((batch.copy(), batch_result))
+        <span class="kw">else</span>:
+            batch_result = <span class="kw">None</span>
+            self.cancel_bubble_timer()
+
+        <span class="cm"># Process the last batch (while current batch runs on GPU)</span>
+        <span class="kw">if</span> self.last_batch:
+            <span class="kw">if not</span> disable_overlap_for_batch:
+                <span class="fn">pop_and_process</span>()
+        <span class="kw">elif</span> batch <span class="kw">is None</span>:
+            self.self_check_during_idle()
+
+        <span class="cm"># Run sample of the current batch (depends on last batch's grammar)</span>
+        <span class="kw">if</span> self.is_generation:
+            self.<span class="fn">launch_batch_sample_if_needed</span>(batch_result)
+
+        self.last_batch = batch</code></pre>
+
+<div class="callout callout-blue">
+<strong>Key Insight:</strong> In the overlap loop, <code>process_batch_result()</code> for batch N
+happens <em>after</em> batch N+1 has already been launched on the GPU via <code>run_batch()</code>.
+The CPU does useful work (result processing, token sampling, streaming output)
+while the GPU is computing, hiding the CPU overhead almost entirely.
+</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 3: Overlap Innovation -->
+<!-- ============================================================ -->
+<section id="overlap-innovation">
+<h2>3. Overlap Scheduling Innovation</h2>
+
+<p>
+The overlap scheduling mechanism uses <strong>CUDA streams</strong> and a <strong>FutureMap</strong> to
+decouple the CPU scheduler from GPU execution. The core idea: the GPU can start working
+on the <em>next</em> batch while the CPU processes the <em>previous</em> batch's output tokens.
+</p>
+
+<div class="diagram-box">
+<div class="title">(a) Normal vs Overlap Event Loop Timeline</div>
+<pre><code>
+  NORMAL EVENT LOOP (Sequential):
+  ================================================================
+  CPU  : [recv] [get_batch] [         wait         ] [process_result] [recv] [get_batch] ...
+  GPU  :                    [====== forward N ======]                                    [=== forward N+1 ===]
+  Time : ---t0----------t1--t2-----------------------t3--------------t4-----t5-----------t6------------------->
+                                                                      ^^^^^               ^^^^^^^^^
+                                                                     CPU idle            CPU idle
+                                                                     (GPU done)          (GPU done)
+
+  OVERLAP EVENT LOOP (Pipelined):
+  ================================================================
+  CPU  : [recv] [get_batch_N+1] [process_result_N] [sample_N+1]  [recv] [get_batch_N+2] [process_result_N+1]
+  GPU  : [======= forward N ========][======== forward N+1 =========][======= forward N+2 ==========]
+  Time : ---t0----t1---------t2------t3-----------t4---------t5------t6---------t7------t8-----------t9----->
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                              CPU work overlaps with GPU work!
+                              No CPU idle time between batches.
+
+  Legend:  [recv]           = recv_requests() + process_input_requests()
+           [get_batch]      = get_next_batch_to_run()
+           [process_result] = process_batch_result() -- token checks, streaming output
+           [forward]        = GPU model forward pass
+           [sample]         = launch_batch_sample_if_needed() -- delayed sampling
+</code></pre>
+</div>
+
+<h3>3.1 CUDA Streams and Future Tokens</h3>
+<p>
+The overlap mode uses separate CUDA streams. The scheduler constructs the batch on the
+<code>schedule_stream</code>, then launches the forward on the <code>forward_stream</code>. Result tokens
+are stored as "futures" in a <code>FutureMap</code> -- negative indices that get resolved later
+when the GPU forward completes:
+</p>
+
+<pre data-label="scheduler.py:1079-1101 -- init_overlap"><code><span class="kw">def</span> <span class="fn">init_overlap</span>(self):
+    self.device_module = torch.get_device_module(self.device)
+    self.forward_stream_ctx = self.device_module.stream(self.forward_stream)
+    self.copy_stream = self.device_module.Stream()
+    self.copy_stream_ctx = self.device_module.stream(self.copy_stream)
+
+    <span class="kw">if not</span> self.enable_overlap:
+        self.future_map = <span class="kw">None</span>
+        <span class="kw">return</span>
+
+    self.future_map = <span class="ty">FutureMap</span>(
+        self.max_running_requests,
+        self.chunked_prefill_size,
+        self.model_config.context_len,
+        self.device,
+        self.spec_algorithm,
+    )
+    self.batch_record_buf = [<span class="kw">None</span>] * <span class="nu">2</span>
+    self.batch_record_ct = <span class="nu">0</span></code></pre>
+
+<pre data-label="overlap_utils.py:40-68 -- FutureMap"><code><span class="kw">class</span> <span class="ty">FutureMap</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, max_running_requests, chunked_prefill_size,
+                 context_len, device, spec_algo=<span class="kw">None</span>):
+        self.future_ct = <span class="nu">0</span>
+        <span class="cm"># Circular buffer layout (wraps in this order):</span>
+        <span class="cm"># Running decode batch -> Prefill chunk 1 -> ... -> Prefill chunk N</span>
+        max_num_chunks = (
+            (context_len + chunked_prefill_size - <span class="nu">1</span>) // chunked_prefill_size
+            <span class="kw">if</span> chunked_prefill_size <span class="kw">else</span> <span class="nu">0</span>
+        )
+        self.future_limit = max_running_requests * (<span class="nu">3</span> + max_num_chunks)
+        self.future_buffer_len = self.future_limit + <span class="nu">2</span> * max_running_requests
+        self.token_ids_buf = torch.empty(
+            (self.future_buffer_len,), dtype=torch.int64, device=device
+        )</code></pre>
+
+<h3>3.2 The run_batch Overlap Path</h3>
+<p>
+When overlap is enabled, <code>run_batch()</code> launches the forward on the <code>forward_stream</code>
+and immediately returns, storing the batch result copy as a non-blocking operation:
+</p>
+
+<pre data-label="scheduler.py:2614-2643 -- run_batch overlap path"><code><span class="kw">if</span> self.enable_overlap:
+    model_worker_batch = worker_batch_or_batch
+    self.<span class="fn">record_batch_in_overlap</span>(model_worker_batch)
+
+    <span class="cm"># Sampling info will be modified during forward, so we store a copy.</span>
+    model_worker_batch.sampling_info = (
+        model_worker_batch.sampling_info.copy_for_forward()
+    )
+
+    bs = len(model_worker_batch.seq_lens)
+    future_indices = self.future_map.<span class="fn">alloc_future_indices</span>(bs)
+
+    <span class="kw">with</span> self.forward_stream_ctx, self.record_bubble_metrics(batch):
+        self.forward_stream.<span class="fn">wait_stream</span>(self.schedule_stream)
+        self.future_map.<span class="fn">resolve_future</span>(model_worker_batch)
+        <span class="kw">with</span> self.record_forward_metrics(batch):
+            batch_result = self.model_worker.<span class="fn">forward_batch_generation</span>(
+                model_worker_batch
+            )
+        batch_result.copy_done = self.device_module.Event()
+        <span class="kw">if</span> batch_result.delay_sample_func <span class="kw">is None</span>:
+            self.future_map.<span class="fn">store_to_map</span>(future_indices, batch_result)
+            batch_result.<span class="fn">copy_to_cpu</span>(return_logprob=batch.return_logprob)
+        <span class="kw">else</span>:
+            batch_result.future_indices = future_indices
+
+    <span class="cm"># Use negative indices as future references</span>
+    future_indices_or_next_token_ids = -future_indices.indices</code></pre>
+
+<h3>3.3 Disabling Overlap for Specific Cases</h3>
+<p>
+Overlap is disabled for consecutive prefill batches (to improve TTFT) and for
+speculative decoding with grammar constraints:
+</p>
+<pre data-label="scheduler.py:1367-1398"><code><span class="kw">def</span> <span class="fn">is_disable_overlap_for_batch</span>(self, batch):
+    <span class="cm"># For two consecutive prefill batches, disable overlap</span>
+    <span class="cm"># to improve the TTFT of the first batch.</span>
+    batch_is_extend = is_extend(batch)
+    last_batch_is_extend = is_extend(self.last_batch)
+
+    disable_overlap_for_batch = (
+        envs.SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP.get()
+        <span class="kw">and</span> batch_is_extend
+        <span class="kw">and</span> last_batch_is_extend
+    )
+
+    <span class="cm"># We do not support overlap + spec + grammar yet</span>
+    need_grammar_sync = (
+        batch <span class="kw">and</span> batch.is_spec_v2 <span class="kw">and</span> batch.has_grammar
+        <span class="kw">and</span> batch.forward_mode.is_decode()
+        <span class="kw">and</span> len(self.result_queue) > <span class="nu">0</span>
+    )
+    <span class="kw">return</span> disable_overlap_for_batch <span class="kw">or</span> need_grammar_sync</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 4: get_next_batch_to_run -->
+<!-- ============================================================ -->
+<section id="get-next-batch">
+<h2>4. get_next_batch_to_run() -- Batch Construction</h2>
+
+<p>
+This is the core scheduling function. It decides whether to run a <strong>prefill</strong> (extend)
+batch for new requests or a <strong>decode</strong> batch for ongoing generation. Prefill is always
+prioritized over decode when new requests are waiting:
+</p>
+
+<pre data-label="scheduler.py:2135-2235 -- get_next_batch_to_run"><code><span class="kw">def</span> <span class="fn">get_next_batch_to_run</span>(self) -> <span class="ty">Optional</span>[<span class="ty">ScheduleBatch</span>]:
+    self._abort_on_waiting_timeout()
+    self._abort_on_running_timeout()
+
+    <span class="cm"># Merge the prefill batch into the running batch</span>
+    <span class="kw">if</span> self.last_batch <span class="kw">and</span> self.last_batch.forward_mode.is_extend():
+        <span class="cm"># Filter completed requests out of the last prefill batch</span>
+        self.last_batch.filter_batch(
+            chunked_req_to_exclude=list(chunked_req_to_exclude)
+        )
+        <span class="cm"># Merge into continuous running batch</span>
+        <span class="kw">if not</span> self.last_batch.is_empty():
+            <span class="kw">if</span> self.running_batch.is_empty():
+                self.running_batch = self.last_batch
+            <span class="kw">else</span>:
+                self.running_batch.<span class="fn">merge_batch</span>(self.last_batch)
+
+    <span class="cm"># Try to build a new prefill batch</span>
+    new_batch = self.<span class="fn">get_new_batch_prefill</span>()
+
+    <span class="kw">if</span> new_batch <span class="kw">is not None</span>:
+        <span class="cm"># Run prefill first if possible</span>
+        ret = new_batch
+    <span class="kw">else</span>:
+        <span class="cm"># Run decode (skip for prefill-only batches)</span>
+        <span class="kw">if</span> (<span class="kw">not</span> self.running_batch.is_empty()
+            <span class="kw">and not</span> self.running_batch.is_prefill_only):
+            self.running_batch = self.<span class="fn">update_running_batch</span>(self.running_batch)
+            ret = self.running_batch <span class="kw">if not</span> self.running_batch.is_empty() <span class="kw">else None</span>
+        <span class="kw">else</span>:
+            ret = <span class="kw">None</span>
+
+    <span class="kw">return</span> ret</code></pre>
+
+<div class="diagram-box">
+<div class="title">(c) Batch Construction Flow</div>
+<pre><code>
+  get_next_batch_to_run()
+      |
+      v
+  +--[Merge last prefill batch into running_batch]--+
+  |                                                  |
+  v                                                  |
+  get_new_batch_prefill()                            |
+      |                                              |
+      +---> waiting_queue empty                      |
+      |     OR batch_is_full?  ---- YES ------------>+---> update_running_batch()
+      |                                              |          |
+      NO                                             |          +---> filter_batch() -- remove finished
+      |                                              |          +---> check_decode_mem() -- OOM check
+      v                                              |          +---> retract_decode() if OOM
+  policy.calc_priority(waiting_queue)                |          +---> prepare_for_decode()
+      |                                              |          |
+      v                                              |          v
+  PrefillAdder.add_one_req() for each req            |     Return decode ScheduleBatch
+      |                                              |
+      +---> Check token budget                       |
+      +---> Match prefix (cache hit)                 |
+      +---> Allocate KV cache                        |
+      +---> Maybe chunk if too long                  |
+      |                                              |
+      v                                              |
+  ScheduleBatch.init_new(can_run_list)               |
+      |                                              |
+      v                                              |
+  prepare_for_extend()                               |
+      |                                              |
+      v                                              |
+  Return prefill ScheduleBatch  <------(priority)----+
+</code></pre>
+</div>
+
+<h3>4.1 The PrefillAdder -- Token Budget Manager</h3>
+<p>
+The <code>PrefillAdder</code> is the core component that decides which waiting requests can fit
+into a new prefill batch, respecting token budgets, memory limits, and chunked prefill:
+</p>
+
+<pre data-label="schedule_policy.py:375-439 -- PrefillAdder.__init__"><code><span class="kw">class</span> <span class="ty">PrefillAdder</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, page_size, tree_cache, token_to_kv_pool_allocator,
+                 running_batch, new_token_ratio, rem_input_tokens,
+                 rem_chunk_tokens, mixed_with_decode_tokens=<span class="nu">0</span>, ...):
+        self.page_size = page_size
+        self.tree_cache = tree_cache
+        self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
+        self.new_token_ratio = new_token_ratio
+        self.rem_input_tokens = rem_input_tokens - mixed_with_decode_tokens
+        self.rem_chunk_tokens = rem_chunk_tokens
+
+        self.can_run_list = []       <span class="cm"># Requests that will be in the batch</span>
+        self.preempt_list = []       <span class="cm"># Requests preempted by priority</span>
+        self.new_chunked_req = <span class="kw">None</span>  <span class="cm"># Request being chunked</span>
+        self.log_hit_tokens = <span class="nu">0</span>      <span class="cm"># Prefix cache hits logged</span>
+        self.log_input_tokens = <span class="nu">0</span>    <span class="cm"># Input tokens logged</span></code></pre>
+
+<pre data-label="schedule_policy.py:728-844 -- add_one_req (key logic)"><code><span class="kw">def</span> <span class="fn">add_one_req</span>(self, req, has_chunked_req, truncation_align_size):
+    <span class="cm"># Calculate total token cost: input + estimated output</span>
+    total_tokens = req.extend_input_len + min(
+        max(req.sampling_params.max_new_tokens - len(req.output_ids), <span class="nu">0</span>),
+        CLIP_MAX_NEW_TOKENS,  <span class="cm"># Default 4096 -- prevents over-conservatism</span>
+    )
+
+    <span class="cm"># Check global token budget</span>
+    <span class="kw">if</span> total_tokens >= self.rem_total_tokens:
+        <span class="kw">return</span> <span class="ty">AddReqResult</span>.NO_TOKEN
+
+    <span class="cm"># Check input token budget</span>
+    <span class="kw">if</span> real_input_tokens >= self.rem_input_tokens <span class="kw">and</span> len(self.can_run_list) != <span class="nu">0</span>:
+        <span class="kw">return</span> <span class="ty">AddReqResult</span>.OTHER
+
+    <span class="cm"># Lock the cache node and try adding</span>
+    <span class="kw">with</span> self._lock_node(req.last_node):
+        <span class="kw">if</span> self.rem_chunk_tokens <span class="kw">is None or</span> input_tokens <= self.rem_chunk_tokens:
+            <span class="cm"># Non-chunked prefill -- add entire request</span>
+            self.can_run_list.append(req)
+        <span class="kw">else</span>:
+            <span class="cm"># Chunked prefill -- truncate to remaining budget</span>
+            trunc_len = self.rem_chunk_tokens // self.page_size * self.page_size
+            req.set_extend_input_len(trunc_len)
+            self.can_run_list.append(req)
+            self.new_chunked_req = req   <span class="cm"># Mark for continuation</span>
+
+    <span class="kw">return</span> self.budget_state()</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 5: process_batch_result -->
+<!-- ============================================================ -->
+<section id="process-result">
+<h2>5. process_batch_result() -- Result Handling</h2>
+
+<p>
+After a forward pass completes, <code>process_batch_result()</code> dispatches to mode-specific
+handlers. In overlap mode, this runs on the CPU <em>while the next batch is already
+executing on the GPU</em>:
+</p>
+
+<pre data-label="scheduler.py:2757-2777"><code><span class="kw">def</span> <span class="fn">process_batch_result</span>(self, batch, result):
+    <span class="kw">if</span> batch.forward_mode.is_decode():
+        self.<span class="fn">process_batch_result_decode</span>(batch, result)
+    <span class="kw">elif</span> batch.forward_mode.is_extend():
+        <span class="kw">if</span> self.disaggregation_mode == <span class="ty">DisaggregationMode</span>.PREFILL:
+            self.<span class="fn">process_batch_result_disagg_prefill</span>(batch, result)
+        <span class="kw">else</span>:
+            self.<span class="fn">process_batch_result_prefill</span>(batch, result)
+    <span class="kw">elif</span> batch.forward_mode.is_prebuilt():
+        self.<span class="fn">process_batch_result_prebuilt</span>(batch)
+    <span class="kw">elif</span> batch.forward_mode.is_idle():
+        self.<span class="fn">process_batch_result_idle</span>(batch, result)
+
+    self.<span class="fn">log_batch_result_stats</span>(batch, result)
+    self.<span class="fn">_maybe_clear_mm_inputs</span>(batch)</code></pre>
+
+<h3>5.1 Decode Result Processing</h3>
+<pre data-label="scheduler_output_processor_mixin.py:370-399"><code><span class="kw">def</span> <span class="fn">process_batch_result_decode</span>(self, batch, result):
+    <span class="kw">if</span> result.copy_done <span class="kw">is not None</span>:
+        result.copy_done.synchronize()  <span class="cm"># Wait for GPU->CPU copy</span>
+
+    logits_output, next_token_ids, can_run_cuda_graph = (
+        result.logits_output, result.next_token_ids, result.can_run_cuda_graph,
+    )
+    next_token_ids = next_token_ids.tolist()
+
+    <span class="cm"># Process each request in the batch</span>
+    <span class="kw">for</span> i, (req, next_token_id) <span class="kw">in</span> enumerate(zip(batch.reqs, next_token_ids)):
+        req.output_ids.append(next_token_id)          <span class="cm"># Append new token</span>
+        req.check_finished()                            <span class="cm"># Check stop conditions</span>
+        <span class="kw">if</span> req.finished():
+            <span class="fn">release_kv_cache</span>(req, self.tree_cache)  <span class="cm"># Free KV cache</span>
+        <span class="kw">if</span> req.grammar <span class="kw">is not None</span>:
+            req.grammar.accept_token(next_token_id)    <span class="cm"># Update grammar state</span>
+
+    self.<span class="fn">stream_output</span>(batch.reqs, batch.return_logprob)</code></pre>
+
+<h3>5.2 Prefill Result Processing</h3>
+<pre data-label="scheduler_output_processor_mixin.py:121-252 (key parts)"><code><span class="kw">def</span> <span class="fn">process_batch_result_prefill</span>(self, batch, result):
+    <span class="kw">if</span> result.copy_done <span class="kw">is not None</span>:
+        result.copy_done.synchronize()
+
+    next_token_ids = result.next_token_ids.tolist()
+
+    <span class="kw">for</span> i, (req, next_token_id) <span class="kw">in</span> enumerate(zip(batch.reqs, next_token_ids)):
+        <span class="kw">if</span> req.is_chunked <= <span class="nu">0</span>:
+            <span class="cm"># Prefill complete -- append first output token</span>
+            req.output_ids.append(next_token_id)
+            req.check_finished()
+            <span class="kw">if</span> req.finished():
+                <span class="fn">release_kv_cache</span>(req, self.tree_cache)
+            <span class="kw">else</span>:
+                self.tree_cache.<span class="fn">cache_unfinished_req</span>(req)
+        <span class="kw">else</span>:
+            <span class="cm"># Still chunking -- decrement counter, don't stream yet</span>
+            req.is_chunked -= <span class="nu">1</span>
+            skip_stream_req = req
+
+    self.<span class="fn">stream_output</span>(batch.reqs, batch.return_logprob, skip_stream_req)</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 6: ForwardMode -->
+<!-- ============================================================ -->
+<section id="forward-mode">
+<h2>6. ForwardMode: Extend vs Decode</h2>
+
+<p>
+<code>ForwardMode</code> is an <code>IntEnum</code> that controls how the model processes each batch.
+The two primary modes are <strong>EXTEND</strong> (prefill) and <strong>DECODE</strong>:
+</p>
+
+<pre data-label="forward_batch_info.py:81-121"><code><span class="kw">class</span> <span class="ty">ForwardMode</span>(<span class="ty">IntEnum</span>):
+    <span class="cm"># Extend a sequence. The KV cache of the beginning part is already</span>
+    <span class="cm"># computed (e.g., system prompt). Also called "prefill".</span>
+    EXTEND = auto()
+
+    <span class="cm"># Decode one token.</span>
+    DECODE = auto()
+
+    <span class="cm"># Contains both EXTEND and DECODE when doing chunked prefill.</span>
+    MIXED = auto()
+
+    <span class="cm"># No sequence to forward. For DP attention idle workers.</span>
+    IDLE = auto()
+
+    <span class="cm"># Used in speculative decoding: verify a batch in the target model.</span>
+    TARGET_VERIFY = auto()
+
+    <span class="cm"># Used in speculative decoding: extend a batch in the draft model.</span>
+    DRAFT_EXTEND = auto()
+    DRAFT_EXTEND_V2 = auto()
+
+    <span class="cm"># Used in disaggregated decode worker -- KV cache is pre-built</span>
+    PREBUILT = auto()
+
+    <span class="cm"># Split Prefill for PD multiplexing</span>
+    SPLIT_PREFILL = auto()
+
+    <span class="cm"># Used in diffusion LLM</span>
+    DLLM_EXTEND = auto()
+
+    <span class="kw">def</span> <span class="fn">is_extend</span>(self, include_draft_extend_v2=<span class="kw">False</span>):
+        <span class="kw">return</span> (self == <span class="ty">ForwardMode</span>.EXTEND
+            <span class="kw">or</span> self == <span class="ty">ForwardMode</span>.MIXED
+            <span class="kw">or</span> self == <span class="ty">ForwardMode</span>.DRAFT_EXTEND
+            <span class="kw">or</span> self == <span class="ty">ForwardMode</span>.TARGET_VERIFY
+            <span class="kw">or</span> self == <span class="ty">ForwardMode</span>.SPLIT_PREFILL
+            <span class="kw">or</span> self == <span class="ty">ForwardMode</span>.DLLM_EXTEND)</code></pre>
+
+<table>
+<tr><th>Mode</th><th>When Used</th><th>Input Shape</th><th>KV Cache Behavior</th></tr>
+<tr>
+  <td><code>EXTEND</code></td>
+  <td>New request's prefill (or continuation after retraction)</td>
+  <td>Variable-length: all new tokens</td>
+  <td>Fills KV cache for all input tokens; reuses prefix cache hits</td>
+</tr>
+<tr>
+  <td><code>DECODE</code></td>
+  <td>Autoregressive generation -- one token per request</td>
+  <td>Exactly 1 token per request</td>
+  <td>Appends 1 KV entry per request</td>
+</tr>
+<tr>
+  <td><code>MIXED</code></td>
+  <td>Chunked prefill mixed with decode requests</td>
+  <td>Variable -- both extend and decode in one batch</td>
+  <td>Both extend and append operations</td>
+</tr>
+<tr>
+  <td><code>IDLE</code></td>
+  <td>DP attention: idle workers with no sequences</td>
+  <td>Empty</td>
+  <td>No-op</td>
+</tr>
+</table>
+
+<h3>Extend vs Decode in Batch Preparation</h3>
+<pre data-label="schedule_batch.py:1478-1492 -- prepare_for_extend"><code><span class="kw">def</span> <span class="fn">prepare_for_extend</span>(self):
+    self.forward_mode = <span class="ty">ForwardMode</span>.EXTEND
+    reqs = self.reqs
+    <span class="cm"># Input = all tokens after the cached prefix</span>
+    input_ids = [r.fill_ids[len(r.prefix_indices):] <span class="kw">for</span> r <span class="kw">in</span> reqs]
+    extend_num_tokens = sum(len(ids) <span class="kw">for</span> ids <span class="kw">in</span> input_ids)
+    seq_lens = [len(r.fill_ids) <span class="kw">for</span> r <span class="kw">in</span> reqs]
+    prefix_lens = [len(r.prefix_indices) <span class="kw">for</span> r <span class="kw">in</span> reqs]
+    extend_lens = [r.extend_input_len <span class="kw">for</span> r <span class="kw">in</span> reqs]</code></pre>
+
+<pre data-label="schedule_batch.py:2002-2004 -- prepare_for_decode"><code><span class="kw">def</span> <span class="fn">prepare_for_decode</span>(self):
+    self.forward_mode = <span class="ty">ForwardMode</span>.DECODE
+    bs = len(self.reqs)
+    <span class="cm"># Decode embeds the last output token via embed_tokens;</span>
+    <span class="cm"># clear stale prefill-time tensor</span>
+    self.input_embeds = <span class="kw">None</span></code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 7: Request Lifecycle -->
+<!-- ============================================================ -->
+<section id="req-lifecycle">
+<h2>7. Request Lifecycle &amp; State Machine</h2>
+
+<p>
+Every request (<code>Req</code>) follows a well-defined lifecycle through the scheduler.
+The key states are: <strong>Waiting</strong>, <strong>Running (Extend)</strong>, <strong>Running (Decode)</strong>,
+<strong>Chunked</strong>, <strong>Retracted</strong>, and <strong>Finished</strong>.
+</p>
+
+<div class="diagram-box">
+<div class="title">(b) Request State Machine</div>
+<pre><code>
+                                      +-----------+
+            handle_generate_request() |           |  abort / error
+  TokenizedReq ------>------->--------| WAITING   |---------->----+
+                                      | (queue)   |               |
+                                      +-----+-----+               |
+                                            |                     |
+                      get_new_batch_prefill()|                     |
+                      PrefillAdder.add_one() |                     |
+                                            v                     |
+                                   +--------+--------+            |
+                                   |    EXTENDING     |            |
+                                   | (prefill batch)  |            |
+                                   +---+---------+---+            |
+                                       |         |                |
+                          is_chunked > 0|         | is_chunked == 0
+                                       |         |                |
+                                       v         v                |
+                               +-------+--+  +--+--------+       |
+                               | CHUNKED  |  | check_    |       |
+                               | (partial |  | finished()|       |
+                               |  prefill)|  +--+--------+       |
+                               +----+-----+     |       |        |
+                                    |    finished|       |not     |
+                       next round   |            v       |finished|
+                       prefill      |     +------+-----+ |        |
+                       +------------+     |  FINISHED   | |        |
+                                          | (release KV)| |        |
+                                          +------+-----+ |        |
+                                                 ^       v        |
+                                                 |  +----+-----+  |
+                          retract_decode()       |  | DECODING  |  |
+                          +-------<-------+------+--+ (running  |  |
+                          |               |  decode  |  batch)   |  |
+                          v               |  token   +----+-----+  |
+                  +-------+------+        |  appended     |        |
+                  | RETRACTED    |        |               |        |
+                  | (back to     |        +------<--------+        |
+                  |  waiting)    |                                  |
+                  +-------+------+                                 |
+                          |                                        |
+                          +---------->---------->----->---------+  |
+                                      (re-queue)               |  |
+                                                               v  v
+                                                         +-----+--+---+
+                                                         | STREAM      |
+                                                         | OUTPUT      |
+                                                         | (to client) |
+                                                         +-------------+
+</code></pre>
+</div>
+
+<h3>7.1 Key Req Fields</h3>
+<pre data-label="schedule_batch.py:493-660 -- Req key fields"><code><span class="kw">class</span> <span class="ty">Req</span>(<span class="ty">ReqDllmMixin</span>):
+    <span class="st">"""The input and output status of a request."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, rid, origin_input_text, origin_input_ids,
+                 sampling_params, ...):
+        <span class="cm"># Identity</span>
+        self.rid = rid
+        self.origin_input_ids = origin_input_ids
+
+        <span class="cm"># Output tracking</span>
+        self.output_ids = []               <span class="cm"># Generated token IDs</span>
+        self.fill_ids = []                 <span class="cm"># origin_input_ids + output_ids</span>
+
+        <span class="cm"># KV cache management</span>
+        self.kv_committed_len = <span class="nu">0</span>          <span class="cm"># Committed KV length</span>
+        self.kv_allocated_len = <span class="nu">0</span>          <span class="cm"># Allocated KV length</span>
+        self.req_pool_idx = <span class="kw">None</span>           <span class="cm"># Index in req_to_token_pool</span>
+
+        <span class="cm"># Prefix cache matching</span>
+        self.prefix_indices = torch.empty((<span class="nu">0</span>,), dtype=torch.int64)
+        self.extend_input_len = <span class="nu">0</span>         <span class="cm"># Tokens to run prefill</span>
+        self.last_node = <span class="kw">None</span>              <span class="cm"># RadixCache node</span>
+        self.cached_tokens = <span class="nu">0</span>            <span class="cm"># Cache hit count</span>
+
+        <span class="cm"># Finish state</span>
+        self.finished_reason = <span class="kw">None</span>        <span class="cm"># None = still running</span>
+        self.to_finish = <span class="kw">None</span>              <span class="cm"># Deferred finish (safe mid-loop)</span>
+
+        <span class="cm"># Chunked prefill tracking</span>
+        self.is_chunked = <span class="nu">0</span>               <span class="cm"># >0 means still chunking</span>
+        self.is_retracted = <span class="kw">False</span>         <span class="cm"># Currently retracted</span></code></pre>
+
+<h3>7.2 Finish Conditions</h3>
+<pre data-label="schedule_batch.py:1087-1100 -- check_finished"><code><span class="kw">def</span> <span class="fn">check_finished</span>(self, new_accepted_len=<span class="nu">1</span>):
+    <span class="kw">if</span> self.finished():
+        <span class="kw">return</span>
+
+    <span class="kw">if</span> self.to_finish:
+        self.finished_reason = self.to_finish
+        self.to_finish = <span class="kw">None</span>
+        <span class="kw">return</span>
+
+    <span class="kw">if</span> len(self.output_ids) >= self.sampling_params.max_new_tokens:
+        self.finished_reason = <span class="ty">FINISH_LENGTH</span>(len(self.output_ids))
+    <span class="cm"># ... also checks stop tokens, stop strings, regex matches</span>
+
+<span class="kw">def</span> <span class="fn">finished</span>(self) -> bool:
+    <span class="kw">return</span> self.finished_reason <span class="kw">is not None</span></code></pre>
+
+<table>
+<tr><th>Finish Reason</th><th>Trigger</th></tr>
+<tr><td><code>FINISH_LENGTH</code></td><td><code>len(output_ids) >= max_new_tokens</code></td></tr>
+<tr><td><code>FINISH_MATCHED_TOKEN</code></td><td>Output matches a stop token ID</td></tr>
+<tr><td><code>FINISH_MATCHED_STR</code></td><td>Decoded text matches a stop string</td></tr>
+<tr><td><code>FINISHED_MATCHED_REGEX</code></td><td>Output matches regex pattern</td></tr>
+<tr><td><code>FINISH_ABORT</code></td><td>Error, timeout, or manual abort</td></tr>
+</table>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 8: Prefix Cache -->
+<!-- ============================================================ -->
+<section id="prefix-cache">
+<h2>8. Prefix Cache Hits &amp; Scheduling Decisions</h2>
+
+<p>
+The prefix cache (RadixCache) is deeply integrated with the scheduler. When a new request
+arrives, <code>init_next_round_input()</code> queries the cache for matching prefixes to avoid
+redundant computation:
+</p>
+
+<pre data-label="schedule_batch.py:872-912 -- init_next_round_input"><code><span class="kw">def</span> <span class="fn">init_next_round_input</span>(self, tree_cache=<span class="kw">None</span>, cow_mamba=<span class="kw">None</span>):
+    self.fill_ids = self.origin_input_ids + self.output_ids
+    input_len = len(self.fill_ids)
+
+    <span class="cm"># Max prefix = input_len - 1 (need at least 1 new token for logprob)</span>
+    max_prefix_len = input_len - <span class="nu">1</span>
+    <span class="kw">if</span> self.return_logprob <span class="kw">and</span> self.logprob_start_len >= <span class="nu">0</span>:
+        max_prefix_len = min(max_prefix_len, self.logprob_start_len)
+
+    token_ids = self.fill_ids[:max_prefix_len]
+    <span class="kw">if</span> tree_cache <span class="kw">is not None</span>:
+        match_result = tree_cache.<span class="fn">match_prefix</span>(
+            <span class="ty">MatchPrefixParams</span>(key=<span class="ty">RadixKey</span>(token_ids=token_ids, ...))
+        )
+        self.prefix_indices = match_result.device_indices
+        self.last_node = match_result.last_device_node
+    <span class="cm"># extend_input_len = total - cached prefix</span>
+    self.extend_input_len = input_len - len(self.prefix_indices)</code></pre>
+
+<h3>8.1 Scheduling Policies</h3>
+<p>
+The <code>SchedulePolicy</code> class supports both <strong>cache-aware</strong> and <strong>cache-agnostic</strong> policies
+that affect how the waiting queue is prioritized:
+</p>
+
+<pre data-label="schedule_policy.py:80-94"><code><span class="kw">class</span> <span class="ty">CacheAwarePolicy</span>(<span class="ty">Enum</span>):
+    <span class="st">"""Scheduling policies that are aware of the tree cache."""</span>
+    LPM = <span class="st">"lpm"</span>          <span class="cm"># Longest prefix match</span>
+    DFS_WEIGHT = <span class="st">"dfs-weight"</span>  <span class="cm"># Depth-first search weighting</span>
+
+<span class="kw">class</span> <span class="ty">CacheAgnosticPolicy</span>(<span class="ty">Enum</span>):
+    <span class="st">"""Scheduling policies that are not aware of the tree cache."""</span>
+    FCFS = <span class="st">"fcfs"</span>         <span class="cm"># First come first serve</span>
+    LOF = <span class="st">"lof"</span>           <span class="cm"># Longest output first</span>
+    RANDOM = <span class="st">"random"</span>
+    ROUTING_KEY = <span class="st">"routing-key"</span>  <span class="cm"># Prioritize by routing key frequency</span></code></pre>
+
+<div class="callout callout-yellow">
+<strong>Performance Optimization:</strong> The LPM policy automatically falls back to FCFS when
+the waiting queue exceeds 128 requests, because the O(N*M) prefix matching becomes too
+expensive: <br>
+<code>if self.policy == CacheAwarePolicy.LPM and len(waiting_queue) > 128: return CacheAgnosticPolicy.FCFS</code>
+</div>
+
+<h3>8.2 In-Batch Prefix Caching</h3>
+<p>
+The scheduler also performs <em>in-batch prefix caching</em> -- if multiple waiting requests share
+the same prefix but have small existing cache matches, only one is scheduled first so that
+its KV cache can benefit subsequent requests:
+</p>
+
+<pre data-label="schedule_policy.py:216-243"><code><span class="cm"># If a request has a small match from existing cache,</span>
+<span class="cm"># check for in-batch prefix sharing</span>
+<span class="kw">if</span> len(r.prefix_indices) <= IN_BATCH_PREFIX_CACHING_CHECK_THRESHOLD:
+    match_result = self.waiting_queue_radix_tree.<span class="fn">match_prefix</span>(...)
+    in_batch_matching_prefixes = match_result.device_indices
+    <span class="kw">if</span> len(in_batch_matching_prefixes) >= IN_BATCH_PREFIX_CACHING_DEPRIORITIZE_THRESHOLD:
+        temporary_deprioritized.add(r.rid)  <span class="cm"># Skip this request for now</span>
+    <span class="kw">else</span>:
+        <span class="cm"># Insert into waiting-queue radix tree for future matching</span>
+        self.waiting_queue_radix_tree.<span class="fn">insert</span>(...)</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 9: Chunked Prefill -->
+<!-- ============================================================ -->
+<section id="chunked-prefill">
+<h2>9. Chunked Prefill &amp; Long Prompt Handling</h2>
+
+<p>
+Long prompts that exceed <code>chunked_prefill_size</code> are split across multiple forward passes.
+This prevents a single large prefill from blocking all decode requests, enabling
+low-latency decoding even during long prefills:
+</p>
+
+<pre data-label="scheduler.py:843-852 -- init_chunked_prefill"><code><span class="kw">def</span> <span class="fn">init_chunked_prefill</span>(self):
+    self.chunked_prefill_size = self.server_args.chunked_prefill_size
+    <span class="kw">if</span> self.chunked_prefill_size <= <span class="nu">0</span>:  <span class="cm"># -1 means disable</span>
+        self.chunked_prefill_size = <span class="kw">None</span>
+    self.chunked_req = <span class="kw">None</span>
+    self.is_mixed_chunk = (
+        self.chunked_prefill_size <span class="kw">is not None</span>
+        <span class="kw">and</span> self.server_args.enable_mixed_chunk
+    )</code></pre>
+
+<h3>9.1 How Chunking Works in PrefillAdder</h3>
+<p>When a request's input exceeds the remaining chunk budget:</p>
+<pre data-label="schedule_policy.py:816-843"><code><span class="kw">else</span>:
+    <span class="cm"># Chunked prefill -- truncate to remaining budget</span>
+    trunc_len = self.rem_chunk_tokens // self.page_size * self.page_size
+
+    <span class="kw">if</span> trunc_len <= <span class="nu">0</span>:
+        <span class="kw">return</span> <span class="ty">AddReqResult</span>.OTHER
+
+    <span class="cm"># When deterministic inference is enabled, align truncation</span>
+    <span class="kw">if</span> truncation_align_size <span class="kw">is not None</span>:
+        trunc_len = truncation_align_size * (trunc_len // truncation_align_size)
+
+    <span class="cm"># Truncate the request's fill_ids</span>
+    req.set_extend_input_len(trunc_len)
+    req.fill_ids = req.fill_ids[:len(req.prefix_indices) + trunc_len]
+
+    self.can_run_list.append(req)
+    self.new_chunked_req = req  <span class="cm"># Track for next iteration</span></code></pre>
+
+<h3>9.2 Chunked Request Flow Through Iterations</h3>
+<pre data-label="scheduler.py:2348-2351 -- resuming chunked requests"><code><span class="cm"># In get_new_batch_prefill: resume the chunked request first</span>
+<span class="kw">if</span> self.chunked_req <span class="kw">is not None</span>:
+    self.chunked_req.<span class="fn">init_next_round_input</span>()  <span class="cm"># Recompute fill_ids/prefix</span>
+    self.chunked_req = adder.<span class="fn">add_chunked_req</span>(self.chunked_req)</code></pre>
+
+<h3>9.3 Mixed Chunked Prefill</h3>
+<p>
+When <code>enable_mixed_chunk</code> is true, the scheduler can combine a chunked prefill with
+ongoing decode requests in a single batch:
+</p>
+<pre data-label="scheduler.py:2472-2489"><code><span class="cm"># Mixed-style chunked prefill</span>
+<span class="kw">if</span> (self.is_mixed_chunk
+    <span class="kw">and not</span> self.running_batch.is_empty()
+    <span class="kw">and not</span> (new_batch.return_logprob <span class="kw">or</span> self.running_batch.return_logprob)
+    <span class="kw">and</span> new_batch.input_embeds <span class="kw">is None</span>):
+    self.running_batch.filter_batch(v1_spec_info_filtered=<span class="kw">True</span>)
+    <span class="kw">if not</span> self.running_batch.is_empty():
+        self.running_batch.<span class="fn">prepare_for_decode</span>()
+        new_batch.<span class="fn">mix_with_running</span>(self.running_batch)
+        new_batch.decoding_reqs = self.running_batch.reqs</code></pre>
+
+<div class="callout callout-green">
+<strong>Mixed Chunked Prefill:</strong> This allows decode tokens to be processed in the same
+forward pass as prefill tokens. The batch uses <code>ForwardMode.MIXED</code> and the attention
+kernel handles both extend and decode positions in a single call.
+</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 10: Data-Parallel Scheduling -->
+<!-- ============================================================ -->
+<section id="data-parallel">
+<h2>10. Data-Parallel Scheduling</h2>
+
+<p>
+When running with <code>dp_size > 1</code>, a <code>DataParallelController</code> dispatches requests
+across multiple scheduler instances. It supports several load-balancing strategies:
+</p>
+
+<pre data-label="data_parallel_controller.py:64-78"><code><span class="kw">class</span> <span class="ty">LoadBalanceMethod</span>(<span class="ty">Enum</span>):
+    <span class="st">"""Load balance method."""</span>
+    ROUND_ROBIN = auto()
+    FOLLOW_BOOTSTRAP_ROOM = auto()
+    TOTAL_REQUESTS = auto()     <span class="cm"># Dispatch to worker with fewest requests</span>
+    TOTAL_TOKENS = auto()       <span class="cm"># Dispatch to worker with fewest tokens</span></code></pre>
+
+<pre data-label="data_parallel_controller.py:81-107 -- DPBudget"><code><span class="kw">class</span> <span class="ty">DPBudget</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, dp_size):
+        self.dp_size = dp_size
+        self.total_requests = [<span class="nu">0</span>] * dp_size
+        self.total_tokens = [<span class="nu">0</span>] * dp_size
+
+    <span class="kw">def</span> <span class="fn">dispatch</span>(self, method):
+        <span class="kw">if</span> method == <span class="ty">LoadBalanceMethod</span>.TOTAL_REQUESTS:
+            target_rank = self.total_requests.index(min(self.total_requests))
+        <span class="kw">elif</span> method == <span class="ty">LoadBalanceMethod</span>.TOTAL_TOKENS:
+            target_rank = min(
+                range(self.dp_size),
+                key=<span class="kw">lambda</span> i: (self.total_tokens[i], self.total_requests[i]),
+            )
+        self.total_requests[target_rank] += <span class="nu">1</span>  <span class="cm"># Heuristic increment</span>
+        <span class="kw">return</span> target_rank</code></pre>
+
+<pre data-label="data_parallel_controller.py:110-165 -- DataParallelController"><code><span class="kw">class</span> <span class="ty">DataParallelController</span>:
+    <span class="st">"""A controller that dispatches requests to multiple DP workers."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, server_args, port_args, run_scheduler_process_func):
+        self.load_balance_method = <span class="ty">LoadBalanceMethod</span>.from_str(
+            server_args.load_balance_method
+        )
+        <span class="cm"># ZMQ sockets to each DP worker</span>
+        self.workers = [<span class="kw">None</span>] * server_args.dp_size
+        self.status = [<span class="kw">True</span>] * server_args.dp_size
+
+        <span class="cm"># Launch scheduler processes for each DP rank</span>
+        <span class="kw">if</span> server_args.enable_dp_attention:
+            self.<span class="fn">launch_dp_attention_schedulers</span>(server_args, port_args)
+        <span class="kw">else</span>:
+            self.<span class="fn">launch_dp_schedulers</span>(server_args, port_args)</code></pre>
+
+<div class="callout callout-red">
+<strong>DP Attention Mode:</strong> When <code>enable_dp_attention</code> is set, all DP workers share the
+same tensor-parallel group but split the <em>attention</em> computation across workers. This requires
+careful synchronization -- the scheduler broadcasts work requests via the attention TP group
+and uses <code>maybe_prepare_mlp_sync_batch()</code> to coordinate MLP operations.
+</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- SECTION 11: Key Data Structures -->
+<!-- ============================================================ -->
+<section id="data-structures">
+<h2>11. Key Data Structures Reference</h2>
+
+<h3>11.1 Req -- Request Object</h3>
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>rid</code></td><td><code>str</code></td><td>Unique request identifier</td></tr>
+<tr><td><code>origin_input_ids</code></td><td><code>List[int]</code></td><td>Original tokenized input (with MM padding)</td></tr>
+<tr><td><code>output_ids</code></td><td><code>List[int]</code></td><td>Generated token IDs so far</td></tr>
+<tr><td><code>fill_ids</code></td><td><code>List[int]</code></td><td><code>origin_input_ids + output_ids</code> (updated each round)</td></tr>
+<tr><td><code>prefix_indices</code></td><td><code>Tensor</code></td><td>KV cache indices from prefix cache match</td></tr>
+<tr><td><code>extend_input_len</code></td><td><code>int</code></td><td>Number of new tokens to process in this extend</td></tr>
+<tr><td><code>last_node</code></td><td><code>TreeNode</code></td><td>Last matched node in RadixCache</td></tr>
+<tr><td><code>req_pool_idx</code></td><td><code>int</code></td><td>Index into <code>req_to_token_pool</code></td></tr>
+<tr><td><code>kv_committed_len</code></td><td><code>int</code></td><td>Length of committed KV cache</td></tr>
+<tr><td><code>is_chunked</code></td><td><code>int</code></td><td>Chunk counter (>0 means still chunking)</td></tr>
+<tr><td><code>finished_reason</code></td><td><code>BaseFinishReason</code></td><td><code>None</code> = still running; set when done</td></tr>
+<tr><td><code>sampling_params</code></td><td><code>SamplingParams</code></td><td>Temperature, top_p, max_new_tokens, etc.</td></tr>
+<tr><td><code>grammar</code></td><td><code>BaseGrammarObject</code></td><td>Grammar constraint state (for structured output)</td></tr>
+</table>
+
+<h3>11.2 ScheduleBatch -- CPU-Side Batch</h3>
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>reqs</code></td><td><code>List[Req]</code></td><td>Requests in this batch</td></tr>
+<tr><td><code>forward_mode</code></td><td><code>ForwardMode</code></td><td>EXTEND, DECODE, MIXED, IDLE, etc.</td></tr>
+<tr><td><code>input_ids</code></td><td><code>Tensor [N]</code></td><td>Flattened input token IDs</td></tr>
+<tr><td><code>req_pool_indices</code></td><td><code>Tensor [B]</code></td><td>Indices into req_to_token_pool</td></tr>
+<tr><td><code>seq_lens</code></td><td><code>Tensor [B]</code></td><td>Sequence lengths (GPU)</td></tr>
+<tr><td><code>seq_lens_cpu</code></td><td><code>Tensor [B]</code></td><td>Sequence lengths (CPU mirror)</td></tr>
+<tr><td><code>out_cache_loc</code></td><td><code>Tensor [N]</code></td><td>Output locations in KV pool</td></tr>
+<tr><td><code>sampling_info</code></td><td><code>SamplingBatchInfo</code></td><td>Batched sampling parameters</td></tr>
+<tr><td><code>batch_is_full</code></td><td><code>bool</code></td><td>Skip prefill check if True</td></tr>
+<tr><td><code>prefix_lens</code></td><td><code>List[int]</code></td><td>Cached prefix lengths (extend mode)</td></tr>
+<tr><td><code>extend_lens</code></td><td><code>List[int]</code></td><td>New tokens per request (extend mode)</td></tr>
+</table>
+
+<h3>11.3 ModelWorkerBatch -- CPU-to-GPU Bridge</h3>
+<table>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+<tr><td><code>forward_mode</code></td><td><code>ForwardMode</code></td><td>Forward pass type</td></tr>
+<tr><td><code>input_ids</code></td><td><code>Tensor</code></td><td>Token IDs for this batch</td></tr>
+<tr><td><code>req_pool_indices</code></td><td><code>Tensor</code></td><td>Request pool indices</td></tr>
+<tr><td><code>seq_lens</code></td><td><code>Tensor</code></td><td>Sequence lengths (GPU)</td></tr>
+<tr><td><code>out_cache_loc</code></td><td><code>Tensor</code></td><td>KV cache output locations</td></tr>
+<tr><td><code>extend_num_tokens</code></td><td><code>int</code></td><td>Total extend tokens in batch</td></tr>
+<tr><td><code>extend_seq_lens</code></td><td><code>List[int]</code></td><td>Per-request extend sequence lengths</td></tr>
+<tr><td><code>extend_prefix_lens</code></td><td><code>List[int]</code></td><td>Per-request cached prefix lengths</td></tr>
+<tr><td><code>sampling_info</code></td><td><code>SamplingBatchInfo</code></td><td>Sampling parameters for GPU</td></tr>
+<tr><td><code>multimodal_inputs</code></td><td><code>List</code></td><td>Multimodal data (images, video, audio)</td></tr>
+<tr><td><code>lora_ids</code></td><td><code>List[str]</code></td><td>LoRA adapter IDs per request</td></tr>
+</table>
+
+<h3>11.4 TpModelWorker -- GPU Worker</h3>
+<pre data-label="tp_worker.py:218-319 -- TpModelWorker"><code><span class="kw">class</span> <span class="ty">TpModelWorker</span>(<span class="ty">BaseTpWorker</span>):
+    <span class="st">"""A tensor parallel model worker."""</span>
+
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, server_args, gpu_id, tp_rank, ...):
+        self.tp_rank = tp_rank
+        self.gpu_id = gpu_id
+        self._init_model_runner()         <span class="cm"># Creates ModelRunner</span>
+        self.enable_overlap = <span class="kw">not</span> server_args.disable_overlap_schedule
+
+    <span class="kw">def</span> <span class="fn">forward_batch_generation</span>(self, model_worker_batch, ...):
+        <span class="cm"># Convert ModelWorkerBatch -> ForwardBatch -> GPU forward</span>
+        forward_batch = <span class="ty">ForwardBatch</span>.<span class="fn">init_new</span>(model_worker_batch, self.model_runner)
+        out = self.model_runner.<span class="fn">forward</span>(forward_batch, ...)
+        <span class="cm"># Sample next tokens</span>
+        next_token_ids = self.model_runner.<span class="fn">sample</span>(out.logits_output, forward_batch)
+        <span class="kw">return</span> <span class="ty">GenerationBatchResult</span>(
+            logits_output=out.logits_output,
+            next_token_ids=next_token_ids,
+        )</code></pre>
+
+<h3>11.5 Running Status Summary</h3>
+<pre data-label="scheduler.py:826-841 -- init_running_status"><code><span class="kw">def</span> <span class="fn">init_running_status</span>(self):
+    self.waiting_queue: <span class="ty">List</span>[<span class="ty">Req</span>] = []
+    <span class="cm"># The running decoding batch for continuous batching</span>
+    self.running_batch: <span class="ty">ScheduleBatch</span> = <span class="ty">ScheduleBatch</span>(reqs=[], batch_is_full=<span class="kw">False</span>)
+    <span class="cm"># The current forward batch</span>
+    self.cur_batch: <span class="ty">Optional</span>[<span class="ty">ScheduleBatch</span>] = <span class="kw">None</span>
+    <span class="cm"># The last forward batch</span>
+    self.last_batch: <span class="ty">Optional</span>[<span class="ty">ScheduleBatch</span>] = <span class="kw">None</span>
+    self.forward_ct = <span class="nu">0</span></code></pre>
+</section>
+
+<!-- ============================================================ -->
+<!-- Summary -->
+<!-- ============================================================ -->
+<section>
+<h2>Summary</h2>
+
+<div class="callout callout-blue">
+<strong>Key Takeaways:</strong>
+<ul style="margin:8px 0 0 18px; color:#b0bec5">
+<li>SGLang's <strong>overlap scheduling</strong> (enabled by default) pipelines CPU result processing
+    with GPU forward passes, eliminating idle CPU bubbles between batches.</li>
+<li>The <code>FutureMap</code> stores token IDs as negative-index futures that are resolved when the
+    GPU forward completes, enabling the scheduler to prepare the next batch immediately.</li>
+<li><code>get_next_batch_to_run()</code> always prioritizes prefill over decode, using a
+    <code>PrefillAdder</code> to fit requests within token budgets and chunk long prompts.</li>
+<li>The <code>SchedulePolicy</code> supports cache-aware policies (LPM, DFS-weight) that prioritize
+    requests with longer prefix cache hits, plus in-batch prefix caching to improve hit rates.</li>
+<li>Chunked prefill splits long prompts across iterations, and mixed-chunk mode allows decode
+    tokens to ride along with prefill, keeping decode latency low.</li>
+<li>The <code>DataParallelController</code> distributes requests across DP workers using pluggable
+    load-balancing strategies (round-robin, min-requests, min-tokens).</li>
+</ul>
+</div>
+</section>
+
+</div><!-- /container -->
+
+<footer>
+  SGLang Scheduler Deep Dive &mdash; Generated from source code analysis of
+  <code>scheduler.py</code>, <code>schedule_batch.py</code>, <code>schedule_policy.py</code>,
+  <code>scheduler_output_processor_mixin.py</code>, <code>tp_worker.py</code>,
+  <code>overlap_utils.py</code>, and <code>data_parallel_controller.py</code>.
+</footer>
+
+</body>
+</html>
