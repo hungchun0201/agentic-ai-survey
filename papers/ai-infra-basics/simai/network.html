@@ -363,6 +363,7 @@ footer a { color: var(--cyan); }
       <li><a href="#single-flow"><span class="i18n" data-en="SingleFlow Data Structure" data-zh="SingleFlow 資料結構">SingleFlow Data Structure</span></a></li>
       <li><a href="#group-topology"><span class="i18n" data-en="Group Topology" data-zh="群組拓撲">Group Topology</span></a></li>
       <li><a href="#backends"><span class="i18n" data-en="astra-sim Three Backends" data-zh="astra-sim 三種後端">astra-sim Three Backends</span></a></li>
+      <li><a href="#transport"><span class="i18n" data-en="P2P Transport Mechanics: RDMA, DCQCN, PFC, ECMP" data-zh="P2P 傳輸機制：RDMA、DCQCN、PFC、ECMP">P2P Transport Mechanics: RDMA, DCQCN, PFC, ECMP</span></a></li>
       <li><a href="#topo-gen"><span class="i18n" data-en="Network Topology Generation" data-zh="網路拓撲生成">Network Topology Generation</span></a></li>
       <li><a href="#topo-deep-dive"><span class="i18n" data-en="Supported Network Topologies — Deep Dive" data-zh="支援的網路拓撲 — 深入分析">Supported Network Topologies — Deep Dive</span></a></li>
       <li><a href="#ns3-conf"><span class="i18n" data-en="NS-3 Configuration" data-zh="NS-3 配置">NS-3 Configuration</span></a></li>
@@ -1180,10 +1181,351 @@ footer a { color: var(--cyan); }
   </div>
 
   <!-- ============================================================== -->
-  <!-- SECTION 6: NETWORK TOPOLOGY GENERATION                          -->
+  <!-- SECTION 6: P2P TRANSPORT MECHANICS — RDMA, DCQCN, PFC, ECMP    -->
+  <!-- ============================================================== -->
+  <div class="section" id="transport">
+    <span class="section-label">Section 6</span>
+    <h2>
+      <span class="i18n" data-en="P2P Transport Mechanics: How KV Cache Actually Travels" data-zh="P2P 傳輸機制：KV 快取實際如何傳輸">P2P Transport Mechanics: How KV Cache Actually Travels</span>
+    </h2>
+
+    <p>
+      <span class="i18n"
+        data-en="When SimAI simulates a KV cache transfer from a prefill node to a decode node, the NS-3 backend doesn't just estimate latency — it simulates the <strong>full RoCEv2 RDMA transport stack</strong> at packet granularity. This section traces the exact mechanisms: how RDMA Queue Pairs are created, how DCQCN adjusts sending rates on congestion, how PFC prevents buffer overflow, and how ECMP distributes flows across equal-cost paths."
+        data-zh="當 SimAI 模擬從預填充節點到解碼節點的 KV 快取傳輸時，NS-3 後端不只是估算延遲 — 它以封包粒度模擬<strong>完整的 RoCEv2 RDMA 傳輸堆疊</strong>。本節追蹤確切的機制：RDMA 佇列對如何建立、DCQCN 如何在擁塞時調整發送速率、PFC 如何防止緩衝區溢出，以及 ECMP 如何在等成本路徑間分配流量。">When SimAI simulates a KV cache transfer from a prefill node to a decode node, the NS-3 backend doesn't just estimate latency — it simulates the <strong>full RoCEv2 RDMA transport stack</strong> at packet granularity. This section traces the exact mechanisms: how RDMA Queue Pairs are created, how DCQCN adjusts sending rates on congestion, how PFC prevents buffer overflow, and how ECMP distributes flows across equal-cost paths.</span>
+    </p>
+
+    <!-- 6.1 RDMA Queue Pair Lifecycle -->
+    <h3 id="rdma-qp">
+      <span class="i18n" data-en="6.1 RDMA Queue Pair (QP) Lifecycle" data-zh="6.1 RDMA 佇列對 (QP) 生命週期">6.1 RDMA Queue Pair (QP) Lifecycle</span>
+    </h3>
+
+    <p>
+      <span class="i18n"
+        data-en="Every P2P flow in SimAI becomes one or more RDMA Queue Pairs. The call chain starts from astra-sim's collective decomposition and ends at NS-3's packet-level simulation:"
+        data-zh="SimAI 中的每個 P2P 流都會變成一個或多個 RDMA 佇列對。呼叫鏈從 astra-sim 的集合操作分解開始，到 NS-3 的封包級模擬結束：">Every P2P flow in SimAI becomes one or more RDMA Queue Pairs. The call chain starts from astra-sim's collective decomposition and ends at NS-3's packet-level simulation:</span>
+    </p>
+
+    <div class="step-flow">
+      <div class="step">
+        <div class="step-num s1">1</div>
+        <h4><span class="i18n" data-en="MockNcclGroup decomposes collective → SingleFlow" data-zh="MockNcclGroup 分解集合操作 → SingleFlow">MockNcclGroup decomposes collective → SingleFlow</span></h4>
+        <p><span class="i18n" data-en="e.g., AllReduce(64MB, 8 GPUs) → 14 SingleFlow objects (2×(N-1) for ring)" data-zh="例如 AllReduce(64MB, 8 GPU) → 14 個 SingleFlow 物件（ring 演算法為 2×(N-1)）">e.g., AllReduce(64MB, 8 GPUs) → 14 SingleFlow objects (2×(N-1) for ring)</span></p>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step">
+        <div class="step-num s2">2</div>
+        <h4><span class="i18n" data-en="astra-sim calls sim_send(src, dst, bytes)" data-zh="astra-sim 呼叫 sim_send(src, dst, bytes)">astra-sim calls sim_send(src, dst, bytes)</span></h4>
+        <p><span class="i18n" data-en="Each SingleFlow triggers a sim_send() to the NS-3 backend with flow_size bytes" data-zh="每個 SingleFlow 觸發對 NS-3 後端的 sim_send()，帶有 flow_size 位元組">Each SingleFlow triggers a sim_send() to the NS-3 backend with flow_size bytes</span></p>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step">
+        <div class="step-num s3">3</div>
+        <h4><span class="i18n" data-en="NS-3 creates RdmaClient → RdmaDriver.AddQueuePair()" data-zh="NS-3 建立 RdmaClient → RdmaDriver.AddQueuePair()">NS-3 creates RdmaClient → RdmaDriver.AddQueuePair()</span></h4>
+        <p><span class="i18n" data-en="A QP is created with src/dst IP, port, priority group, window size (BDP), and base RTT. The QP starts sending packets at line rate." data-zh="建立一個 QP，包含 src/dst IP、port、優先級群組、視窗大小 (BDP) 和基礎 RTT。QP 開始以線速發送封包。">A QP is created with src/dst IP, port, priority group, window size (BDP), and base RTT. The QP starts sending packets at line rate.</span></p>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step">
+        <div class="step-num s4">4</div>
+        <h4><span class="i18n" data-en="Packets traverse switches → ECN marking → ACK/CNP" data-zh="封包通過交換機 → ECN 標記 → ACK/CNP">Packets traverse switches → ECN marking → ACK/CNP</span></h4>
+        <p><span class="i18n" data-en="9000-byte jumbo frames traverse the topology. Switches check queue depth, mark ECN if congested, trigger PFC if buffer critical. Receiver sends ACK or generates CNP." data-zh="9000 位元組巨型封包通過拓撲。交換機檢查佇列深度，擁塞時標記 ECN，緩衝區臨界時觸發 PFC。接收端發送 ACK 或產生 CNP。">9000-byte jumbo frames traverse the topology. Switches check queue depth, mark ECN if congested, trigger PFC if buffer critical. Receiver sends ACK or generates CNP.</span></p>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step">
+        <div class="step-num s5">5</div>
+        <h4><span class="i18n" data-en="All bytes ACKed → qp_finish() → callback to astra-sim" data-zh="所有位元組確認 → qp_finish() → 回呼至 astra-sim">All bytes ACKed → qp_finish() → callback to astra-sim</span></h4>
+        <p><span class="i18n" data-en="FCT (Flow Completion Time) is recorded. astra-sim's event system proceeds to the next dependent operation." data-zh="記錄 FCT（流完成時間）。astra-sim 的事件系統繼續執行下一個相依操作。">FCT (Flow Completion Time) is recorded. astra-sim's event system proceeds to the next dependent operation.</span></p>
+      </div>
+    </div>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">simulation/src/point-to-point/model/rdma-queue-pair.h</div>
+<pre><code><span class="kw">class</span> <span class="cl">RdmaQueuePair</span> : <span class="kw">public</span> Object {
+    Ipv4Address sip, dip;             <span class="cm">// Source & destination IP</span>
+    <span class="ty">uint16_t</span> sport, dport;             <span class="cm">// Source & dest port (ECMP hash input)</span>
+    <span class="ty">uint64_t</span> m_size;                    <span class="cm">// Total bytes to transfer (= KV cache size)</span>
+    <span class="ty">uint16_t</span> m_pg;                      <span class="cm">// Priority group (queue index for PFC)</span>
+    <span class="ty">uint64_t</span> snd_nxt, snd_una;          <span class="cm">// Next seq to send, unacked seq</span>
+    <span class="ty">uint32_t</span> m_win;                     <span class="cm">// Window size (BDP-based)</span>
+    DataRate m_rate;                    <span class="cm">// Current sending rate (DCQCN-controlled)</span>
+    <span class="ty">uint64_t</span> m_baseRtt;                 <span class="cm">// Base RTT for this src-dst pair</span>
+};</code></pre>
+
+    <!-- 6.2 DCQCN Congestion Control -->
+    <h3 id="dcqcn">
+      <span class="i18n" data-en="6.2 DCQCN Congestion Control (CC_MODE=1)" data-zh="6.2 DCQCN 擁塞控制 (CC_MODE=1)">6.2 DCQCN Congestion Control (CC_MODE=1)</span>
+    </h3>
+
+    <p>
+      <span class="i18n"
+        data-en="SimAI's default congestion control is <strong>DCQCN (Data Center QCN)</strong>, Mellanox's adaptation of QCN for RoCEv2. It operates in three phases: rate decrease on CNP, alpha tracking via EWMA, and rate recovery via additive/hyper-additive increase."
+        data-zh="SimAI 的預設擁塞控制是 <strong>DCQCN（資料中心 QCN）</strong>，Mellanox 為 RoCEv2 改編的 QCN。它以三個階段運作：收到 CNP 時降速、透過 EWMA 追蹤 alpha、以及透過加法/超加法增加恢復速率。">SimAI's default congestion control is <strong>DCQCN (Data Center QCN)</strong>, Mellanox's adaptation of QCN for RoCEv2. It operates in three phases: rate decrease on CNP, alpha tracking via EWMA, and rate recovery via additive/hyper-additive increase.</span>
+    </p>
+
+    <div class="callout">
+      <strong><span class="i18n" data-en="CC_MODE options:" data-zh="CC_MODE 選項：">CC_MODE options:</span></strong>
+      <span class="i18n"
+        data-en="<code>1</code> = DCQCN (Mellanox, default), <code>3</code> = HPCC (High Precision CC), <code>7</code> = TIMELY (RTT-based), <code>10</code> = HPCC-PINT (with INT sampling). All implemented in <code>rdma-hw.cc</code>."
+        data-zh="<code>1</code> = DCQCN（Mellanox，預設），<code>3</code> = HPCC（高精度 CC），<code>7</code> = TIMELY（基於 RTT），<code>10</code> = HPCC-PINT（含 INT 取樣）。全部實作於 <code>rdma-hw.cc</code>。"><code>1</code> = DCQCN (Mellanox, default), <code>3</code> = HPCC (High Precision CC), <code>7</code> = TIMELY (RTT-based), <code>10</code> = HPCC-PINT (with INT sampling). All implemented in <code>rdma-hw.cc</code>.</span>
+    </div>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">simulation/src/point-to-point/model/rdma-hw.h — DCQCN parameters</div>
+<pre><code><span class="cm">// DCQCN rate control state (per QP)</span>
+<span class="ty">double</span> m_g;                    <span class="cm">// EWMA gain = 0.00390625 (1/256)</span>
+<span class="ty">double</span> m_rateOnFirstCNP;       <span class="cm">// Rate fraction on first CNP (1.0 = full)</span>
+<span class="ty">double</span> m_rpgTimeReset;         <span class="cm">// Rate increase timer = 900 μs</span>
+<span class="ty">double</span> m_rateDecreaseInterval;  <span class="cm">// Rate decrease check interval = 4 μs</span>
+<span class="ty">double</span> m_alpha_resume_interval; <span class="cm">// Alpha EWMA update interval = 1 μs</span>
+DataRate m_rai;                <span class="cm">// Additive increase = 50 Mb/s</span>
+DataRate m_rhai;               <span class="cm">// Hyper-additive increase = 100 Mb/s</span>
+<span class="ty">uint32_t</span> m_rpgThreshold;       <span class="cm">// Fast recovery threshold = 1 CNP</span></code></pre>
+
+    <h4><span class="i18n" data-en="Rate Decrease (on CNP received)" data-zh="降速（收到 CNP 時）">Rate Decrease (on CNP received)</span></h4>
+    <p>
+      <span class="i18n"
+        data-en="When a CNP (Congestion Notification Packet) arrives at the sender, DCQCN reduces the rate multiplicatively. The key formula:"
+        data-zh="當 CNP（擁塞通知封包）到達發送端時，DCQCN 以乘法方式降低速率。關鍵公式：">When a CNP (Congestion Notification Packet) arrives at the sender, DCQCN reduces the rate multiplicatively. The key formula:</span>
+    </p>
+
+    <div class="card highlight-red">
+      <h4><span class="i18n" data-en="DCQCN Rate Decrease Formula" data-zh="DCQCN 降速公式">DCQCN Rate Decrease Formula</span></h4>
+<pre><code><span class="cm">// On each rate_decrease_interval (4 μs), if CNP was received:</span>
+target_rate = rate × (<span class="nr">1</span> - alpha / <span class="nr">2</span>)
+rate = max(rate × (<span class="nr">1</span> - alpha / <span class="nr">2</span>), MIN_RATE)
+
+<span class="cm">// Alpha is updated via EWMA every alpha_resume_interval (1 μs):</span>
+<span class="cm">// If CNP received in this interval:</span>
+alpha = (<span class="nr">1</span> - m_g) × alpha + m_g        <span class="cm">// α increases toward 1</span>
+<span class="cm">// If no CNP:</span>
+alpha = (<span class="nr">1</span> - m_g) × alpha              <span class="cm">// α decays toward 0</span>
+
+<span class="cm">// With m_g = 1/256, alpha converges slowly — providing stability</span></code></pre>
+    </div>
+
+    <h4><span class="i18n" data-en="Rate Increase (recovery)" data-zh="加速（恢復）">Rate Increase (recovery)</span></h4>
+    <div class="card highlight-green">
+      <h4><span class="i18n" data-en="DCQCN Rate Increase — Three Phases" data-zh="DCQCN 加速 — 三個階段">DCQCN Rate Increase — Three Phases</span></h4>
+<pre><code><span class="cm">// Every RP_TIMER (900 μs), if no CNP received:</span>
+<span class="cm">// Phase 1: Fast Recovery (first m_rpgThreshold rounds)</span>
+rate = (rate + target_rate) / <span class="nr">2</span>
+
+<span class="cm">// Phase 2: Additive Increase</span>
+rate = rate + m_rai                    <span class="cm">// +50 Mb/s per interval</span>
+
+<span class="cm">// Phase 3: Hyper-Additive Increase (after sustained no-congestion)</span>
+rate = rate + m_rhai                   <span class="cm">// +100 Mb/s per interval</span></code></pre>
+    </div>
+
+    <!-- 6.3 ECN Marking -->
+    <h3 id="ecn">
+      <span class="i18n" data-en="6.3 ECN Marking at Switches (RED-based)" data-zh="6.3 交換機的 ECN 標記（基於 RED）">6.3 ECN Marking at Switches (RED-based)</span>
+    </h3>
+
+    <p>
+      <span class="i18n"
+        data-en="Switches mark packets with ECN (setting the ECE bits in IPv4 header) based on <strong>probabilistic RED (Random Early Detection)</strong>. The marking probability increases linearly between kmin and kmax:"
+        data-zh="交換機基於<strong>概率性 RED（隨機早期偵測）</strong>對封包進行 ECN 標記（設定 IPv4 標頭中的 ECE 位元）。標記概率在 kmin 和 kmax 之間線性增加：">Switches mark packets with ECN (setting the ECE bits in IPv4 header) based on <strong>probabilistic RED (Random Early Detection)</strong>. The marking probability increases linearly between kmin and kmax:</span>
+    </p>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">simulation/src/point-to-point/model/switch-mmu.cc — ShouldSendCN()</div>
+<pre><code><span class="ty">bool</span> SwitchMmu::<span class="fn">ShouldSendCN</span>(<span class="ty">uint32_t</span> ifindex, <span class="ty">uint32_t</span> qIndex) {
+    <span class="kw">if</span> (qIndex == <span class="nr">0</span>) <span class="kw">return</span> <span class="kw">false</span>;          <span class="cm">// Queue 0 = highest priority, never marked</span>
+    <span class="kw">if</span> (egress_bytes[ifindex][qIndex] > kmax[ifindex])
+        <span class="kw">return</span> <span class="kw">true</span>;                           <span class="cm">// Above kmax: always mark (100%)</span>
+    <span class="kw">if</span> (egress_bytes[ifindex][qIndex] > kmin[ifindex]) {
+        <span class="cm">// Between kmin and kmax: linear probability</span>
+        <span class="ty">double</span> p = pmax[ifindex]
+                 * (<span class="ty">double</span>)(egress_bytes[ifindex][qIndex] - kmin[ifindex])
+                 / (kmax[ifindex] - kmin[ifindex]);
+        <span class="kw">if</span> (UniformVariable(<span class="nr">0</span>, <span class="nr">1</span>).GetValue() < p)
+            <span class="kw">return</span> <span class="kw">true</span>;                       <span class="cm">// Probabilistic mark</span>
+    }
+    <span class="kw">return</span> <span class="kw">false</span>;                              <span class="cm">// Below kmin: never mark</span>
+}</code></pre>
+
+    <p>
+      <span class="i18n"
+        data-en="The kmin/kmax/pmax values are <strong>rate-dependent</strong>, configured per link speed in SimAI.conf:"
+        data-zh="kmin/kmax/pmax 值是<strong>依速率而定的</strong>，在 SimAI.conf 中按鏈路速度配置：">The kmin/kmax/pmax values are <strong>rate-dependent</strong>, configured per link speed in SimAI.conf:</span>
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th><span class="i18n" data-en="Link Speed" data-zh="鏈路速度">Link Speed</span></th>
+          <th>kmin (KB)</th>
+          <th>kmax (KB)</th>
+          <th>pmax</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>25 Gbps</td><td>100</td><td>400</td><td>0.2</td></tr>
+        <tr><td>100 Gbps</td><td>400</td><td>1600</td><td>0.2</td></tr>
+        <tr><td>200 Gbps</td><td>300</td><td>1200</td><td>0.8</td></tr>
+        <tr><td>400 Gbps</td><td>800</td><td>3200</td><td>0.2</td></tr>
+      </tbody>
+    </table>
+
+    <!-- 6.4 PFC -->
+    <h3 id="pfc">
+      <span class="i18n" data-en="6.4 PFC (Priority Flow Control) — Layer 2 Back-Pressure" data-zh="6.4 PFC（優先級流量控制）— 第 2 層背壓">6.4 PFC (Priority Flow Control) — Layer 2 Back-Pressure</span>
+    </h3>
+
+    <p>
+      <span class="i18n"
+        data-en="PFC operates at Layer 2, independently from DCQCN. When a switch's ingress buffer fills beyond the threshold, it sends a PAUSE frame to the upstream sender, halting transmission on that priority queue. This prevents packet loss but can cause <strong>head-of-line blocking</strong> and <strong>PFC storms</strong>."
+        data-zh="PFC 在第 2 層運作，獨立於 DCQCN。當交換機的入口緩衝區超過閾值時，它向上游發送方發送 PAUSE 幀，暫停該優先級佇列的傳輸。這可防止封包遺失，但可能導致<strong>隊頭阻塞</strong>和 <strong>PFC 風暴</strong>。">PFC operates at Layer 2, independently from DCQCN. When a switch's ingress buffer fills beyond the threshold, it sends a PAUSE frame to the upstream sender, halting transmission on that priority queue. This prevents packet loss but can cause <strong>head-of-line blocking</strong> and <strong>PFC storms</strong>.</span>
+    </p>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">simulation/src/point-to-point/model/switch-mmu.cc — PFC PAUSE/RESUME logic</div>
+<pre><code><span class="ty">bool</span> SwitchMmu::<span class="fn">CheckShouldPause</span>(<span class="ty">uint32_t</span> port, <span class="ty">uint32_t</span> qIndex) {
+    <span class="kw">return</span> !paused[port][qIndex] &amp;&amp;
+           (hdrm_bytes[port][qIndex] > <span class="nr">0</span> ||                  <span class="cm">// Headroom occupied</span>
+            GetSharedUsed(port, qIndex) >= GetPfcThreshold(port));  <span class="cm">// Shared buffer full</span>
+}
+
+<span class="ty">bool</span> SwitchMmu::<span class="fn">CheckShouldResume</span>(<span class="ty">uint32_t</span> port, <span class="ty">uint32_t</span> qIndex) {
+    <span class="kw">if</span> (!paused[port][qIndex]) <span class="kw">return</span> <span class="kw">false</span>;
+    <span class="kw">return</span> hdrm_bytes[port][qIndex] == <span class="nr">0</span> &amp;&amp;                 <span class="cm">// Headroom drained</span>
+           (GetSharedUsed(port,qIndex) == <span class="nr">0</span> ||
+            GetSharedUsed(port,qIndex) + resume_offset       <span class="cm">// 3 KB hysteresis</span>
+                <= GetPfcThreshold(port));
+}
+
+<span class="cm">// Switch buffer: 12 MB total (static) or 32 MB (SimAI.conf BUFFER_SIZE)</span>
+<span class="cm">// Dynamic threshold: USE_DYNAMIC_PFC_THRESHOLD = 1 (enabled by default)</span>
+<span class="cm">// 8 priority queues (qCnt=8), queue 0 = highest (ACK/NACK/CNP bypass PFC)</span></code></pre>
+
+    <div class="callout warn">
+      <strong><span class="i18n" data-en="PFC vs DCQCN — Two Layers of Defense:" data-zh="PFC vs DCQCN — 兩層防禦：">PFC vs DCQCN — Two Layers of Defense:</span></strong>
+      <span class="i18n"
+        data-en="<strong>DCQCN</strong> (Layer 4) proactively reduces sending rate when switches mark ECN — it's the <em>fine-grained</em> rate control. <strong>PFC</strong> (Layer 2) is the <em>last resort</em> that physically pauses the link when buffers are critically full. In a well-tuned system, DCQCN should react fast enough that PFC rarely triggers. SimAI tracks PFC events in <code>PFC_OUTPUT_FILE</code> — high PFC counts indicate that DCQCN parameters need tuning (e.g., lower kmin, faster RATE_DECREASE_INTERVAL)."
+        data-zh="<strong>DCQCN</strong>（第 4 層）在交換機標記 ECN 時主動降低發送速率 — 這是<em>細粒度</em>的速率控制。<strong>PFC</strong>（第 2 層）是緩衝區嚴重滿載時物理暫停鏈路的<em>最後手段</em>。在調校良好的系統中，DCQCN 應足夠快速反應，使 PFC 很少觸發。SimAI 在 <code>PFC_OUTPUT_FILE</code> 中追蹤 PFC 事件 — 高 PFC 計數表明 DCQCN 參數需要調整（如降低 kmin、加快 RATE_DECREASE_INTERVAL）。"><strong>DCQCN</strong> (Layer 4) proactively reduces sending rate when switches mark ECN — it's the <em>fine-grained</em> rate control. <strong>PFC</strong> (Layer 2) is the <em>last resort</em> that physically pauses the link when buffers are critically full. In a well-tuned system, DCQCN should react fast enough that PFC rarely triggers. SimAI tracks PFC events in <code>PFC_OUTPUT_FILE</code> — high PFC counts indicate that DCQCN parameters need tuning (e.g., lower kmin, faster RATE_DECREASE_INTERVAL).</span>
+    </div>
+
+    <!-- 6.5 ECMP -->
+    <h3 id="ecmp">
+      <span class="i18n" data-en="6.5 ECMP Routing (Per-Flow, MurmurHash3)" data-zh="6.5 ECMP 路由（每流、MurmurHash3）">6.5 ECMP Routing (Per-Flow, MurmurHash3)</span>
+    </h3>
+
+    <p>
+      <span class="i18n"
+        data-en="SimAI uses <strong>per-flow ECMP</strong> routing at every switch. When a packet arrives at a switch with multiple equal-cost next hops, the switch hashes the flow's 5-tuple to deterministically pick a path:"
+        data-zh="SimAI 在每個交換機使用<strong>每流 ECMP</strong> 路由。當封包到達具有多個等成本下一跳的交換機時，交換機對流的 5-tuple 進行雜湊以確定性地選擇路徑：">SimAI uses <strong>per-flow ECMP</strong> routing at every switch. When a packet arrives at a switch with multiple equal-cost next hops, the switch hashes the flow's 5-tuple to deterministically pick a path:</span>
+    </p>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">simulation/src/point-to-point/model/switch-node.cc — ECMP hash</div>
+<pre><code><span class="ty">int</span> SwitchNode::<span class="fn">GetOutDev</span>(Ptr&lt;Packet&gt; p, CustomHeader &amp;ch) {
+    <span class="cm">// Extract 5-tuple: src_ip(4B) + dst_ip(4B) + src_port(2B) + dst_port(2B)</span>
+    <span class="kw">union</span> { <span class="ty">uint8_t</span> u8[<span class="nr">12</span>]; <span class="ty">uint32_t</span> u32[<span class="nr">3</span>]; } buf;
+    buf.u32[<span class="nr">0</span>] = ch.sip;    buf.u32[<span class="nr">1</span>] = ch.dip;
+    buf.u32[<span class="nr">2</span>] = ch.sport | ((<span class="ty">uint32_t</span>)ch.dport &lt;&lt; <span class="nr">16</span>);
+
+    <span class="cm">// MurmurHash3 with per-switch seed (= node ID)</span>
+    <span class="ty">uint32_t</span> idx = <span class="fn">EcmpHash</span>(buf.u8, <span class="nr">12</span>, m_ecmpSeed) % nexthops.size();
+    <span class="kw">return</span> nexthops[idx];     <span class="cm">// Deterministic path for this flow</span>
+}</code></pre>
+
+    <div class="callout key">
+      <strong><span class="i18n" data-en="ECMP and PD Disaggregation:" data-zh="ECMP 與 PD 分離：">ECMP and PD Disaggregation:</span></strong>
+      <span class="i18n"
+        data-en="In PD disaggregation, KV cache transfers are large, long-lived flows. Per-flow ECMP means each KV transfer is locked to a single path for its entire duration — it cannot spread across multiple links. This creates <strong>hash collision risk</strong>: if two large KV transfers hash to the same ASW→PSW link, they compete for bandwidth while other links sit idle. This is a known limitation of per-flow ECMP for elephant flows, and is why rail-optimized topologies (where same-rail traffic avoids PSW entirely) are preferred for TP-heavy workloads."
+        data-zh="在 PD 分離中，KV 快取傳輸是大型、長存活流。每流 ECMP 意味著每次 KV 傳輸在整個持續期間被鎖定到單一路徑 — 它無法跨多個鏈路分散。這造成<strong>雜湊碰撞風險</strong>：如果兩個大型 KV 傳輸雜湊到同一個 ASW→PSW 鏈路，它們會競爭頻寬，而其他鏈路閒置。這是每流 ECMP 對大流量的已知限制，也是為何軌道最佳化拓撲（同軌道流量完全避免 PSW）在 TP 密集工作負載中更受青睞的原因。">In PD disaggregation, KV cache transfers are large, long-lived flows. Per-flow ECMP means each KV transfer is locked to a single path for its entire duration — it cannot spread across multiple links. This creates <strong>hash collision risk</strong>: if two large KV transfers hash to the same ASW→PSW link, they compete for bandwidth while other links sit idle. This is a known limitation of per-flow ECMP for elephant flows, and is why rail-optimized topologies (where same-rail traffic avoids PSW entirely) are preferred for TP-heavy workloads.</span>
+    </div>
+
+    <!-- 6.6 FCT Output -->
+    <h3 id="fct">
+      <span class="i18n" data-en="6.6 Flow Completion Time (FCT) Tracking" data-zh="6.6 流完成時間 (FCT) 追蹤">6.6 Flow Completion Time (FCT) Tracking</span>
+    </h3>
+
+    <div class="component-badge ns3">ns-3-alibabacloud</div>
+    <div class="file-tag">astra-sim/network_frontend/ns3/entry.h — qp_finish()</div>
+<pre><code><span class="kw">void</span> <span class="fn">qp_finish</span>(FILE *fout, Ptr&lt;RdmaQueuePair&gt; q) {
+    <span class="ty">uint64_t</span> standalone_fct = base_rtt
+        + total_bytes * <span class="nr">8000000000</span>lu / bandwidth;  <span class="cm">// Ideal FCT (no congestion)</span>
+
+    fprintf(fout, <span class="st">"%08x %08x %u %u %lu %lu %lu %lu\n"</span>,
+        q-&gt;sip, q-&gt;dip,             <span class="cm">// Source &amp; dest IP (hex)</span>
+        q-&gt;sport, q-&gt;dport,          <span class="cm">// Ports</span>
+        q-&gt;m_size,                    <span class="cm">// Data bytes (= KV cache size)</span>
+        q-&gt;startTime,                 <span class="cm">// Start time (ns)</span>
+        Simulator::Now() - q-&gt;startTime,  <span class="cm">// Actual FCT (ns)</span>
+        standalone_fct);              <span class="cm">// Ideal FCT (ns, zero-congestion)</span>
+}
+<span class="cm">// FCT ratio = actual_fct / ideal_fct → measures congestion impact</span>
+<span class="cm">// For PD disagg: this directly determines pd_p2p_comm_time</span></code></pre>
+
+    <!-- 6.7 Summary Table -->
+    <h3 id="transport-summary">
+      <span class="i18n" data-en="6.7 Transport Stack Summary" data-zh="6.7 傳輸堆疊總覽">6.7 Transport Stack Summary</span>
+    </h3>
+
+    <table>
+      <thead>
+        <tr>
+          <th><span class="i18n" data-en="Layer" data-zh="層級">Layer</span></th>
+          <th><span class="i18n" data-en="Mechanism" data-zh="機制">Mechanism</span></th>
+          <th><span class="i18n" data-en="Implementation" data-zh="實作">Implementation</span></th>
+          <th><span class="i18n" data-en="Key Parameters" data-zh="關鍵參數">Key Parameters</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="i18n" data-en="L4 Transport" data-zh="L4 傳輸">L4 Transport</span></td>
+          <td><span class="i18n" data-en="RoCEv2 RDMA with QP state" data-zh="帶 QP 狀態的 RoCEv2 RDMA">RoCEv2 RDMA with QP state</span></td>
+          <td><code>rdma-hw.cc</code>, <code>rdma-queue-pair.h</code></td>
+          <td>PACKET_PAYLOAD_SIZE=9000, HAS_WIN=1</td>
+        </tr>
+        <tr>
+          <td><span class="i18n" data-en="L4 Congestion Control" data-zh="L4 擁塞控制">L4 Congestion Control</span></td>
+          <td><span class="i18n" data-en="DCQCN (default) / HPCC / TIMELY" data-zh="DCQCN（預設）/ HPCC / TIMELY">DCQCN (default) / HPCC / TIMELY</span></td>
+          <td><code>rdma-hw.cc</code> <code>cnp_received_mlx()</code></td>
+          <td>CC_MODE=1, EWMA_GAIN=1/256, RATE_AI=50Mb/s</td>
+        </tr>
+        <tr>
+          <td><span class="i18n" data-en="L3 ECN Marking" data-zh="L3 ECN 標記">L3 ECN Marking</span></td>
+          <td><span class="i18n" data-en="Probabilistic RED at switch egress" data-zh="交換機出口的概率性 RED">Probabilistic RED at switch egress</span></td>
+          <td><code>switch-mmu.cc</code> <code>ShouldSendCN()</code></td>
+          <td><span class="i18n" data-en="kmin/kmax per link speed, pmax=0.2" data-zh="kmin/kmax 按鏈路速度，pmax=0.2">kmin/kmax per link speed, pmax=0.2</span></td>
+        </tr>
+        <tr>
+          <td><span class="i18n" data-en="L3 Routing" data-zh="L3 路由">L3 Routing</span></td>
+          <td><span class="i18n" data-en="Per-flow ECMP (MurmurHash3)" data-zh="每流 ECMP（MurmurHash3）">Per-flow ECMP (MurmurHash3)</span></td>
+          <td><code>switch-node.cc</code> <code>GetOutDev()</code></td>
+          <td><span class="i18n" data-en="5-tuple hash, seed=node_id" data-zh="5-tuple 雜湊，seed=node_id">5-tuple hash, seed=node_id</span></td>
+        </tr>
+        <tr>
+          <td><span class="i18n" data-en="L2 Flow Control" data-zh="L2 流量控制">L2 Flow Control</span></td>
+          <td><span class="i18n" data-en="PFC with dynamic threshold" data-zh="帶動態閾值的 PFC">PFC with dynamic threshold</span></td>
+          <td><code>switch-mmu.cc</code>, <code>qbb-net-device.h</code></td>
+          <td><span class="i18n" data-en="8 queues, 3KB hysteresis, 32MB buffer" data-zh="8 佇列、3KB 遲滯、32MB 緩衝區">8 queues, 3KB hysteresis, 32MB buffer</span></td>
+        </tr>
+        <tr>
+          <td><span class="i18n" data-en="L1 Physical" data-zh="L1 實體">L1 Physical</span></td>
+          <td><span class="i18n" data-en="Point-to-point links with configurable BW/latency" data-zh="可配置頻寬/延遲的點對點鏈路">Point-to-point links with configurable BW/latency</span></td>
+          <td><span class="i18n" data-en="Topology file" data-zh="拓撲檔案">Topology file</span></td>
+          <td><span class="i18n" data-en="NVLink 2880Gbps, NIC 100-400Gbps" data-zh="NVLink 2880Gbps、NIC 100-400Gbps">NVLink 2880Gbps, NIC 100-400Gbps</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout critical">
+      <strong><span class="i18n" data-en="Why This Matters for PD Disaggregation Accuracy:" data-zh="為什麼這對 PD 分離準確性很重要：">Why This Matters for PD Disaggregation Accuracy:</span></strong>
+      <span class="i18n"
+        data-en="The analytical backend estimates KV transfer time as <code>size / bandwidth</code>. The NS-3 backend captures effects that analytical mode misses: (1) <strong>DCQCN rate ramp-up</strong> — new QPs start at line rate but quickly converge when competing; (2) <strong>ECMP hash collisions</strong> — two KV transfers to the same decode node may collide on a PSW uplink; (3) <strong>PFC cascading</strong> — a congested decode node can PFC-pause the entire upstream path; (4) <strong>cross-traffic interference</strong> — TP AllReduce on the same rails competes with PD KV transfers. These effects can cause 2-5× FCT inflation compared to the ideal <code>size/BW</code> estimate, making NS-3 essential for accurate PD disagg analysis."
+        data-zh="分析式後端將 KV 傳輸時間估算為 <code>size / bandwidth</code>。NS-3 後端捕捉分析模式遺漏的效果：(1) <strong>DCQCN 速率爬升</strong> — 新 QP 以線速啟動但在競爭時快速收斂；(2) <strong>ECMP 雜湊碰撞</strong> — 兩個到同一解碼節點的 KV 傳輸可能在 PSW 上行鏈路碰撞；(3) <strong>PFC 級聯</strong> — 擁塞的解碼節點可以 PFC 暫停整個上游路徑；(4) <strong>交叉流量干擾</strong> — 同軌道上的 TP AllReduce 與 PD KV 傳輸競爭。這些效果可導致 FCT 比理想的 <code>size/BW</code> 估算膨脹 2-5 倍，使 NS-3 成為精確 PD 分離分析的必要工具。">The analytical backend estimates KV transfer time as <code>size / bandwidth</code>. The NS-3 backend captures effects that analytical mode misses: (1) <strong>DCQCN rate ramp-up</strong> — new QPs start at line rate but quickly converge when competing; (2) <strong>ECMP hash collisions</strong> — two KV transfers to the same decode node may collide on a PSW uplink; (3) <strong>PFC cascading</strong> — a congested decode node can PFC-pause the entire upstream path; (4) <strong>cross-traffic interference</strong> — TP AllReduce on the same rails competes with PD KV transfers. These effects can cause 2-5× FCT inflation compared to the ideal <code>size/BW</code> estimate, making NS-3 essential for accurate PD disagg analysis.</span>
+    </div>
+  </div>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 7: NETWORK TOPOLOGY GENERATION                          -->
   <!-- ============================================================== -->
   <div class="section" id="topo-gen">
-    <span class="section-label">Section 6</span>
+    <span class="section-label">Section 7</span>
     <h2>
       <span class="i18n" data-en="Network Topology Generation" data-zh="網路拓撲生成">Network Topology Generation</span>
     </h2>
