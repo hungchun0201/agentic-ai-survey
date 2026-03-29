@@ -639,8 +639,8 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--pr
       <h4><span class="i18n" data-en="Replica Scheduling + Batching" data-zh="副本排程與批次處理">Replica Scheduling + Batching</span></h4>
       <span class="component-badge vidur">vidur-alibabacloud</span>
       <p><span class="i18n"
-        data-en="The SplitWise replica scheduler on the target replica builds a batch from waiting requests. It considers KV cache memory budget, maximum batch size, and token limits. For each request in the batch, it computes the KV cache size needed and adds <code class='inline-code'>PromptTask</code> or <code class='inline-code'>TokenTask</code> nodes to the request's DAG."
-        data-zh="目標副本上的 SplitWise 副本排程器從等待中的請求建構批次。它考慮 KV 快取記憶體預算、最大批次大小及 Token 限制。對於批次中的每個請求，計算所需的 KV 快取大小並將 <code class='inline-code'>PromptTask</code> 或 <code class='inline-code'>TokenTask</code> 節點加入請求的 DAG。">The SplitWise replica scheduler on the target replica builds a batch from waiting requests. It considers KV cache memory budget, maximum batch size, and token limits. For each request in the batch, it computes the KV cache size needed and adds <code class="inline-code">PromptTask</code> or <code class="inline-code">TokenTask</code> nodes to the request's DAG.</span></p>
+        data-en="The SplitWise replica scheduler on the target replica builds a batch from waiting requests. It considers KV cache memory budget, maximum batch size, and token limits. The DAG nodes (<code class='inline-code'>PromptTask</code>, <code class='inline-code'>KVCacheTransferFlow</code>, <code class='inline-code'>TokenTask</code>) were already created by the global scheduler; the replica scheduler picks up the appropriate task node and groups requests into batches for execution."
+        data-zh="目標副本上的 SplitWise 副本排程器從等待中的請求建構批次。它考慮 KV 快取記憶體預算、最大批次大小及 Token 限制。DAG 節點（<code class='inline-code'>PromptTask</code>、<code class='inline-code'>KVCacheTransferFlow</code>、<code class='inline-code'>TokenTask</code>）已由全域排程器建立；副本排程器取得對應的任務節點並將請求分組為批次執行。">The SplitWise replica scheduler on the target replica builds a batch from waiting requests. It considers KV cache memory budget, maximum batch size, and token limits. The DAG nodes (<code class="inline-code">PromptTask</code>, <code class="inline-code">KVCacheTransferFlow</code>, <code class="inline-code">TokenTask</code>) were already created by the global scheduler; the replica scheduler picks up the appropriate task node and groups requests into batches for execution.</span></p>
     </div>
     <div class="step-connector"></div>
 
@@ -1127,8 +1127,8 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--pr
   <div class="callout warn">
     <strong><span class="i18n" data-en="DAG Complexity" data-zh="DAG 複雜度">DAG Complexity</span>:</strong>
     <span class="i18n"
-      data-en="The DAG-based task representation introduces additional complexity compared to Vidur's linear execution model. Each request in PD mode generates at minimum three DAG nodes (PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask), with each decode iteration adding another TokenTask. For a request with 1000 decode tokens, the DAG has ~1003 nodes. This overhead is manageable for simulation purposes but is worth understanding when interpreting profiling data."
-      data-zh="基於 DAG 的任務表示相比 Vidur 的線性執行模型引入了額外的複雜度。PD 模式下每個請求至少產生三個 DAG 節點（PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask），每次解碼迭代再增加一個 TokenTask。對於有 1000 個解碼 Token 的請求，DAG 約有 ~1003 個節點。此開銷在模擬用途上可管理，但在解讀剖析資料時值得了解。">The DAG-based task representation introduces additional complexity compared to Vidur's linear execution model. Each request in PD mode generates at minimum three DAG nodes (PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask), with each decode iteration adding another TokenTask. For a request with 1000 decode tokens, the DAG has ~1003 nodes. This overhead is manageable for simulation purposes but is worth understanding when interpreting profiling data.</span>
+      data-en="The DAG-based task representation introduces additional complexity compared to Vidur's linear execution model. Each request in PD mode generates exactly three DAG nodes (PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask); in co-located mode (same replica), it generates only two nodes (PromptTask &rarr; TokenTask). The single <code class='inline-code'>TokenTask</code> node handles all decode tokens internally through multiple batch iterations (<code class='inline-code'>tokens_per_iteration = 1</code>), rather than creating a separate node per token. This keeps the DAG lightweight regardless of output length."
+      data-zh="基於 DAG 的任務表示相比 Vidur 的線性執行模型引入了額外的複雜度。PD 模式下每個請求恰好產生三個 DAG 節點（PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask）；在同副本模式下則只有兩個節點（PromptTask &rarr; TokenTask）。單一 <code class='inline-code'>TokenTask</code> 節點透過多次批次迭代（<code class='inline-code'>tokens_per_iteration = 1</code>）在內部處理所有解碼 Token，而非為每個 Token 建立獨立節點。因此無論輸出長度為何，DAG 都保持輕量。">The DAG-based task representation introduces additional complexity compared to Vidur's linear execution model. Each request in PD mode generates exactly three DAG nodes (PromptTask &rarr; KVCacheTransferFlow &rarr; TokenTask); in co-located mode (same replica), it generates only two nodes (PromptTask &rarr; TokenTask). The single <code class="inline-code">TokenTask</code> node handles all decode tokens internally through multiple batch iterations (<code class="inline-code">tokens_per_iteration = 1</code>), rather than creating a separate node per token. This keeps the DAG lightweight regardless of output length.</span>
   </div>
 
   <div class="callout key">
@@ -1330,68 +1330,69 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--pr
   </h2>
 
   <p><span class="i18n"
-    data-en="In PD disaggregation mode, a request with 3 decode tokens produces the following DAG structure. The KVCacheTransferFlow sits between the prefill and first decode, creating the critical PD communication dependency."
-    data-zh="在 PD 分離模式下，一個有 3 個解碼 Token 的請求產生以下 DAG 結構。KVCacheTransferFlow 位於前綴計算與首次解碼之間，形成關鍵的 PD 通訊依賴。">In PD disaggregation mode, a request with 3 decode tokens produces the following DAG structure. The KVCacheTransferFlow sits between the prefill and first decode, creating the critical PD communication dependency.</span></p>
+    data-en="In PD disaggregation mode, a request produces a DAG with exactly three nodes. The single <code class='inline-code'>TokenTask</code> node handles all decode tokens internally through batch iterations (<code class='inline-code'>tokens_per_iteration = 1</code>), rather than creating a separate node per token. The KVCacheTransferFlow sits between prefill and decode, creating the critical PD communication dependency."
+    data-zh="在 PD 分離模式下，一個請求恰好產生三個 DAG 節點。單一 <code class='inline-code'>TokenTask</code> 節點透過批次迭代（<code class='inline-code'>tokens_per_iteration = 1</code>）在內部處理所有解碼 Token，而非為每個 Token 建立獨立節點。KVCacheTransferFlow 位於前綴計算與解碼之間，形成關鍵的 PD 通訊依賴。">In PD disaggregation mode, a request produces a DAG with exactly three nodes. The single <code class="inline-code">TokenTask</code> node handles all decode tokens internally through batch iterations (<code class="inline-code">tokens_per_iteration = 1</code>), rather than creating a separate node per token. The KVCacheTransferFlow sits between prefill and decode, creating the critical PD communication dependency.</span></p>
 
   <!-- DAG SVG Diagram -->
   <div class="diagram-container">
     <div class="diagram-title">
-      <span class="i18n" data-en="Request DAG in PD Disaggregation Mode (3 decode tokens)" data-zh="PD 分離模式下的請求 DAG（3 個解碼 Token）">Request DAG in PD Disaggregation Mode (3 decode tokens)</span>
+      <span class="i18n" data-en="Request DAG in PD Disaggregation Mode" data-zh="PD 分離模式下的請求 DAG">Request DAG in PD Disaggregation Mode</span>
     </div>
-    <svg viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+    <svg viewBox="0 0 800 260" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
       <defs>
         <marker id="dagArrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
           <polygon points="0 0, 8 3, 0 6" fill="#6ec6ff"/>
         </marker>
       </defs>
-      <rect width="800" height="220" fill="var(--code-bg)" rx="8"/>
+      <rect width="800" height="260" fill="var(--code-bg)" rx="8"/>
 
       <!-- Prefill pool label -->
       <rect x="20" y="60" width="220" height="100" rx="8" fill="rgba(74,158,255,0.05)" stroke="rgba(74,158,255,0.2)" stroke-dasharray="4,3"/>
       <text x="130" y="50" text-anchor="middle" fill="#4a9eff" font-size="10" font-weight="600">Prefill Replica</text>
 
+      <!-- Network transfer zone -->
+      <rect x="260" y="60" width="130" height="100" rx="8" fill="rgba(255,107,107,0.03)" stroke="rgba(255,107,107,0.15)" stroke-dasharray="4,3"/>
+      <text x="325" y="50" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="600">Network</text>
+
       <!-- Decode pool label -->
-      <rect x="380" y="60" width="400" height="100" rx="8" fill="rgba(46,204,113,0.05)" stroke="rgba(46,204,113,0.2)" stroke-dasharray="4,3"/>
-      <text x="580" y="50" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="600">Decode Replica</text>
+      <rect x="410" y="60" width="370" height="100" rx="8" fill="rgba(46,204,113,0.05)" stroke="rgba(46,204,113,0.2)" stroke-dasharray="4,3"/>
+      <text x="595" y="50" text-anchor="middle" fill="#2ecc71" font-size="10" font-weight="600">Decode Replica</text>
 
       <!-- PromptTask node -->
-      <rect x="50" y="85" width="130" height="50" rx="8" fill="rgba(74,158,255,0.15)" stroke="#4a9eff" stroke-width="1.5"/>
-      <text x="115" y="107" text-anchor="middle" fill="#4a9eff" font-size="11" font-weight="700">PromptTask</text>
-      <text x="115" y="125" text-anchor="middle" fill="#a0aec0" font-size="9">prefill all tokens</text>
+      <rect x="40" y="82" width="180" height="56" rx="8" fill="rgba(74,158,255,0.15)" stroke="#4a9eff" stroke-width="1.5"/>
+      <text x="130" y="105" text-anchor="middle" fill="#4a9eff" font-size="12" font-weight="700">PromptTask</text>
+      <text x="130" y="125" text-anchor="middle" fill="#a0aec0" font-size="9">prefill all tokens at once</text>
 
       <!-- KVCacheTransferFlow node -->
-      <rect x="250" y="85" width="110" height="50" rx="8" fill="rgba(255,107,107,0.15)" stroke="#ff6b6b" stroke-width="1.5"/>
-      <text x="305" y="105" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="700">KVCache</text>
-      <text x="305" y="122" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="700">Transfer</text>
+      <rect x="270" y="82" width="110" height="56" rx="8" fill="rgba(255,107,107,0.15)" stroke="#ff6b6b" stroke-width="1.5"/>
+      <text x="325" y="103" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="700">KVCache</text>
+      <text x="325" y="120" text-anchor="middle" fill="#ff6b6b" font-size="10" font-weight="700">Transfer</text>
 
-      <!-- TokenTask 1 -->
-      <rect x="400" y="85" width="100" height="50" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="1.5"/>
-      <text x="450" y="107" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="700">TokenTask</text>
-      <text x="450" y="125" text-anchor="middle" fill="#a0aec0" font-size="9">decode t=1</text>
-
-      <!-- TokenTask 2 -->
-      <rect x="530" y="85" width="100" height="50" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="1.5"/>
-      <text x="580" y="107" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="700">TokenTask</text>
-      <text x="580" y="125" text-anchor="middle" fill="#a0aec0" font-size="9">decode t=2</text>
-
-      <!-- TokenTask 3 -->
-      <rect x="660" y="85" width="100" height="50" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="1.5"/>
-      <text x="710" y="107" text-anchor="middle" fill="#2ecc71" font-size="11" font-weight="700">TokenTask</text>
-      <text x="710" y="125" text-anchor="middle" fill="#a0aec0" font-size="9">decode t=3</text>
+      <!-- Single TokenTask node (larger to emphasize it's one node) -->
+      <rect x="430" y="75" width="330" height="70" rx="8" fill="rgba(46,204,113,0.15)" stroke="#2ecc71" stroke-width="1.5"/>
+      <text x="595" y="100" text-anchor="middle" fill="#2ecc71" font-size="12" font-weight="700">TokenTask</text>
+      <text x="595" y="118" text-anchor="middle" fill="#a0aec0" font-size="9">single node, token_size = num_decode_tokens &minus; 1</text>
+      <text x="595" y="133" text-anchor="middle" fill="#a0aec0" font-size="9">internally iterates: tokens_per_iteration = 1</text>
 
       <!-- Arrows -->
-      <line x1="180" y1="110" x2="250" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
-      <line x1="360" y1="110" x2="400" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
-      <line x1="500" y1="110" x2="530" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
-      <line x1="630" y1="110" x2="660" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
+      <line x1="220" y1="110" x2="270" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
+      <line x1="380" y1="110" x2="430" y2="110" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#dagArrow)"/>
+
+      <!-- Node ID labels -->
+      <text x="40" y="78" fill="#a0aec0" font-size="8">node_id = 0</text>
+      <text x="270" y="78" fill="#a0aec0" font-size="8">node_id = 1</text>
+      <text x="430" y="71" fill="#a0aec0" font-size="8">node_id = 2</text>
 
       <!-- Timeline labels -->
-      <text x="115" y="190" text-anchor="middle" fill="#a0aec0" font-size="9">compute_time</text>
-      <text x="115" y="203" text-anchor="middle" fill="#a0aec0" font-size="9">(AICB profiled)</text>
-      <text x="305" y="190" text-anchor="middle" fill="#a0aec0" font-size="9">pd_p2p_comm_time</text>
-      <text x="305" y="203" text-anchor="middle" fill="#a0aec0" font-size="9">(NS-3 / analytical)</text>
-      <text x="580" y="190" text-anchor="middle" fill="#a0aec0" font-size="9">compute_time per token</text>
-      <text x="580" y="203" text-anchor="middle" fill="#a0aec0" font-size="9">(AICB profiled)</text>
+      <text x="130" y="195" text-anchor="middle" fill="#a0aec0" font-size="9">compute_time</text>
+      <text x="130" y="208" text-anchor="middle" fill="#a0aec0" font-size="9">(AICB profiled)</text>
+      <text x="325" y="195" text-anchor="middle" fill="#a0aec0" font-size="9">pd_p2p_comm_time</text>
+      <text x="325" y="208" text-anchor="middle" fill="#a0aec0" font-size="9">(NS-3 / analytical)</text>
+      <text x="595" y="195" text-anchor="middle" fill="#a0aec0" font-size="9">compute_time &times; num_decode_tokens</text>
+      <text x="595" y="208" text-anchor="middle" fill="#a0aec0" font-size="9">(batched by replica scheduler)</text>
+
+      <!-- Execution timeline illustration -->
+      <text x="400" y="235" text-anchor="middle" fill="#a0aec0" font-size="9" font-style="italic">DAG has only 3 nodes; decode tokens are handled by batch iterations within the single TokenTask</text>
     </svg>
   </div>
 
