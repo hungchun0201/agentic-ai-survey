@@ -5,250 +5,124 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>vLLM V1 GPUModelRunner Deep Dive - Attention Backends, Sampling &amp; CUDA Graphs</title>
 <style>
-:root {
-  --dark: #16213e;
-  --mid: #0f3460;
-  --primary: #e94560;
-  --green: #2ecc71;
-  --amber: #f5a623;
-  --purple: #9b59b6;
-  --blue: #3498db;
-  --cyan: #00d2d3;
-  --teal: #1abc9c;
-  --orange: #e67e22;
-  --code-bg: #1e1e2e;
-  --card-bg: #1a2744;
-  --text: #e0e0e0;
-  --text-muted: #a0aec0;
-  --border: #2d3e5e;
-  --surface: #1e2d4a;
-}
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0b0e1a;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* ===== STICKY NAV ===== */
+nav.top-nav{position:sticky;top:0;z-index:1000;background:rgba(11,14,26,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(110,198,255,.12);padding:.6rem 1.5rem;display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap}
+nav.top-nav .brand{font-weight:700;font-size:1.05rem;color:#ff9f43;letter-spacing:.5px}
+nav.top-nav a{font-size:.85rem;padding:.25rem .5rem;border-radius:4px;transition:background .2s,color .2s}
+nav.top-nav a:hover{background:rgba(110,198,255,.12);color:#fff}
+nav.top-nav a.active{background:rgba(255,159,67,.15);color:#ff9f43}
+nav.top-nav .sep{color:#3a3f55}
 
-body {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: var(--dark);
-  color: var(--text);
-  line-height: 1.7;
-}
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#16213e 0%,#0f3460 50%,#1a1a40 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden}
+.hero h1{font-size:2.4rem;font-weight:800;color:#fff;margin-bottom:.5rem;position:relative}
+.hero .subtitle{font-size:1.15rem;color:#8fa4c0;max-width:800px;margin:.5rem auto 1.5rem;position:relative}
+.hero .badge{display:inline-block;background:rgba(255,159,67,.15);border:1px solid rgba(255,159,67,.3);color:#ffb74d;padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;margin:.2rem;position:relative}
+.badge-red{background:rgba(255,159,67,.15);color:#ffb74d;border:1px solid rgba(255,159,67,.3)}
+.badge-green{background:rgba(102,187,106,.15);color:#66bb6a;border:1px solid rgba(102,187,106,.3)}
+.badge-blue{background:rgba(110,198,255,.15);color:#6ec6ff;border:1px solid rgba(110,198,255,.3)}
+.badge-purple{background:rgba(179,136,255,.15);color:#b388ff;border:1px solid rgba(179,136,255,.3)}
+.badge-amber{background:rgba(255,159,67,.15);color:#ffb74d;border:1px solid rgba(255,159,67,.3)}
 
-/* ---- Sticky Nav ---- */
-nav {
-  position: sticky;
-  top: 0;
-  z-index: 1000;
-  background: rgba(15, 52, 96, 0.95);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
-  padding: 0 2rem;
-}
-nav ul {
-  display: flex;
-  list-style: none;
-  max-width: 1200px;
-  margin: 0 auto;
-  gap: 0.25rem;
-  overflow-x: auto;
-}
-nav ul li a {
-  display: block;
-  padding: 0.85rem 1rem;
-  color: var(--text-muted);
-  text-decoration: none;
-  font-size: 0.82rem;
-  font-weight: 500;
-  white-space: nowrap;
-  transition: color 0.2s, border-bottom 0.2s;
-  border-bottom: 2px solid transparent;
-}
-nav ul li a:hover {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
-}
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
 
-/* ---- Hero ---- */
-.hero {
-  text-align: center;
-  padding: 4rem 2rem 3rem;
-  background: linear-gradient(135deg, #0f3460 0%, #16213e 60%, #1a1a2e 100%);
-  border-bottom: 2px solid var(--primary);
-}
-.hero h1 {
-  font-size: 2.4rem;
-  color: #fff;
-  margin-bottom: 0.5rem;
-}
-.hero .subtitle {
-  font-size: 1.15rem;
-  color: var(--text-muted);
-  max-width: 800px;
-  margin: 0.5rem auto 1.5rem;
-}
-.hero .badge {
-  display: inline-block;
-  padding: 0.3rem 1rem;
-  border-radius: 20px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  margin: 0.2rem;
-}
-.badge-red { background: rgba(233,69,96,0.25); color: var(--primary); border: 1px solid var(--primary); }
-.badge-green { background: rgba(46,204,113,0.25); color: var(--green); border: 1px solid var(--green); }
-.badge-blue { background: rgba(52,152,219,0.25); color: var(--blue); border: 1px solid var(--blue); }
-.badge-purple { background: rgba(155,89,182,0.25); color: var(--purple); border: 1px solid var(--purple); }
-.badge-amber { background: rgba(245,166,35,0.25); color: var(--amber); border: 1px solid var(--amber); }
+/* ===== SECTION HEADINGS ===== */
+section{margin-bottom:3.5rem}
+h2,section h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(110,198,255,.2);position:relative}
+h3,section h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4,section h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+p{margin-bottom:1rem}
 
-/* ---- Container ---- */
-.container {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 2rem;
-}
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+.inline-code{background:rgba(110,198,255,.1);padding:.1em .4em;border-radius:4px;color:#89b4fa;font-size:.85em}
 
-/* ---- Section ---- */
-section {
-  margin-bottom: 3.5rem;
-}
-section h2 {
-  font-size: 1.7rem;
-  color: var(--primary);
-  margin-bottom: 1.2rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 2px solid var(--border);
-}
-section h3 {
-  font-size: 1.25rem;
-  color: var(--amber);
-  margin: 1.5rem 0 0.8rem;
-}
-section h4 {
-  font-size: 1.05rem;
-  color: var(--cyan);
-  margin: 1rem 0 0.5rem;
-}
-p { margin-bottom: 1rem; }
+/* Syntax highlighting -- Catppuccin Mocha */
+.kw{color:#cba6f7}
+.fn{color:#89b4fa}
+.str{color:#a6e3a1}
+.cm{color:#6c7086;font-style:italic}
+.num{color:#fab387}
+.type{color:#f9e2af}
+.op{color:#fab387}
+.param{color:#94e2d5}
 
-/* ---- Code ---- */
-pre {
-  background: var(--code-bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.2rem;
-  overflow-x: auto;
-  margin: 1rem 0 1.5rem;
-  font-size: 0.82rem;
-  line-height: 1.6;
-}
-code {
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-  color: #c9d1d9;
-}
-.kw { color: #ff79c6; }
-.fn { color: #50fa7b; }
-.str { color: #f1fa8c; }
-.cm { color: #6272a4; }
-.num { color: #bd93f9; }
-.type { color: #8be9fd; }
-.op { color: #ff79c6; }
-.param { color: #ffb86c; }
+/* ===== CARDS ===== */
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(110,198,255,.1);border-radius:12px;padding:1.5rem 1.8rem;margin:1.2rem 0;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(110,198,255,.25);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;margin:1rem 0}
+.card h4{margin-top:0}
 
-/* ---- Cards ---- */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1.5rem;
-  margin: 1rem 0;
-}
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1rem;
-  margin: 1rem 0;
-}
-.card h4 {
-  margin-top: 0;
-}
+/* ===== DIAGRAM ===== */
+.diagram{background:linear-gradient(135deg,#0d1117 0%,#161b22 100%);border:1px solid rgba(110,198,255,.15);border-radius:14px;padding:2rem;margin:1.5rem 0;text-align:center;overflow-x:auto}
+.diagram svg{max-width:100%;height:auto}
 
-/* ---- Diagram ---- */
-.diagram {
-  background: linear-gradient(135deg, #0d1b2a 0%, #1b2838 100%);
-  border: 2px solid var(--border);
-  border-radius: 12px;
-  padding: 2rem;
-  margin: 1.5rem 0;
-  text-align: center;
-  overflow-x: auto;
-}
-.diagram svg {
-  max-width: 100%;
-  height: auto;
-}
+/* ===== KEY INSIGHT ===== */
+.insight{background:rgba(110,198,255,.06);border-left:4px solid #ff9f43;border-radius:0 8px 8px 0;padding:1rem 1.2rem;margin:1rem 0}
+.insight strong{color:#ff9f43}
 
-/* ---- Key insight ---- */
-.insight {
-  background: linear-gradient(135deg, rgba(233,69,96,0.12) 0%, rgba(155,89,182,0.08) 100%);
-  border-left: 4px solid var(--primary);
-  border-radius: 0 8px 8px 0;
-  padding: 1rem 1.2rem;
-  margin: 1rem 0;
-}
-.insight strong { color: var(--primary); }
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(110,198,255,.1);color:#6ec6ff;padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(110,198,255,.2)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
 
-/* ---- Comparison table ---- */
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 1rem 0;
-  font-size: 0.9rem;
-}
-th {
-  background: var(--mid);
-  color: var(--amber);
-  padding: 0.75rem 1rem;
-  text-align: left;
-  border: 1px solid var(--border);
-}
-td {
-  padding: 0.65rem 1rem;
-  border: 1px solid var(--border);
-  background: var(--card-bg);
-}
-tr:nth-child(even) td {
-  background: var(--surface);
-}
+/* ===== FILE REF TAG ===== */
+.file-ref{display:inline-block;background:rgba(110,198,255,.1);color:#89b4fa;border:1px solid rgba(110,198,255,.2);padding:.1rem .5rem;border-radius:4px;font-size:.78rem;font-family:monospace;margin:0 .2rem}
 
-/* ---- Tag ---- */
-.file-ref {
-  display: inline-block;
-  background: rgba(52,152,219,0.2);
-  color: var(--blue);
-  border: 1px solid rgba(52,152,219,0.4);
-  padding: 0.1rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.78rem;
-  font-family: monospace;
-  margin: 0 0.2rem;
-}
-.lang-switch{position:absolute;top:16px;right:20px;z-index:10;display:flex;gap:6px} .lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer} .lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+/* ===== LANG SWITCH ===== */
+.lang-switch{position:absolute;top:16px;right:20px;z-index:10;display:flex;gap:6px}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== NAV DROPDOWN ===== */
+.nav-dropdown{position:relative;display:inline-flex}
+.nav-dropdown>a{display:flex;align-items:center;gap:.3rem}
+.nav-dropdown>a::after{content:'▾';font-size:.65rem;opacity:.5;transition:transform .2s}
+.nav-dropdown:hover>a::after{transform:rotate(180deg);opacity:1}
+.dropdown-menu{display:none;position:absolute;top:100%;left:0;background:rgba(11,14,26,.97);border:1px solid rgba(110,198,255,.15);border-radius:8px;padding:.4rem 0;min-width:220px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:1001;max-height:70vh;overflow-y:auto}
+.nav-dropdown:hover .dropdown-menu{display:block}
+.dropdown-menu a{display:block;padding:.4rem 1rem;font-size:.8rem;color:#8fa4c0;white-space:nowrap;border-radius:0;background:none}
+.dropdown-menu a:hover{background:rgba(110,198,255,.1);color:#fff}
 </style>
 </head>
 <body>
 
 <!-- ==================== NAV ==================== -->
-<nav>
-<ul>
-  <li><a href="#overview">Overview</a></li>
-  <li><a href="#execute-model">execute_model()</a></li>
-  <li><a href="#input-batch">InputBatch</a></li>
-  <li><a href="#prepare-inputs">_prepare_inputs</a></li>
-  <li><a href="#attn-backends">Attention Backends</a></li>
-  <li><a href="#sampling">Sampling</a></li>
-  <li><a href="#cuda-graphs">CUDA Graphs</a></li>
-  <li><a href="#memory">Memory Budget</a></li>
-  <li><a href="#executors">Executors</a></li>
-</ul>
+<nav class="top-nav">
+  <span class="brand">vLLM V1 Internals</span>
+  <span class="sep">|</span>
+  <a href="../index.html">Overview</a>
+  <a href="entrypoints.html">Entrypoints</a>
+  <a href="engine-core.html">EngineCore</a>
+  <a href="scheduler.html">Scheduler</a>
+  <div class="nav-dropdown">
+    <a href="model-runner.html" class="active">ModelRunner</a>
+    <div class="dropdown-menu">
+      <a href="#overview">Overview</a>
+      <a href="#execute-model">execute_model()</a>
+      <a href="#input-batch">Input Batch</a>
+      <a href="#prepare-inputs">Prepare Inputs</a>
+      <a href="#attn-backends">Attention Backends</a>
+      <a href="#sampling">Sampling</a>
+      <a href="#cuda-graphs">CUDA Graphs</a>
+      <a href="#memory">Memory Management</a>
+      <a href="#executors">Executors</a>
+    </div>
+  </div>
+  <a href="distributed.html">Distributed</a>
+  <a href="attention.html">Attention</a>
+  <a href="index.html">Life of a Request</a>
 </nav>
 
 <!-- ==================== HERO ==================== -->
