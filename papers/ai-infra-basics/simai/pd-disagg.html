@@ -623,8 +623,8 @@ nav ul li a:hover, nav ul li a.active {
     </h4>
     <p>
       <span class="i18n"
-        data-en="Select a prefill replica via round-robin over the P-pool. Select a decode replica via round-robin over the D-pool. Record <code class='inline-code'>request.prefill_replica_id</code> and <code class='inline-code'>request.decode_replica_id</code>."
-        data-zh="透過 P 池的輪詢方式選擇預填充副本。透過 D 池的輪詢方式選擇解碼副本。記錄 <code class='inline-code'>request.prefill_replica_id</code> 和 <code class='inline-code'>request.decode_replica_id</code>。">Select a prefill replica via round-robin over the P-pool. Select a decode replica via round-robin over the D-pool. Record <code class="inline-code">request.prefill_replica_id</code> and <code class="inline-code">request.decode_replica_id</code>.</span>
+        data-en="Select a prefill replica via <strong>round-robin</strong> over the P-pool. Select a decode replica via <strong>round-robin with offset</strong> over the D-pool. Record <code class='inline-code'>request.prefill_replica_id</code> and <code class='inline-code'>request.decode_replica_id</code>. Note: although the constructor sets <code class='inline-code'>self._sub_scheduler = &quot;lor&quot;</code> and creates LOR sub-schedulers, the actual <code class='inline-code'>schedule()</code> method bypasses them and uses simple round-robin counters instead (see source code analysis below)."
+        data-zh="透過 <strong>輪詢</strong>方式在 P 池中選擇預填充副本。透過<strong>帶偏移的輪詢</strong>方式在 D 池中選擇解碼副本。記錄 <code class='inline-code'>request.prefill_replica_id</code> 和 <code class='inline-code'>request.decode_replica_id</code>。注意：雖然建構函式設定 <code class='inline-code'>self._sub_scheduler = &quot;lor&quot;</code> 並建立 LOR 子排程器，但實際的 <code class='inline-code'>schedule()</code> 方法繞過了它們，改用簡單的輪詢計數器（見下方原始碼分析）。">Select a prefill replica via <strong>round-robin</strong> over the P-pool. Select a decode replica via <strong>round-robin with offset</strong> over the D-pool. Record <code class="inline-code">request.prefill_replica_id</code> and <code class="inline-code">request.decode_replica_id</code>. Note: although the constructor sets <code class="inline-code">self._sub_scheduler = &quot;lor&quot;</code> and creates LOR sub-schedulers, the actual <code class="inline-code">schedule()</code> method bypasses them and uses simple round-robin counters instead (see source code analysis below).</span>
     </p>
   </div>
   <div class="step-connector"></div>
@@ -641,6 +641,156 @@ nav ul li a:hover, nav ul li a.active {
         data-zh="如果 prefill_replica != decode_replica，則呼叫 <code class='inline-code'>add_kv_cache_transfer()</code>，將 DAG 從 PromptTask -> TokenTask 轉換為 PromptTask -> KVCacheTransferFlow -> TokenTask，其中流透過模擬傳輸延遲的 <code class='inline-code'>DummyLink</code> 連接。">If prefill_replica != decode_replica, call <code class="inline-code">add_kv_cache_transfer()</code> which transforms the DAG from PromptTask -> TokenTask to PromptTask -> KVCacheTransferFlow -> TokenTask, with the flow linked via a <code class="inline-code">DummyLink</code> that simulates transfer latency.</span>
     </p>
   </div>
+</div>
+
+<!-- 2.3.1 PD Node Selection Logic — Source Code Deep Dive -->
+<h3 id="node-selection-logic">
+  <span class="i18n"
+    data-en="2.3.1 PD Node Selection Logic — Source Code Deep Dive"
+    data-zh="2.3.1 PD 節點選擇邏輯 — 原始碼深入分析">2.3.1 PD Node Selection Logic — Source Code Deep Dive</span>
+</h3>
+
+<div class="callout critical">
+  <strong>
+    <span class="i18n"
+      data-en="Design vs Implementation Gap:"
+      data-zh="設計與實作的落差：">Design vs Implementation Gap:</span>
+  </strong>
+  <span class="i18n"
+    data-en="The <code>SplitwiseGlobalScheduler</code> contains two distinct node-selection strategies in its source code, but only one is actually active. Understanding this gap is critical for anyone extending or benchmarking SimAI's PD disaggregation."
+    data-zh="<code>SplitwiseGlobalScheduler</code> 的原始碼中包含兩種不同的節點選擇策略，但只有一種實際啟用。理解這個落差對於擴展或基準測試 SimAI 的 PD 分離至關重要。">The <code>SplitwiseGlobalScheduler</code> contains two distinct node-selection strategies in its source code, but only one is actually active. Understanding this gap is critical for anyone extending or benchmarking SimAI's PD disaggregation.</span>
+</div>
+
+<h4>
+  <span class="i18n"
+    data-en="Strategy A: Round-Robin (ACTIVE in schedule())"
+    data-zh="策略 A：輪詢（在 schedule() 中啟用）">Strategy A: Round-Robin (ACTIVE in schedule())</span>
+</h4>
+
+<p>
+  <span class="i18n"
+    data-en="The <code class='inline-code'>schedule()</code> method uses simple modular counters to distribute requests across pools. This is the code path that actually executes:"
+    data-zh="<code class='inline-code'>schedule()</code> 方法使用簡單的模數計數器在池之間分配請求。這是實際執行的程式碼路徑：">The <code class="inline-code">schedule()</code> method uses simple modular counters to distribute requests across pools. This is the code path that actually executes:</span>
+</p>
+
+<div class="component-badge vidur">vidur-alibabacloud</div>
+<div class="file-tag">vidur/scheduler/global_scheduler/splitwise_global_scheduler.py — schedule() lines 350-370</div>
+<pre><code><span class="kw">for</span> request <span class="kw">in</span> <span class="param">self</span>._request_queue:
+    <span class="cm"># --- Prefill node selection: simple round-robin ---</span>
+    <span class="cm"># (LOR code is commented out on line 351)</span>
+    <span class="cm"># replica_id = min(pending_prefill_requests_map.items(), key=lambda x: x[1])[0]</span>
+
+    replica_id = <span class="param">self</span>.p_request_counter % <span class="fn">len</span>(<span class="param">self</span>.prefill_replicas)  <span class="cm"># Round-robin</span>
+    <span class="param">self</span>.p_request_counter += <span class="nr">1</span>
+
+    prefill_replica = <span class="param">self</span>.prefill_replicas[replica_id]
+    request.prefill_replica_id = replica_id
+
+    <span class="cm"># --- Decode node selection: round-robin with offset ---</span>
+    <span class="cm"># (LOR code is commented out on lines 364-366)</span>
+    <span class="cm"># replica_id = min(pending_decode_requests_map.items(), key=lambda x: x[1])[0]</span>
+
+    replica_id = (<span class="param">self</span>.d_request_counter % <span class="fn">len</span>(<span class="param">self</span>.decode_replicas)) \
+                 + <span class="fn">len</span>(<span class="param">self</span>.prefill_replicas)  <span class="cm"># Offset by N_prefill</span>
+    <span class="param">self</span>.d_request_counter += <span class="nr">1</span>
+
+    decode_replica = <span class="param">self</span>.decode_replicas[replica_id]
+    request.decode_replica_id = replica_id</code></pre>
+
+<h4>
+  <span class="i18n"
+    data-en="Strategy B: Load-Aware Selection (DEFINED but NOT CALLED)"
+    data-zh="策略 B：負載感知選擇（已定義但未被呼叫）">Strategy B: Load-Aware Selection (DEFINED but NOT CALLED)</span>
+</h4>
+
+<p>
+  <span class="i18n"
+    data-en="The class defines two load-aware methods — <code class='inline-code'>find_best_prefill_replica()</code> and <code class='inline-code'>find_best_decode_replica()</code> — that implement smarter selection based on pending token count and memory utilization. However, <strong>neither method is ever called</strong> by <code class='inline-code'>schedule()</code> in the current codebase:"
+    data-zh="該類別定義了兩個負載感知方法 — <code class='inline-code'>find_best_prefill_replica()</code> 和 <code class='inline-code'>find_best_decode_replica()</code> — 基於待處理 token 數和記憶體使用率實現更智慧的選擇。然而，在目前的程式碼庫中，<strong>這兩個方法都未被 <code class='inline-code'>schedule()</code> 呼叫</strong>：">The class defines two load-aware methods — <code class="inline-code">find_best_prefill_replica()</code> and <code class="inline-code">find_best_decode_replica()</code> — that implement smarter selection based on pending token count and memory utilization. However, <strong>neither method is ever called</strong> by <code class="inline-code">schedule()</code> in the current codebase:</span>
+</p>
+
+<div class="component-badge vidur">vidur-alibabacloud</div>
+<div class="file-tag">splitwise_global_scheduler.py — find_best_prefill_replica() lines 202-214</div>
+<pre><code><span class="kw">def</span> <span class="fn">find_best_prefill_replica</span>(<span class="param">self</span>, prefill_replicas, prefill_task):
+    <span class="st">"""Select prefill replica with minimum pending tokens, if queue not overloaded"""</span>
+    <span class="kw">if</span> <span class="fn">len</span>(prefill_replicas) == <span class="nr">0</span>:
+        <span class="kw">return</span> <span class="kw">None</span>
+    prefill_replica = <span class="fn">min</span>(prefill_replicas,
+                          key=<span class="kw">lambda</span> replica: replica.sched_pending_tokens)  <span class="cm"># Load-aware!</span>
+    <span class="kw">if</span> <span class="param">self</span>.<span class="fn">is_queue_long</span>(prefill_replica, prefill_task):
+        <span class="kw">return</span> <span class="kw">None</span>  <span class="cm"># Back-pressure: reject if queue too long</span>
+    <span class="kw">return</span> prefill_replica</code></pre>
+
+<div class="component-badge vidur">vidur-alibabacloud</div>
+<div class="file-tag">splitwise_global_scheduler.py — find_best_decode_replica() lines 220-231</div>
+<pre><code><span class="kw">def</span> <span class="fn">find_best_decode_replica</span>(<span class="param">self</span>, decode_replicas, prefill_task, decode_task):
+    <span class="st">"""Select decode replica with minimum pending tokens, if memory sufficient"""</span>
+    <span class="kw">if</span> <span class="fn">len</span>(decode_replicas) == <span class="nr">0</span>:
+        <span class="kw">return</span> <span class="kw">None</span>
+    decode_replica = <span class="fn">min</span>(decode_replicas,
+                          key=<span class="kw">lambda</span> replica: replica.sched_pending_tokens)  <span class="cm"># Load-aware!</span>
+    <span class="kw">if</span> <span class="param">self</span>.<span class="fn">is_memory_loaded</span>(decode_replica, [prefill_task, decode_task]):
+        <span class="kw">return</span> <span class="kw">None</span>  <span class="cm"># Back-pressure: reject if OOM risk</span>
+    <span class="kw">return</span> decode_replica</code></pre>
+
+<h4>
+  <span class="i18n"
+    data-en="Also: Sub-Scheduler Initialization Mismatch"
+    data-zh="此外：子排程器初始化不匹配">Also: Sub-Scheduler Initialization Mismatch</span>
+</h4>
+
+<p>
+  <span class="i18n"
+    data-en="The constructor sets <code class='inline-code'>self._sub_scheduler = &quot;lor&quot;</code> and creates LOR (Least Outstanding Requests) sub-schedulers for both pools via <code class='inline-code'>get_global_scheduler()</code>. These sub-schedulers are stored as <code class='inline-code'>self.prefill_scheduler</code> and <code class='inline-code'>self.decode_scheduler</code>, but <strong>neither is ever invoked</strong> — the <code class='inline-code'>schedule()</code> method implements its own routing logic instead of delegating to them."
+    data-zh="建構函式設定 <code class='inline-code'>self._sub_scheduler = &quot;lor&quot;</code> 並透過 <code class='inline-code'>get_global_scheduler()</code> 為兩個池建立 LOR（最少未完成請求）子排程器。這些子排程器儲存為 <code class='inline-code'>self.prefill_scheduler</code> 和 <code class='inline-code'>self.decode_scheduler</code>，但<strong>兩者都從未被呼叫</strong> — <code class='inline-code'>schedule()</code> 方法實作了自己的路由邏輯，而非委派給它們。">The constructor sets <code class="inline-code">self._sub_scheduler = &quot;lor&quot;</code> and creates LOR (Least Outstanding Requests) sub-schedulers for both pools via <code class="inline-code">get_global_scheduler()</code>. These sub-schedulers are stored as <code class="inline-code">self.prefill_scheduler</code> and <code class="inline-code">self.decode_scheduler</code>, but <strong>neither is ever invoked</strong> — the <code class="inline-code">schedule()</code> method implements its own routing logic instead of delegating to them.</span>
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th><span class="i18n" data-en="Aspect" data-zh="面向">Aspect</span></th>
+      <th><span class="i18n" data-en="Round-Robin (Active)" data-zh="輪詢（啟用中）">Round-Robin (Active)</span></th>
+      <th><span class="i18n" data-en="Load-Aware (Dead Code)" data-zh="負載感知（未使用程式碼）">Load-Aware (Dead Code)</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="i18n" data-en="P-node selection" data-zh="P 節點選擇">P-node selection</span></td>
+      <td><code>p_request_counter % len(prefill_replicas)</code></td>
+      <td><code>min(replicas, key=sched_pending_tokens)</code></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="D-node selection" data-zh="D 節點選擇">D-node selection</span></td>
+      <td><code>(d_request_counter % len(decode_replicas)) + N_p</code></td>
+      <td><code>min(replicas, key=sched_pending_tokens)</code> + memory check</td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Back-pressure" data-zh="背壓機制">Back-pressure</span></td>
+      <td><span class="i18n" data-en="None — always assigns" data-zh="無 — 總是分配">None — always assigns</span></td>
+      <td><code>is_queue_long()</code> / <code>is_memory_loaded()</code></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Fairness" data-zh="公平性">Fairness</span></td>
+      <td><span class="i18n" data-en="Perfect (deterministic)" data-zh="完美（確定性）">Perfect (deterministic)</span></td>
+      <td><span class="i18n" data-en="Approximate (greedy min)" data-zh="近似（貪心最小值）">Approximate (greedy min)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Load imbalance risk" data-zh="負載不均風險">Load imbalance risk</span></td>
+      <td><span class="i18n" data-en="High if request sizes vary" data-zh="若請求大小不一則風險高">High if request sizes vary</span></td>
+      <td><span class="i18n" data-en="Low (adapts to token counts)" data-zh="低（依 token 數量調適）">Low (adapts to token counts)</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout key">
+  <strong>
+    <span class="i18n"
+      data-en="Key Takeaway:"
+      data-zh="關鍵要點：">Key Takeaway:</span>
+  </strong>
+  <span class="i18n"
+    data-en="The current SimAI codebase uses <strong>simple round-robin</strong> for both P-node and D-node selection. The load-aware methods (<code>find_best_prefill_replica</code>, <code>find_best_decode_replica</code>) and the LOR sub-schedulers exist in the code but are not wired into the scheduling path. This means simulation results assume perfectly uniform request distribution across replicas — which may not reflect real-world scenarios with variable prompt lengths. To enable load-aware routing, you would need to replace the round-robin lines (354, 369) with calls to the <code>find_best_*</code> methods."
+    data-zh="目前的 SimAI 程式碼庫對 P 節點和 D 節點的選擇都使用<strong>簡單輪詢</strong>。負載感知方法（<code>find_best_prefill_replica</code>、<code>find_best_decode_replica</code>）和 LOR 子排程器雖然存在於程式碼中，但未接入排程路徑。這表示模擬結果假設請求在副本之間完美均勻分配 — 這可能無法反映提示詞長度不一的真實場景。若要啟用負載感知路由，需要將輪詢程式碼（第 354、369 行）替換為對 <code>find_best_*</code> 方法的呼叫。">The current SimAI codebase uses <strong>simple round-robin</strong> for both P-node and D-node selection. The load-aware methods (<code>find_best_prefill_replica</code>, <code>find_best_decode_replica</code>) and the LOR sub-schedulers exist in the code but are not wired into the scheduling path. This means simulation results assume perfectly uniform request distribution across replicas — which may not reflect real-world scenarios with variable prompt lengths. To enable load-aware routing, you would need to replace the round-robin lines (354, 369) with calls to the <code>find_best_*</code> methods.</span>
 </div>
 
 <!-- 2.4 KV Cache Transfer Flow -->
@@ -747,8 +897,8 @@ nav ul li a:hover, nav ul li a.active {
 
 <p>
   <span class="i18n"
-    data-en="At the global level, the <code class='inline-code'>SplitwiseGlobalScheduler</code> decides <em>which</em> replica handles each phase. But the per-replica scheduling behavior also differs between prefill and decode replicas. The sub-schedulers (currently LOR or round-robin) operate independently on each pool."
-    data-zh="在全域層級，<code class='inline-code'>SplitwiseGlobalScheduler</code> 決定<em>哪個</em>副本處理每個階段。但每個副本的排程行為在預填充和解碼副本之間也有所不同。子排程器（目前是 LOR 或輪詢）在每個池上獨立運作。">At the global level, the <code class="inline-code">SplitwiseGlobalScheduler</code> decides <em>which</em> replica handles each phase. But the per-replica scheduling behavior also differs between prefill and decode replicas. The sub-schedulers (currently LOR or round-robin) operate independently on each pool.</span>
+    data-en="At the global level, the <code class='inline-code'>SplitwiseGlobalScheduler</code> uses <strong>round-robin</strong> to decide <em>which</em> replica handles each phase (as shown in Section 2.3.1). Once assigned, the per-replica scheduling behavior differs between prefill and decode replicas — prefill replicas optimize for throughput, while decode replicas optimize for latency. The codebase also contains unused load-aware methods that could replace round-robin in future versions."
+    data-zh="在全域層級，<code class='inline-code'>SplitwiseGlobalScheduler</code> 使用<strong>輪詢</strong>來決定<em>哪個</em>副本處理每個階段（如第 2.3.1 節所示）。一旦分配完成，每個副本的排程行為在預填充和解碼副本之間有所不同 — 預填充副本針對吞吐量最佳化，而解碼副本針對延遲最佳化。程式碼庫中還包含未使用的負載感知方法，可在未來版本中替代輪詢。">At the global level, the <code class="inline-code">SplitwiseGlobalScheduler</code> uses <strong>round-robin</strong> to decide <em>which</em> replica handles each phase (as shown in Section 2.3.1). Once assigned, the per-replica scheduling behavior differs between prefill and decode replicas — prefill replicas optimize for throughput, while decode replicas optimize for latency. The codebase also contains unused load-aware methods that could replace round-robin in future versions.</span>
 </p>
 
 <div class="grid-2">
@@ -760,8 +910,8 @@ nav ul li a:hover, nav ul li a.active {
     </h4>
     <p>
       <span class="i18n"
-        data-en="<strong>Goal: maximize compute throughput.</strong> Prefill replicas can afford to accumulate larger batches because they only need to process the prompt once. The scheduler checks <code class='inline-code'>sched_pending_tokens</code> to avoid overloading any single P-node. The <code class='inline-code'>find_best_prefill_replica()</code> method selects the replica with the minimum pending token count, subject to queue length limits."
-        data-zh="<strong>目標：最大化計算吞吐量。</strong>預填充副本可以累積更大的批次，因為它們只需處理提示詞一次。排程器檢查 <code class='inline-code'>sched_pending_tokens</code> 以避免過載任何單一 P 節點。<code class='inline-code'>find_best_prefill_replica()</code> 方法選擇具有最小待處理 token 數的副本，受限於佇列長度限制。"><strong>Goal: maximize compute throughput.</strong> Prefill replicas can afford to accumulate larger batches because they only need to process the prompt once. The scheduler checks <code class="inline-code">sched_pending_tokens</code> to avoid overloading any single P-node. The <code class="inline-code">find_best_prefill_replica()</code> method selects the replica with the minimum pending token count, subject to queue length limits.</span>
+        data-en="<strong>Goal: maximize compute throughput.</strong> Prefill replicas can accumulate larger batches because they only process the prompt once. Currently, P-node assignment uses <strong>round-robin</strong> (<code class='inline-code'>p_request_counter % N_p</code>). The codebase also defines <code class='inline-code'>find_best_prefill_replica()</code> which selects the replica with minimum <code class='inline-code'>sched_pending_tokens</code> and checks <code class='inline-code'>is_queue_long()</code> for back-pressure — but this method is not yet called."
+        data-zh="<strong>目標：最大化計算吞吐量。</strong>預填充副本可以累積更大的批次，因為它們只需處理提示詞一次。目前 P 節點分配使用<strong>輪詢</strong>（<code class='inline-code'>p_request_counter % N_p</code>）。程式碼庫中也定義了 <code class='inline-code'>find_best_prefill_replica()</code>，它選擇具有最小 <code class='inline-code'>sched_pending_tokens</code> 的副本並檢查 <code class='inline-code'>is_queue_long()</code> 進行背壓 — 但此方法尚未被呼叫。"><strong>Goal: maximize compute throughput.</strong> Prefill replicas can afford to accumulate larger batches because they only need to process the prompt once. The scheduler checks <code class="inline-code">sched_pending_tokens</code> to avoid overloading any single P-node. The <code class="inline-code">find_best_prefill_replica()</code> method selects the replica with the minimum pending token count, subject to queue length limits.</span>
     </p>
   </div>
   <div class="card highlight-green">
@@ -772,8 +922,8 @@ nav ul li a:hover, nav ul li a.active {
     </h4>
     <p>
       <span class="i18n"
-        data-en="<strong>Goal: minimize latency variance.</strong> Decode replicas run continuous iteration loops generating one token per step. The scheduler checks <code class='inline-code'>sched_memory</code> to ensure the D-node has enough KV cache memory for both the incoming prefill result and the ongoing decode. The <code class='inline-code'>find_best_decode_replica()</code> method uses memory-awareness to prevent OOM."
-        data-zh="<strong>目標：最小化延遲變異。</strong>解碼副本執行連續迭代迴圈，每步生成一個 token。排程器檢查 <code class='inline-code'>sched_memory</code> 以確保 D 節點有足夠的 KV 快取記憶體來容納傳入的預填充結果和正在進行的解碼。<code class='inline-code'>find_best_decode_replica()</code> 方法使用記憶體感知來防止 OOM。"><strong>Goal: minimize latency variance.</strong> Decode replicas run continuous iteration loops generating one token per step. The scheduler checks <code class="inline-code">sched_memory</code> to ensure the D-node has enough KV cache memory for both the incoming prefill result and the ongoing decode. The <code class="inline-code">find_best_decode_replica()</code> method uses memory-awareness to prevent OOM.</span>
+        data-en="<strong>Goal: minimize latency variance.</strong> Decode replicas run continuous iteration loops generating one token per step. Currently, D-node assignment uses <strong>round-robin with offset</strong> (<code class='inline-code'>(d_request_counter % N_d) + N_p</code>). The codebase defines <code class='inline-code'>find_best_decode_replica()</code> which checks <code class='inline-code'>sched_memory</code> to ensure the D-node has enough KV cache memory and uses <code class='inline-code'>is_memory_loaded()</code> to prevent OOM — but this method is not yet called."
+        data-zh="<strong>目標：最小化延遲變異。</strong>解碼副本執行連續迭代迴圈，每步生成一個 token。目前 D 節點分配使用<strong>帶偏移的輪詢</strong>（<code class='inline-code'>(d_request_counter % N_d) + N_p</code>）。程式碼庫定義了 <code class='inline-code'>find_best_decode_replica()</code>，它檢查 <code class='inline-code'>sched_memory</code> 以確保 D 節點有足夠的 KV 快取記憶體，並使用 <code class='inline-code'>is_memory_loaded()</code> 防止 OOM — 但此方法尚未被呼叫。"><strong>Goal: minimize latency variance.</strong> Decode replicas run continuous iteration loops generating one token per step. The scheduler checks <code class="inline-code">sched_memory</code> to ensure the D-node has enough KV cache memory for both the incoming prefill result and the ongoing decode. The <code class="inline-code">find_best_decode_replica()</code> method uses memory-awareness to prevent OOM.</span>
     </p>
   </div>
 </div>
@@ -789,8 +939,8 @@ nav ul li a:hover, nav ul li a.active {
   <tbody>
     <tr>
       <td><span class="i18n" data-en="Selection criterion" data-zh="選擇準則">Selection criterion</span></td>
-      <td><span class="i18n" data-en="Min pending tokens (round-robin fallback)" data-zh="最小待處理 token 數（輪詢備援）">Min pending tokens (round-robin fallback)</span></td>
-      <td><span class="i18n" data-en="Min pending tokens + memory check" data-zh="最小待處理 token 數 + 記憶體檢查">Min pending tokens + memory check</span></td>
+      <td><span class="i18n" data-en="Round-robin (load-aware method exists but unused)" data-zh="輪詢（負載感知方法存在但未使用）">Round-robin (load-aware method exists but unused)</span></td>
+      <td><span class="i18n" data-en="Round-robin with offset (memory-aware method exists but unused)" data-zh="帶偏移的輪詢（記憶體感知方法存在但未使用）">Round-robin with offset (memory-aware method exists but unused)</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="Bottleneck check" data-zh="瓶頸檢查">Bottleneck check</span></td>
