@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM V1 Attention Backends -- Deep Dive from Source Code</title>
+<style>
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0b0e1a;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav.top-nav{position:sticky;top:0;z-index:1000;background:rgba(11,14,26,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(110,198,255,.12);padding:.6rem 1.5rem;display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap}
+nav.top-nav .brand{font-weight:700;font-size:1.05rem;color:#ff9f43;letter-spacing:.5px}
+nav.top-nav a{font-size:.85rem;padding:.25rem .5rem;border-radius:4px;transition:background .2s,color .2s}
+nav.top-nav a:hover{background:rgba(110,198,255,.12);color:#fff}
+nav.top-nav a.active{background:rgba(255,159,67,.15);color:#ff9f43}
+nav.top-nav .sep{color:#3a3f55}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#16213e 0%,#0f3460 50%,#1a1a40 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(110,198,255,.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero h1 span{background:linear-gradient(90deg,#6ec6ff,#ff9f43);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero .subtitle{font-size:1.15rem;color:#8fa4c0;max-width:720px;margin:0 auto 1.5rem;position:relative}
+.hero .badge{display:inline-block;background:rgba(255,159,67,.15);border:1px solid rgba(255,159,67,.3);color:#ffb74d;padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTION HEADINGS ===== */
+h2.section-title{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(110,198,255,.2);position:relative}
+h2.section-title::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+
+/* ===== CARDS ===== */
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(110,198,255,.1);border-radius:12px;padding:1.5rem 1.8rem;margin:1.2rem 0;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(110,198,255,.25);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.highlight-orange{border-left:4px solid #ff9f43}
+.card.highlight-blue{border-left:4px solid #6ec6ff}
+.card.highlight-green{border-left:4px solid #66bb6a}
+.card.highlight-purple{border-left:4px solid #b388ff}
+.card.highlight-red{border-left:4px solid #ef5350}
+
+/* ===== CALLOUT ===== */
+.callout{background:rgba(110,198,255,.06);border:1px solid rgba(110,198,255,.2);border-radius:8px;padding:1rem 1.4rem;margin:1rem 0;font-size:.93rem}
+.callout.warn{background:rgba(255,159,67,.06);border-color:rgba(255,159,67,.25)}
+.callout.key{background:rgba(102,187,106,.06);border-color:rgba(102,187,106,.25)}
+.callout strong{color:#fff}
+
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+.inline-code{background:rgba(110,198,255,.1);padding:.1em .4em;border-radius:4px;color:#89b4fa;font-size:.85em}
+
+/* ===== KEYWORDS ===== */
+.kw{color:#c678dd}.fn{color:#61afef}.cm{color:#5c6370;font-style:italic}.st{color:#98c379}.nu{color:#d19a66}.op{color:#56b6c2}.ty{color:#e5c07b}.dc{color:#e06c75}
+
+/* ===== DIAGRAM ===== */
+.diagram-container{background:#0d1117;border:1px solid #2d3e5e;border-radius:10px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto;text-align:center}
+.diagram-container svg{max-width:100%;height:auto}
+.diagram-label{font-size:.78rem;color:#8fa4c0;margin-top:.5rem;text-align:center}
+
+/* ===== TABLE ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem}
+th{background:#1a2744;color:#6ec6ff;padding:.7rem .8rem;text-align:left;border-bottom:2px solid #2d3e5e;font-weight:600}
+td{padding:.6rem .8rem;border-bottom:1px solid rgba(45,62,94,.5);color:#c0c8d8}
+tr:hover td{background:rgba(110,198,255,.04)}
+
+/* ===== TWO-COL ===== */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1rem 0}
+@media(max-width:768px){.two-col{grid-template-columns:1fr}}
+
+/* ===== BACK LINK ===== */
+.back-link{display:inline-block;margin-bottom:1rem;font-size:.9rem;color:#6ec6ff;opacity:.85}
+.back-link:hover{opacity:1}
+
+/* ===== TOC ===== */
+.toc{background:rgba(22,33,62,.8);border:1px solid #2d3e5e;border-radius:10px;padding:1.5rem 2rem;margin:2rem 0}
+.toc h3{margin-top:0;color:#ff9f43;font-size:1.1rem}
+.toc ol{padding-left:1.5rem}
+.toc li{margin:.4rem 0;font-size:.92rem;color:#a0aec0}
+.toc a{color:#6ec6ff}
+
+/* ===== FOOTER ===== */
+footer{background:#0b0e1a;border-top:1px solid rgba(110,198,255,.08);padding:2rem;text-align:center;color:#5a6480;font-size:.82rem;margin-top:4rem}
+</style>
+</head>
+<body>
+
+<!-- ===== NAV ===== -->
+<nav class="top-nav">
+  <span class="brand">vLLM V1 Internals</span>
+  <span class="sep">|</span>
+  <a href="index.html">Overview</a>
+  <a href="engine-core.html">EngineCore</a>
+  <a href="scheduler.html">Scheduler</a>
+  <a href="model-runner.html">ModelRunner</a>
+  <a href="attention.html" class="active">Attention</a>
+  <a href="distributed.html">Distributed</a>
+</nav>
+
+<!-- ===== HERO ===== -->
+<div class="hero">
+  <h1>Attention <span>Backends</span></h1>
+  <p class="subtitle">How vLLM selects, configures, and dispatches to FlashAttention, FlashInfer, and MLA kernels -- traced through actual source code.</p>
+  <span class="badge">vllm/v1/attention/backends/ -- Source-Level Analysis</span>
+</div>
+
+<!-- ===== MAIN ===== -->
+<div class="container">
+
+<a href="index.html" class="back-link">&larr; Back to vLLM Overview</a>
+
+<!-- TOC -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#selection">Backend Selection &amp; Priority System</a></li>
+    <li><a href="#flash-attn">FlashAttention Backend (FA2 / FA3)</a></li>
+    <li><a href="#flashinfer">FlashInfer Backend</a></li>
+    <li><a href="#mla-overview">Multi-Latent Attention (MLA) Overview</a></li>
+    <li><a href="#mla-backends">MLA Backend Implementations</a></li>
+    <li><a href="#metadata">Attention Metadata Structures</a></li>
+    <li><a href="#block-table">Block Table &amp; KV Cache Layout</a></li>
+    <li><a href="#performance">Performance: Hardware-to-Backend Mapping</a></li>
+  </ol>
+</div>
+
+<!-- ===================================================================== -->
+<!-- SECTION 1: BACKEND SELECTION -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="selection">1. Backend Selection &amp; Priority System</h2>
+
+<p>Every attention layer in vLLM calls <code class="inline-code">get_attn_backend()</code> to determine which kernel to use. The entry point is in <code class="inline-code">vllm/v1/attention/selector.py</code>:</p>
+
+<pre><code><span class="cm"># vllm/v1/attention/selector.py</span>
+
+<span class="kw">def</span> <span class="fn">get_attn_backend</span>(
+    head_size: <span class="ty">int</span>,
+    dtype: <span class="ty">torch.dtype</span>,
+    kv_cache_dtype: <span class="ty">str</span> | <span class="ty">None</span>,
+    use_mla: <span class="ty">bool</span> = <span class="nu">False</span>,
+    has_sink: <span class="ty">bool</span> = <span class="nu">False</span>,
+    use_sparse: <span class="ty">bool</span> = <span class="nu">False</span>,
+    ...
+) -> <span class="ty">type</span>[<span class="ty">AttentionBackend</span>]:
+    <span class="st">"""Selects which attention backend to use and lazily imports it."""</span>
+    vllm_config = get_current_vllm_config()
+    <span class="cm"># If user set --block-size explicitly, pass it to validation</span>
+    block_size = cache_config.block_size <span class="kw">if</span> cache_config.user_specified_block_size <span class="kw">else</span> <span class="nu">None</span>
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=head_size, dtype=dtype, kv_cache_dtype=kv_cache_dtype,
+        block_size=block_size, use_mla=use_mla, has_sink=has_sink, ...
+    )
+    <span class="kw">return</span> _cached_get_attn_backend(
+        backend=vllm_config.attention_config.backend,  <span class="cm"># user override or None</span>
+        attn_selector_config=attn_selector_config,
+    )
+</code></pre>
+
+<h3>Priority-Based Auto-Selection</h3>
+
+<p>When no backend is explicitly requested via <code class="inline-code">--attention-backend</code>, the CUDA platform iterates through a <strong>priority-ordered list</strong> and picks the first one that passes validation. This logic lives in <code class="inline-code">vllm/platforms/cuda.py</code>:</p>
+
+<pre><code><span class="cm"># vllm/platforms/cuda.py -- _get_backend_priorities()</span>
+
+<span class="kw">def</span> <span class="fn">_get_backend_priorities</span>(
+    use_mla: <span class="ty">bool</span>,
+    device_capability: <span class="ty">DeviceCapability</span>,
+    num_heads: <span class="ty">int</span> | <span class="ty">None</span> = <span class="nu">None</span>,
+    kv_cache_dtype: <span class="ty">CacheDType</span> | <span class="ty">None</span> = <span class="nu">None</span>,
+) -> <span class="ty">list</span>[<span class="ty">AttentionBackendEnum</span>]:
+    <span class="kw">if</span> use_mla:
+        <span class="kw">if</span> device_capability.major == <span class="nu">10</span>:  <span class="cm"># Blackwell (SM100)</span>
+            <span class="kw">return</span> [
+                FLASHINFER_MLA,   <span class="cm"># Highest priority on Blackwell</span>
+                CUTLASS_MLA,
+                FLASH_ATTN_MLA,
+                FLASHMLA,
+                TRITON_MLA,
+                *sparse_backends,  <span class="cm"># FLASHMLA_SPARSE / FLASHINFER_MLA_SPARSE</span>
+            ]
+        <span class="kw">else</span>:  <span class="cm"># Hopper (SM90) and older</span>
+            <span class="kw">return</span> [FLASH_ATTN_MLA, FLASHMLA, FLASHINFER_MLA, TRITON_MLA, ...]
+    <span class="kw">else</span>:  <span class="cm"># Standard MHA</span>
+        <span class="kw">if</span> device_capability.major == <span class="nu">10</span>:  <span class="cm"># Blackwell</span>
+            <span class="kw">return</span> [FLASHINFER, FLASH_ATTN, TRITON_ATTN, FLEX_ATTENTION]
+        <span class="kw">else</span>:  <span class="cm"># Ampere / Hopper</span>
+            <span class="kw">return</span> [FLASH_ATTN, FLASHINFER, TRITON_ATTN, FLEX_ATTENTION]
+</code></pre>
+
+<div class="callout key">
+  <strong>Key insight:</strong> The priority list depends on <em>two</em> dimensions: (1) whether the model uses MLA (e.g., DeepSeek-V2/V3), and (2) the GPU generation. On Blackwell, FlashInfer takes top priority for both MHA and MLA; on Hopper, FlashAttention leads for MHA while FlashMLA leads for MLA.
+</div>
+
+<h3>Validation Gate</h3>
+
+<p>Each backend class exposes a <code class="inline-code">validate_configuration()</code> method (inherited from <code class="inline-code">AttentionBackend</code>). The platform checks every backend in priority order:</p>
+
+<pre><code><span class="cm"># vllm/platforms/cuda.py -- get_valid_backends()</span>
+
+<span class="kw">for</span> priority, backend <span class="kw">in</span> <span class="fn">enumerate</span>(backend_priorities):
+    backend_class = backend.get_class()
+    invalid_reasons = backend_class.validate_configuration(
+        device_capability=device_capability,
+        **attn_selector_config._asdict(),
+    )
+    <span class="kw">if</span> invalid_reasons:
+        invalid_reasons_map[backend] = (priority, invalid_reasons)
+    <span class="kw">else</span>:
+        valid_backends_priorities.append((backend, priority))
+
+<span class="cm"># Select backend with lowest priority index (highest priority)</span>
+sorted_indices = sorted(range(len(valid)), key=<span class="kw">lambda</span> i: valid[i][<span class="nu">1</span>])
+selected_backend = valid[sorted_indices[<span class="nu">0</span>]][<span class="nu">0</span>]
+</code></pre>
+
+<!-- Diagram: Selection Flow -->
+<div class="diagram-container">
+  <svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background -->
+    <rect width="900" height="320" rx="8" fill="#0d1117"/>
+    <!-- Title -->
+    <text x="450" y="30" fill="#6ec6ff" font-size="14" text-anchor="middle" font-weight="bold">Backend Selection Flow</text>
+    <!-- get_attn_backend -->
+    <rect x="30" y="55" width="160" height="40" rx="6" fill="#1a2744" stroke="#6ec6ff" stroke-width="1.5"/>
+    <text x="110" y="80" fill="#cdd6f4" font-size="11" text-anchor="middle">get_attn_backend()</text>
+    <!-- Arrow -->
+    <line x1="190" y1="75" x2="230" y2="75" stroke="#6ec6ff" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+    <!-- User override? -->
+    <polygon points="320,55 400,75 320,95 240,75" fill="#1e2d4a" stroke="#ff9f43" stroke-width="1.5"/>
+    <text x="320" y="79" fill="#ffb74d" font-size="10" text-anchor="middle">--backend?</text>
+    <!-- Yes path -->
+    <line x1="400" y1="75" x2="440" y2="75" stroke="#ff9f43" stroke-width="1.2"/>
+    <text x="418" y="68" fill="#66bb6a" font-size="9">Yes</text>
+    <rect x="440" y="55" width="140" height="40" rx="6" fill="#1a2744" stroke="#ff9f43" stroke-width="1.5"/>
+    <text x="510" y="73" fill="#ffb74d" font-size="10" text-anchor="middle">Validate selected</text>
+    <text x="510" y="86" fill="#ffb74d" font-size="10" text-anchor="middle">backend directly</text>
+    <!-- No path -->
+    <line x1="320" y1="95" x2="320" y2="130" stroke="#6ec6ff" stroke-width="1.2"/>
+    <text x="332" y="115" fill="#ef5350" font-size="9">No</text>
+    <!-- Priority list -->
+    <rect x="230" y="130" width="180" height="40" rx="6" fill="#1a2744" stroke="#6ec6ff" stroke-width="1.5"/>
+    <text x="320" y="148" fill="#cdd6f4" font-size="10" text-anchor="middle">_get_backend_priorities()</text>
+    <text x="320" y="163" fill="#8fa4c0" font-size="9" text-anchor="middle">MLA? GPU gen?</text>
+    <!-- Arrow down -->
+    <line x1="320" y1="170" x2="320" y2="200" stroke="#6ec6ff" stroke-width="1.2" marker-end="url(#arrowBlue)"/>
+    <!-- Loop -->
+    <rect x="210" y="200" width="220" height="45" rx="6" fill="#1a2744" stroke="#66bb6a" stroke-width="1.5"/>
+    <text x="320" y="218" fill="#66bb6a" font-size="10" text-anchor="middle">for priority, backend in priorities:</text>
+    <text x="320" y="235" fill="#cdd6f4" font-size="10" text-anchor="middle">validate_configuration()</text>
+    <!-- Arrow right -->
+    <line x1="430" y1="222" x2="500" y2="222" stroke="#66bb6a" stroke-width="1.2" marker-end="url(#arrowGreen)"/>
+    <!-- Result -->
+    <rect x="500" y="200" width="180" height="45" rx="6" fill="#16213e" stroke="#66bb6a" stroke-width="2"/>
+    <text x="590" y="218" fill="#66bb6a" font-size="11" text-anchor="middle" font-weight="bold">First valid backend</text>
+    <text x="590" y="234" fill="#8fa4c0" font-size="9" text-anchor="middle">= lowest priority index</text>
+    <!-- Priority tables -->
+    <rect x="620" y="55" width="260" height="120" rx="6" fill="#16213e" stroke="#2d3e5e" stroke-width="1"/>
+    <text x="750" y="74" fill="#ff9f43" font-size="11" text-anchor="middle" font-weight="bold">Priority (index 0 = highest)</text>
+    <text x="640" y="93" fill="#6ec6ff" font-size="10">Blackwell MHA:</text>
+    <text x="800" y="93" fill="#cdd6f4" font-size="9">FI &gt; FA &gt; Triton</text>
+    <text x="640" y="110" fill="#6ec6ff" font-size="10">Hopper MHA:</text>
+    <text x="800" y="110" fill="#cdd6f4" font-size="9">FA &gt; FI &gt; Triton</text>
+    <text x="640" y="127" fill="#b388ff" font-size="10">Blackwell MLA:</text>
+    <text x="810" y="127" fill="#cdd6f4" font-size="9">FI &gt; CUTLASS &gt; FA</text>
+    <text x="640" y="144" fill="#b388ff" font-size="10">Hopper MLA:</text>
+    <text x="810" y="144" fill="#cdd6f4" font-size="9">FA &gt; FlashMLA &gt; FI</text>
+    <text x="640" y="161" fill="#ef5350" font-size="10">Fallback (any):</text>
+    <text x="800" y="161" fill="#cdd6f4" font-size="9">TRITON_MLA</text>
+    <!-- Arrow markers -->
+    <defs>
+      <marker id="arrowBlue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#6ec6ff"/></marker>
+      <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#66bb6a"/></marker>
+      <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#ff9f43"/></marker>
+    </defs>
+  </svg>
+  <div class="diagram-label">Backend selection: user override takes precedence; otherwise auto-select by GPU generation + model type.</div>
+</div>
+
+<h3>The Backend Registry</h3>
+
+<p>All backends are registered in an enum at <code class="inline-code">vllm/v1/attention/backends/registry.py</code>. Each entry maps a name to a fully qualified class path:</p>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/registry.py</span>
+
+<span class="kw">class</span> <span class="ty">AttentionBackendEnum</span>(Enum):
+    FLASH_ATTN     = <span class="st">"vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"</span>
+    FLASHINFER     = <span class="st">"vllm.v1.attention.backends.flashinfer.FlashInferBackend"</span>
+    TRITON_MLA     = <span class="st">"vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"</span>
+    CUTLASS_MLA    = <span class="st">"vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"</span>
+    FLASHMLA       = <span class="st">"vllm.v1.attention.backends.mla.flashmla.FlashMLABackend"</span>
+    FLASHINFER_MLA = <span class="st">"vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"</span>
+    FLASH_ATTN_MLA = <span class="st">"vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"</span>
+    TRITON_ATTN    = <span class="st">"vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"</span>
+    <span class="cm"># ... plus ROCm, CPU, sparse variants, etc.</span>
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 2: FLASH ATTENTION -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="flash-attn">2. FlashAttention Backend (FA2 / FA3)</h2>
+
+<p>The FlashAttention backend (<code class="inline-code">vllm/v1/attention/backends/flash_attn.py</code>) is the workhorse for standard multi-head attention on Ampere and Hopper GPUs. It auto-detects the FA version and adjusts its behavior accordingly.</p>
+
+<h3>Backend Class: Capabilities</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/flash_attn.py</span>
+
+<span class="kw">class</span> <span class="ty">FlashAttentionBackend</span>(AttentionBackend):
+    accept_output_buffer: <span class="ty">bool</span> = <span class="nu">True</span>
+    forward_includes_kv_cache_update: <span class="ty">bool</span> = <span class="nu">False</span>  <span class="cm"># KV update separate from attn</span>
+
+    supported_dtypes = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes = [<span class="st">"auto"</span>, <span class="st">"float16"</span>, <span class="st">"bfloat16"</span>]
+
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_supported_kernel_block_sizes</span>():
+        <span class="cm"># For hybrid models with FP32 Mamba state, restrict block sizes</span>
+        <span class="kw">if</span> model_config.is_hybrid:
+            <span class="kw">return</span> [<span class="nu">16</span>, <span class="nu">32</span>, <span class="nu">64</span>]  <span class="cm"># NaN propagation issue</span>
+        <span class="kw">return</span> [MultipleOf(<span class="nu">16</span>)]       <span class="cm"># Any multiple of 16</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_compute_capability</span>(cls, capability):
+        <span class="kw">return</span> capability >= DeviceCapability(<span class="nu">8</span>, <span class="nu">0</span>)  <span class="cm"># Ampere+</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_per_head_quant_scales</span>(cls):
+        <span class="kw">return</span> get_flash_attn_version() >= <span class="nu">3</span>  <span class="cm"># FA3 only</span>
+</code></pre>
+
+<h3>KV Cache Shape</h3>
+
+<p>FlashAttention stores the KV cache with the key and value in a unified tensor. The first dimension selects K vs V:</p>
+
+<pre><code><span class="cm"># KV cache shape for FlashAttention:</span>
+<span class="cm"># (2, num_blocks, block_size, num_kv_heads, head_size)</span>
+<span class="cm">#  ^--- 0=key, 1=value</span>
+
+<span class="kw">@staticmethod</span>
+<span class="kw">def</span> <span class="fn">get_kv_cache_shape</span>(num_blocks, block_size, num_kv_heads, head_size, ...):
+    <span class="kw">if</span> block_size % <span class="nu">16</span> != <span class="nu">0</span>:
+        <span class="kw">raise</span> ValueError(<span class="st">"Block size must be a multiple of 16."</span>)
+    <span class="kw">return</span> (<span class="nu">2</span>, num_blocks, block_size, num_kv_heads, head_size)
+</code></pre>
+
+<h3>Metadata Builder: AOT Scheduling</h3>
+
+<p>The <code class="inline-code">FlashAttentionMetadataBuilder</code> pre-computes scheduling decisions <strong>ahead of time (AOT)</strong> when running with FlashAttention 3. This is critical for CUDA graph compatibility:</p>
+
+<pre><code><span class="cm"># FlashAttentionMetadataBuilder.__init__()</span>
+
+self.aot_schedule = get_flash_attn_version() == <span class="nu">3</span>  <span class="cm"># Only FA3</span>
+
+<span class="kw">if</span> self.use_full_cuda_graph <span class="kw">and</span> self.aot_schedule:
+    <span class="cm"># FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4</span>
+    <span class="cm"># The +1 is for tile_count_semaphore (synchronization)</span>
+    <span class="cm"># 4 slots per batch: prepare_varlen + dynamic_split + sort + head_swizzle</span>
+    max_batch_size = max(max_num_seqs, max_cudagraph_capture_size <span class="kw">or</span> <span class="nu">0</span>)
+    self.scheduler_metadata = torch.zeros(
+        <span class="nu">1</span> + round_up(max_batch_size, <span class="nu">4</span>) * <span class="nu">4</span>,
+        dtype=torch.int32, device=self.device,
+    )
+    <span class="cm"># Upper bound for intermediate buffer splits</span>
+    self.max_num_splits = attention_config.flash_attn_max_num_splits_for_cuda_graph
+</code></pre>
+
+<div class="callout warn">
+  <strong>FA2 vs FA3 CUDA Graph support:</strong> FA3 supports <code class="inline-code">AttentionCGSupport.ALWAYS</code> (full cudagraph for all cases). FA2 only supports <code class="inline-code">UNIFORM_BATCH</code> because its special <code class="inline-code">max_query_len=1</code> packed-GQA handling breaks when mixed prefill-decode batches are replayed from a graph captured with decode-only shapes.
+</div>
+
+<h3>The build() Method: Metadata Preparation</h3>
+
+<pre><code><span class="cm"># FlashAttentionMetadataBuilder.build()</span>
+
+<span class="kw">def</span> <span class="fn">build</span>(self, common_prefix_len, common_attn_metadata, fast_build=<span class="nu">False</span>):
+    <span class="cm"># fast_build disables AOT scheduling -- used for spec-decode</span>
+    aot_schedule = self.aot_schedule <span class="kw">and not</span> fast_build
+
+    <span class="cm"># Inner function that invokes FA3's get_scheduler_metadata</span>
+    <span class="kw">def</span> <span class="fn">schedule</span>(batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal):
+        <span class="kw">if</span> aot_schedule:
+            <span class="kw">return</span> get_scheduler_metadata(
+                batch_size=batch_size, max_seqlen_q=max_query_len,
+                max_seqlen_k=max_seq_len, num_heads_q=self.num_heads_q,
+                num_heads_kv=self.num_heads_kv, headdim=self.headdim,
+                cache_seqlens=seqlens, qkv_dtype=qkv_dtype,
+                cu_seqlens_q=cu_query_lens, page_size=self.block_size,
+                causal=causal, window_size=self.aot_sliding_window,
+                num_splits=max_num_splits,
+            )
+        <span class="kw">return</span> <span class="nu">None</span>
+
+    <span class="cm"># Three paths: DCP, cascade, or standard</span>
+    <span class="kw">if</span> self.dcp_world_size > <span class="nu">1</span>:
+        scheduler_metadata = schedule(..., causal=<span class="nu">False</span>)
+    <span class="kw">elif</span> use_cascade:
+        prefix_scheduler = schedule(batch_size=<span class="nu">1</span>, ..., causal=<span class="nu">False</span>)
+        suffix_scheduler = schedule(batch_size=num_reqs, ..., causal=<span class="nu">True</span>)
+    <span class="kw">else</span>:
+        scheduler_metadata = schedule(..., causal=causal)
+
+    <span class="cm"># For FA3 + CUDA graph: copy into persistent buffer, zero rest</span>
+    <span class="kw">if</span> self.use_full_cuda_graph <span class="kw">and</span> scheduler_metadata <span class="kw">is not</span> <span class="nu">None</span>:
+        n = scheduler_metadata.shape[<span class="nu">0</span>]
+        self.scheduler_metadata[:n] = scheduler_metadata
+        self.scheduler_metadata[n:] = <span class="nu">0</span>  <span class="cm"># Zero rest for correctness</span>
+</code></pre>
+
+<h3>The forward() Method: Kernel Dispatch</h3>
+
+<pre><code><span class="cm"># FlashAttentionImpl.forward()</span>
+
+<span class="kw">def</span> <span class="fn">forward</span>(self, layer, query, key, value, kv_cache, attn_metadata, output, ...):
+    num_actual_tokens = attn_metadata.num_actual_tokens
+    key_cache, value_cache = kv_cache.unbind(<span class="nu">0</span>)   <span class="cm"># Split K/V</span>
+
+    <span class="kw">if</span> self.kv_cache_dtype.startswith(<span class="st">"fp8"</span>):
+        key_cache = key_cache.view(dtype)          <span class="cm"># Reinterpret as FP8</span>
+        value_cache = value_cache.view(dtype)
+
+    <span class="kw">if not</span> attn_metadata.use_cascade:
+        <span class="cm"># Standard path: single flash_attn_varlen_func call</span>
+        flash_attn_varlen_func(
+            q=query[:num_actual_tokens],
+            k=key_cache, v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            max_seqlen_q=attn_metadata.max_query_len,
+            seqused_k=attn_metadata.seq_lens,
+            max_seqlen_k=attn_metadata.max_seq_len,
+            softmax_scale=self.scale, causal=attn_metadata.causal,
+            block_table=attn_metadata.block_table,      <span class="cm"># Paged attention!</span>
+            scheduler_metadata=attn_metadata.scheduler_metadata,  <span class="cm"># AOT</span>
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale, k_descale=k_descale, v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
+            s_aux=self.sinks,                            <span class="cm"># Attention sinks</span>
+        )
+    <span class="kw">else</span>:
+        <span class="cm"># Cascade attention: prefix + suffix kernels, merged via LSE</span>
+        cascade_attention(output, query, key_cache, value_cache, ...)
+</code></pre>
+
+<div class="card highlight-blue">
+  <h4>Cascade Attention</h4>
+  <p>When multiple requests share a common KV prefix (e.g., system prompt), vLLM computes attention over the shared prefix once and merges with per-request suffix attention using log-sum-exp (LSE) values. The FlashAttention backend dispatches two separate <code class="inline-code">flash_attn_varlen_func</code> calls: one for the prefix (non-causal, batch_size=1) and one for the per-request suffixes (causal).</p>
+</div>
+
+<h3>KV Cache Update</h3>
+
+<pre><code><span class="cm"># FlashAttentionImpl.do_kv_cache_update() -- called BEFORE forward()</span>
+
+<span class="kw">def</span> <span class="fn">do_kv_cache_update</span>(self, layer, key, value, kv_cache, slot_mapping):
+    key_cache, value_cache = kv_cache.unbind(<span class="nu">0</span>)
+    <span class="cm"># reshape_and_cache_flash writes K/V tokens into paged blocks</span>
+    <span class="cm"># using slot_mapping to determine the block + offset for each token</span>
+    reshape_and_cache_flash(
+        key[:num_actual_tokens], value[:num_actual_tokens],
+        key_cache, value_cache, slot_mapping[:num_actual_tokens],
+        self.kv_cache_dtype, layer._k_scale, layer._v_scale,
+    )
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 3: FLASHINFER -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="flashinfer">3. FlashInfer Backend</h2>
+
+<p>FlashInfer (<code class="inline-code">vllm/v1/attention/backends/flashinfer.py</code>) takes top priority on Blackwell GPUs and offers two internal dispatch paths: the native FlashInfer wrappers and TRT-LLM attention kernels.</p>
+
+<h3>Backend Class: Blackwell-First Design</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/flashinfer.py</span>
+
+<span class="kw">class</span> <span class="ty">FlashInferBackend</span>(AttentionBackend):
+    accept_output_buffer: <span class="ty">bool</span> = <span class="nu">True</span>
+    supported_kv_cache_dtypes = [<span class="st">"auto"</span>, <span class="st">"float16"</span>, <span class="st">"bfloat16"</span>,
+                                 <span class="st">"fp8"</span>, <span class="st">"fp8_e4m3"</span>, <span class="st">"fp8_e5m2"</span>]
+
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_supported_kernel_block_sizes</span>():
+        <span class="kw">return</span> [<span class="nu">16</span>, <span class="nu">32</span>, <span class="nu">64</span>]  <span class="cm"># Fixed sizes, not MultipleOf</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_compute_capability</span>(cls, capability):
+        <span class="kw">return</span> capability >= DeviceCapability(<span class="nu">7</span>, <span class="nu">5</span>) \
+           <span class="kw">and</span> capability <= DeviceCapability(<span class="nu">12</span>, <span class="nu">1</span>)
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">get_required_kv_cache_layout</span>(cls):
+        capability = current_platform.get_device_capability()
+        <span class="kw">if</span> capability.major == <span class="nu">10</span>:  <span class="cm"># Blackwell requires HND layout</span>
+            <span class="kw">return</span> <span class="st">"HND"</span>
+        <span class="kw">return</span> <span class="nu">None</span>  <span class="cm"># Use default (NHD)</span>
+</code></pre>
+
+<h3>The Plan/Execute Pattern</h3>
+
+<p>FlashInfer uses a <strong>plan-then-execute</strong> pattern. During <code class="inline-code">build()</code>, wrappers call <code class="inline-code">.plan()</code> to precompute indices and scheduling. During <code class="inline-code">forward()</code>, they call <code class="inline-code">.run()</code> to execute the actual attention.</p>
+
+<h4>Workspace Management</h4>
+
+<pre><code><span class="cm"># Workspace buffer: allocated once, reused across calls</span>
+FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = <span class="nu">2048</span> * <span class="nu">1024</span> * <span class="nu">1024</span>  <span class="cm"># 2 GB</span>
+
+<span class="kw">def</span> <span class="fn">_get_workspace_buffer</span>(self):
+    <span class="kw">if</span> self._workspace_buffer <span class="kw">is</span> <span class="nu">None</span>:
+        buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        <span class="kw">if</span> envs.VLLM_BATCH_INVARIANT:
+            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+        self._workspace_buffer = torch.zeros(
+            buffer_size, dtype=torch.uint8, device=self.device
+        )
+    <span class="kw">return</span> self._workspace_buffer
+</code></pre>
+
+<h4>Wrapper Initialization</h4>
+
+<pre><code><span class="cm"># Separate wrappers for prefill vs decode</span>
+
+<span class="kw">def</span> <span class="fn">_get_prefill_wrapper</span>(self):
+    <span class="kw">if</span> self.use_dcp:
+        <span class="kw">return</span> BatchDCPPrefillWrapper(workspace_buffer=..., dcp_a2a=...)
+    <span class="kw">else</span>:
+        <span class="kw">return</span> BatchPrefillWithPagedKVCacheWrapper(
+            self._get_workspace_buffer(), get_kv_cache_layout()
+        )
+
+<span class="kw">def</span> <span class="fn">_get_decode_wrapper</span>(self, batch_size, use_cudagraph=<span class="nu">False</span>):
+    <span class="cm"># For CUDA graphs: one wrapper PER batch size, with pinned buffers</span>
+    <span class="kw">if</span> use_cudagraph:
+        decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size)
+    <span class="kw">if</span> decode_wrapper <span class="kw">is</span> <span class="nu">None</span>:
+        decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+            self._get_workspace_buffer(), get_kv_cache_layout(),
+            use_cuda_graph=use_cudagraph,
+            paged_kv_indptr_buffer=self.paged_kv_indptr.gpu[:batch_size+<span class="nu">1</span>],
+            paged_kv_indices_buffer=self.paged_kv_indices.gpu,
+            paged_kv_last_page_len_buffer=self.paged_kv_last_page_len.gpu[:batch_size],
+            use_tensor_cores=<span class="nu">True</span>,  <span class="cm"># Always on for modern GPUs</span>
+        )
+        <span class="kw">if</span> use_cudagraph:
+            self._decode_wrappers_cudagraph[batch_size] = decode_wrapper
+</code></pre>
+
+<h3>The build() Method: Dual-Path Dispatch</h3>
+
+<p>FlashInfer's <code class="inline-code">build()</code> decides <em>per-phase</em> whether to use native FlashInfer or TRT-LLM kernels:</p>
+
+<pre><code><span class="cm"># FlashInferMetadataBuilder.build()</span>
+
+<span class="cm"># Step 1: Decide dispatch mode for each phase</span>
+prefill_use_trtllm = use_trtllm_attention(
+    self.num_qo_heads, self.num_kv_heads, num_prefill_tokens,
+    max_seq_len, self.dcp_world_size, self.cache_dtype, ...
+)
+decode_use_trtllm = self.use_trtllm_decode_attention <span class="kw">and</span> self.dcp_world_size <= <span class="nu">1</span>
+
+<span class="cm"># Step 2: Build metadata skeleton</span>
+attn_metadata = FlashInferMetadata(
+    num_actual_tokens=num_actual_tokens,
+    slot_mapping=slot_mapping,
+    q_data_type=self.q_data_type,
+    num_decodes=num_decodes, num_prefills=num_prefills,
+    prefill=<span class="nu">None</span>, decode=<span class="nu">None</span>,  <span class="cm"># populated below</span>
+    use_cascade=use_cascade, cascade_wrapper=<span class="nu">None</span>,
+)
+
+<span class="cm"># Step 3a: PREFILL -- either FI native or TRTLLM</span>
+<span class="kw">if</span> prefill_use_trtllm:
+    attn_metadata.prefill = TRTLLMPrefill(
+        block_tables=block_table_tensor[prefill_start:],
+        seq_lens=seq_lens[prefill_start:],
+        cum_seq_lens_q=qo_indptr_prefill_gpu,
+        max_q_len=max_q_len_prefill, max_seq_len=max_seq_len,
+    )
+<span class="kw">else</span>:
+    prefill_wrapper = self._get_prefill_wrapper()
+    prefill_wrapper.plan(...)   <span class="cm"># Plan phase -- precompute indices</span>
+    attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+
+<span class="cm"># Step 3b: DECODE -- either FI native or TRTLLM</span>
+<span class="kw">if</span> decode_use_trtllm:
+    attn_metadata.decode = TRTLLMDecode(
+        block_tables=block_table_tensor[:num_decodes],
+        seq_lens=seq_lens[:num_decodes], max_seq_len=max_seq_len,
+    )
+<span class="kw">else</span>:
+    decode_wrapper = self._get_decode_wrapper(num_decode_tokens, use_cudagraph)
+    fast_plan_decode(decode_wrapper, ...)  <span class="cm"># Plan phase</span>
+    attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+</code></pre>
+
+<h3>Metadata Types: FI Native vs TRT-LLM</h3>
+
+<div class="two-col">
+  <div class="card highlight-blue">
+    <h4>FI Native Metadata</h4>
+<pre><code><span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">FIPrefill</span>:
+    wrapper: BatchPrefillWith...Wrapper
+    <span class="cm"># Wrapper has plan() already called</span>
+    <span class="cm"># Contains paged_kv_indptr,</span>
+    <span class="cm"># paged_kv_indices, last_page_len</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">FIDecode</span>:
+    wrapper: BatchDecodeWith...Wrapper
+    <span class="cm"># Same pattern: plan() pre-called</span>
+</code></pre>
+  </div>
+  <div class="card highlight-orange">
+    <h4>TRT-LLM Metadata</h4>
+<pre><code><span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">TRTLLMPrefill</span>:
+    block_tables: torch.Tensor  <span class="cm"># [num_prefills, max_blocks]</span>
+    seq_lens: torch.Tensor      <span class="cm"># [num_prefills]</span>
+    cum_seq_lens_q: torch.Tensor
+    cum_seq_lens_kv: torch.Tensor
+    max_q_len: <span class="ty">int</span>
+    max_seq_len: <span class="ty">int</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">TRTLLMDecode</span>:
+    block_tables: torch.Tensor  <span class="cm"># [num_decodes, max_blocks]</span>
+    seq_lens: torch.Tensor      <span class="cm"># [num_decodes]</span>
+    max_seq_len: <span class="ty">int</span>
+</code></pre>
+  </div>
+</div>
+
+<h3>CUDA Graph Support</h3>
+
+<pre><code><span class="cm"># FlashInfer CUDA graph strategy depends on TRT-LLM availability</span>
+
+<span class="kw">@classmethod</span>
+<span class="kw">def</span> <span class="fn">get_cudagraph_support</span>(cls, vllm_config, kv_cache_spec):
+    <span class="cm"># Check if TRT-LLM attention works for ALL spec layers</span>
+    has_trtllm_support = <span class="nu">True</span>
+    <span class="kw">for</span> spec <span class="kw">in</span> kv_specs:
+        <span class="kw">if not</span> can_use_trtllm_attention(num_qo_heads, spec.num_kv_heads):
+            has_trtllm_support = <span class="nu">False</span>
+            <span class="kw">break</span>
+    <span class="kw">if</span> has_trtllm_support:
+        <span class="kw">return</span> AttentionCGSupport.UNIFORM_BATCH       <span class="cm"># Full CG with mixed batches</span>
+    <span class="kw">else</span>:
+        <span class="kw">return</span> AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE  <span class="cm"># Decode-only CG</span>
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 4: MLA OVERVIEW -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="mla-overview">4. Multi-Latent Attention (MLA) Overview</h2>
+
+<p>MLA, introduced in DeepSeek-V2, compresses the KV cache into a single <strong>latent vector</strong> per token. This dramatically reduces memory bandwidth during decode. The design is documented in extensive comments in <code class="inline-code">vllm/model_executor/layers/attention/mla_attention.py</code>:</p>
+
+<div class="card highlight-purple">
+<h4>MLA Key Dimensions (DeepSeek-V3)</h4>
+<table>
+  <tr><th>Symbol</th><th>Meaning</th><th>Value</th></tr>
+  <tr><td><code class="inline-code">N</code></td><td>Number of attention heads</td><td>128</td></tr>
+  <tr><td><code class="inline-code">Lkv</code></td><td>Latent KV dimension</td><td>512</td></tr>
+  <tr><td><code class="inline-code">P</code></td><td>No-RoPE head dimension</td><td>128</td></tr>
+  <tr><td><code class="inline-code">R</code></td><td>RoPE head dimension</td><td>64</td></tr>
+  <tr><td><code class="inline-code">V</code></td><td>Value head dimension</td><td>128</td></tr>
+</table>
+<p style="margin-top:.8rem;color:#a0aec0">KV cache stores only <code class="inline-code">[Lkv + R] = 576</code> values per token per layer, vs <code class="inline-code">2 * N * P = 32768</code> for standard MHA. A <strong>57x</strong> compression.</p>
+</div>
+
+<h3>Two Computation Paths</h3>
+
+<p>The source code defines two paths explicitly (from the docstring in <code class="inline-code">mla_attention.py</code>):</p>
+
+<!-- Diagram: MLA paths -->
+<div class="diagram-container">
+  <svg viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg">
+    <rect width="900" height="360" rx="8" fill="#0d1117"/>
+    <text x="450" y="28" fill="#b388ff" font-size="14" text-anchor="middle" font-weight="bold">MLA: Two Computation Paths</text>
+
+    <!-- PREFILL (MHA) path -->
+    <rect x="20" y="50" width="420" height="290" rx="8" fill="#16213e" stroke="#6ec6ff" stroke-width="1.5"/>
+    <text x="230" y="72" fill="#6ec6ff" font-size="12" text-anchor="middle" font-weight="bold">Compute-Friendly (forward_mha) -- Prefill</text>
+
+    <text x="40" y="100" fill="#cdd6f4" font-size="10">1. Decompress KV latent into full heads:</text>
+    <text x="55" y="118" fill="#98c379" font-size="10">k_nope = (kv_c @ W_UK).view(Skv, N, P)</text>
+    <text x="55" y="134" fill="#98c379" font-size="10">v      = (kv_c @ W_UV).view(Skv, N, V)</text>
+
+    <text x="40" y="160" fill="#cdd6f4" font-size="10">2. Standard Multi-Head Attention:</text>
+    <text x="55" y="178" fill="#98c379" font-size="10">Q = cat([q_nope, q_pe], dim=-1)  # [Sq, N, P+R]</text>
+    <text x="55" y="194" fill="#98c379" font-size="10">K = cat([k_nope, k_pe], dim=-1)  # [Skv, N, P+R]</text>
+    <text x="55" y="210" fill="#98c379" font-size="10">V = v                            # [Skv, N, V]</text>
+    <text x="55" y="228" fill="#e5c07b" font-size="10">sdpa(Q, K, V)  # Standard FA call</text>
+
+    <text x="40" y="258" fill="#ef5350" font-size="10">Memory cost: O(Skv * N * P)</text>
+    <text x="40" y="276" fill="#66bb6a" font-size="10">Compute: Standard MHA -- good Sq/Skv ratio</text>
+
+    <rect x="55" y="290" width="120" height="28" rx="5" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="115" y="309" fill="#6ec6ff" font-size="10" text-anchor="middle">FlashAttention</text>
+    <rect x="195" y="290" width="120" height="28" rx="5" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="255" y="309" fill="#6ec6ff" font-size="10" text-anchor="middle">FlashInfer</text>
+
+    <!-- DECODE (MQA) path -->
+    <rect x="460" y="50" width="420" height="290" rx="8" fill="#16213e" stroke="#ff9f43" stroke-width="1.5"/>
+    <text x="670" y="72" fill="#ff9f43" font-size="12" text-anchor="middle" font-weight="bold">Memory-Friendly (forward_mqa) -- Decode</text>
+
+    <text x="480" y="100" fill="#cdd6f4" font-size="10">1. Absorb W_UK into query (no decompression!):</text>
+    <text x="495" y="118" fill="#98c379" font-size="10">ql_nope = einsum("snh,lnh->snl", q, W_UK)</text>
+
+    <text x="480" y="146" fill="#cdd6f4" font-size="10">2. Multi-Query Attention on latent vectors:</text>
+    <text x="495" y="164" fill="#98c379" font-size="10">Q = cat([ql_nope, q_pe], dim=-1)  # [Sq, N, Lkv+R]</text>
+    <text x="495" y="180" fill="#98c379" font-size="10">K = cat([kv_c, k_pe], dim=-1)     # [Skv, 1, Lkv+R]</text>
+    <text x="495" y="196" fill="#98c379" font-size="10">V = kv_c                          # [Skv, 1, Lkv]</text>
+    <text x="495" y="214" fill="#e5c07b" font-size="10">MQA(Q, K, V)  # 1 KV head!</text>
+
+    <text x="480" y="244" fill="#66bb6a" font-size="10">Memory cost: O(Skv * (Lkv + R)) -- no per-head expand</text>
+    <text x="480" y="262" fill="#ef5350" font-size="10">Compute: Lkv > P, more FLOPs per token</text>
+
+    <rect x="495" y="290" width="100" height="28" rx="5" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="545" y="309" fill="#ff9f43" font-size="10" text-anchor="middle">FlashMLA</text>
+    <rect x="610" y="290" width="100" height="28" rx="5" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="660" y="309" fill="#ff9f43" font-size="10" text-anchor="middle">CUTLASS MLA</text>
+    <rect x="725" y="290" width="100" height="28" rx="5" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="775" y="309" fill="#ff9f43" font-size="10" text-anchor="middle">Triton MLA</text>
+  </svg>
+  <div class="diagram-label">Prefill uses standard MHA with decompressed heads; decode uses MQA on compressed latent vectors to save bandwidth.</div>
+</div>
+
+<pre><code><span class="cm"># From vllm/model_executor/layers/attention/mla_attention.py docstring:</span>
+
+<span class="cm">## Compute Friendly Approach (forward_mha) -- used for prefill:</span>
+<span class="cm"># Decompress KV latent into per-head K and V</span>
+k_nope = (kv_c @ W_UK.view(Lkv, N * P)).view(Skv, N, P)
+v      = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
+<span class="cm"># Standard MHA with QK headdim = P + R, V headdim = V</span>
+spda_o = scaled_dot_product_attention(
+    cat([q_nope, q_pe], dim=-<span class="nu">1</span>),   <span class="cm"># [Sq, N, P+R]</span>
+    cat([k_nope, k_pe_expanded], dim=-<span class="nu">1</span>),  <span class="cm"># [Skv, N, P+R]</span>
+    v                                       <span class="cm"># [Skv, N, V]</span>
+)
+
+<span class="cm">## Data-Movement Friendly Approach (forward_mqa) -- used for decode:</span>
+<span class="cm"># Absorb W_UK into query -- avoid decompressing KV</span>
+ql_nope = einsum(<span class="st">"snh,lnh->snl"</span>, q, W_UK)
+<span class="cm"># MQA with QK headdim = Lkv + R, V headdim = Lkv</span>
+spda_o = scaled_dot_product_attention(
+    cat([ql_nope, q_pe], dim=-<span class="nu">1</span>),  <span class="cm"># [Sq, N, Lkv+R] = [Sq, N, 576]</span>
+    cat([kv_c, k_pe], dim=-<span class="nu">1</span>),      <span class="cm"># [Skv, 1, 576] -- MQA, single KV head</span>
+    kv_c                            <span class="cm"># [Skv, 1, 512]</span>
+)
+o = einsum(<span class="st">"snl,lnv->snv"</span>, spda_o, W_UV)  <span class="cm"># Project back to V dimension</span>
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 5: MLA BACKENDS -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="mla-backends">5. MLA Backend Implementations</h2>
+
+<p>vLLM provides multiple MLA decode kernels under <code class="inline-code">vllm/v1/attention/backends/mla/</code>. All inherit from <code class="inline-code">MLACommonBackend</code> / <code class="inline-code">MLACommonImpl</code> and implement <code class="inline-code">forward_mqa()</code> for the decode path.</p>
+
+<h3>5a. FlashMLA -- Hopper &amp; Blackwell</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/mla/flashmla.py</span>
+
+<span class="kw">class</span> <span class="ty">FlashMLABackend</span>(MLACommonBackend):
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_supported_kernel_block_sizes</span>():
+        <span class="kw">return</span> [<span class="nu">64</span>]  <span class="cm"># Fixed block size of 64</span>
+
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_name</span>():
+        <span class="kw">return</span> <span class="st">"FLASHMLA"</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_compute_capability</span>(cls, capability):
+        <span class="kw">return</span> capability.major <span class="kw">in</span> [<span class="nu">9</span>, <span class="nu">10</span>]  <span class="cm"># Hopper + Blackwell only</span>
+</code></pre>
+
+<h4>FlashMLA Decode Kernel</h4>
+
+<pre><code><span class="cm"># FlashMLAImpl.forward_mqa()</span>
+
+<span class="kw">def</span> <span class="fn">forward_mqa</span>(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
+    q = reshape_query_for_spec_decode(q, attn_metadata.num_decodes)
+
+    scheduler_metadata = attn_metadata.decode.scheduler_metadata
+
+    <span class="kw">if</span> self.kv_cache_dtype.startswith(<span class="st">"fp8"</span>):
+        o, lse = flash_mla_with_kvcache_fp8(
+            q=q,
+            k_cache=kv_c_and_k_pe_cache.unsqueeze(-<span class="nu">2</span>),  <span class="cm"># Add head dim of 1</span>
+            block_table=attn_metadata.decode.block_table,
+            cache_seqlens=attn_metadata.decode.seq_lens,
+            head_dim_v=self.kv_lora_rank,        <span class="cm"># 512</span>
+            tile_scheduler_metadata=scheduler_metadata.tile_scheduler_metadata,
+            num_splits=scheduler_metadata.num_splits,
+            softmax_scale=self.scale, causal=<span class="nu">True</span>,
+            descale_q=layer._q_scale, descale_k=layer._k_scale,
+        )
+    <span class="kw">else</span>:
+        o, lse = flash_mla_with_kvcache(
+            q=q,
+            k_cache=kv_c_and_k_pe_cache.unsqueeze(-<span class="nu">2</span>),  <span class="cm"># MQA: 1 KV head</span>
+            block_table=attn_metadata.decode.block_table,
+            cache_seqlens=attn_metadata.decode.seq_lens,
+            head_dim_v=self.kv_lora_rank,
+            tile_scheduler_metadata=scheduler_metadata,
+            softmax_scale=self.scale, causal=<span class="nu">True</span>,
+        )
+    <span class="kw">return</span> reshape_attn_output_for_spec_decode(o), lse
+</code></pre>
+
+<h4>FlashMLA Metadata Builder</h4>
+
+<pre><code><span class="cm"># FlashMLAMetadataBuilder._build_decode()</span>
+
+<span class="kw">def</span> <span class="fn">_build_decode</span>(self, block_table, seq_lens, max_seq_len, ...):
+    <span class="cm"># Compute tile scheduler metadata for the FlashMLA kernel</span>
+    scheduler_metadata, _ = get_mla_metadata(
+        seq_lens, num_q_tokens_per_head_k, <span class="nu">1</span>,  <span class="cm"># MQA: 1 KV head</span>
+        is_fp8_kvcache=self.is_fp8_kvcache,
+    )
+    <span class="kw">if</span> self.is_fp8_kvcache:
+        <span class="cm"># FP8 needs separate tile_scheduler_metadata and num_splits</span>
+        tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(...)
+        <span class="cm"># Copy into CUDA graph persistent buffers</span>
+        <span class="kw">if</span> self.cudagraph_mode.has_full_cudagraphs():
+            self.cg_buf_tile_scheduler_metadata[:n].copy_(tile_scheduler_metadata)
+            self.cg_buf_num_splits[:n].copy_(num_splits)
+</code></pre>
+
+<h3>5b. CUTLASS MLA -- Blackwell Only</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/mla/cutlass_mla.py</span>
+
+<span class="kw">class</span> <span class="ty">CutlassMLABackend</span>(MLACommonBackend):
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_supported_kernel_block_sizes</span>():
+        <span class="kw">return</span> [<span class="nu">128</span>]   <span class="cm"># Forced to 128</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_compute_capability</span>(cls, capability):
+        <span class="kw">return</span> capability.major == <span class="nu">10</span>  <span class="cm"># Blackwell (SM100) ONLY</span>
+</code></pre>
+
+<h4>SM100 Workspace</h4>
+
+<pre><code><span class="cm"># Manages GPU workspace buffer for CUTLASS MLA</span>
+
+<span class="kw">class</span> <span class="ty">SM100Workspace</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, initial_workspace_size):
+        self._workspace_buf = torch.empty(
+            initial_workspace_size, device=<span class="st">"cuda"</span>, dtype=torch.uint8
+        )
+        self._block_size = <span class="nu">128</span>  <span class="cm"># Forced to 128</span>
+        self._sm_count = num_compute_units(<span class="nu">0</span>)
+
+    <span class="kw">def</span> <span class="fn">ensure_size</span>(self, attn_metadata, num_kv_splits):
+        workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
+            max_seq_len * self._block_size, batch_size,
+            self._sm_count, num_kv_splits=num_kv_splits,
+        )
+        <span class="kw">if</span> self._workspace_buf.shape[<span class="nu">0</span>] < workspace_size:
+            self._workspace_buf.resize_(workspace_size)
+
+g_sm100_workspace = SM100Workspace(<span class="nu">128</span> * <span class="nu">1024</span> * <span class="nu">1024</span>)  <span class="cm"># 128 MB initial</span>
+MAX_HEADS = <span class="nu">128</span>
+</code></pre>
+
+<h4>CUTLASS MLA Decode Kernel</h4>
+
+<pre><code><span class="cm"># CutlassMLAImpl.forward_mqa()</span>
+
+<span class="kw">def</span> <span class="fn">forward_mqa</span>(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
+    <span class="kw">if</span> <span class="kw">type</span>(q) <span class="kw">is</span> <span class="ty">tuple</span>:
+        q_nope, q_pe = q               <span class="cm"># Already split</span>
+    <span class="kw">else</span>:
+        q_nope, q_pe = torch.split(q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-<span class="nu">1</span>)
+
+    self._workspace.ensure_size(attn_metadata, self._num_kv_splits)
+
+    <span class="cm"># q_nope: [B, H, 512], q_pe: [B, H, 64]</span>
+    <span class="cm"># kv_c_and_k_pe_cache: [num_blocks, 128, 576]</span>
+    ops.sm100_cutlass_mla_decode(
+        out, lse, q_nope, q_pe,
+        kv_c_and_k_pe_cache,
+        seq_lens, page_table, workspace,
+        sm_scale=self.scale,
+        num_kv_splits=self._num_kv_splits,  <span class="cm"># -1 = auto-detect</span>
+    )
+    <span class="kw">return</span> out[:, :H], lse[:, :H]
+</code></pre>
+
+<h3>5c. Triton MLA -- Universal Fallback</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/mla/triton_mla.py</span>
+
+<span class="kw">class</span> <span class="ty">TritonMLABackend</span>(MLACommonBackend):
+    <span class="kw">@staticmethod</span>
+    <span class="kw">def</span> <span class="fn">get_supported_kernel_block_sizes</span>():
+        <span class="kw">return</span> [MultipleOf(<span class="nu">16</span>)]  <span class="cm"># Any multiple of 16</span>
+
+    <span class="kw">@classmethod</span>
+    <span class="kw">def</span> <span class="fn">supports_compute_capability</span>(cls, capability):
+        <span class="kw">return</span> <span class="nu">True</span>  <span class="cm"># Works on ANY GPU</span>
+</code></pre>
+
+<h4>Triton MLA Decode: Split-K with Explicit Workspace</h4>
+
+<pre><code><span class="cm"># TritonMLAImpl.forward_mqa()</span>
+
+<span class="kw">def</span> <span class="fn">forward_mqa</span>(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
+    B, q_num_heads = q.shape[<span class="nu">0</span>], q.shape[<span class="nu">1</span>]
+    o = torch.zeros(B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device)
+    lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+
+    num_kv_splits = <span class="nu">1</span> <span class="kw">if</span> envs.VLLM_BATCH_INVARIANT <span class="kw">else</span> <span class="nu">4</span>
+
+    <span class="cm"># Workspace for split-K: stores partial outputs + LSE per split</span>
+    attn_logits = torch.empty(
+        (B, q_num_heads, num_kv_splits, self.kv_lora_rank + <span class="nu">1</span>),
+        <span class="cm">#                                   ^ +1 for LSE per split</span>
+        dtype=torch.float32, device=q.device,
+    )
+
+    kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(<span class="nu">2</span>)  <span class="cm"># Add head dim of 1</span>
+    decode_attention_fwd(
+        q, kv_c_and_k_pe_cache,
+        kv_c_and_k_pe_cache[..., :self.kv_lora_rank],  <span class="cm"># V = kv_c portion</span>
+        o, lse, block_table, seq_lens, attn_logits,
+        num_kv_splits, self.scale, PAGE_SIZE,
+        k_scale=layer._k_scale, v_scale=layer._k_scale,
+    )
+    <span class="kw">return</span> o, lse
+</code></pre>
+
+<div class="callout key">
+  <strong>Key difference:</strong> Triton MLA uses <code class="inline-code">decode_attention_fwd</code> with an explicit split-K workspace (<code class="inline-code">attn_logits</code>) that stores per-split partial outputs and LSE values. The <code class="inline-code">+1</code> in the last dimension holds the LogSumExp for each split, which the stage-2 kernel uses to merge results.
+</div>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 6: METADATA STRUCTURES -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="metadata">6. Attention Metadata Structures</h2>
+
+<p>Each backend defines its own metadata dataclass. These are populated by the builder's <code class="inline-code">build()</code> method and consumed by the implementation's <code class="inline-code">forward()</code>.</p>
+
+<h3>FlashAttentionMetadata</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/flash_attn.py</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">FlashAttentionMetadata</span>:
+    <span class="cm"># |---------- N-1 iteration --------|</span>
+    <span class="cm"># |---------------- N iteration ---------|</span>
+    <span class="cm"># |- tokenA -|..............|-- newTokens --|</span>
+    <span class="cm"># |---------- context_len --|</span>
+    <span class="cm"># |-------------- seq_len ------------------|</span>
+    <span class="cm">#                          |-- query_len ---|</span>
+
+    num_actual_tokens: <span class="ty">int</span>          <span class="cm"># Tokens excluding padding</span>
+    max_query_len: <span class="ty">int</span>
+    query_start_loc: torch.Tensor   <span class="cm"># [num_reqs + 1] cumsum of query lens</span>
+    max_seq_len: <span class="ty">int</span>
+    seq_lens: torch.Tensor          <span class="cm"># [num_reqs] total sequence lengths</span>
+    block_table: torch.Tensor       <span class="cm"># [num_reqs, max_blocks_per_seq]</span>
+    slot_mapping: torch.Tensor      <span class="cm"># [num_actual_tokens] -> cache slot idx</span>
+
+    <span class="cm"># Cascade attention fields</span>
+    use_cascade: <span class="ty">bool</span>
+    common_prefix_len: <span class="ty">int</span>
+    cu_prefix_query_lens: torch.Tensor | <span class="ty">None</span>
+    prefix_kv_lens: torch.Tensor | <span class="ty">None</span>
+    suffix_kv_lens: torch.Tensor | <span class="ty">None</span>
+
+    <span class="cm"># AOT scheduling (FA3 only)</span>
+    scheduler_metadata: torch.Tensor | <span class="ty">None</span> = <span class="ty">None</span>
+    prefix_scheduler_metadata: torch.Tensor | <span class="ty">None</span> = <span class="ty">None</span>
+    max_num_splits: <span class="ty">int</span> = <span class="nu">0</span>           <span class="cm"># 0 = use FA3's heuristics</span>
+    causal: <span class="ty">bool</span> = <span class="nu">True</span>
+</code></pre>
+
+<h3>FlashInferMetadata</h3>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/flashinfer.py</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">FlashInferMetadata</span>:
+    num_actual_tokens: <span class="ty">int</span>
+    slot_mapping: torch.Tensor    <span class="cm"># [num_actual_tokens]</span>
+    q_data_type: torch.dtype      <span class="cm"># May be FP8 if TRT-LLM path</span>
+
+    num_decodes: <span class="ty">int</span>
+    num_decode_tokens: <span class="ty">int</span>
+    num_prefills: <span class="ty">int</span>
+    num_prefill_tokens: <span class="ty">int</span>
+
+    <span class="cm"># Polymorphic: FI native OR TRT-LLM, depending on dispatch</span>
+    prefill: FIPrefill | TRTLLMPrefill | <span class="ty">None</span>
+    decode:  FIDecode  | TRTLLMDecode  | <span class="ty">None</span>
+
+    <span class="cm"># Cascade attention (uses FlashInfer's MultiLevelCascadeAttentionWrapper)</span>
+    use_cascade: <span class="ty">bool</span>
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | <span class="ty">None</span>
+</code></pre>
+
+<h3>MLA Common Metadata</h3>
+
+<pre><code><span class="cm"># From vllm/model_executor/layers/attention/mla_attention.py</span>
+
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">MLACommonDecodeMetadata</span>:
+    block_table: torch.Tensor     <span class="cm"># [num_decodes, max_blocks]</span>
+    seq_lens: torch.Tensor        <span class="cm"># [num_decodes]</span>
+    dcp_tot_seq_lens: torch.Tensor | <span class="ty">None</span>
+
+<span class="cm"># FlashMLA extends this with scheduler metadata:</span>
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="ty">FlashMLADecodeMetadata</span>(MLACommonDecodeMetadata):
+    scheduler_metadata: FlashMLASchedMeta
+    <span class="cm"># Contains tile_scheduler_metadata and num_splits</span>
+    <span class="cm"># for the FlashMLA kernel's work distribution</span>
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 7: BLOCK TABLE -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="block-table">7. Block Table &amp; KV Cache Layout</h2>
+
+<h3>Block Table Format</h3>
+
+<p>The block table is a 2D tensor of shape <code class="inline-code">[num_requests, max_blocks_per_seq]</code>. Each entry is a physical block index into the KV cache pool. The attention kernel uses it to map logical token positions to physical memory locations:</p>
+
+<!-- Diagram: Block Table -->
+<div class="diagram-container">
+  <svg viewBox="0 0 880 300" xmlns="http://www.w3.org/2000/svg">
+    <rect width="880" height="300" rx="8" fill="#0d1117"/>
+    <text x="440" y="25" fill="#6ec6ff" font-size="13" text-anchor="middle" font-weight="bold">Block Table Maps Logical Sequence to Physical KV Cache Blocks</text>
+
+    <!-- Block table -->
+    <text x="30" y="60" fill="#ff9f43" font-size="11" font-weight="bold">block_table[req_id][block_idx]</text>
+
+    <!-- Request 0 -->
+    <text x="30" y="90" fill="#8fa4c0" font-size="10">Req 0 (seq_len=50):</text>
+    <rect x="180" y="75" width="50" height="25" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="205" y="92" fill="#6ec6ff" font-size="10" text-anchor="middle">7</text>
+    <rect x="235" y="75" width="50" height="25" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="260" y="92" fill="#6ec6ff" font-size="10" text-anchor="middle">14</text>
+    <rect x="290" y="75" width="50" height="25" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="315" y="92" fill="#6ec6ff" font-size="10" text-anchor="middle">3</text>
+    <rect x="345" y="75" width="50" height="25" rx="3" fill="#1a2744" stroke="#5c6370" stroke-dasharray="3"/>
+    <text x="370" y="92" fill="#5c6370" font-size="10" text-anchor="middle">-</text>
+
+    <!-- Request 1 -->
+    <text x="30" y="125" fill="#8fa4c0" font-size="10">Req 1 (seq_len=96):</text>
+    <rect x="180" y="110" width="50" height="25" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="205" y="127" fill="#ff9f43" font-size="10" text-anchor="middle">1</text>
+    <rect x="235" y="110" width="50" height="25" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="260" y="127" fill="#ff9f43" font-size="10" text-anchor="middle">9</text>
+    <rect x="290" y="110" width="50" height="25" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="315" y="127" fill="#ff9f43" font-size="10" text-anchor="middle">22</text>
+    <rect x="345" y="110" width="50" height="25" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="370" y="127" fill="#ff9f43" font-size="10" text-anchor="middle">5</text>
+
+    <!-- Physical KV cache -->
+    <text x="500" y="60" fill="#66bb6a" font-size="11" font-weight="bold">Physical KV Cache Pool</text>
+
+    <!-- Blocks -->
+    <rect x="500" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#2d3e5e"/>
+    <text x="520" y="100" fill="#5c6370" font-size="9" text-anchor="middle">blk 0</text>
+    <rect x="545" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="565" y="100" fill="#ff9f43" font-size="9" text-anchor="middle">blk 1</text>
+    <rect x="590" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#2d3e5e"/>
+    <text x="610" y="100" fill="#5c6370" font-size="9" text-anchor="middle">blk 2</text>
+    <rect x="635" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="655" y="100" fill="#6ec6ff" font-size="9" text-anchor="middle">blk 3</text>
+    <rect x="680" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#2d3e5e"/>
+    <text x="700" y="100" fill="#5c6370" font-size="9" text-anchor="middle">...</text>
+    <rect x="725" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="745" y="100" fill="#6ec6ff" font-size="9" text-anchor="middle">blk 7</text>
+    <rect x="770" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#ff9f43"/>
+    <text x="790" y="100" fill="#ff9f43" font-size="9" text-anchor="middle">blk 9</text>
+    <rect x="815" y="75" width="40" height="55" rx="3" fill="#1a2744" stroke="#6ec6ff"/>
+    <text x="835" y="100" fill="#6ec6ff" font-size="9" text-anchor="middle">blk 14</text>
+
+    <!-- Arrows -->
+    <line x1="205" y1="100" x2="745" y2="105" stroke="#6ec6ff" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="260" y1="100" x2="835" y2="105" stroke="#6ec6ff" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="315" y1="100" x2="655" y2="105" stroke="#6ec6ff" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="205" y1="135" x2="565" y2="130" stroke="#ff9f43" stroke-width="1" stroke-dasharray="4"/>
+    <line x1="260" y1="135" x2="790" y2="130" stroke="#ff9f43" stroke-width="1" stroke-dasharray="4"/>
+
+    <!-- Block internal structure -->
+    <text x="30" y="170" fill="#b388ff" font-size="11" font-weight="bold">Block Internal Layout (block_size=16 example)</text>
+    <text x="30" y="195" fill="#8fa4c0" font-size="10">FlashAttn:   (2, num_blocks, block_size, num_kv_heads, head_size)</text>
+    <text x="30" y="215" fill="#8fa4c0" font-size="10">FlashInfer:  (num_blocks, 2, block_size, num_kv_heads, head_size)</text>
+    <text x="30" y="235" fill="#8fa4c0" font-size="10">MLA:         (num_blocks, block_size, kv_lora_rank + rope_dim)</text>
+    <text x="30" y="255" fill="#8fa4c0" font-size="10">             = (num_blocks, 64, 576)  for DeepSeek-V3</text>
+
+    <!-- slot_mapping explanation -->
+    <text x="30" y="285" fill="#ff9f43" font-size="10">slot_mapping[token_i] = block_idx * block_size + offset_in_block</text>
+  </svg>
+  <div class="diagram-label">Each entry in the block table points to a physical block in the KV cache pool. slot_mapping maps individual tokens to cache slots.</div>
+</div>
+
+<h3>NHD vs HND Layout</h3>
+
+<p>vLLM supports two memory layouts for KV cache blocks, selectable via <code class="inline-code">VLLM_KV_CACHE_LAYOUT</code>:</p>
+
+<pre><code><span class="cm"># vllm/v1/attention/backends/utils.py</span>
+
+KVCacheLayoutType = Literal[<span class="st">"NHD"</span>, <span class="st">"HND"</span>]
+
+<span class="kw">@functools.lru_cache</span>
+<span class="kw">def</span> <span class="fn">get_kv_cache_layout</span>():
+    <span class="cm"># Priority: code override > env var > connector default</span>
+    <span class="kw">if</span> _KV_CACHE_LAYOUT_OVERRIDE <span class="kw">is not</span> <span class="nu">None</span>:
+        <span class="kw">return</span> _KV_CACHE_LAYOUT_OVERRIDE
+    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+    <span class="kw">if</span> cache_layout <span class="kw">is</span> <span class="nu">None</span>:
+        cache_layout = get_kv_connector_cache_layout()
+    <span class="kw">return</span> cache_layout
+</code></pre>
+
+<div class="two-col">
+  <div class="card highlight-blue">
+    <h4>NHD (Default)</h4>
+    <p><code class="inline-code">(num_blocks, block_size, num_kv_heads, head_size)</code></p>
+    <p>Tokens within a block are contiguous, heads interleaved. Good for sequential token access patterns. Used by FlashAttention on Ampere/Hopper.</p>
+  </div>
+  <div class="card highlight-orange">
+    <h4>HND (Blackwell)</h4>
+    <p><code class="inline-code">(num_blocks, num_kv_heads, block_size, head_size)</code></p>
+    <p>Heads within a block are contiguous, tokens interleaved. Required by FlashInfer on Blackwell (SM100) for optimal memory access patterns with the TRTLLM kernels.</p>
+  </div>
+</div>
+
+<h3>FlashInfer's Paged KV Metadata</h3>
+
+<p>FlashInfer requires three auxiliary tensors to describe the paged KV structure:</p>
+
+<pre><code><span class="cm"># FlashInferMetadataBuilder._compute_flashinfer_kv_metadata()</span>
+
+<span class="kw">def</span> <span class="fn">_compute_flashinfer_kv_metadata</span>(self, num_blocks_np, seq_lens_np,
+                                      block_table_tensor, num_reqs, page_size):
+    <span class="cm"># 1. paged_kv_indptr: cumulative sum of blocks per request</span>
+    np.cumsum(num_blocks_np, dtype=np.int32,
+              out=self.paged_kv_indptr.np[<span class="nu">1</span>:num_reqs+<span class="nu">1</span>])
+
+    <span class="cm"># 2. paged_kv_indices: flattened list of physical block IDs</span>
+    _copy_page_indices_kernel[(num_reqs,)](
+        paged_kv_indices, block_table_tensor,
+        block_table_tensor.stride(<span class="nu">0</span>), paged_kv_indptr,
+    )
+
+    <span class="cm"># 3. paged_kv_last_page_len: how many valid tokens in last block</span>
+    paged_kv_last_page_len_np = seq_lens_np % page_size
+    self.paged_kv_last_page_len.np[:num_reqs] = np.where(
+        (paged_kv_last_page_len_np == <span class="nu">0</span>) & (seq_lens_np != <span class="nu">0</span>),
+        page_size, paged_kv_last_page_len_np,
+    )
+</code></pre>
+
+
+<!-- ===================================================================== -->
+<!-- SECTION 8: PERFORMANCE -->
+<!-- ===================================================================== -->
+<h2 class="section-title" id="performance">8. Performance: Hardware-to-Backend Mapping</h2>
+
+<h3>Standard MHA: Backend Selection Matrix</h3>
+
+<table>
+  <tr>
+    <th>GPU Generation</th>
+    <th>SM</th>
+    <th>Default Backend</th>
+    <th>Fallback</th>
+    <th>Key Feature</th>
+  </tr>
+  <tr>
+    <td>Blackwell (B200, B100)</td>
+    <td>SM100</td>
+    <td><strong>FlashInfer</strong> + TRT-LLM kernels</td>
+    <td>FlashAttention</td>
+    <td>HND layout, FP8+FP4 fused output quant</td>
+  </tr>
+  <tr>
+    <td>Hopper (H100, H200)</td>
+    <td>SM90</td>
+    <td><strong>FlashAttention</strong> (FA3)</td>
+    <td>FlashInfer</td>
+    <td>AOT scheduling, full CUDA graph</td>
+  </tr>
+  <tr>
+    <td>Ampere (A100, A10)</td>
+    <td>SM80</td>
+    <td><strong>FlashAttention</strong> (FA2)</td>
+    <td>FlashInfer</td>
+    <td>Packed GQA, uniform-batch CG only</td>
+  </tr>
+  <tr>
+    <td>Any (fallback)</td>
+    <td>Any</td>
+    <td>Triton Attention</td>
+    <td>FlexAttention</td>
+    <td>Pure Triton kernel, portable</td>
+  </tr>
+</table>
+
+<h3>MLA: Backend Selection Matrix</h3>
+
+<table>
+  <tr>
+    <th>GPU Generation</th>
+    <th>SM</th>
+    <th>Prefill Backend</th>
+    <th>Decode Backend (Dense)</th>
+    <th>Block Size</th>
+    <th>FP8 KV Cache</th>
+  </tr>
+  <tr>
+    <td>Blackwell</td>
+    <td>SM100</td>
+    <td>FlashInfer MLA / FlashAttn MLA</td>
+    <td><strong>FlashInfer MLA</strong> > CUTLASS MLA > FlashMLA</td>
+    <td>64 / 128</td>
+    <td>Yes (FlashInfer preferred for FP8)</td>
+  </tr>
+  <tr>
+    <td>Hopper</td>
+    <td>SM90</td>
+    <td>FlashAttn MLA</td>
+    <td><strong>FlashMLA</strong> > FlashAttn MLA</td>
+    <td>64</td>
+    <td>Yes (FlashMLA FP8 + dense path)</td>
+  </tr>
+  <tr>
+    <td>Ampere</td>
+    <td>SM80</td>
+    <td>FlashAttn MLA</td>
+    <td><strong>Triton MLA</strong> (fallback)</td>
+    <td>any*16</td>
+    <td>Yes (dequant in kernel)</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>Blackwell MLA priority nuance:</strong> When using FP8 KV cache, FlashInfer MLA Sparse gets highest priority. For BF16 KV cache with fewer than 16 attention heads, FlashInfer MLA Sparse also leads. Otherwise, FlashMLA Sparse takes the top sparse slot. The code handles this with head-count-dependent reordering in <code class="inline-code">_get_backend_priorities()</code>.
+</div>
+
+<h3>CUDA Graph Compatibility</h3>
+
+<table>
+  <tr>
+    <th>Backend</th>
+    <th>CG Support Level</th>
+    <th>Meaning</th>
+  </tr>
+  <tr>
+    <td>FlashAttention (FA3)</td>
+    <td><code class="inline-code">ALWAYS</code></td>
+    <td>Full CG for all batch types (decode, mixed prefill-decode)</td>
+  </tr>
+  <tr>
+    <td>FlashAttention (FA2)</td>
+    <td><code class="inline-code">UNIFORM_BATCH</code></td>
+    <td>CG works for uniform-length batches only (not mixed)</td>
+  </tr>
+  <tr>
+    <td>FlashInfer (with TRT-LLM)</td>
+    <td><code class="inline-code">UNIFORM_BATCH</code></td>
+    <td>CG works for decode and uniform prefill</td>
+  </tr>
+  <tr>
+    <td>FlashInfer (without TRT-LLM)</td>
+    <td><code class="inline-code">UNIFORM_SINGLE_TOKEN_DECODE</code></td>
+    <td>CG only for pure single-token decode</td>
+  </tr>
+  <tr>
+    <td>FlashMLA</td>
+    <td><code class="inline-code">UNIFORM_BATCH</code></td>
+    <td>Persistent CUDA graph buffers for tile scheduler metadata</td>
+  </tr>
+  <tr>
+    <td>CUTLASS MLA</td>
+    <td><code class="inline-code">UNIFORM_SINGLE_TOKEN_DECODE</code></td>
+    <td>Decode-only CUDA graph with 128 MB workspace</td>
+  </tr>
+  <tr>
+    <td>Triton MLA</td>
+    <td><code class="inline-code">UNIFORM_SINGLE_TOKEN_DECODE</code></td>
+    <td>Default (inherited from MLACommonMetadataBuilder)</td>
+  </tr>
+</table>
+
+<h3>Key Configuration Environment Variables</h3>
+
+<table>
+  <tr>
+    <th>Variable</th>
+    <th>Effect</th>
+  </tr>
+  <tr>
+    <td><code class="inline-code">VLLM_KV_CACHE_LAYOUT</code></td>
+    <td>Force NHD or HND layout (auto-detected per backend otherwise)</td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE</code></td>
+    <td>FlashInfer workspace size in bytes (default varies by platform)</td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">VLLM_BATCH_INVARIANT</code></td>
+    <td>Force deterministic output (limits splits to 1, enlarges workspace to 2 GB)</td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">--attention-backend</code></td>
+    <td>Override auto-selection with a specific backend name</td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">FORCE_NUM_KV_SPLITS</code></td>
+    <td>Override CUTLASS MLA split-K count (default: auto-detect)</td>
+  </tr>
+</table>
+
+<!-- Summary Architecture Diagram -->
+<h3>Architecture Overview</h3>
+
+<div class="diagram-container">
+  <svg viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg">
+    <rect width="900" height="420" rx="8" fill="#0d1117"/>
+    <text x="450" y="28" fill="#fff" font-size="14" text-anchor="middle" font-weight="bold">vLLM V1 Attention Architecture</text>
+
+    <!-- Layer 1: Model layer -->
+    <rect x="250" y="48" width="400" height="36" rx="6" fill="#1a2744" stroke="#b388ff" stroke-width="2"/>
+    <text x="450" y="71" fill="#b388ff" font-size="12" text-anchor="middle" font-weight="bold">Attention Layer (model_executor/layers/attention/)</text>
+
+    <line x1="450" y1="84" x2="450" y2="108" stroke="#8fa4c0" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+
+    <!-- Layer 2: Selector -->
+    <rect x="280" y="108" width="340" height="36" rx="6" fill="#1a2744" stroke="#6ec6ff" stroke-width="1.5"/>
+    <text x="450" y="131" fill="#6ec6ff" font-size="11" text-anchor="middle">get_attn_backend() -- selector.py + cuda.py</text>
+
+    <line x1="450" y1="144" x2="450" y2="168" stroke="#8fa4c0" stroke-width="1.5" marker-end="url(#arrowGray)"/>
+
+    <!-- Layer 3: AttentionBackend (abstract) -->
+    <rect x="250" y="168" width="400" height="36" rx="6" fill="#16213e" stroke="#ff9f43" stroke-width="1.5"/>
+    <text x="450" y="191" fill="#ff9f43" font-size="11" text-anchor="middle">AttentionBackend (get_impl_cls, get_builder_cls, validate...)</text>
+
+    <!-- Fan out to concrete backends -->
+    <line x1="300" y1="204" x2="100" y2="245" stroke="#6ec6ff" stroke-width="1"/>
+    <line x1="400" y1="204" x2="340" y2="245" stroke="#ff9f43" stroke-width="1"/>
+    <line x1="500" y1="204" x2="560" y2="245" stroke="#b388ff" stroke-width="1"/>
+    <line x1="600" y1="204" x2="800" y2="245" stroke="#66bb6a" stroke-width="1"/>
+
+    <!-- FlashAttention -->
+    <rect x="20" y="245" width="170" height="55" rx="6" fill="#1a2744" stroke="#6ec6ff" stroke-width="1.5"/>
+    <text x="105" y="265" fill="#6ec6ff" font-size="10" text-anchor="middle" font-weight="bold">FlashAttention</text>
+    <text x="105" y="280" fill="#8fa4c0" font-size="9" text-anchor="middle">FA2 (SM80+) / FA3 (SM90+)</text>
+    <text x="105" y="293" fill="#8fa4c0" font-size="9" text-anchor="middle">AOT sched, cascade</text>
+
+    <!-- FlashInfer -->
+    <rect x="210" y="245" width="170" height="55" rx="6" fill="#1a2744" stroke="#ff9f43" stroke-width="1.5"/>
+    <text x="295" y="265" fill="#ff9f43" font-size="10" text-anchor="middle" font-weight="bold">FlashInfer</text>
+    <text x="295" y="280" fill="#8fa4c0" font-size="9" text-anchor="middle">FI native + TRT-LLM</text>
+    <text x="295" y="293" fill="#8fa4c0" font-size="9" text-anchor="middle">Plan/Execute, HND</text>
+
+    <!-- MLA backends -->
+    <rect x="400" y="245" width="290" height="55" rx="6" fill="#1a2744" stroke="#b388ff" stroke-width="1.5"/>
+    <text x="545" y="265" fill="#b388ff" font-size="10" text-anchor="middle" font-weight="bold">MLA Backends (DeepSeek)</text>
+    <text x="545" y="280" fill="#8fa4c0" font-size="9" text-anchor="middle">FlashMLA | CUTLASS MLA | FlashInfer MLA</text>
+    <text x="545" y="293" fill="#8fa4c0" font-size="9" text-anchor="middle">Triton MLA (fallback) | +Sparse variants</text>
+
+    <!-- Fallback -->
+    <rect x="710" y="245" width="170" height="55" rx="6" fill="#1a2744" stroke="#66bb6a" stroke-width="1.5"/>
+    <text x="795" y="265" fill="#66bb6a" font-size="10" text-anchor="middle" font-weight="bold">Fallback</text>
+    <text x="795" y="280" fill="#8fa4c0" font-size="9" text-anchor="middle">Triton Attn, Flex Attn</text>
+    <text x="795" y="293" fill="#8fa4c0" font-size="9" text-anchor="middle">ROCm, CPU, ...</text>
+
+    <!-- Down to metadata + forward -->
+    <line x1="105" y1="300" x2="105" y2="335" stroke="#6ec6ff" stroke-width="1" marker-end="url(#arrowBlue)"/>
+    <line x1="295" y1="300" x2="295" y2="335" stroke="#ff9f43" stroke-width="1" marker-end="url(#arrowOrange)"/>
+    <line x1="545" y1="300" x2="545" y2="335" stroke="#b388ff" stroke-width="1"/>
+
+    <!-- Bottom layer: execution -->
+    <rect x="20" y="335" width="860" height="70" rx="8" fill="#16213e" stroke="#2d3e5e" stroke-width="1"/>
+    <text x="450" y="358" fill="#fff" font-size="11" text-anchor="middle" font-weight="bold">Per-Step Execution</text>
+
+    <text x="105" y="378" fill="#6ec6ff" font-size="9" text-anchor="middle">MetadataBuilder.build()</text>
+    <text x="105" y="393" fill="#8fa4c0" font-size="9" text-anchor="middle">-> FlashAttentionMetadata</text>
+
+    <text x="295" y="378" fill="#ff9f43" font-size="9" text-anchor="middle">MetadataBuilder.build()</text>
+    <text x="295" y="393" fill="#8fa4c0" font-size="9" text-anchor="middle">-> FlashInferMetadata</text>
+
+    <text x="545" y="378" fill="#b388ff" font-size="9" text-anchor="middle">MLACommonBuilder.build()</text>
+    <text x="545" y="393" fill="#8fa4c0" font-size="9" text-anchor="middle">-> MLACommonMetadata + decode</text>
+
+    <text x="795" y="378" fill="#66bb6a" font-size="9" text-anchor="middle">Backend.build()</text>
+    <text x="795" y="393" fill="#8fa4c0" font-size="9" text-anchor="middle">-> Backend-specific metadata</text>
+
+    <!-- Arrow defs -->
+    <defs>
+      <marker id="arrowGray" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8fa4c0"/></marker>
+    </defs>
+  </svg>
+  <div class="diagram-label">From model layer to kernel dispatch: selector picks a backend, builder prepares metadata, impl runs the kernel.</div>
+</div>
+
+<h3>Source File Reference</h3>
+
+<table>
+  <tr>
+    <th>File</th>
+    <th>Purpose</th>
+    <th>Key Classes</th>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/selector.py</code></td>
+    <td>Entry point for backend selection</td>
+    <td><code class="inline-code">get_attn_backend()</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/registry.py</code></td>
+    <td>Enum of all backend class paths</td>
+    <td><code class="inline-code">AttentionBackendEnum</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">platforms/cuda.py</code></td>
+    <td>GPU-specific priority ordering</td>
+    <td><code class="inline-code">_get_backend_priorities()</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/flash_attn.py</code></td>
+    <td>FlashAttention 2/3 implementation</td>
+    <td><code class="inline-code">FlashAttentionBackend</code>, <code class="inline-code">FlashAttentionImpl</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/flashinfer.py</code></td>
+    <td>FlashInfer + TRT-LLM implementation</td>
+    <td><code class="inline-code">FlashInferBackend</code>, <code class="inline-code">FlashInferImpl</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/utils.py</code></td>
+    <td>KV cache layout, per-layer params, local attention</td>
+    <td><code class="inline-code">get_kv_cache_layout()</code>, <code class="inline-code">PerLayerParameters</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/mla/flashmla.py</code></td>
+    <td>FlashMLA for DeepSeek (SM90/100)</td>
+    <td><code class="inline-code">FlashMLABackend</code>, <code class="inline-code">FlashMLAImpl</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/mla/cutlass_mla.py</code></td>
+    <td>CUTLASS MLA for Blackwell only</td>
+    <td><code class="inline-code">CutlassMLABackend</code>, <code class="inline-code">CutlassMLAImpl</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">v1/attention/backends/mla/triton_mla.py</code></td>
+    <td>Triton MLA fallback (any GPU)</td>
+    <td><code class="inline-code">TritonMLABackend</code>, <code class="inline-code">TritonMLAImpl</code></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">model_executor/layers/attention/mla_attention.py</code></td>
+    <td>MLA common base classes + algorithm docs</td>
+    <td><code class="inline-code">MLACommonBackend</code>, <code class="inline-code">MLACommonImpl</code></td>
+  </tr>
+</table>
+
+
+</div><!-- container -->
+
+<footer>
+  vLLM V1 Attention Backends -- Deep Dive from Source Code | Generated from vllm/v1/attention/backends/
+</footer>
+
+</body>
+</html>
