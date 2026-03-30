@@ -764,14 +764,56 @@ python -m vidur.main \
 
         <!-- Output of Step 1 -->
         <h4 style="color:#2ecc71"><span class="i18n" data-en="Output &rarr; Request Object" data-zh="輸出 &rarr; Request 物件">Output &rarr; Request Object</span></h4>
+        <p><span class="i18n"
+          data-en="Defined in <code class='inline-code'>vidur/entities/request.py</code>. At this stage only the identity and token fields are set; timing/DAG fields are populated in later steps."
+          data-zh="定義於 <code class='inline-code'>vidur/entities/request.py</code>。此階段僅設定身份與 token 欄位；時序/DAG 欄位在後續步驟中填入。">Defined in <code class="inline-code">vidur/entities/request.py</code>. At this stage only the identity and token fields are set; timing/DAG fields are populated in later steps.</span></p>
         <pre><code>Request(
-  _id: <span class="ty">int</span>              <span class="cm"># auto-incremented unique ID</span>
-  _arrived_at: <span class="ty">float</span>      <span class="cm"># arrival timestamp (seconds)</span>
-  _num_prefill_tokens: <span class="ty">int</span> <span class="cm"># input tokens</span>
-  _num_decode_tokens: <span class="ty">int</span>  <span class="cm"># output tokens</span>
-  dag: nx.DiGraph()       <span class="cm"># empty, will be populated</span>
-  request_type: RequestType <span class="cm"># PREFILL / DECODE / MIXED</span>
+  <span class="cm"># ── Identity &amp; tokens (set at creation) ──</span>
+  _id: <span class="ty">int</span>                    <span class="cm"># auto-incremented unique ID</span>
+  _arrived_at: <span class="ty">float</span>            <span class="cm"># arrival timestamp (seconds)</span>
+  _num_prefill_tokens: <span class="ty">int</span>       <span class="cm"># input / prompt tokens</span>
+  _num_decode_tokens: <span class="ty">int</span>        <span class="cm"># output / generation tokens</span>
+  _num_processed_tokens: <span class="ty">int</span> = 0 <span class="cm"># tokens processed so far</span>
+
+  <span class="cm"># ── DAG (empty now, populated in Step 2) ──</span>
+  dag: nx.DiGraph()              <span class="cm"># task dependency graph</span>
+  node_id: <span class="ty">int</span> = 0              <span class="cm"># counter for unique node IDs in DAG</span>
+  nodes: <span class="ty">dict</span> = {}              <span class="cm"># node_id → Node object mapping</span>
+  root_node: Node = <span class="kw">None</span>        <span class="cm"># entry point (PromptTask)</span>
+  request_type: RequestType      <span class="cm"># PREFILL=1 / DECODE=2 / MIXED=0</span>
+
+  <span class="cm"># ── Replica assignment (set in Step 2) ──</span>
+  prefill_replica_id: <span class="ty">int</span> = <span class="kw">None</span>
+  decode_replica_id: <span class="ty">int</span> = <span class="kw">None</span>
+
+  <span class="cm"># ── Timing fields (populated in Steps 3–6) ──</span>
+  _scheduled_at: <span class="ty">float</span> = 0          <span class="cm"># first scheduling time</span>
+  _prefill_completed_at: <span class="ty">float</span> = 0  <span class="cm"># TTFT base timestamp</span>
+  _completed_at: <span class="ty">float</span> = 0          <span class="cm"># request completion time</span>
+  _execution_time: <span class="ty">float</span> = 0        <span class="cm"># GPU execution time</span>
+  _model_execution_time: <span class="ty">float</span> = 0  <span class="cm"># model-specific execution time</span>
+  _scheduling_delay: <span class="ty">float</span> = 0      <span class="cm"># wait before first scheduling</span>
+  _preempted_time: <span class="ty">float</span> = 0        <span class="cm"># time lost to preemption</span>
+  prefill_arrived_at: <span class="ty">float</span>         <span class="cm"># prefill start (= arrived_at)</span>
+  decode_arrived_at: <span class="ty">float</span> = inf    <span class="cm"># decode start (after KV transfer)</span>
+
+  <span class="cm"># ── PD communication (set in Step 5) ──</span>
+  pd_p2p_comm_size: <span class="ty">float</span> = inf    <span class="cm"># KV cache transfer bytes</span>
+  pd_p2p_comm_time: <span class="ty">float</span> = inf    <span class="cm"># KV cache transfer time (s)</span>
+  pd_p2p_comm_bandwidth: <span class="ty">float</span> = 0 <span class="cm"># effective bandwidth</span>
+  pd_p2p_bytes_per_token: <span class="ty">int</span> = <span class="kw">None</span> <span class="cm"># 2 (fp16) / 4 (fp32) / 8 (fp64)</span>
+  pd_p2p_comm_dtype: <span class="ty">str</span> = <span class="kw">None</span>   <span class="cm"># "float16", "float32", etc.</span>
+
+  <span class="cm"># ── Status flags ──</span>
+  _scheduled: <span class="ty">bool</span> = <span class="kw">False</span>
+  _preempted: <span class="ty">bool</span> = <span class="kw">False</span>
+  _completed: <span class="ty">bool</span> = <span class="kw">False</span>
+  _is_prefill_complete: <span class="ty">bool</span> = <span class="kw">False</span>
+  _num_restarts: <span class="ty">int</span> = 0
 )</code></pre>
+        <p><span class="i18n"
+          data-en="The generator also creates a <code class='inline-code'>RequestArrivalEvent(_time=arrived_at, _request=request)</code> which is pushed into the simulation's min-heap event queue."
+          data-zh="產生器同時建立 <code class='inline-code'>RequestArrivalEvent(_time=arrived_at, _request=request)</code>，推入模擬器的最小堆事件佇列。">The generator also creates a <code class="inline-code">RequestArrivalEvent(_time=arrived_at, _request=request)</code> which is pushed into the simulation's min-heap event queue.</span></p>
       </div><!-- /card -->
     </div>
     <div class="step-connector"></div>
@@ -812,10 +854,78 @@ python -m vidur.main \
           </tr>
         </table>
 
-        <h4 style="color:#2ecc71"><span class="i18n" data-en="Output" data-zh="輸出">Output</span></h4>
+        <h4 style="color:#2ecc71"><span class="i18n" data-en="Output &rarr; Populated DAG" data-zh="輸出 &rarr; 填入的 DAG">Output &rarr; Populated DAG</span></h4>
         <p><span class="i18n"
-          data-en="Sets <code class='inline-code'>request.prefill_replica_id</code> and <code class='inline-code'>request.decode_replica_id</code>. Populates the request DAG with <code class='inline-code'>PromptTask</code> &rarr; <code class='inline-code'>KVCacheTransferFlow</code> &rarr; <code class='inline-code'>TokenTask</code> nodes."
-          data-zh="設定 <code class='inline-code'>request.prefill_replica_id</code> 和 <code class='inline-code'>request.decode_replica_id</code>。在請求 DAG 中填入 <code class='inline-code'>PromptTask</code> &rarr; <code class='inline-code'>KVCacheTransferFlow</code> &rarr; <code class='inline-code'>TokenTask</code> 節點。">Sets <code class="inline-code">request.prefill_replica_id</code> and <code class="inline-code">request.decode_replica_id</code>. Populates the request DAG with <code class="inline-code">PromptTask</code> &rarr; <code class="inline-code">KVCacheTransferFlow</code> &rarr; <code class="inline-code">TokenTask</code> nodes.</span></p>
+          data-en="Sets <code class='inline-code'>request.prefill_replica_id</code> and <code class='inline-code'>request.decode_replica_id</code>, then builds the DAG. The exact DAG shape depends on whether the prefill and decode replicas are the same or different (code in <code class='inline-code'>splitwise_global_scheduler.py</code>):"
+          data-zh="設定 <code class='inline-code'>request.prefill_replica_id</code> 和 <code class='inline-code'>request.decode_replica_id</code>，接著建構 DAG。DAG 的確切形狀取決於前綴計算和解碼副本是否相同（程式碼在 <code class='inline-code'>splitwise_global_scheduler.py</code>）：">Sets <code class="inline-code">request.prefill_replica_id</code> and <code class="inline-code">request.decode_replica_id</code>, then builds the DAG. The exact DAG shape depends on whether the prefill and decode replicas are the same or different (code in <code class="inline-code">splitwise_global_scheduler.py</code>):</span></p>
+
+        <div class="grid-2">
+          <div class="card highlight-blue">
+            <h4><span class="i18n" data-en="Case A: Same Replica (no PD split)" data-zh="情境 A：同一副本（無 PD 分離）">Case A: Same Replica (no PD split)</span></h4>
+            <pre><code>PromptTask ──→ TokenTask
+  <span class="cm"># linked via prefill_task.chain = [decode_task]</span>
+  <span class="cm"># no KV transfer needed</span></code></pre>
+          </div>
+          <div class="card highlight-purple">
+            <h4><span class="i18n" data-en="Case B: Different Replicas (PD disaggregation)" data-zh="情境 B：不同副本（PD 分離）">Case B: Different Replicas (PD disaggregation)</span></h4>
+            <pre><code>PromptTask ──→ KVCacheTransferFlow ──→ TokenTask
+  <span class="cm"># edges in request.dag (nx.DiGraph)</span>
+  <span class="cm"># KV transfer bridges the two replicas</span></code></pre>
+          </div>
+        </div>
+
+        <h4><span class="i18n" data-en="DAG Node Structures" data-zh="DAG 節點結構">DAG Node Structures</span></h4>
+        <div class="file-tag">vidur/entities/task.py</div>
+        <div class="file-tag">vidur/entities/flow.py</div>
+        <div class="file-tag">vidur/entities/node.py</div>
+        <pre><code><span class="cm"># ── Base Node (all DAG nodes inherit from this) ──</span>
+Node(BaseEntity):
+  node_id: <span class="ty">int</span>                <span class="cm"># unique ID within this request's DAG</span>
+  state: NodeState             <span class="cm"># NONE=0 → QUEUED=1 → RUNNING=2 → COMPLETED=4</span>
+                               <span class="cm">#   (or BLOCKED=3 if preempted, ABORTED=5)</span>
+  request: Request             <span class="cm"># back-reference to owning request</span>
+  chain: <span class="ty">list</span>[Node]            <span class="cm"># consecutive nodes (used in same-replica case)</span>
+  num_preemptions: <span class="ty">int</span> = 0
+
+<span class="cm"># ── PromptTask (prefill stage) ──</span>
+PromptTask(Task → Node):
+  task_type: TaskType = PROMPT <span class="cm"># = 1</span>
+  prompt_size: <span class="ty">int</span>             <span class="cm"># = request.num_prefill_tokens</span>
+  tokens_per_iteration: <span class="ty">int</span>    <span class="cm"># = prompt_size (process all at once)</span>
+  processing_tokens: <span class="ty">int</span> = 0   <span class="cm"># tokens being processed this iteration</span>
+  processed_tokens: <span class="ty">int</span> = 0    <span class="cm"># total tokens processed</span>
+  generating_tokens: <span class="ty">int</span> = 0   <span class="cm"># tokens being generated this iteration</span>
+  generated_tokens: <span class="ty">int</span> = 0    <span class="cm"># total generated (max 1 for prefill)</span>
+  is_prefill_complete: <span class="ty">bool</span> = <span class="kw">False</span>
+  cleanup_memory: <span class="ty">bool</span> = <span class="kw">False</span> <span class="cm"># keep KV cache for decode</span>
+  batch_size: <span class="ty">int</span> = 1
+  duration: <span class="ty">float</span> = 0.0       <span class="cm"># set by execution time predictor</span>
+
+  <span class="cm"># memory = 2 × num_tokens × mlp_hidden_dim × num_layers × bytes_per_token</span>
+
+<span class="cm"># ── TokenTask (decode stage) ──</span>
+TokenTask(Task → Node):
+  task_type: TaskType = TOKEN  <span class="cm"># = 2</span>
+  token_size: <span class="ty">int</span>              <span class="cm"># = request.num_decode_tokens − 1</span>
+                               <span class="cm">#   (1 token already generated in prefill)</span>
+  tokens_per_iteration: <span class="ty">int</span> = 1 <span class="cm"># auto-regressive: 1 token at a time</span>
+  is_prefill_complete: <span class="ty">bool</span> = <span class="kw">True</span>
+  <span class="cm"># same processing/generated fields as PromptTask</span>
+
+<span class="cm"># ── KVCacheTransferFlow (PD transfer) ──</span>
+KVCacheTransferFlow(Flow → Node):
+  flow_type: FlowType = KVCacheTransfer  <span class="cm"># = 1</span>
+  src: Replica                 <span class="cm"># prefill replica</span>
+  dest: Replica                <span class="cm"># decode replica</span>
+  size: <span class="ty">float</span>                  <span class="cm"># KV cache size in bytes</span>
+                               <span class="cm">#   = estimate_kv_cache_size(prefill_tokens, replica)</span>
+  duration: <span class="ty">float</span> = 0.0        <span class="cm"># set after transfer simulation</span>
+  notify: <span class="ty">bool</span> = <span class="kw">False</span>
+  batch_size: <span class="ty">int</span> = 1</code></pre>
+
+        <p><span class="i18n"
+          data-en="After DAG construction, the global scheduler emits a <code class='inline-code'>GlobalScheduleEvent</code> which triggers <code class='inline-code'>ReplicaScheduleEvent</code>(s) for the assigned replica(s)."
+          data-zh="DAG 建構完成後，全域排程器發出 <code class='inline-code'>GlobalScheduleEvent</code>，觸發指派副本的 <code class='inline-code'>ReplicaScheduleEvent</code>。">After DAG construction, the global scheduler emits a <code class="inline-code">GlobalScheduleEvent</code> which triggers <code class="inline-code">ReplicaScheduleEvent</code>(s) for the assigned replica(s).</span></p>
       </div>
     </div>
     <div class="step-connector"></div>
@@ -860,10 +970,58 @@ python -m vidur.main \
           </tr>
         </table>
 
-        <h4 style="color:#2ecc71"><span class="i18n" data-en="Output &rarr; Batch Object" data-zh="輸出 &rarr; Batch 物件">Output &rarr; Batch Object</span></h4>
+        <h4 style="color:#2ecc71"><span class="i18n" data-en="Output &rarr; Batch Object + Event Chain" data-zh="輸出 &rarr; Batch 物件與事件鏈">Output &rarr; Batch Object + Event Chain</span></h4>
+
+        <div class="file-tag">vidur/entities/batch.py</div>
+        <pre><code>Batch(BaseEntity):
+  _replica_id: <span class="ty">int</span>              <span class="cm"># which replica executes this batch</span>
+  _requests: List[Request]       <span class="cm"># requests grouped into this batch</span>
+  _num_tokens: List[<span class="ty">int</span>]         <span class="cm"># tokens per request in this batch</span>
+  _total_num_tokens: <span class="ty">int</span>         <span class="cm"># sum of all tokens</span>
+  _num_prefill_tokens: <span class="ty">int</span>       <span class="cm"># prefill tokens (non-completed only)</span>
+  _total_num_tokens_rounded: <span class="ty">int</span> <span class="cm"># tokens rounded to 8-token boundary</span>
+  _scheduled_at: <span class="ty">float</span> = <span class="kw">None</span>   <span class="cm"># when batch was scheduled</span>
+  _completed_at: <span class="ty">float</span> = <span class="kw">None</span>   <span class="cm"># when batch completed</span>
+
+  <span class="cm"># Properties:</span>
+  num_decode_tokens → _total_num_tokens − _num_prefill_tokens
+  all_requests_completed → <span class="ty">bool</span>  <span class="cm"># True if all done</span>
+  preempted_requests → List[Request]
+  completed_requests → List[Request]</code></pre>
+
+        <h4><span class="i18n" data-en="Event Chain (discrete-event simulation)" data-zh="事件鏈（離散事件模擬）">Event Chain (discrete-event simulation)</span></h4>
         <p><span class="i18n"
-          data-en="A <code class='inline-code'>Batch</code> containing grouped requests, scheduled as a <code class='inline-code'>BatchExecutionEvent</code> in the event queue."
-          data-zh="一個包含分組請求的 <code class='inline-code'>Batch</code>，作為 <code class='inline-code'>BatchExecutionEvent</code> 加入事件佇列。">A <code class="inline-code">Batch</code> containing grouped requests, scheduled as a <code class="inline-code">BatchExecutionEvent</code> in the event queue.</span></p>
+          data-en="The simulation is event-driven. Each event generates successor events that are pushed into a min-heap sorted by timestamp. The full chain from scheduling to completion:"
+          data-zh="模擬為事件驅動。每個事件產生後繼事件，推入按時間戳排序的最小堆。從排程到完成的完整事件鏈：">The simulation is event-driven. Each event generates successor events that are pushed into a min-heap sorted by timestamp. The full chain from scheduling to completion:</span></p>
+        <div class="file-tag">vidur/events/</div>
+        <pre><code><span class="cm"># ── Event chain for a single batch ──</span>
+
+RequestArrivalEvent(time, request)
+  → GlobalScheduleEvent(time)                  <span class="cm"># route to replica</span>
+    → ReplicaScheduleEvent(time, replica_id)   <span class="cm"># build batch</span>
+      → BatchStageArrivalEvent(time, replica_id, stage_id=0, batch)
+        → ReplicaStageScheduleEvent(time, replica_id, stage_id)
+          <span class="cm"># calls execution_time_predictor → gets duration</span>
+          → BatchStageEndEvent(time + duration, replica_id, stage_id, batch)
+
+<span class="cm"># If pipeline has more stages (PP > 1):</span>
+BatchStageEndEvent → BatchStageArrivalEvent(next stage) + ReplicaStageScheduleEvent(current)
+
+<span class="cm"># If last pipeline stage:</span>
+BatchStageEndEvent → BatchEndEvent(time, replica_id, batch)
+
+<span class="cm"># BatchEndEvent handles PD logic:</span>
+BatchEndEvent:
+  <span class="cm"># For each request that completed prefill:</span>
+  <span class="cm">#   calculates pd_p2p_comm_time</span>
+  <span class="cm">#   sets request.decode_arrived_at = prefill_completed_at + pd_p2p_comm_time</span>
+  <span class="cm">#   → ReplicaScheduleEvent(decode_arrived_at, decode_replica_id)</span></code></pre>
+
+        <div class="callout" style="margin-top:.5rem">
+          <span class="i18n"
+            data-en="<strong>BaseEvent fields:</strong> Every event carries <code class='inline-code'>_time</code> (float), <code class='inline-code'>_id</code> (auto-incremented int), <code class='inline-code'>_event_type</code> (EventType enum), and <code class='inline-code'>_priority_number</code> = (time, id, event_type) for min-heap ordering."
+            data-zh="<strong>BaseEvent 欄位：</strong>每個事件攜帶 <code class='inline-code'>_time</code>（float）、<code class='inline-code'>_id</code>（自動遞增 int）、<code class='inline-code'>_event_type</code>（EventType 列舉）及 <code class='inline-code'>_priority_number</code> = (time, id, event_type) 用於最小堆排序。"><strong>BaseEvent fields:</strong> Every event carries <code class="inline-code">_time</code> (float), <code class="inline-code">_id</code> (auto-incremented int), <code class="inline-code">_event_type</code> (EventType enum), and <code class="inline-code">_priority_number</code> = (time, id, event_type) for min-heap ordering.</span>
+        </div>
       </div>
     </div>
     <div class="step-connector"></div>
