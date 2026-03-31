@@ -360,8 +360,10 @@ footer{background:var(--dark);border-top:1px solid var(--border);padding:2rem;te
           <li><a href="#simai-bypasses"><span class="i18n" data-en="How AICB Bypasses This Problem" data-zh="AICB 如何繞開這個問題">How AICB Bypasses This Problem</span></a></li>
         </ul>
       </li>
-      <li><a href="#sklearn-training"><span class="i18n" data-en="Step 2: Training Prediction Models (Vidur)" data-zh="步驟二：訓練預測模型（Vidur）">Step 2: Training Prediction Models (Vidur)</span></a></li>
-      <li><a href="#per-request-prediction"><span class="i18n" data-en="Step 3: Per-Request Prediction from Trace" data-zh="步驟三：從 Trace 逐 Request 預測">Step 3: Per-Request Prediction from Trace</span></a></li>
+      <li><a href="#batching"><span class="i18n" data-en="Scheduling &amp; Batching Strategies" data-zh="排程與 Batching 策略">Scheduling &amp; Batching Strategies</span></a></li>
+      <li><a href="#compute-time"><span class="i18n" data-en="Compute Time Calculation in Detail" data-zh="計算時間的詳細計算方式">Compute Time Calculation in Detail</span></a></li>
+      <li><a href="#sklearn-training"><span class="i18n" data-en="Training Prediction Models (Vidur)" data-zh="訓練預測模型（Vidur）">Training Prediction Models (Vidur)</span></a></li>
+      <li><a href="#per-request-prediction"><span class="i18n" data-en="Per-Request Prediction from Trace" data-zh="從 Trace 逐 Request 預測">Per-Request Prediction from Trace</span></a></li>
       <li><a href="#token-aggregation"><span class="i18n" data-en="How Tokens are Aggregated in a Batch" data-zh="Batch 中 Token 的聚合方式">How Tokens are Aggregated in a Batch</span></a></li>
       <li><a href="#supported-models"><span class="i18n" data-en="Supported GPU &amp; LLM Models" data-zh="支援的 GPU 與 LLM 模型">Supported GPU &amp; LLM Models</span></a></li>
       <li><a href="#aicb-vs-vidur"><span class="i18n" data-en="AICB vs Vidur: Two Prediction Paths" data-zh="AICB vs Vidur：兩條預測路徑">AICB vs Vidur: Two Prediction Paths</span></a></li>
@@ -678,11 +680,252 @@ compute_cache = {
   </div>
 
   <!-- ============================================================== -->
-  <!-- SECTION 4: SKLEARN TRAINING                                     -->
+  <!-- SECTION 4: SCHEDULING & BATCHING                                -->
+  <!-- ============================================================== -->
+  <div class="section" id="batching">
+    <span class="section-label"><span class="i18n" data-en="Section 4" data-zh="第四節">Section 4</span></span>
+    <h2><span class="i18n" data-en="Scheduling &amp; Batching Strategies" data-zh="排程與 Batching 策略">Scheduling &amp; Batching Strategies</span></h2>
+
+    <p><span class="i18n"
+      data-en="Before predicting execution time, SimAI must decide <strong>which requests go into each batch</strong>. This is handled by the replica scheduler, which implements one of three strategies. Each strategy has different constraints on how prefill and decode requests are mixed."
+      data-zh="在預測執行時間之前，SimAI 必須決定<strong>哪些 request 進入每個 batch</strong>。這由 replica scheduler 負責，它實作了三種策略之一。每種策略對 prefill 和 decode request 的混合方式有不同的限制。">Before predicting execution time, SimAI must decide <strong>which requests go into each batch</strong>. This is handled by the replica scheduler, which implements one of three strategies. Each strategy has different constraints on how prefill and decode requests are mixed.</span></p>
+
+    <h3><span class="i18n" data-en="Common Constraints" data-zh="共同限制">Common Constraints</span></h3>
+
+    <span class="file-tag">vidur/config/config.py</span>
+<pre><span class="kw">class</span> <span class="cl">BaseReplicaSchedulerConfig</span>:
+    batch_size_cap: <span class="ty">int</span> = <span class="nr">128</span>             <span class="cm"># max requests per batch</span>
+    block_size: <span class="ty">int</span> = <span class="nr">16</span>                  <span class="cm"># KV cache block size (tokens)</span>
+    watermark_blocks_fraction: <span class="ty">float</span> = <span class="nr">0.01</span>  <span class="cm"># reserved memory fraction</span></pre>
+
+    <p><span class="i18n"
+      data-en="Memory is the hard constraint: each request occupies KV cache blocks proportional to its context length. The scheduler must ensure total allocated blocks do not exceed GPU memory (minus a watermark reserve)."
+      data-zh="記憶體是硬性限制：每個 request 佔用的 KV cache block 與其 context 長度成正比。排程器必須確保分配的總 block 數不超過 GPU 記憶體（減去 watermark 保留量）。">Memory is the hard constraint: each request occupies KV cache blocks proportional to its context length. The scheduler must ensure total allocated blocks do not exceed GPU memory (minus a watermark reserve).</span></p>
+
+    <h3><span class="i18n" data-en="Strategy A: vLLM — Token-Budget Continuous Batching" data-zh="策略 A：vLLM — Token-Budget 連續 Batching">Strategy A: vLLM — Token-Budget Continuous Batching</span></h3>
+
+    <span class="file-tag">vidur/scheduler/replica_scheduler/vllm_replica_scheduler.py</span>
+
+    <p><span class="i18n"
+      data-en="The vLLM scheduler packs requests until a <strong>token budget</strong> is exhausted. Prefill and decode requests can coexist in the same batch."
+      data-zh="vLLM 排程器將 request 填入 batch 直到 <strong>token budget</strong> 耗盡。Prefill 和 decode request 可以共存於同一個 batch。">The vLLM scheduler packs requests until a <strong>token budget</strong> is exhausted. Prefill and decode requests can coexist in the same batch.</span></p>
+
+<pre><span class="cm"># Core constraint:</span>
+num_batch_tokens = len(all_tokens_list) &times; max(all_tokens_list)
+<span class="cm"># Must satisfy: num_batch_tokens &le; max_tokens_in_batch (default 4096)</span>
+
+<span class="cm"># Per-request token count:</span>
+<span class="kw">if</span> request.is_prefill_complete:
+    next_tokens = <span class="nr">1</span>               <span class="cm"># decode: 1 token per iteration</span>
+<span class="kw">else</span>:
+    next_tokens = request.num_prefill_tokens  <span class="cm"># prefill: all tokens at once</span></pre>
+
+    <div class="callout">
+      <span class="i18n"
+        data-en="The <code>num_requests &times; max_seq_len</code> formulation means a single long prefill request can consume the entire token budget, blocking shorter requests. This is the classic vLLM V1 scheduling behavior."
+        data-zh="<code>num_requests &times; max_seq_len</code> 的算法意味著一個長的 prefill request 可能消耗整個 token budget，阻塞較短的 request。這是經典的 vLLM V1 排程行為。">The <code>num_requests &times; max_seq_len</code> formulation means a single long prefill request can consume the entire token budget, blocking shorter requests. This is the classic vLLM V1 scheduling behavior.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="Strategy B: Sarathi — Chunk-Based Scheduling" data-zh="策略 B：Sarathi — Chunk-Based 排程">Strategy B: Sarathi — Chunk-Based Scheduling</span></h3>
+
+    <span class="file-tag">vidur/scheduler/replica_scheduler/sarathi_replica_scheduler.py</span>
+
+    <p><span class="i18n"
+      data-en="Sarathi splits long prefills into fixed-size <strong>chunks</strong>, preventing a single prefill from monopolizing the GPU. Decode requests are always processed (1 token each), and remaining budget goes to prefill chunks."
+      data-zh="Sarathi 將長 prefill 切成固定大小的 <strong>chunk</strong>，防止單一 prefill 獨佔 GPU。Decode request 始終被處理（每次 1 token），剩餘的 budget 分配給 prefill chunk。">Sarathi splits long prefills into fixed-size <strong>chunks</strong>, preventing a single prefill from monopolizing the GPU. Decode requests are always processed (1 token each), and remaining budget goes to prefill chunks.</span></p>
+
+<pre><span class="cm"># Prefill tokens capped by remaining chunk budget:</span>
+next_tokens = <span class="fn">min</span>(
+    request.num_prefill_tokens - request.num_processed_tokens,
+    chunk_size - num_batch_tokens,      <span class="cm"># remaining budget in this chunk</span>
+)
+<span class="cm"># chunk_size default: 512 tokens</span></pre>
+
+    <h3><span class="i18n" data-en="Strategy C: LightLLM — Separate Prefill/Decode Batches" data-zh="策略 C：LightLLM — 分離 Prefill/Decode Batch">Strategy C: LightLLM — Separate Prefill/Decode Batches</span></h3>
+
+    <span class="file-tag">vidur/scheduler/replica_scheduler/lightllm_replica_scheduler.py</span>
+
+    <p><span class="i18n"
+      data-en="LightLLM never mixes prefill and decode in the same batch. It alternates between prefill-only and decode-only batches, with a fairness mechanism to prevent decode starvation."
+      data-zh="LightLLM 從不在同一個 batch 中混合 prefill 和 decode。它在純 prefill batch 和純 decode batch 之間交替，並有公平機制防止 decode 被餓死。">LightLLM never mixes prefill and decode in the same batch. It alternates between prefill-only and decode-only batches, with a fairness mechanism to prevent decode starvation.</span></p>
+
+<pre><span class="kw">def</span> <span class="fn">_get_next_batch</span>(self):
+    <span class="kw">if</span> <span class="kw">not</span> self._preempted_requests:        <span class="cm"># no ongoing decode</span>
+        <span class="kw">return</span> self._get_prefill_batch()
+
+    <span class="kw">if</span> self._num_waiting_iters &ge; max_waiting_iters:
+        <span class="kw">return</span> self._get_prefill_batch()     <span class="cm"># fairness: don't starve prefill</span>
+
+    <span class="kw">return</span> self._get_decode_batch()          <span class="cm"># default: continue decode</span></pre>
+
+    <h3><span class="i18n" data-en="Comparison" data-zh="比較">Comparison</span></h3>
+
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <table>
+      <thead><tr>
+        <th><span class="i18n" data-en="Strategy" data-zh="策略">Strategy</span></th>
+        <th><span class="i18n" data-en="Prefill/Decode Mixing" data-zh="Prefill/Decode 混合">Prefill/Decode Mixing</span></th>
+        <th><span class="i18n" data-en="Prefill Chunking" data-zh="Prefill 分塊">Prefill Chunking</span></th>
+        <th><span class="i18n" data-en="Budget Constraint" data-zh="Budget 限制">Budget Constraint</span></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>vLLM</strong></td>
+          <td style="color:#2ecc71"><span class="i18n" data-en="Mixed" data-zh="混合">Mixed</span></td>
+          <td style="color:#ff6b6b"><span class="i18n" data-en="No (full prefill)" data-zh="否（完整 prefill）">No (full prefill)</span></td>
+          <td><code>n_reqs &times; max_seq &le; 4096</code></td>
+        </tr>
+        <tr>
+          <td><strong>Sarathi</strong></td>
+          <td style="color:#2ecc71"><span class="i18n" data-en="Mixed" data-zh="混合">Mixed</span></td>
+          <td style="color:#2ecc71"><span class="i18n" data-en="Yes (fixed chunks)" data-zh="是（固定 chunk）">Yes (fixed chunks)</span></td>
+          <td><code>total_tokens &le; chunk_size</code></td>
+        </tr>
+        <tr>
+          <td><strong>LightLLM</strong></td>
+          <td style="color:#ff6b6b"><span class="i18n" data-en="Separate batches" data-zh="分開 batch">Separate batches</span></td>
+          <td style="color:#ff6b6b"><span class="i18n" data-en="No" data-zh="否">No</span></td>
+          <td><code>max_tokens &le; 4096</code></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 5: COMPUTE TIME CALCULATION                             -->
+  <!-- ============================================================== -->
+  <div class="section" id="compute-time">
+    <span class="section-label"><span class="i18n" data-en="Section 5" data-zh="第五節">Section 5</span></span>
+    <h2><span class="i18n" data-en="Compute Time Calculation in Detail" data-zh="計算時間的詳細計算方式">Compute Time Calculation in Detail</span></h2>
+
+    <p><span class="i18n"
+      data-en="Once a batch is formed, SimAI computes its execution time by summing per-component predictions. Every component time comes from a <strong>pre-trained polynomial model</strong> looked up by the batch's aggregated token count. Here is the complete formula."
+      data-zh="一旦 batch 形成，SimAI 透過加總各組件的預測來計算執行時間。每個組件的時間都來自<strong>預訓練的多項式模型</strong>，以 batch 的聚合 token 數進行查表。以下是完整公式。">Once a batch is formed, SimAI computes its execution time by summing per-component predictions. Every component time comes from a <strong>pre-trained polynomial model</strong> looked up by the batch's aggregated token count. Here is the complete formula.</span></p>
+
+    <h3><span class="i18n" data-en="Per-Layer Block Time" data-zh="每層 Block 時間">Per-Layer Block Time</span></h3>
+
+    <span class="file-tag">vidur/entities/execution_time.py</span>
+
+    <p><span class="i18n"
+      data-en="Each transformer layer's execution time is the sum of an attention block and an MLP block:"
+      data-zh="每個 transformer 層的執行時間是 attention block 和 MLP block 的加總：">Each transformer layer's execution time is the sum of an attention block and an MLP block:</span></p>
+
+<pre><span class="cm">// Per-layer block time:</span>
+block_time = attention_time + mlp_time + residual_add
+
+<span class="cm">// Attention block (8 sub-components):</span>
+attention_time = pre_proj          <span class="cm">// QKV projection        &larr; f(total_tokens)</span>
+               + post_proj         <span class="cm">// output projection     &larr; f(total_tokens)</span>
+               + rope              <span class="cm">// rotary embedding      &larr; f(total_tokens)</span>
+               + kv_cache_save     <span class="cm">// write K,V to cache    &larr; f(total_tokens)</span>
+               + prefill_attn      <span class="cm">// prefill attention     &larr; f(kv_cache, chunk&sup2;)</span>
+               + decode_attn       <span class="cm">// decode attention      &larr; f(batch_size, kv_cache)</span>
+               + tp_allreduce      <span class="cm">// tensor parallel comm  &larr; f(total_tokens)</span>
+               + attn_norm         <span class="cm">// layer norm            &larr; f(total_tokens)</span>
+
+<span class="cm">// MLP block (5 sub-components):</span>
+mlp_time = up_proj                 <span class="cm">// gate + up projection  &larr; f(total_tokens)</span>
+         + down_proj               <span class="cm">// down projection       &larr; f(total_tokens)</span>
+         + activation              <span class="cm">// SiLU / GeLU           &larr; f(total_tokens)</span>
+         + tp_allreduce            <span class="cm">// tensor parallel comm  &larr; f(total_tokens)</span>
+         + mlp_norm                <span class="cm">// layer norm            &larr; f(total_tokens)</span></pre>
+
+    <h3><span class="i18n" data-en="Total Model Time" data-zh="總模型時間">Total Model Time</span></h3>
+
+<pre><span class="cm">// Standard (dense) models:</span>
+model_time = block_time &times; num_layers_per_pipeline_stage
+           + pipeline_parallel_communication
+
+<span class="cm">// MoE models (DeepSeek, Qwen3-MoE): per-layer calculation</span>
+<span class="cm">// because dense layers and MoE layers have different times</span>
+model_time = &sum; block_time(layer_id) <span class="kw">for</span> layer_id <span class="kw">in</span> [start..end]
+           + pipeline_parallel_communication
+
+<span class="cm">// Final output:</span>
+total_time = model_time + cpu_overhead</pre>
+
+    <h3><span class="i18n" data-en="How Each Component Gets Its Input" data-zh="每個組件如何取得輸入">How Each Component Gets Its Input</span></h3>
+
+    <p><span class="i18n"
+      data-en="The key insight is that different components aggregate the batch's tokens differently:"
+      data-zh="關鍵洞察是不同組件對 batch 的 token 有不同的聚合方式：">The key insight is that different components aggregate the batch's tokens differently:</span></p>
+
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <table>
+      <thead><tr>
+        <th><span class="i18n" data-en="Component" data-zh="組件">Component</span></th>
+        <th><span class="i18n" data-en="Input Features" data-zh="輸入特徵">Input Features</span></th>
+        <th><span class="i18n" data-en="How Aggregated from Batch" data-zh="如何從 Batch 聚合">How Aggregated from Batch</span></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="i18n" data-en="MLP / Projection / Norm" data-zh="MLP / 投影 / Norm">MLP / Projection / Norm</span></td>
+          <td><code>(total_tokens,)</code></td>
+          <td><span class="i18n" data-en="Sum all tokens, round to multiple of 8" data-zh="加總所有 token，四捨五入到 8 的倍數">Sum all tokens, round to multiple of 8</span></td>
+        </tr>
+        <tr>
+          <td>Prefill Attention</td>
+          <td><code>(kv_cache, chunk_size&sup2;)</code></td>
+          <td><span class="i18n" data-en="kv = &sum;per-request context; chunk = L2 norm then squared" data-zh="kv = 各 request context 加總；chunk = L2 norm 後平方">kv = &sum;per-request context; chunk = L2 norm then squared</span></td>
+        </tr>
+        <tr>
+          <td>Decode Attention</td>
+          <td><code>(batch_size, avg_kv)</code></td>
+          <td><span class="i18n" data-en="Count decode requests; average their kv_cache sizes" data-zh="計算 decode request 數；取其 kv_cache 大小的平均值">Count decode requests; average their kv_cache sizes</span></td>
+        </tr>
+        <tr>
+          <td>TP AllReduce</td>
+          <td><code>(total_tokens,)</code></td>
+          <td><span class="i18n" data-en="Same as MLP (message size &prop; tokens)" data-zh="同 MLP（訊息大小 &prop; token 數）">Same as MLP (message size &prop; tokens)</span></td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3><span class="i18n" data-en="Concrete Example: Decode Attention Lookup" data-zh="具體範例：Decode Attention 查表">Concrete Example: Decode Attention Lookup</span></h3>
+
+    <span class="file-tag">vidur/execution_time_predictor/sklearn_execution_time_predictor.py</span>
+
+<pre><span class="kw">def</span> <span class="fn">_get_attention_decode_execution_time</span>(self, batch):
+    decode_batch_size, avg_kv_cache = self._get_batch_decode_attention_params(batch)
+    <span class="kw">if</span> decode_batch_size == <span class="nr">0</span>:
+        <span class="kw">return</span> <span class="nr">0</span>
+
+    base_time = self._predictions[<span class="st">"attn_decode"</span>][(decode_batch_size, avg_kv_cache)]
+    <span class="cm"># Add batching overhead when batch_size > 1</span>
+    <span class="kw">return</span> base_time &times; (<span class="nr">1</span> + overhead_fraction &times; <span class="fn">int</span>(decode_batch_size > <span class="nr">1</span>))</pre>
+
+    <h3><span class="i18n" data-en="Concrete Example: Prefill Attention Aggregation" data-zh="具體範例：Prefill Attention 聚合">Concrete Example: Prefill Attention Aggregation</span></h3>
+
+<pre><span class="kw">def</span> <span class="fn">_get_attention_prefill_execution_time</span>(self, batch):
+    <span class="cm"># Collect (kv_cache_size, prefill_chunk_size) per prefill request</span>
+    prefill_params = self._get_batch_prefill_attention_params(batch)
+    <span class="kw">if</span> <span class="fn">len</span>(prefill_params) == <span class="nr">0</span>:
+        <span class="kw">return</span> <span class="nr">0</span>
+
+    kv_sizes, chunk_sizes = <span class="fn">zip</span>(*prefill_params)
+    agg_kv    = <span class="fn">sum</span>(kv_sizes)
+    agg_chunk = <span class="fn">sum</span>([x**<span class="nr">2</span> <span class="kw">for</span> x <span class="kw">in</span> chunk_sizes]) ** <span class="nr">0.5</span>   <span class="cm"># L2 norm</span>
+
+    <span class="kw">return</span> self._predictions[<span class="st">"attn_prefill"</span>][
+        (agg_kv, <span class="fn">round</span>(agg_chunk)**<span class="nr">2</span>)                     <span class="cm"># squared back</span>
+    ]</pre>
+
+    <div class="callout key">
+      <strong><span class="i18n" data-en="Why L2 norm for prefill chunks?" data-zh="為什麼 prefill chunk 用 L2 norm？">Why L2 norm for prefill chunks?</span></strong>
+      <span class="i18n"
+        data-en="Prefill attention is roughly <code>O(chunk_size&sup2;)</code> per request (self-attention). When batching N requests, the total work is <code>&sum; chunk_i&sup2;</code>, not <code>(&sum; chunk_i)&sup2;</code>. The L2 norm <code>&radic;(&sum; chunk_i&sup2;)</code> preserves this property: squaring it back gives the correct total FLOPs. A simple sum would overestimate by including cross-request attention that doesn't happen."
+        data-zh="Prefill attention 的時間大約是每個 request 的 <code>O(chunk_size&sup2;)</code>（self-attention）。當批次處理 N 個 request 時，總計算量是 <code>&sum; chunk_i&sup2;</code>，而不是 <code>(&sum; chunk_i)&sup2;</code>。L2 norm <code>&radic;(&sum; chunk_i&sup2;)</code> 保留了這個特性：平方回去就得到正確的總 FLOPs。簡單加總會高估，因為包含了實際不存在的跨 request attention。">Prefill attention is roughly <code>O(chunk_size&sup2;)</code> per request (self-attention). When batching N requests, the total work is <code>&sum; chunk_i&sup2;</code>, not <code>(&sum; chunk_i)&sup2;</code>. The L2 norm <code>&radic;(&sum; chunk_i&sup2;)</code> preserves this property: squaring it back gives the correct total FLOPs. A simple sum would overestimate by including cross-request attention that doesn't happen.</span>
+    </div>
+  </div>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 6: SKLEARN TRAINING                                     -->
   <!-- ============================================================== -->
   <div class="section" id="sklearn-training">
-    <span class="section-label"><span class="i18n" data-en="Section 4" data-zh="第四節">Section 4</span></span>
-    <h2><span class="i18n" data-en="Step 2: Training Prediction Models (Vidur)" data-zh="步驟二：訓練預測模型（Vidur）">Step 2: Training Prediction Models (Vidur)</span></h2>
+    <span class="section-label"><span class="i18n" data-en="Section 6" data-zh="第六節">Section 6</span></span>
+    <h2><span class="i18n" data-en="Training Prediction Models (Vidur)" data-zh="訓練預測模型（Vidur）">Training Prediction Models (Vidur)</span></h2>
 
     <p><span class="i18n"
       data-en="Vidur takes the profiling CSV files from Stage 1 and trains separate sklearn models for each type of operation. The key technique is polynomial regression &mdash; fitting a curve that captures the memory-bound &rarr; compute-bound transition."
@@ -761,8 +1004,8 @@ predictions[model_name] = model.predict(num_token_range)
   <!-- SECTION 5: PER-REQUEST PREDICTION                               -->
   <!-- ============================================================== -->
   <div class="section" id="per-request-prediction">
-    <span class="section-label"><span class="i18n" data-en="Section 5" data-zh="第五節">Section 5</span></span>
-    <h2><span class="i18n" data-en="Step 3: Per-Request Prediction from Trace" data-zh="步驟三：從 Trace 逐 Request 預測">Step 3: Per-Request Prediction from Trace</span></h2>
+    <span class="section-label"><span class="i18n" data-en="Section 7" data-zh="第七節">Section 7</span></span>
+    <h2><span class="i18n" data-en="Per-Request Prediction from Trace" data-zh="從 Trace 逐 Request 預測">Per-Request Prediction from Trace</span></h2>
 
     <p><span class="i18n"
       data-en="A trace is a CSV file where each row is a request with a specific <code>num_prefill_tokens</code> and <code>num_decode_tokens</code>. Vidur processes the trace by forming batches and predicting execution time per batch."
@@ -813,7 +1056,7 @@ predictions[model_name] = model.predict(num_token_range)
   <!-- SECTION 6: TOKEN AGGREGATION                                    -->
   <!-- ============================================================== -->
   <div class="section" id="token-aggregation">
-    <span class="section-label"><span class="i18n" data-en="Section 6" data-zh="第六節">Section 6</span></span>
+    <span class="section-label"><span class="i18n" data-en="Section 8" data-zh="第八節">Section 8</span></span>
     <h2><span class="i18n" data-en="How Tokens are Aggregated in a Batch" data-zh="Batch 中 Token 的聚合方式">How Tokens are Aggregated in a Batch</span></h2>
 
     <p><span class="i18n"
@@ -894,7 +1137,7 @@ decode_time = predictions[<span class="st">"attn_decode"</span>][(<span class="n
   <!-- SECTION 7: SUPPORTED MODELS                                     -->
   <!-- ============================================================== -->
   <div class="section" id="supported-models">
-    <span class="section-label"><span class="i18n" data-en="Section 7" data-zh="第七節">Section 7</span></span>
+    <span class="section-label"><span class="i18n" data-en="Section 9" data-zh="第九節">Section 9</span></span>
     <h2><span class="i18n" data-en="Supported GPU &amp; LLM Models" data-zh="支援的 GPU 與 LLM 模型">Supported GPU &amp; LLM Models</span></h2>
 
     <h3><span class="i18n" data-en="AICB Inference Profiling (Kernel-Level)" data-zh="AICB 推理 Profiling（Kernel 級別）">AICB Inference Profiling (Kernel-Level)</span></h3>
@@ -947,7 +1190,7 @@ decode_time = predictions[<span class="st">"attn_decode"</span>][(<span class="n
   <!-- SECTION 8: AICB vs VIDUR                                        -->
   <!-- ============================================================== -->
   <div class="section" id="aicb-vs-vidur">
-    <span class="section-label"><span class="i18n" data-en="Section 8" data-zh="第八節">Section 8</span></span>
+    <span class="section-label"><span class="i18n" data-en="Section 10" data-zh="第十節">Section 10</span></span>
     <h2><span class="i18n" data-en="AICB vs Vidur: Two Prediction Paths" data-zh="AICB vs Vidur：兩條預測路徑">AICB vs Vidur: Two Prediction Paths</span></h2>
 
     <p><span class="i18n"
