@@ -1403,72 +1403,231 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
     data-en="PD Disagg Gap &amp; Request Waiting Time Between Batches"
     data-zh="PD Disagg 差異與 Request 在批次之間的等待時間">PD Disagg Gap &amp; Request Waiting Time Between Batches</span></h3>
 
-  <!-- ===== PD DISAGG: +1 BONUS ===== -->
-  <h4><span class="i18n" data-en="Does Vidur Model PD Disaggregation's First-Token Discard?" data-zh="Vidur 是否建模了 PD Disaggregation 的首 Token 丟棄？">Does Vidur Model PD Disaggregation's First-Token Discard?</span></h4>
+  <!-- ===== PD DISAGG: VIDUR vs SIMAI ===== -->
+  <h4><span class="i18n" data-en="Original Vidur: No PD Disaggregation" data-zh="原版 Vidur：沒有 PD Disaggregation">Original Vidur: No PD Disaggregation</span></h4>
 
-  <div class="callout critical">
-    <strong><span class="i18n" data-en="No." data-zh="沒有。">No.</span></strong>
-    <span class="i18n"
-      data-en="This Vidur codebase has <strong>no PD disaggregation implementation</strong>. The +1 bonus is applied unconditionally."
-      data-zh="此 Vidur codebase <strong>沒有 PD disaggregation 的實作</strong>。+1 bonus 無條件執行。">This Vidur codebase has <strong>no PD disaggregation implementation</strong>. The +1 bonus is applied unconditionally.</span>
+  <p><span class="i18n"
+    data-en="The original Vidur has <strong>no PD disagg</strong>: every request runs prefill and decode on the <strong>same replica</strong>, and the +1 bonus is unconditional. There is no KV cache transfer, no splitwise scheduler, and no separate P/D replica pools."
+    data-zh="原版 Vidur <strong>沒有 PD disagg</strong>：每個請求在<strong>同一個 replica</strong> 上執行 prefill 和 decode，+1 bonus 無條件執行。沒有 KV cache 傳輸、沒有 splitwise scheduler、沒有獨立的 P/D replica 池。">The original Vidur has <strong>no PD disagg</strong>: every request runs prefill and decode on the <strong>same replica</strong>, and the +1 bonus is unconditional. There is no KV cache transfer, no splitwise scheduler, and no separate P/D replica pools.</span></p>
+
+  <h4><span class="i18n" data-en="SimAI Fork: What Changed in the Event System for PD Disagg" data-zh="SimAI Fork：事件系統為 PD Disagg 做了什麼改動">SimAI Fork: What Changed in the Event System for PD Disagg</span></h4>
+
+  <p><span class="i18n"
+    data-en="The SimAI fork (vidur-alibabacloud) achieves PD disaggregation by modifying <strong>three points</strong> in the existing event chain — not by adding new event types, but by changing the behavior of existing ones."
+    data-zh="SimAI fork（vidur-alibabacloud）透過修改現有事件鏈中的<strong>三個點</strong>來實現 PD disaggregation — 不是新增事件類型，而是改變現有事件的行為。">The SimAI fork (vidur-alibabacloud) achieves PD disaggregation by modifying <strong>three points</strong> in the existing event chain — not by adding new event types, but by changing the behavior of existing ones.</span></p>
+
+  <!-- Change 1: SplitwiseGlobalScheduler -->
+  <div class="card highlight-orange">
+    <h4><span class="i18n" data-en="Change 1: SplitwiseGlobalScheduler — split replicas into P and D pools" data-zh="改動 1：SplitwiseGlobalScheduler — 將 replicas 拆分為 P 和 D 池">Change 1: SplitwiseGlobalScheduler — split replicas into P and D pools</span></h4>
+    <span class="file-tag">scheduler/global_scheduler/splitwise_global_scheduler.py</span>
+    <p><span class="i18n"
+      data-en="At initialization, replicas are split by <code class='inline-code'>pd_node_ratio</code>:"
+      data-zh="初始化時，replicas 按 <code class='inline-code'>pd_node_ratio</code> 拆分：">At initialization, replicas are split by <code class="inline-code">pd_node_ratio</code>:</span></p>
+<pre><code><span class="cm"># Example: 4 replicas, pd_node_ratio=0.5</span>
+<span class="cm"># Replica 0, 1 → ReplicaType.PREFILL  (P pool)</span>
+<span class="cm"># Replica 2, 3 → ReplicaType.DECODE   (D pool)</span>
+<span class="kw">for</span> replica_id, replica <span class="kw">in</span> <span class="kw">self</span>._replicas.items():
+    <span class="kw">if</span> replica_id < <span class="kw">self</span>._num_prefill_nodes:
+        <span class="kw">self</span>.prefill_replicas[replica_id] = replica
+        replica.replica_type = <span class="cl">ReplicaType</span>.PREFILL
+    <span class="kw">else</span>:
+        <span class="kw">self</span>.decode_replicas[replica_id] = replica
+        replica.replica_type = <span class="cl">ReplicaType</span>.DECODE</code></pre>
+
+    <p><span class="i18n"
+      data-en="In <code class='inline-code'>schedule()</code>, each new request is assigned to <strong>both</strong> a P replica and a D replica upfront:"
+      data-zh="在 <code class='inline-code'>schedule()</code> 中，每個新請求在到達時就被分配給<strong>兩個</strong> replica（一個 P、一個 D）：">In <code class="inline-code">schedule()</code>, each new request is assigned to <strong>both</strong> a P replica and a D replica upfront:</span></p>
+<pre><code><span class="kw">def</span> <span class="fn">schedule</span>(<span class="kw">self</span>):
+    <span class="kw">for</span> request <span class="kw">in</span> <span class="kw">self</span>._request_queue:
+        request.request_type = <span class="cl">RequestType</span>.PREFILL
+
+        <span class="cm"># Assign P replica (round-robin in P pool)</span>
+        replica_id = <span class="kw">self</span>.p_request_counter % <span class="fn">len</span>(<span class="kw">self</span>.prefill_replicas)
+        request.prefill_replica_id = replica_id
+
+        <span class="cm"># Assign D replica (round-robin in D pool)</span>
+        replica_id = (<span class="kw">self</span>.d_request_counter % <span class="fn">len</span>(<span class="kw">self</span>.decode_replicas)) + <span class="fn">len</span>(<span class="kw">self</span>.prefill_replicas)
+        request.decode_replica_id = replica_id
+
+    <span class="kw">return</span> prefill_request_mapping  <span class="cm"># ← 只返回 P replica 的映射</span></code></pre>
+
+    <div class="callout warn" style="margin-bottom:0">
+      <span class="i18n"
+        data-en="<code class='inline-code'>schedule()</code> only returns <strong>prefill_request_mapping</strong>. The request is initially sent to the P replica only. The D replica gets its <code class='inline-code'>ReplicaScheduleEvent</code> later — from <code class='inline-code'>BatchEndEvent</code>, not from here."
+        data-zh="<code class='inline-code'>schedule()</code> 只返回 <strong>prefill_request_mapping</strong>。請求最初只發送到 P replica。D replica 的 <code class='inline-code'>ReplicaScheduleEvent</code> 稍後才產生 — 來自 <code class='inline-code'>BatchEndEvent</code>，而非此處。"><code class="inline-code">schedule()</code> only returns <strong>prefill_request_mapping</strong>. The request is initially sent to the P replica only. The D replica gets its <code class="inline-code">ReplicaScheduleEvent</code> later — from <code class="inline-code">BatchEndEvent</code>, not from here.</span>
+    </div>
   </div>
 
-  <p><span class="i18n"
-    data-en="In real vLLM with PD disagg, prefill and decode run on <strong>separate replicas</strong>. The prefill replica computes the KV cache and produces the first output token — but that token is <strong>discarded</strong>, because the actual decoding happens on a different decode replica after KV cache transfer. This means the first decode token must be regenerated on the decode replica, costing an extra iteration."
-    data-zh="在真實的 vLLM PD disagg 中，prefill 和 decode 在<strong>不同的 replica</strong> 上執行。Prefill replica 計算 KV cache 並產生第一個 output token — 但該 token 會被<strong>丟棄</strong>，因為實際的 decoding 發生在 KV cache 傳輸後的另一個 decode replica 上。這意味著第一個 decode token 需要在 decode replica 上重新生成，額外消耗一次迭代。">In real vLLM with PD disagg, prefill and decode run on <strong>separate replicas</strong>. The prefill replica computes the KV cache and produces the first output token — but that token is <strong>discarded</strong>, because the actual decoding happens on a different decode replica after KV cache transfer. This means the first decode token must be regenerated on the decode replica, costing an extra iteration.</span></p>
+  <!-- Change 2: BatchEndEvent -->
+  <div class="card highlight-red">
+    <h4><span class="i18n" data-en="Change 2: BatchEndEvent — the critical cross-replica handoff" data-zh="改動 2：BatchEndEvent — 關鍵的跨 replica 移交">Change 2: BatchEndEvent — the critical cross-replica handoff</span></h4>
+    <span class="file-tag">events/batch_end_event.py</span>
+    <p><span class="i18n"
+      data-en="This is where the entire PD disagg logic lives. The original <code class='inline-code'>BatchEndEvent</code> was 42 lines. The SimAI version is 151 lines. After the normal batch-end handling, it adds:"
+      data-zh="整個 PD disagg 邏輯都在這裡。原版 <code class='inline-code'>BatchEndEvent</code> 是 42 行，SimAI 版本是 151 行。在正常的批次結束處理後，新增了：">This is where the entire PD disagg logic lives. The original <code class="inline-code">BatchEndEvent</code> was 42 lines. The SimAI version is 151 lines. After the normal batch-end handling, it adds:</span></p>
 
-  <p><span class="i18n"
-    data-en="Vidur does not model this. Here's what's missing:"
-    data-zh="Vidur 沒有建模這個。以下是缺少的部分：">Vidur does not model this. Here's what's missing:</span></p>
+<pre><code><span class="cm"># batch_end_event.py — SimAI version (simplified)</span>
+<span class="kw">def</span> <span class="fn">handle_event</span>(<span class="kw">self</span>, scheduler, metrics_store):
+    <span class="cm"># ① Normal Vidur logic (unchanged)</span>
+    <span class="kw">self</span>._batch.<span class="fn">on_batch_end</span>(<span class="kw">self</span>.time)
+    replica_scheduler.<span class="fn">on_batch_end</span>(<span class="kw">self</span>._batch)
+    events = [<span class="cl">ReplicaScheduleEvent</span>(<span class="kw">self</span>.time, <span class="kw">self</span>._replica_id)]
+
+    <span class="cm"># ② NEW: PD disagg cross-replica transfer</span>
+    <span class="kw">if</span> scheduler.__class__.__name__ == <span class="st">'SplitwiseGlobalScheduler'</span>:
+        <span class="kw">for</span> request <span class="kw">in</span> <span class="kw">self</span>._batch.requests:
+            <span class="kw">if</span> request.is_prefill_complete \
+               <span class="kw">and</span> request.request_type == <span class="cl">RequestType</span>.DECODE \
+               <span class="kw">and</span> replica_scheduler.replica.replica_type == <span class="cl">ReplicaType</span>.PREFILL:
+
+                <span class="cm"># ③ Calculate KV cache transfer time</span>
+                request.pd_p2p_comm_size = request.<span class="fn">estimate_kv_cache_size</span>(
+                    request.num_processed_tokens, replica_scheduler.replica)
+                request.pd_p2p_comm_bandwidth = replica.pd_p2p_comm_bandwidth
+                request.pd_p2p_comm_time = request.pd_p2p_comm_size / request.pd_p2p_comm_bandwidth
+
+                <span class="cm"># ④ Set D replica arrival = prefill done + KV transfer time</span>
+                request.decode_arrived_at = request.prefill_completed_at + request.pd_p2p_comm_time
+
+                <span class="cm"># ⑤ Create ReplicaScheduleEvent for D replica with DELAYED time</span>
+                events.<span class="fn">append</span>(
+                    <span class="cl">ReplicaScheduleEvent</span>(request.decode_arrived_at, request.decode_replica_id))
+                    <span class="cm"># ↑ 注意：時間不是 self.time，而是未來的時間點！</span>
+
+    <span class="kw">return</span> events</code></pre>
+  </div>
+
+  <!-- Change 3: Request entity -->
+  <div class="card highlight-blue">
+    <h4><span class="i18n" data-en="Change 3: Request &amp; Replica entities — new PD fields" data-zh="改動 3：Request 與 Replica entities — 新增 PD 欄位">Change 3: Request &amp; Replica entities — new PD fields</span></h4>
+    <div class="grid-2">
+      <div>
+        <span class="file-tag">entities/request.py</span>
+<pre><code><span class="cm"># New fields added to Request</span>
+request_type = <span class="cl">RequestType</span>.PREFILL  <span class="cm"># PREFILL → DECODE</span>
+prefill_replica_id = <span class="kw">None</span>
+decode_replica_id = <span class="kw">None</span>
+prefill_arrived_at = arrived_at
+decode_arrived_at = <span class="fn">float</span>(<span class="st">'inf'</span>)  <span class="cm"># ← set later</span>
+pd_p2p_comm_size = <span class="fn">float</span>(<span class="st">'inf'</span>)
+pd_p2p_comm_time = <span class="fn">float</span>(<span class="st">'inf'</span>)
+pd_p2p_comm_bandwidth = <span class="nr">0</span></code></pre>
+      </div>
+      <div>
+        <span class="file-tag">entities/replica.py</span>
+<pre><code><span class="cm"># New fields added to Replica</span>
+replica_type = <span class="cl">ReplicaType</span>.MIXED
+<span class="cm"># ↑ set to PREFILL or DECODE by scheduler</span>
+pd_p2p_comm_bandwidth = ...
+pd_p2p_comm_dtype = ...
+pd_node_ratio = ...
+pending_requests = []</code></pre>
+      </div>
+    </div>
+    <p><span class="i18n"
+      data-en="The <code class='inline-code'>request_type</code> starts as PREFILL and changes to DECODE in <code class='inline-code'>on_batch_end()</code> when prefill completes (same place as the +1 bonus). This flag is how <code class='inline-code'>BatchEndEvent</code> knows to trigger the cross-replica transfer."
+      data-zh="<code class='inline-code'>request_type</code> 初始為 PREFILL，在 <code class='inline-code'>on_batch_end()</code> 中 prefill 完成時變為 DECODE（與 +1 bonus 在同一處）。這個標記讓 <code class='inline-code'>BatchEndEvent</code> 知道要觸發跨 replica 的移交。">The <code class="inline-code">request_type</code> starts as PREFILL and changes to DECODE in <code class="inline-code">on_batch_end()</code> when prefill completes (same place as the +1 bonus). This flag is how <code class="inline-code">BatchEndEvent</code> knows to trigger the cross-replica transfer.</span></p>
+  </div>
+
+  <h4><span class="i18n" data-en="The Modified Event Flow with PD Disagg" data-zh="PD Disagg 下的修改後事件流">The Modified Event Flow with PD Disagg</span></h4>
+
+<pre><code><span class="cm">═══ P Replica (Prefill Pool) ═══</span>
+
+<span class="cl">RequestArrivalEvent</span>(t=<span class="nr">0.0</span>)
+  → <span class="cl">GlobalScheduleEvent</span> → <span class="cl">SplitwiseGlobalScheduler</span>.<span class="fn">schedule</span>()
+      request.prefill_replica_id = <span class="nr">0</span>   <span class="cm">(P pool)</span>
+      request.decode_replica_id  = <span class="nr">2</span>   <span class="cm">(D pool)</span>
+      <span class="kw">return</span> [(replica_id=<span class="nr">0</span>, request)]     <span class="cm">← 只發到 P replica</span>
+  → <span class="cl">ReplicaScheduleEvent</span>(t=<span class="nr">0.0</span>, replica=<span class="nr">0</span>)    <span class="cm">← P replica</span>
+  → BatchStageArrival → ReplicaStageSchedule
+      <span class="cm">execution_time = predict(batch with 512 prefill tokens)</span>
+  → <span class="cl">BatchStageEndEvent</span>(t=<span class="nr">0.0</span> + <span class="nr">0.8</span>s)
+  → <span class="cl">BatchEndEvent</span>(t=<span class="nr">0.8</span>)  <span class="cm">← 這裡改動最大</span>
+      ① Batch.<span class="fn">on_batch_end</span>() → Request.<span class="fn">on_batch_end</span>(num_tokens=<span class="nr">512</span>)
+         <span class="cm">processed: 0 → 512 → 513 (bonus +1)</span>
+         <span class="cm">request_type: PREFILL → DECODE</span>
+      ② <span class="cm">Detect: is_prefill_complete + DECODE type + on PREFILL replica</span>
+      ③ <span class="fn">estimate_kv_cache_size</span>(<span class="nr">513</span> tokens) = <span class="nr">1.6</span> GB
+      ④ pd_p2p_comm_time = <span class="nr">1.6</span> GB / <span class="nr">50</span> GB/s = <span class="nr">0.032</span>s
+      ⑤ decode_arrived_at = <span class="nr">0.8</span> + <span class="nr">0.032</span> = <span class="nr">0.832</span>s
+      ⑥ events = [
+           <span class="cl">ReplicaScheduleEvent</span>(<span class="nr">0.8</span>, replica=<span class="nr">0</span>),    <span class="cm">← P replica 繼續排下一個 batch</span>
+           <span class="cl">ReplicaScheduleEvent</span>(<span class="nr">0.832</span>, replica=<span class="nr">2</span>)  <span class="cm">← D replica 在 KV 傳輸完成後開始</span>
+         ]
+
+<span class="cm">═══ D Replica (Decode Pool) ═══</span>
+
+<span class="cl">ReplicaScheduleEvent</span>(t=<span class="nr">0.832</span>, replica=<span class="nr">2</span>)    <span class="cm">← 來自上面的 BatchEndEvent</span>
+  → <span class="fn">on_schedule</span>() → <span class="fn">_get_next_batch</span>()
+      <span class="cm">request from queue, is_prefill_complete=True → num_tokens=1</span>
+  → BatchStageArrival → ReplicaStageSchedule → BatchStageEnd → BatchEnd
+      <span class="cm">processed: 513 → 514</span>
+  → <span class="cl">ReplicaScheduleEvent</span>(t=..., replica=<span class="nr">2</span>)    <span class="cm">← D replica 繼續 decode loop</span>
+      <span class="cm">⋮ (D-1 iterations on D replica)</span></code></pre>
+
+  <h4><span class="i18n" data-en="Vidur vs SimAI: Comparison" data-zh="Vidur vs SimAI：對照">Vidur vs SimAI: Comparison</span></h4>
 
   <table>
     <tr>
-      <th><span class="i18n" data-en="PD Disagg Feature" data-zh="PD Disagg 功能">PD Disagg Feature</span></th>
-      <th><span class="i18n" data-en="Real vLLM" data-zh="真實 vLLM">Real vLLM</span></th>
-      <th><span class="i18n" data-en="Vidur (this codebase)" data-zh="Vidur（此 codebase）">Vidur (this codebase)</span></th>
+      <th><span class="i18n" data-en="Aspect" data-zh="面向">Aspect</span></th>
+      <th><span class="i18n" data-en="Vidur (original)" data-zh="Vidur（原版）">Vidur (original)</span></th>
+      <th><span class="i18n" data-en="SimAI (vidur-alibabacloud)" data-zh="SimAI（vidur-alibabacloud）">SimAI (vidur-alibabacloud)</span></th>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Separate prefill/decode replicas" data-zh="獨立的 prefill/decode replica">Separate prefill/decode replicas</span></td>
-      <td style="color:#66bb6a">✓</td>
-      <td style="color:#ef5350">✗ <span class="i18n" data-en="single replica does both" data-zh="同一 replica 執行兩者">single replica does both</span></td>
+      <td><span class="i18n" data-en="Replica pools" data-zh="Replica 池">Replica pools</span></td>
+      <td><span class="i18n" data-en="All replicas identical" data-zh="所有 replica 相同">All replicas identical</span></td>
+      <td><span class="i18n" data-en="P pool + D pool (split by pd_node_ratio)" data-zh="P 池 + D 池（按 pd_node_ratio 拆分）">P pool + D pool (split by pd_node_ratio)</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="KV cache transfer between replicas" data-zh="Replica 間的 KV cache 傳輸">KV cache transfer between replicas</span></td>
-      <td style="color:#66bb6a">✓</td>
-      <td style="color:#ef5350">✗ <span class="i18n" data-en="no transfer modeled" data-zh="未建模傳輸">no transfer modeled</span></td>
+      <td><code class="inline-code">schedule()</code></td>
+      <td><span class="i18n" data-en="Assign to 1 replica" data-zh="分配到 1 個 replica">Assign to 1 replica</span></td>
+      <td><span class="i18n" data-en="Assign to P replica + record D replica; only return P mapping" data-zh="分配到 P replica + 記錄 D replica；僅返回 P 映射">Assign to P replica + record D replica; only return P mapping</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="First decode token discarded" data-zh="首個 decode token 丟棄">First decode token discarded</span></td>
-      <td style="color:#66bb6a">✓ <span class="i18n" data-en="regenerated on decode replica" data-zh="在 decode replica 重新生成">regenerated on decode replica</span></td>
-      <td style="color:#ef5350">✗ <span class="i18n" data-en="+1 bonus always applied" data-zh="+1 bonus 永遠執行">+1 bonus always applied</span></td>
+      <td><span class="i18n" data-en="Prefill execution" data-zh="Prefill 執行">Prefill execution</span></td>
+      <td><span class="i18n" data-en="Same replica as decode" data-zh="與 decode 同一 replica">Same replica as decode</span></td>
+      <td><span class="i18n" data-en="P replica only" data-zh="僅在 P replica">P replica only</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Splitwise / disagg scheduler" data-zh="Splitwise / disagg 排程器">Splitwise / disagg scheduler</span></td>
-      <td style="color:#66bb6a">✓</td>
-      <td style="color:#ef5350">✗ <span class="i18n" data-en="only Random/RoundRobin/LOR" data-zh="僅 Random/RoundRobin/LOR">only Random/RoundRobin/LOR</span></td>
+      <td><span class="i18n" data-en="P→D handoff" data-zh="P→D 移交">P&rarr;D handoff</span></td>
+      <td><span class="i18n" data-en="—" data-zh="—">&mdash;</span></td>
+      <td><span class="i18n" data-en="BatchEndEvent detects prefill_complete on P replica, calculates KV transfer time, creates delayed ReplicaScheduleEvent for D replica" data-zh="BatchEndEvent 在 P replica 偵測到 prefill_complete，計算 KV 傳輸時間，為 D replica 建立延遲的 ReplicaScheduleEvent">BatchEndEvent detects prefill_complete on P replica, calculates KV transfer time, creates delayed ReplicaScheduleEvent for D replica</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Total iterations for D decode tokens" data-zh="D 個 decode token 的總迭代數">Total iterations for D decode tokens</span></td>
-      <td><strong>D+1</strong> <span class="i18n" data-en="(1 prefill + D decode, first token discarded)" data-zh="（1 prefill + D decode，首 token 丟棄）">(1 prefill + D decode, first token discarded)</span></td>
-      <td><strong>D</strong> <span class="i18n" data-en="(1 prefill + D−1 decode, first token free)" data-zh="（1 prefill + D−1 decode，首 token 免費）">(1 prefill + D&minus;1 decode, first token free)</span></td>
+      <td><span class="i18n" data-en="KV cache transfer" data-zh="KV cache 傳輸">KV cache transfer</span></td>
+      <td><span class="i18n" data-en="—" data-zh="—">&mdash;</span></td>
+      <td><code class="inline-code">2 &times; tokens &times; hidden_dim &times; layers &times; dtype_bytes / bandwidth</code></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Decode execution" data-zh="Decode 執行">Decode execution</span></td>
+      <td><span class="i18n" data-en="Same replica as prefill" data-zh="與 prefill 同一 replica">Same replica as prefill</span></td>
+      <td><span class="i18n" data-en="D replica only (all D-1 iterations)" data-zh="僅在 D replica（全部 D-1 次迭代）">D replica only (all D&minus;1 iterations)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+1 bonus" data-zh="+1 bonus">+1 bonus</span></td>
+      <td><span class="i18n" data-en="Kept (correct for co-located)" data-zh="保留（co-located 時正確）">Kept (correct for co-located)</span></td>
+      <td><span class="i18n" data-en="Still kept — first decode token is not re-generated on D replica" data-zh="仍然保留 — 第一個 decode token 不會在 D replica 上重新生成">Still kept — first decode token is <strong>not</strong> re-generated on D replica</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="New event types" data-zh="新事件類型">New event types</span></td>
+      <td>&mdash;</td>
+      <td><span class="i18n" data-en="None — reuses existing ReplicaScheduleEvent with delayed time" data-zh="無 — 重用現有的 ReplicaScheduleEvent 搭配延遲時間">None — reuses existing ReplicaScheduleEvent with delayed time</span></td>
     </tr>
   </table>
 
-  <div class="callout warn">
-    <strong><span class="i18n" data-en="Note:" data-zh="注意：">Note:</span></strong>
+  <div class="callout critical">
+    <strong><span class="i18n" data-en="Key Insight:" data-zh="關鍵洞察：">Key Insight:</span></strong>
     <span class="i18n"
-      data-en="PD disaggregation is a feature of the <strong>SimAI fork</strong> (vidur-alibabacloud), not of the original Vidur. The SimAI fork adds KV cache transfer modeling, disaggregated scheduling, and network simulation — covered in the <a href='pd-disagg.html'>PD Disagg</a> page."
-      data-zh="PD disaggregation 是 <strong>SimAI fork</strong>（vidur-alibabacloud）的功能，而非原版 Vidur。SimAI fork 新增了 KV cache 傳輸建模、disaggregated scheduling 和網路模擬 — 詳見 <a href='pd-disagg.html'>PD Disagg</a> 頁面。">PD disaggregation is a feature of the <strong>SimAI fork</strong> (vidur-alibabacloud), not of the original Vidur. The SimAI fork adds KV cache transfer modeling, disaggregated scheduling, and network simulation — covered in the <a href="pd-disagg.html">PD Disagg</a> page.</span>
+      data-en="SimAI achieves PD disagg <strong>without adding any new event types</strong>. It only modifies <code class='inline-code'>BatchEndEvent.handle_event()</code> to detect the prefill→decode transition on a P replica, and inject a <strong>time-delayed</strong> <code class='inline-code'>ReplicaScheduleEvent</code> targeting the D replica. The delay = KV cache transfer time. This is the <strong>second point in the entire simulator where time advances</strong> (the first being the execution_time in <code class='inline-code'>ReplicaStageScheduleEvent</code>)."
+      data-zh="SimAI <strong>不新增任何事件類型</strong>就實現了 PD disagg。它只修改 <code class='inline-code'>BatchEndEvent.handle_event()</code>，偵測 P replica 上的 prefill→decode 轉換，並注入一個<strong>時間延遲的</strong> <code class='inline-code'>ReplicaScheduleEvent</code> 指向 D replica。延遲 = KV cache 傳輸時間。這是<strong>整個模擬器中時間推進的第二個點</strong>（第一個是 <code class='inline-code'>ReplicaStageScheduleEvent</code> 中的 execution_time）。">SimAI achieves PD disagg <strong>without adding any new event types</strong>. It only modifies <code class="inline-code">BatchEndEvent.handle_event()</code> to detect the prefill&rarr;decode transition on a P replica, and inject a <strong>time-delayed</strong> <code class="inline-code">ReplicaScheduleEvent</code> targeting the D replica. The delay = KV cache transfer time. This is the <strong>second point in the entire simulator where time advances</strong> (the first being the execution_time in <code class="inline-code">ReplicaStageScheduleEvent</code>).</span>
   </div>
 
-  <p><span class="i18n"
-    data-en="To verify, here is the code that unconditionally awards the +1 bonus:"
-    data-zh="驗證：以下是無條件執行 +1 bonus 的程式碼：">To verify, here is the code that unconditionally awards the +1 bonus:</span></p>
-
-<pre><code><span class="cm"># request.py: on_batch_end() — no conditional, no disagg check</span>
-<span class="kw">if</span> <span class="kw">self</span>._num_processed_tokens == <span class="kw">self</span>._num_prefill_tokens:
-    <span class="kw">self</span>._is_prefill_complete = <span class="kw">True</span>
-    <span class="kw">self</span>._num_processed_tokens += <span class="nr">1</span>   <span class="cm"># ← always +1, never skipped</span></code></pre>
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Note on +1 bonus:" data-zh="關於 +1 bonus 的注意事項：">Note on +1 bonus:</span></strong>
+    <span class="i18n"
+      data-en="The SimAI fork <strong>keeps the +1 bonus</strong>. In real PD disagg, the first decode token produced on the P replica is discarded and must be regenerated on the D replica (costing an extra iteration, making total = D+1). SimAI does not model this discard — it keeps total = D. This is a simplification in the current SimAI implementation."
+      data-zh="SimAI fork <strong>保留了 +1 bonus</strong>。在真實的 PD disagg 中，P replica 上產生的第一個 decode token 會被丟棄，需在 D replica 上重新生成（額外消耗一次迭代，總計 = D+1）。SimAI 沒有建模此丟棄 — 總計仍為 D。這是當前 SimAI 實作的一個簡化。">The SimAI fork <strong>keeps the +1 bonus</strong>. In real PD disagg, the first decode token produced on the P replica is discarded and must be regenerated on the D replica (costing an extra iteration, making total = D+1). SimAI does not model this discard — it keeps total = D. This is a simplification in the current SimAI implementation.</span>
+  </div>
 
   <!-- ===== WAITING TIME TRACKING ===== -->
   <h4><span class="i18n" data-en="Is Waiting Time Between Batches Recorded?" data-zh="批次之間的等待時間是否有記錄？">Is Waiting Time Between Batches Recorded?</span></h4>
