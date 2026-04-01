@@ -652,6 +652,12 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
         </tr>
       </table>
       <p style="margin-top:.6rem"><span class="i18n" data-en="Creates:" data-zh="產生：">Creates:</span> <span class="event-badge gsched">GlobalScheduleEvent</span></p>
+      <div class="callout warn">
+        <strong><span class="i18n" data-en="Note:" data-zh="注意：">Note:</span></strong>
+        <span class="i18n"
+          data-en="This only <strong>enqueues</strong> the request — it does NOT immediately form a batch. The request joins <code class='inline-code'>scheduler._request_queue</code> and waits. Multiple requests can accumulate in this queue before any batch is formed."
+          data-zh="這裡只是將請求<strong>加入佇列</strong> — 並不會立即形成批次。請求進入 <code class='inline-code'>scheduler._request_queue</code> 等待。多個請求可以在佇列中累積，直到批次真正被組裝。">This only <strong>enqueues</strong> the request — it does NOT immediately form a batch. The request joins <code class="inline-code">scheduler._request_queue</code> and waits. Multiple requests can accumulate in this queue before any batch is formed.</span>
+      </div>
       <details>
         <summary><span class="i18n" data-en="▸ View handle_event() source" data-zh="▸ 查看 handle_event() 原始碼">▸ View handle_event() source</span></summary>
 <pre><code><span class="kw">def</span> <span class="fn">handle_event</span>(<span class="kw">self</span>, scheduler, metrics_store):
@@ -734,7 +740,15 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
           <td><span class="file-tag">metrics/metrics_store.py</span></td>
         </tr>
       </table>
-      <p style="margin-top:.6rem"><span class="i18n" data-en="Creates:" data-zh="產生：">Creates:</span> <span class="event-badge stage-arr">BatchStageArrivalEvent</span> <span class="i18n" data-en="&times; one per batch (stage_id = 0)" data-zh="&times; 每個批次各一個 (stage_id = 0)">&times; one per batch (stage_id = 0)</span></p>
+      <p style="margin-top:.6rem"><span class="i18n" data-en="Creates:" data-zh="產生：">Creates:</span> <span class="event-badge stage-arr">BatchStageArrivalEvent</span> <span class="i18n" data-en="&times; one per batch (stage_id = 0), or empty list if no batch can be formed" data-zh="&times; 每個批次各一個 (stage_id = 0)，若無法組成批次則返回空列表">&times; one per batch (stage_id = 0), or empty list if no batch can be formed</span></p>
+
+      <div class="callout critical">
+        <strong><span class="i18n" data-en="This is where batching actually happens:" data-zh="批次實際在這裡組裝：">This is where batching actually happens:</span></strong>
+        <span class="i18n"
+          data-en="<code class='inline-code'>replica_scheduler.on_schedule()</code> pulls <strong>multiple requests</strong> from the queue to form ONE batch. It does NOT create one batch per request. The internal <code class='inline-code'>_get_next_batch()</code> loops through the request queue, adding requests until it hits memory, token, or batch-size limits. If the replica is already running the maximum number of concurrent batches (<code class='inline-code'>_num_running_batches &ge; _num_stages</code>), it returns an <strong>empty list</strong> — the requests simply wait."
+          data-zh="<code class='inline-code'>replica_scheduler.on_schedule()</code> 從佇列中取出<strong>多個請求</strong>組成一個批次，並非每個請求各一個批次。內部的 <code class='inline-code'>_get_next_batch()</code> 會遍歷請求佇列，持續加入請求直到觸及 memory、token 或 batch-size 上限。若 replica 已達最大並行批次數（<code class='inline-code'>_num_running_batches &ge; _num_stages</code>），則返回<strong>空列表</strong> — 請求繼續等待。"><code class="inline-code">replica_scheduler.on_schedule()</code> pulls <strong>multiple requests</strong> from the queue to form ONE batch. It does NOT create one batch per request. The internal <code class="inline-code">_get_next_batch()</code> loops through the request queue, adding requests until it hits memory, token, or batch-size limits. If the replica is already running the maximum number of concurrent batches (<code class="inline-code">_num_running_batches &ge; _num_stages</code>), it returns an <strong>empty list</strong> — the requests simply wait.</span>
+      </div>
+
       <details>
         <summary><span class="i18n" data-en="▸ View handle_event() source" data-zh="▸ 查看 handle_event() 原始碼">▸ View handle_event() source</span></summary>
 <pre><code><span class="kw">def</span> <span class="fn">handle_event</span>(<span class="kw">self</span>, scheduler, metrics_store):
@@ -742,7 +756,7 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
     <span class="kw">self</span>._batches = replica_scheduler.<span class="fn">on_schedule</span>()
 
     <span class="kw">if not</span> <span class="kw">self</span>._batches:
-        <span class="kw">return</span> []
+        <span class="kw">return</span> []    <span class="cm"># ← 若 replica 正忙或佇列為空，什麼都不做</span>
 
     memory_usage_percent = replica_scheduler.memory_usage_percent
     metrics_store.<span class="fn">on_replica_schedule</span>(
@@ -755,6 +769,36 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
         <span class="cl">BatchStageArrivalEvent</span>(<span class="kw">self</span>.time, <span class="kw">self</span>._replica_id, <span class="nr">0</span>, batch)
         <span class="kw">for</span> batch <span class="kw">in</span> <span class="kw">self</span>._batches
     ]</code></pre>
+      </details>
+      <details>
+        <summary><span class="i18n" data-en="▸ View on_schedule() → _get_next_batch() batching logic" data-zh="▸ 查看 on_schedule() → _get_next_batch() 批次組裝邏輯">▸ View on_schedule() &rarr; _get_next_batch() batching logic</span></summary>
+<pre><code><span class="cm"># base_replica_scheduler.py — on_schedule()</span>
+<span class="kw">def</span> <span class="fn">on_schedule</span>(<span class="kw">self</span>) -> <span class="ty">List</span>[<span class="cl">Batch</span>]:
+    scheduled_batches = []
+    <span class="kw">while</span> <span class="kw">self</span>._num_running_batches < <span class="kw">self</span>._num_stages:
+        batch = <span class="kw">self</span>.<span class="fn">_get_next_batch</span>()     <span class="cm"># ← 從佇列撈多個 request 組成 1 個 batch</span>
+        <span class="kw">if not</span> batch:
+            <span class="kw">break</span>
+        scheduled_batches.<span class="fn">append</span>(batch)
+        <span class="kw">self</span>._num_running_batches += <span class="nr">1</span>
+    <span class="kw">return</span> scheduled_batches
+
+<span class="cm"># vllm_replica_scheduler.py — _get_next_batch() (以 vLLM 為例)</span>
+<span class="kw">def</span> <span class="fn">_get_next_batch</span>(<span class="kw">self</span>) -> <span class="ty">Optional</span>[<span class="cl">Batch</span>]:
+    requests, num_tokens = [], []
+    <span class="kw">while</span> <span class="kw">self</span>._request_queue:           <span class="cm"># ← 遍歷整個佇列</span>
+        <span class="kw">if not</span> <span class="kw">self</span>.<span class="fn">_can_allocate</span>(...):    <span class="cm"># memory 不足 → 停止</span>
+            <span class="kw">break</span>
+        <span class="kw">if</span> total_tokens > max_tokens:     <span class="cm"># token 上限 → 停止</span>
+            <span class="kw">break</span>
+        <span class="kw">if</span> <span class="fn">len</span>(requests) >= batch_size_cap: <span class="cm"># batch size 上限 → 停止</span>
+            <span class="kw">break</span>
+        request = <span class="kw">self</span>._request_queue.<span class="fn">pop</span>(<span class="nr">0</span>)
+        requests.<span class="fn">append</span>(request)            <span class="cm"># ← 多個 request 加入同一個 batch</span>
+        num_tokens.<span class="fn">append</span>(next_tokens)
+    <span class="kw">if not</span> requests:
+        <span class="kw">return</span> <span class="kw">None</span>
+    <span class="kw">return</span> <span class="cl">Batch</span>(<span class="kw">self</span>._replica_id, requests, num_tokens)</code></pre>
       </details>
     </div>
 
@@ -801,6 +845,12 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
       <span class="event-badge stage-sched">ReplicaStageScheduleEvent</span>
       <span class="file-tag">vidur/events/replica_stage_schedule_event.py</span>
       <h4><span class="i18n" data-en="Execute batch on a pipeline stage" data-zh="在 pipeline stage 上執行批次">Execute batch on a pipeline stage</span></h4>
+      <div class="callout warn">
+        <strong><span class="i18n" data-en="Guard:" data-zh="保護機制：">Guard:</span></strong>
+        <span class="i18n"
+          data-en="<code class='inline-code'>stage_scheduler.on_schedule()</code> checks <code class='inline-code'>_is_busy</code> first. If this stage is already executing a batch, it returns <code class='inline-code'>(None, None, None)</code> and the event produces no further events — the new batch waits in the stage queue until the current one finishes."
+          data-zh="<code class='inline-code'>stage_scheduler.on_schedule()</code> 會先檢查 <code class='inline-code'>_is_busy</code>。若該 stage 正在執行批次，則返回 <code class='inline-code'>(None, None, None)</code>，不產生後續事件 — 新批次在 stage 佇列中等待，直到當前批次執行完畢。"><code class="inline-code">stage_scheduler.on_schedule()</code> checks <code class="inline-code">_is_busy</code> first. If this stage is already executing a batch, it returns <code class="inline-code">(None, None, None)</code> and the event produces no further events — the new batch waits in the stage queue until the current one finishes.</span>
+      </div>
       <table>
         <tr>
           <th><span class="i18n" data-en="Action" data-zh="動作">Action</span></th>
@@ -808,7 +858,7 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
           <th><span class="i18n" data-en="File" data-zh="檔案">File</span></th>
         </tr>
         <tr>
-          <td><span class="i18n" data-en="Dequeue batch and compute execution time" data-zh="取出批次並計算執行時間">Dequeue batch and compute execution time</span></td>
+          <td><span class="i18n" data-en="Dequeue batch and compute execution time (if not busy)" data-zh="取出批次並計算執行時間（若未忙碌）">Dequeue batch and compute execution time (if not busy)</span></td>
           <td><code class="inline-code">stage_scheduler.on_schedule()</code></td>
           <td><span class="file-tag">scheduler/replica_stage_scheduler/replica_stage_schduler.py</span></td>
         </tr>
