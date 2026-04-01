@@ -1154,6 +1154,261 @@ GPU 7→15  sport=<span class="num">1</span>  <span class="st">Spine 26</span>  
             </table>
         </section>
 
+        <!-- ═══════════════ 8.5 SOURCE DEEP DIVE ═══════════════ -->
+        <section id="source-deep-dive">
+            <h2 class="i18n" data-en="Source Code Deep Dive — What Each File Does" data-zh="原始碼深入解析 — 每個檔案在做什麼">Source Code Deep Dive — What Each File Does</h2>
+
+            <p><span class="i18n"
+                data-en="This section traces the execution flow through the 5 C++ source files, showing exactly when each is invoked and what it does at the code level."
+                data-zh="本節追蹤 5 個 C++ 原始碼檔案的執行流程，展示每個檔案何時被呼叫以及在程式碼層級上做了什麼。">This section traces the execution flow through the 5 C++ source files, showing exactly when each is invoked and what it does at the code level.</span></p>
+
+            <!-- ===== AstraSimNetwork.cc ===== -->
+            <div class="card" style="border-left:4px solid #ffa500">
+                <h3><span class="file-tag">AstraSimNetwork.cc</span> <span class="i18n" data-en="— Main entry point + TraceInjector" data-zh="— 主進入點 + TraceInjector">— Main entry point + TraceInjector</span></h3>
+                <p><span class="i18n"
+                    data-en="Contains <code>main()</code> and the <code>ASTRASimNetwork</code> class that bridges AstraSim ↔ NS-3."
+                    data-zh="包含 <code>main()</code> 和連接 AstraSim ↔ NS-3 的 <code>ASTRASimNetwork</code> 類別。">Contains <code>main()</code> and the <code>ASTRASimNetwork</code> class that bridges AstraSim &harr; NS-3.</span></p>
+
+                <h4><span class="i18n" data-en="Execution Order" data-zh="執行順序">Execution Order</span></h4>
+<pre><code><span class="fn">main</span>(argc, argv)
+  ① <span class="fn">user_param_prase</span>()         <span class="cm">// parse -t thread -w workload -n topo -c conf</span>
+  ② <span class="fn">main1</span>(topo, conf)           <span class="cm">// → common.h: ReadConf → SetConfig → SetupNetwork</span>
+                                  <span class="cm">//   (builds NS-3 topology, initializes CentralController)</span>
+  ③ <span class="kw">if</span> env <span class="st">TRACE_INJECT_FILE</span>:   <span class="cm">// ← NEW: TraceInjector bypass mode</span>
+      <span class="kw">for</span> line <span class="kw">in</span> csv:
+        Simulator::<span class="fn">Schedule</span>(NanoSeconds(t), &<span class="fn">SendFlowTrace</span>, src, dst, size)
+      Simulator::<span class="fn">Run</span>()           <span class="cm">// run NS-3 with injected flows only</span>
+      <span class="kw">return</span>
+  ④ <span class="cm">// Normal mode: create ASTRASimNetwork + AstraSim::Sys per GPU</span>
+     <span class="kw">for</span> j <span class="kw">in</span> nodes_num:
+       networks[j] = <span class="kw">new</span> <span class="cl">ASTRASimNetwork</span>(j, <span class="nr">0</span>)
+       systems[j]  = <span class="kw">new</span> <span class="cl">AstraSim::Sys</span>(networks[j], ...)
+     <span class="kw">for</span> i <span class="kw">in</span> nodes_num:
+       systems[i]-&gt;workload-&gt;<span class="fn">fire</span>()  <span class="cm">// kick off collective workloads</span>
+     Simulator::<span class="fn">Run</span>()</code></pre>
+
+                <h4><span class="i18n" data-en="ASTRASimNetwork class — AstraSim ↔ NS-3 bridge" data-zh="ASTRASimNetwork 類別 — AstraSim ↔ NS-3 橋接">ASTRASimNetwork class — AstraSim &harr; NS-3 bridge</span></h4>
+                <table>
+                    <tr><th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th><th><span class="i18n" data-en="What it does" data-zh="做什麼">What it does</span></th></tr>
+                    <tr><td><code>sim_send()</code></td><td><span class="i18n" data-en="Registers flow in <code>sentHash</code>, then calls <code>SendFlow()</code> (in entry.h) to inject an RDMA QP into NS-3" data-zh="在 <code>sentHash</code> 註冊 flow，然後呼叫 <code>SendFlow()</code>（在 entry.h 中）將 RDMA QP 注入 NS-3">Registers flow in <code>sentHash</code>, then calls <code>SendFlow()</code> (in entry.h) to inject an RDMA QP into NS-3</span></td></tr>
+                    <tr><td><code>sim_recv()</code></td><td><span class="i18n" data-en="Matches arriving data against <code>expeRecvHash</code>. If data already arrived: invoke callback immediately. If not: register in <code>expeRecvHash</code> to wait." data-zh="將到達的資料與 <code>expeRecvHash</code> 匹配。若資料已到達：立即呼叫回調。若未到達：註冊在 <code>expeRecvHash</code> 中等待。">Matches arriving data against <code>expeRecvHash</code>. If data already arrived: invoke callback immediately. If not: register in <code>expeRecvHash</code> to wait.</span></td></tr>
+                    <tr><td><code>sim_get_time()</code></td><td><span class="i18n" data-en="Returns NS-3's <code>Simulator::Now().GetNanoSeconds()</code> to AstraSim" data-zh="將 NS-3 的 <code>Simulator::Now().GetNanoSeconds()</code> 回傳給 AstraSim">Returns NS-3's <code>Simulator::Now().GetNanoSeconds()</code> to AstraSim</span></td></tr>
+                    <tr><td><code>sim_schedule()</code></td><td><span class="i18n" data-en="Wraps <code>Simulator::Schedule()</code> for AstraSim callbacks" data-zh="為 AstraSim 回調封裝 <code>Simulator::Schedule()</code>">Wraps <code>Simulator::Schedule()</code> for AstraSim callbacks</span></td></tr>
+                </table>
+
+                <div class="callout green">
+                    <strong>TraceInjector</strong>:
+                    <span class="i18n"
+                        data-en="When <code>TRACE_INJECT_FILE</code> is set, the entire AstraSim workload system is <strong>bypassed</strong>. Flows are read from a CSV (<code>timestamp_ns,src,dst,size_bytes</code>) and scheduled directly into NS-3 via <code>SendFlowTrace()</code>. This enables isolated network experiments (e.g., KV cache transfer patterns) without needing the full SimAI stack."
+                        data-zh="當設定 <code>TRACE_INJECT_FILE</code> 時，整個 AstraSim 工作負載系統被<strong>繞過</strong>。Flow 從 CSV（<code>timestamp_ns,src,dst,size_bytes</code>）讀取，透過 <code>SendFlowTrace()</code> 直接排程到 NS-3。這允許獨立的網路實驗（例如 KV cache 傳輸模式），無需完整的 SimAI 堆疊。">When <code>TRACE_INJECT_FILE</code> is set, the entire AstraSim workload system is <strong>bypassed</strong>. Flows are read from a CSV (<code>timestamp_ns,src,dst,size_bytes</code>) and scheduled directly into NS-3 via <code>SendFlowTrace()</code>. This enables isolated network experiments (e.g., KV cache transfer patterns) without needing the full SimAI stack.</span>
+                </div>
+            </div>
+
+            <!-- ===== entry.h ===== -->
+            <div class="card" style="border-left:4px solid #6ec6ff">
+                <h3><span class="file-tag">entry.h</span> <span class="i18n" data-en="— SendFlow + CentralController integration" data-zh="— SendFlow + CentralController 整合">— SendFlow + CentralController integration</span></h3>
+                <p><span class="i18n"
+                    data-en="Defines the flow injection functions and all flow completion callbacks. This is where the CentralController's <code>AssignSport()</code> is called for every flow."
+                    data-zh="定義 flow 注入函式和所有 flow 完成回調。這是每個 flow 呼叫 CentralController 的 <code>AssignSport()</code> 的地方。">Defines the flow injection functions and all flow completion callbacks. This is where the CentralController's <code>AssignSport()</code> is called for every flow.</span></p>
+
+                <h4><code>SendFlow()</code> <span class="i18n" data-en="— normal mode (called by AstraSim)" data-zh="— 正常模式（由 AstraSim 呼叫）">— normal mode (called by AstraSim)</span></h4>
+<pre><code><span class="kw">void</span> <span class="fn">SendFlow</span>(src, dst, maxPacketCount, msg_handler, fun_arg, tag, request) {
+  port = portNumber[src][dst]++;
+
+  <span class="cm">// ← NEW: CentralController picks a conflict-free sport</span>
+  port = <span class="cl">CentralController</span>::<span class="fn">Instance</span>().<span class="fn">AssignSport</span>(
+      serverAddress[src], serverAddress[dst],
+      <span class="nr">100</span> <span class="cm">/*dport*/</span>, src, dst, port);
+
+  sender_src_port_map[{port, {src, dst}}] = request-&gt;flowTag;
+
+  <span class="cl">RdmaClientHelper</span> clientHelper(pg, srcIP, dstIP, port, dport, size, ...);
+  appCon = clientHelper.<span class="fn">Install</span>(n.Get(src));
+  appCon.<span class="fn">Start</span>(Time(send_lat));  <span class="cm">// inject RDMA QP into NS-3</span>
+}</code></pre>
+
+                <h4><code>SendFlowTrace()</code> <span class="i18n" data-en="— TraceInjector mode (no AstraSim context)" data-zh="— TraceInjector 模式（無 AstraSim 上下文）">— TraceInjector mode (no AstraSim context)</span></h4>
+<pre><code><span class="kw">void</span> <span class="fn">SendFlowTrace</span>(src, dst, size_bytes) {
+  port = portNumber[src][dst]++;
+  port = <span class="cl">CentralController</span>::<span class="fn">Instance</span>().<span class="fn">AssignSport</span>(...);
+
+  <span class="cl">AstraSim::ncclFlowTag</span> sentinel;  <span class="cm">// current_flow_id = -1 (sentinel)</span>
+  sender_src_port_map[{port, {src, dst}}] = sentinel;
+
+  <span class="cm">// Same RDMA QP injection, but no AstraSim callbacks</span>
+  <span class="cl">RdmaClientHelper</span> clientHelper(..., <span class="kw">nullptr</span>, <span class="kw">nullptr</span>, ...);
+  appCon.<span class="fn">Start</span>(Time(send_lat));
+}</code></pre>
+
+                <h4><span class="i18n" data-en="Completion Callbacks" data-zh="完成回調">Completion Callbacks</span></h4>
+                <table>
+                    <tr><th><span class="i18n" data-en="Callback" data-zh="回調">Callback</span></th><th><span class="i18n" data-en="Triggered by" data-zh="觸發者">Triggered by</span></th><th><span class="i18n" data-en="What it does" data-zh="做什麼">What it does</span></th></tr>
+                    <tr><td><code>qp_finish()</code></td><td><span class="i18n" data-en="NS-3 when all packets arrive at dst" data-zh="NS-3，當所有封包到達目的地">NS-3 when all packets arrive at dst</span></td><td><span class="i18n" data-en="Writes to fct.txt, checks <code>is_receive_finished()</code>, calls <code>notify_receiver_receive_data()</code> → triggers AstraSim recv callback. For sentinel flows (TraceInjector): early return." data-zh="寫入 fct.txt，檢查 <code>is_receive_finished()</code>，呼叫 <code>notify_receiver_receive_data()</code> → 觸發 AstraSim 接收回調。對 sentinel flow（TraceInjector）：提前返回。">Writes to fct.txt, checks <code>is_receive_finished()</code>, calls <code>notify_receiver_receive_data()</code> &rarr; triggers AstraSim recv callback. For sentinel flows (TraceInjector): early return.</span></td></tr>
+                    <tr><td><code>send_finish()</code></td><td><span class="i18n" data-en="NS-3 when all packets leave src NIC" data-zh="NS-3，當所有封包離開源 NIC">NS-3 when all packets leave src NIC</span></td><td><span class="i18n" data-en="Checks <code>is_sending_finished()</code>, calls <code>notify_sender_sending_finished()</code> → triggers AstraSim send callback. For sentinel flows: early return." data-zh="檢查 <code>is_sending_finished()</code>，呼叫 <code>notify_sender_sending_finished()</code> → 觸發 AstraSim 傳送回調。對 sentinel flow：提前返回。">Checks <code>is_sending_finished()</code>, calls <code>notify_sender_sending_finished()</code> &rarr; triggers AstraSim send callback. For sentinel flows: early return.</span></td></tr>
+                </table>
+            </div>
+
+            <!-- ===== common.h ===== -->
+            <div class="card" style="border-left:4px solid #2ecc71">
+                <h3><span class="file-tag">common.h</span> <span class="i18n" data-en="— Network setup + CC initialization" data-zh="— 網路設定 + CC 初始化">— Network setup + CC initialization</span></h3>
+                <p><span class="i18n"
+                    data-en="The infrastructure glue file. Defines global state, reads config, builds the NS-3 topology, and initializes the CentralController."
+                    data-zh="基礎架構黏合檔案。定義全域狀態、讀取設定、建構 NS-3 拓撲，並初始化 CentralController。">The infrastructure glue file. Defines global state, reads config, builds the NS-3 topology, and initializes the CentralController.</span></p>
+
+                <h4><span class="i18n" data-en="Three main functions, called in order by main1()" data-zh="三個主要函式，由 main1() 依序呼叫">Three main functions, called in order by main1()</span></h4>
+<pre><code><span class="fn">main1</span>(topo, conf)
+  ① <span class="fn">ReadConf</span>(topo, conf)    <span class="cm">// Parse config: CC_MODE, DATA_RATE, LINK_DELAY, PFC, DCQCN params...</span>
+  ② <span class="fn">SetConfig</span>()             <span class="cm">// Apply NS-3 defaults (PauseTime, QcnEnabled, IntHeader mode)</span>
+                             <span class="cm">//   cc_mode=3 → DCQCN, cc_mode=7 → TIMELY, cc_mode=10 → PINT</span>
+  ③ <span class="fn">SetupNetwork</span>(qp_finish, send_finish)
+       <span class="cm">// a. Read topology file: node_num, gpus_per_server, nvswitch_num, switch_num</span>
+       <span class="cm">// b. Create NS-3 nodes (hosts, SwitchNode, NVSwitchNode)</span>
+       <span class="cm">// c. Install point-to-point links with QBB (lossless Ethernet)</span>
+       <span class="cm">// d. Configure RDMA per host (RdmaHw with CC mode, rates, PFC)</span>
+       <span class="cm">// e. CalculateRoutes() → SetRoutingEntries()</span>
+       <span class="cm">// f. NEW: Initialize CentralController ↓</span></code></pre>
+
+                <h4><span class="i18n" data-en="CentralController initialization (added in SetupNetwork)" data-zh="CentralController 初始化（新增於 SetupNetwork 中）">CentralController initialization (added in SetupNetwork)</span></h4>
+<pre><code><span class="cm">// After SetRoutingEntries():</span>
+<span class="cl">CentralController</span>::<span class="fn">Instance</span>().<span class="fn">Initialize</span>(n, nodeIdToRdmaHw, ipToNodeId, gpus_per_server);
+
+<span class="cm">// Env var control:</span>
+<span class="kw">if</span> (env <span class="st">"CC_LOG_FILE"</span>)   CC.<span class="fn">SetLogFile</span>(path);   <span class="cm">// CSV: flow_id,sip,dip,sport,hops</span>
+<span class="kw">if</span> (env <span class="st">"CC_ENABLE"</span> != <span class="st">"0"</span>) CC.<span class="fn">Enable</span>();  <span class="cm">// default: enabled</span>
+<span class="kw">else</span>                       CC.<span class="fn">Disable</span>(); <span class="cm">// for A/B comparison</span></code></pre>
+            </div>
+
+            <!-- ===== central-controller.h ===== -->
+            <div class="card" style="border-left:4px solid #b388ff">
+                <h3><span class="file-tag">central-controller.h</span> <span class="i18n" data-en="— CC class declaration" data-zh="— CC 類別宣告">— CC class declaration</span></h3>
+                <p><span class="i18n"
+                    data-en="Singleton class with the full API and internal data structures for conflict-free path assignment."
+                    data-zh="單例類別，包含衝突避免路徑分配的完整 API 和內部資料結構。">Singleton class with the full API and internal data structures for conflict-free path assignment.</span></p>
+
+                <h4><span class="i18n" data-en="Public API" data-zh="公開 API">Public API</span></h4>
+                <table>
+                    <tr><th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th><th><span class="i18n" data-en="When called" data-zh="何時呼叫">When called</span></th><th><span class="i18n" data-en="What it does" data-zh="做什麼">What it does</span></th></tr>
+                    <tr><td><code>Initialize()</code></td><td><span class="i18n" data-en="Once, in SetupNetwork" data-zh="一次，在 SetupNetwork 中">Once, in SetupNetwork</span></td><td><span class="i18n" data-en="Reads NS-3 topology: adjacency graph, switch ECMP seeds + routing tables, host NIC→switch mapping" data-zh="讀取 NS-3 拓撲：鄰接圖、switch ECMP seed + 路由表、host NIC→switch 對應">Reads NS-3 topology: adjacency graph, switch ECMP seeds + routing tables, host NIC&rarr;switch mapping</span></td></tr>
+                    <tr><td><code>AssignSport()</code></td><td><span class="i18n" data-en="Every flow (SendFlow / SendFlowTrace)" data-zh="每個 flow（SendFlow / SendFlowTrace）">Every flow (SendFlow / SendFlowTrace)</span></td><td><span class="i18n" data-en="Probes sport 1..65534, finds first conflict-free path, reserves it" data-zh="探測 sport 1..65534，找到第一個無衝突路徑，預留之">Probes sport 1..65534, finds first conflict-free path, reserves it</span></td></tr>
+                    <tr><td><code>ReleasePath()</code></td><td><span class="i18n" data-en="QP completion (rdma-hw.cc)" data-zh="QP 完成時（rdma-hw.cc）">QP completion (rdma-hw.cc)</span></td><td><span class="i18n" data-en="Unreserves all hops for the completed flow" data-zh="解除已完成 flow 的所有跳預留">Unreserves all hops for the completed flow</span></td></tr>
+                </table>
+
+                <h4><span class="i18n" data-en="Internal Data Structures" data-zh="內部資料結構">Internal Data Structures</span></h4>
+                <table>
+                    <tr><th><span class="i18n" data-en="Structure" data-zh="結構">Structure</span></th><th><span class="i18n" data-en="Purpose" data-zh="用途">Purpose</span></th></tr>
+                    <tr><td><code>m_switches</code></td><td><span class="i18n" data-en="Per-switch: ecmpSeed + rtTable (dip → [outPorts]). Read-only after Initialize." data-zh="每交換機：ecmpSeed + rtTable（dip → [outPorts]）。Initialize 後唯讀。">Per-switch: ecmpSeed + rtTable (dip &rarr; [outPorts]). Read-only after Initialize.</span></td></tr>
+                    <tr><td><code>m_adjacency</code></td><td><span class="i18n" data-en="nodeId → {portIdx → neighborNodeId}. Physical topology graph." data-zh="nodeId → {portIdx → neighborNodeId}。物理拓撲圖。">nodeId &rarr; {portIdx &rarr; neighborNodeId}. Physical topology graph.</span></td></tr>
+                    <tr><td><code>m_hopToFlows</code></td><td><span class="i18n" data-en="(switchId, portIdx) → set of active FlowKeys. The <strong>dynamic reservation state</strong>." data-zh="(switchId, portIdx) → 活躍 FlowKey 集合。<strong>動態預留狀態</strong>。">(switchId, portIdx) &rarr; set of active FlowKeys. The <strong>dynamic reservation state</strong>.</span></td></tr>
+                    <tr><td><code>m_flowPaths</code></td><td><span class="i18n" data-en="FlowKey → Path. Reverse lookup for ReleasePath." data-zh="FlowKey → Path。供 ReleasePath 反查。">FlowKey &rarr; Path. Reverse lookup for ReleasePath.</span></td></tr>
+                </table>
+            </div>
+
+            <!-- ===== central-controller.cc ===== -->
+            <div class="card" style="border-left:4px solid #ef5350">
+                <h3><span class="file-tag">central-controller.cc</span> <span class="i18n" data-en="— CC core logic" data-zh="— CC 核心邏輯">— CC core logic</span></h3>
+
+                <h4><code>AssignSport()</code> <span class="i18n" data-en="— the hot path (called per flow)" data-zh="— 熱路徑（每個 flow 呼叫一次）">— the hot path (called per flow)</span></h4>
+<pre><code><span class="fn">AssignSport</span>(sip, dip, dport, srcNodeId, dstNodeId, fallbackSport) {
+  <span class="kw">if</span> (!m_enabled || !m_initialized) <span class="kw">return</span> fallbackSport;
+  <span class="kw">if</span> (srcNodeId/gpusPerServer == dstNodeId/gpusPerServer) <span class="kw">return</span> fallbackSport;
+      <span class="cm">// ↑ intra-server → NVSwitch, no ECMP, CC can't help</span>
+
+  <span class="cm">// Quick check: if probe path has ≤1 hop, CC is useless</span>
+  Path probe = <span class="fn">ComputePath</span>(sip, dip, fallbackSport, dport, ...);
+  <span class="kw">if</span> (probe.size() <= <span class="nr">1</span>) <span class="kw">return</span> fallbackSport;
+
+  <span class="cm">// Exhaustive search: try sport 1..65534</span>
+  <span class="kw">for</span> (sport = <span class="nr">1</span>; sport < <span class="nr">65535</span>; sport++) {
+    Path path = <span class="fn">ComputePath</span>(sip, dip, sport, dport, ...);
+    <span class="kw">if</span> (!<span class="fn">HasConflict</span>(path)) {
+      <span class="fn">ReservePath</span>(path, {sip, dip, sport, dport});
+      <span class="kw">return</span> sport;  <span class="cm">// ← conflict-free sport found</span>
+    }
+  }
+  <span class="kw">return</span> fallbackSport;  <span class="cm">// no conflict-free sport exists</span>
+}</code></pre>
+
+                <h4><code>ComputePath()</code> <span class="i18n" data-en="— deterministic ECMP replay" data-zh="— 確定性 ECMP 重播">— deterministic ECMP replay</span></h4>
+<pre><code><span class="fn">ComputePath</span>(sip, dip, sport, dport, srcNodeId, dstNodeId) {
+  buf = {sip, dip, (sport | dport&lt;&lt;16)};  <span class="cm">// 12-byte hash input</span>
+
+  <span class="cm">// Step 1: NIC selection at host (same hash as rdma-hw.cc)</span>
+  h = <span class="fn">Murmur3</span>(buf, <span class="nr">12</span>, <span class="nr">0x8BADF00D</span>);
+  nicIdx = hostNics[h % hostNics.size()];
+  currentNode = nicToSwitch[nicIdx];
+
+  <span class="cm">// Step 2: switch-by-switch ECMP traversal</span>
+  <span class="kw">while</span> (currentNode is switch) {
+    h = <span class="fn">Murmur3</span>(buf, <span class="nr">12</span>, switch.ecmpSeed);  <span class="cm">// ← per-switch seed</span>
+    portIdx = switch.rtTable[dip][h % numPorts];
+    path.push_back({currentNode, portIdx});
+    currentNode = adjacency[currentNode][portIdx];
+  }
+  <span class="kw">return</span> path;
+}</code></pre>
+
+                <div class="callout amber">
+                    <strong><span class="i18n" data-en="Key:" data-zh="關鍵：">Key:</span></strong>
+                    <span class="i18n"
+                        data-en="<code>ComputePath()</code> uses the <strong>exact same Murmur3 hash</strong> with the <strong>exact same per-switch ECMP seed</strong> as the NS-3 <code>SwitchNode</code>. This means the CC can predict the path any 5-tuple will take through the fabric <em>before</em> injecting the flow. Changing <code>sport</code> changes the hash output, which changes the ECMP port selection, which routes the flow through different spine links."
+                        data-zh="<code>ComputePath()</code> 使用與 NS-3 <code>SwitchNode</code> <strong>完全相同的 Murmur3 hash</strong> 和<strong>完全相同的每交換機 ECMP seed</strong>。這意味著 CC 可以在注入 flow <em>之前</em>預測任何 5-tuple 在網路中的路徑。改變 <code>sport</code> 會改變 hash 輸出，進而改變 ECMP 端口選擇，將 flow 路由到不同的 spine 鏈路。"><code>ComputePath()</code> uses the <strong>exact same Murmur3 hash</strong> with the <strong>exact same per-switch ECMP seed</strong> as the NS-3 <code>SwitchNode</code>. This means the CC can predict the path any 5-tuple will take through the fabric <em>before</em> injecting the flow. Changing <code>sport</code> changes the hash output, which changes the ECMP port selection, which routes the flow through different spine links.</span>
+                </div>
+
+                <h4><code>HasConflict()</code> + <code>ReservePath()</code> / <code>ReleasePath()</code></h4>
+<pre><code><span class="fn">HasConflict</span>(path) {
+  <span class="cm">// Check all hops EXCEPT the last one (leaf→GPU has no diversity)</span>
+  <span class="kw">for</span> (i = <span class="nr">0</span>; i + <span class="nr">1</span> < path.size(); i++)
+    <span class="kw">if</span> (m_hopToFlows[{path[i].node, path[i].port}].size() > <span class="nr">0</span>)
+      <span class="kw">return</span> <span class="kw">true</span>;
+  <span class="kw">return</span> <span class="kw">false</span>;
+}
+
+<span class="fn">ReservePath</span>(path, flowKey) {
+  m_flowPaths[flowKey] = path;
+  <span class="kw">for</span> (i = <span class="nr">0</span>; i + <span class="nr">1</span> < path.size(); i++)
+    m_hopToFlows[{path[i].node, path[i].port}].<span class="fn">insert</span>(flowKey);
+}
+
+<span class="fn">ReleasePath</span>(sip, dip, sport, dport) {  <span class="cm">// called from rdma-hw.cc QpComplete()</span>
+  flowKey = {sip, dip, sport, dport};
+  path = m_flowPaths[flowKey];
+  <span class="kw">for</span> hop <span class="kw">in</span> path:
+    m_hopToFlows[hop].<span class="fn">erase</span>(flowKey);
+  m_flowPaths.<span class="fn">erase</span>(flowKey);
+}</code></pre>
+            </div>
+
+            <!-- ===== Full lifecycle ===== -->
+            <h3 class="i18n" data-en="Complete Lifecycle: One Flow Through All 5 Files" data-zh="完整生命週期：一個 Flow 穿越所有 5 個檔案">Complete Lifecycle: One Flow Through All 5 Files</h3>
+
+<pre><code><span class="cm">① AstraSim decides to send a collective chunk</span>
+   → <span class="cl">ASTRASimNetwork</span>::<span class="fn">sim_send</span>()                  <span class="cm">[AstraSimNetwork.cc]</span>
+
+<span class="cm">② sim_send() calls SendFlow()</span>
+   → <span class="fn">SendFlow</span>(src, dst, size, callback, tag)      <span class="cm">[entry.h]</span>
+
+<span class="cm">③ SendFlow() asks CC for a conflict-free port</span>
+   → <span class="cl">CentralController</span>::<span class="fn">AssignSport</span>()              <span class="cm">[central-controller.cc]</span>
+       → <span class="fn">ComputePath</span>(sip, dip, sport_candidate)     <span class="cm">// replays ECMP hash</span>
+       → <span class="fn">HasConflict</span>(path)                          <span class="cm">// checks m_hopToFlows</span>
+       → <span class="fn">ReservePath</span>(path, flowKey)                 <span class="cm">// reserves hops</span>
+       → <span class="kw">return</span> sport
+
+<span class="cm">④ SendFlow() injects RDMA QP with CC-assigned sport</span>
+   → <span class="cl">RdmaClientHelper</span>.<span class="fn">Install</span>() + <span class="fn">Start</span>()          <span class="cm">[entry.h → NS-3]</span>
+
+<span class="cm">⑤ NS-3 simulates packet-level RDMA transport</span>
+   → switches use ECMP hash (same Murmur3)       <span class="cm">[ns-3 switch-node.cc]</span>
+   → congestion control (DCQCN/TIMELY/PINT)       <span class="cm">[configured in common.h]</span>
+
+<span class="cm">⑥ All packets arrive → QP completes</span>
+   → <span class="cl">RdmaHw</span>::<span class="fn">QpComplete</span>()                          <span class="cm">[rdma-hw.cc]</span>
+       → <span class="cl">CentralController</span>::<span class="fn">ReleasePath</span>()            <span class="cm">// free reserved hops</span>
+       → <span class="fn">qp_finish</span>()                                <span class="cm">[entry.h]</span>
+           → <span class="fn">notify_receiver_receive_data</span>()           <span class="cm">// triggers AstraSim callback</span></code></pre>
+
+        </section>
+
         <!-- ═══════════════ 9. DIFF ═══════════════ -->
         <section id="diff">
             <span class="section-label">9</span>
