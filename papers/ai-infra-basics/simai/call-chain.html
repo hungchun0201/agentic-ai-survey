@@ -203,6 +203,7 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
       <li><a href="#phase3"><span class="i18n" data-en="Phase 3 — Event Queue Bootstrap" data-zh="階段 3 — 事件佇列初始化">Phase 3 — Event Queue Bootstrap</span></a></li>
       <li><a href="#phase4"><span class="i18n" data-en="Phase 4 — Main Event Loop" data-zh="階段 4 — 主事件迴圈">Phase 4 — Main Event Loop</span></a></li>
       <li><a href="#events"><span class="i18n" data-en="Phase 5 — Event Chain Detail" data-zh="階段 5 — 事件鏈詳解">Phase 5 — Event Chain Detail</span></a></li>
+      <li><a href="#prefill-decode"><span class="i18n" data-en="Prefill / Decode Iteration Lifecycle" data-zh="Prefill / Decode 迭代生命週期">Prefill / Decode Iteration Lifecycle</span></a></li>
       <li><a href="#event-timing"><span class="i18n" data-en="Event Timestamp Propagation" data-zh="事件時間戳傳遞">Event Timestamp Propagation</span></a></li>
       <li><a href="#entities"><span class="i18n" data-en="Entity State Transitions" data-zh="Entity 狀態轉換">Entity State Transitions</span></a></li>
       <li><a href="#output"><span class="i18n" data-en="Phase 6 — Output &amp; Metrics" data-zh="階段 6 — 輸出與指標">Phase 6 — Output &amp; Metrics</span></a></li>
@@ -1122,6 +1123,276 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
     <span class="i18n"
       data-en="The event chain triggered by <span class='event-badge arrival'>RequestArrival</span> fires every time, but is mostly a no-op when the replica is busy. The <strong>real multi-request batching</strong> happens when <span class='event-badge batch-end'>BatchEnd</span> triggers <span class='event-badge rsched'>ReplicaSchedule</span> — by that time, multiple requests have accumulated in the queue and are pulled into a single batch."
       data-zh="由 <span class='event-badge arrival'>RequestArrival</span> 觸發的事件鏈每次都會執行，但當 replica 忙碌時大多是空操作。<strong>真正的多請求批次化</strong>發生在 <span class='event-badge batch-end'>BatchEnd</span> 觸發 <span class='event-badge rsched'>ReplicaSchedule</span> 時 — 此時多個請求已在佇列中累積，被一起拉入同一個批次。">The event chain triggered by <span class="event-badge arrival">RequestArrival</span> fires every time, but is mostly a no-op when the replica is busy. The <strong>real multi-request batching</strong> happens when <span class="event-badge batch-end">BatchEnd</span> triggers <span class="event-badge rsched">ReplicaSchedule</span> — by that time, multiple requests have accumulated in the queue and are pulled into a single batch.</span>
+  </div>
+
+  <!-- ========================================================== -->
+  <!--  PREFILL / DECODE ITERATION LIFECYCLE                       -->
+  <!-- ========================================================== -->
+  <h3 id="prefill-decode"><span class="i18n"
+    data-en="Prefill / Decode Iteration Lifecycle — How Many Batches Does One Request Need?"
+    data-zh="Prefill / Decode 迭代生命週期 — 一個 Request 需要幾次 Batch？">Prefill / Decode Iteration Lifecycle — How Many Batches Does One Request Need?</span></h3>
+
+  <p><span class="i18n"
+    data-en="The event chain (Events 3→4→5→6→7→3) forms a <strong>loop</strong>. A single request goes through this loop <strong>multiple times</strong> — once is not enough. But the call graph above doesn't make this obvious. This section traces the full lifecycle of a single request with P prefill tokens and D decode tokens."
+    data-zh="事件鏈（事件 3→4→5→6→7→3）形成一個<strong>迴圈</strong>。單一請求會經歷這個迴圈<strong>多次</strong> — 一次是不夠的。但上面的呼叫圖並沒有讓這點顯而易見。本節追蹤一個擁有 P 個 prefill tokens 和 D 個 decode tokens 的請求的完整生命週期。">The event chain (Events 3&rarr;4&rarr;5&rarr;6&rarr;7&rarr;3) forms a <strong>loop</strong>. A single request goes through this loop <strong>multiple times</strong> — once is not enough. But the call graph above doesn't make this obvious. This section traces the full lifecycle of a single request with P prefill tokens and D decode tokens.</span></p>
+
+  <h4><span class="i18n" data-en="The Two Key Mechanisms" data-zh="兩個關鍵機制">The Two Key Mechanisms</span></h4>
+
+  <div class="grid-2">
+    <div class="card highlight-orange">
+      <h4><span class="i18n" data-en="① How many tokens per iteration?" data-zh="① 每次迭代處理多少 token？">① How many tokens per iteration?</span></h4>
+      <span class="file-tag">scheduler/replica_scheduler/base_replica_scheduler.py</span>
+<pre><code><span class="kw">def</span> <span class="fn">_get_request_next_num_tokens</span>(<span class="kw">self</span>, request):
+    <span class="kw">if</span> request.is_prefill_complete:
+        <span class="kw">return</span> <span class="nr">1</span>                        <span class="cm"># decode: 每次只處理 1 個 token</span>
+    <span class="kw">return</span> request.num_prefill_tokens  <span class="cm"># prefill: 一次全部處理完</span></code></pre>
+      <p><span class="i18n"
+        data-en="Prefill processes <strong>all P tokens in one shot</strong>. Decode processes <strong>exactly 1 token per iteration</strong>."
+        data-zh="Prefill <strong>一次處理全部 P 個 token</strong>。Decode <strong>每次迭代只處理 1 個 token</strong>。">Prefill processes <strong>all P tokens in one shot</strong>. Decode processes <strong>exactly 1 token per iteration</strong>.</span></p>
+    </div>
+    <div class="card highlight-blue">
+      <h4><span class="i18n" data-en="② How does a request re-enter the loop?" data-zh="② Request 如何重新進入迴圈？">② How does a request re-enter the loop?</span></h4>
+      <span class="file-tag">scheduler/replica_scheduler/vllm_replica_scheduler.py</span>
+<pre><code><span class="kw">def</span> <span class="fn">on_batch_end</span>(<span class="kw">self</span>, batch):
+    <span class="kw">self</span>._num_running_batches -= <span class="nr">1</span>
+    <span class="kw">for</span> request <span class="kw">in</span> batch.requests:
+        <span class="kw">if</span> request.completed:
+            <span class="kw">self</span>.<span class="fn">free</span>(request.id)         <span class="cm"># 完成 → 釋放記憶體</span>
+        <span class="kw">else</span>:
+            <span class="kw">self</span>._preempted_requests.<span class="fn">append</span>(request)
+            <span class="cm"># ↑ 未完成 → 放回 preempted 佇列，下次 on_schedule() 會再撈出來</span></code></pre>
+      <p><span class="i18n"
+        data-en="After each batch, non-completed requests go into <code class='inline-code'>_preempted_requests</code>. The next <code class='inline-code'>_get_next_batch()</code> picks them up again — each time with <code class='inline-code'>num_tokens=1</code> (decode)."
+        data-zh="每個批次結束後，未完成的請求進入 <code class='inline-code'>_preempted_requests</code>。下一次 <code class='inline-code'>_get_next_batch()</code> 會再次撈出它們 — 每次帶 <code class='inline-code'>num_tokens=1</code>（decode）。">After each batch, non-completed requests go into <code class="inline-code">_preempted_requests</code>. The next <code class="inline-code">_get_next_batch()</code> picks them up again — each time with <code class="inline-code">num_tokens=1</code> (decode).</span></p>
+    </div>
+  </div>
+
+  <h4><span class="i18n" data-en="The Hidden +1: Prefill Awards the First Decode Token for Free" data-zh="隱藏的 +1：Prefill 完成時免費送出第一個 Decode Token">The Hidden +1: Prefill Awards the First Decode Token for Free</span></h4>
+
+  <div class="card highlight-green">
+    <span class="file-tag">vidur/entities/request.py</span>
+    <p><span class="i18n"
+      data-en="Inside <code class='inline-code'>on_batch_end()</code>, there is a critical +1 that changes the iteration count:"
+      data-zh="在 <code class='inline-code'>on_batch_end()</code> 內部，有一個改變迭代次數的關鍵 +1：">Inside <code class="inline-code">on_batch_end()</code>, there is a critical +1 that changes the iteration count:</span></p>
+<pre><code><span class="kw">def</span> <span class="fn">on_batch_end</span>(<span class="kw">self</span>, time, num_tokens_processed):
+    <span class="kw">self</span>._num_processed_tokens += num_tokens_processed  <span class="cm"># prefill 後: P</span>
+
+    <span class="kw">if</span> <span class="kw">self</span>._num_processed_tokens == <span class="kw">self</span>._num_prefill_tokens:
+        <span class="kw">self</span>._is_prefill_complete = <span class="kw">True</span>
+        <span class="cm"># we get one decode token when the prefill processing completes</span>
+        <span class="kw">self</span>._num_processed_tokens += <span class="nr">1</span>    <span class="cm"># ← P → P+1，第一個 decode token 免費！</span>
+
+        <span class="kw">if</span> <span class="kw">self</span>._prefill_completed_at == <span class="nr">0</span>:
+            <span class="kw">self</span>._prefill_completed_at = time
+
+    <span class="kw">if</span> <span class="kw">self</span>._num_processed_tokens == <span class="kw">self</span>.total_tokens:  <span class="cm"># P+D?</span>
+        <span class="kw">self</span>._completed = <span class="kw">True</span></code></pre>
+
+    <div class="callout key" style="margin-bottom:0">
+      <span class="i18n"
+        data-en="This models real LLM behavior: the prefill forward pass computes the KV cache for all P input tokens <strong>and</strong> produces the first output token in the same pass. So the first decode token costs zero additional iterations."
+        data-zh="這模擬了真實 LLM 行為：prefill 前向傳播為所有 P 個輸入 token 計算 KV cache，<strong>同時</strong>在同一次 pass 中產生第一個輸出 token。因此第一個 decode token 不需要額外的迭代。">This models real LLM behavior: the prefill forward pass computes the KV cache for all P input tokens <strong>and</strong> produces the first output token in the same pass. So the first decode token costs zero additional iterations.</span>
+    </div>
+  </div>
+
+  <h4><span class="i18n" data-en="Concrete Example: Request(P=512, D=128)" data-zh="具體範例：Request(P=512, D=128)">Concrete Example: Request(P=512, D=128)</span></h4>
+
+  <p><span class="i18n"
+    data-en="Walk through the state of <code class='inline-code'>num_processed_tokens</code> at each batch iteration. The request is complete when it reaches <code class='inline-code'>total_tokens = P + D = 640</code>."
+    data-zh="追蹤每次 batch 迭代中 <code class='inline-code'>num_processed_tokens</code> 的狀態。當達到 <code class='inline-code'>total_tokens = P + D = 640</code> 時請求完成。">Walk through the state of <code class="inline-code">num_processed_tokens</code> at each batch iteration. The request is complete when it reaches <code class="inline-code">total_tokens = P + D = 640</code>.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Iter" data-zh="迭代">Iter</span></th>
+      <th><span class="i18n" data-en="Phase" data-zh="階段">Phase</span></th>
+      <th><span class="i18n" data-en="num_tokens in Batch" data-zh="Batch 中的 num_tokens">num_tokens in Batch</span></th>
+      <th><span class="i18n" data-en="processed before" data-zh="處理前">processed before</span></th>
+      <th><span class="i18n" data-en="+= tokens" data-zh="+= tokens">+= tokens</span></th>
+      <th><span class="i18n" data-en="+1 bonus" data-zh="+1 bonus">+1 bonus</span></th>
+      <th><span class="i18n" data-en="processed after" data-zh="處理後">processed after</span></th>
+      <th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th>
+    </tr>
+    <tr style="background:rgba(255,165,0,.06)">
+      <td><strong>1</strong></td>
+      <td><span style="color:#ffa500;font-weight:600">Prefill</span></td>
+      <td>512</td>
+      <td>0</td>
+      <td>+512</td>
+      <td style="color:#66bb6a;font-weight:600">+1</td>
+      <td><strong>513</strong></td>
+      <td><span class="i18n" data-en="prefill_complete=True, request in preempted queue" data-zh="prefill_complete=True，進入 preempted 佇列">prefill_complete=True, &rarr; preempted queue</span></td>
+    </tr>
+    <tr>
+      <td><strong>2</strong></td>
+      <td><span style="color:#4a9eff;font-weight:600">Decode</span></td>
+      <td>1</td>
+      <td>513</td>
+      <td>+1</td>
+      <td>—</td>
+      <td>514</td>
+      <td><span class="i18n" data-en="→ preempted queue" data-zh="→ preempted 佇列">&rarr; preempted queue</span></td>
+    </tr>
+    <tr>
+      <td><strong>3</strong></td>
+      <td><span style="color:#4a9eff;font-weight:600">Decode</span></td>
+      <td>1</td>
+      <td>514</td>
+      <td>+1</td>
+      <td>—</td>
+      <td>515</td>
+      <td><span class="i18n" data-en="→ preempted queue" data-zh="→ preempted 佇列">&rarr; preempted queue</span></td>
+    </tr>
+    <tr>
+      <td colspan="8" style="text-align:center;color:#6c7086;font-style:italic">⋮ &nbsp;&nbsp; <span class="i18n" data-en="(each iteration: +1 token)" data-zh="（每次迭代：+1 token）">(each iteration: +1 token)</span></td>
+    </tr>
+    <tr style="background:rgba(46,204,113,.06)">
+      <td><strong>128</strong></td>
+      <td><span style="color:#4a9eff;font-weight:600">Decode</span></td>
+      <td>1</td>
+      <td>639</td>
+      <td>+1</td>
+      <td>—</td>
+      <td><strong>640 = P+D</strong></td>
+      <td style="color:#66bb6a;font-weight:600"><span class="i18n" data-en="✓ completed=True, freed" data-zh="✓ completed=True，釋放">✓ completed=True, freed</span></td>
+    </tr>
+  </table>
+
+  <div class="callout critical">
+    <strong><span class="i18n" data-en="Total: D batch iterations (not D+1)" data-zh="總計：D 次 batch 迭代（不是 D+1）">Total: D batch iterations (not D+1)</span></strong><br>
+    <span class="i18n"
+      data-en="= 1 prefill iteration + (D&minus;1) decode iterations = D. The first decode token is included in the prefill iteration via the +1 bonus."
+      data-zh="= 1 次 prefill 迭代 + (D&minus;1) 次 decode 迭代 = D。第一個 decode token 透過 +1 bonus 包含在 prefill 迭代中。">= 1 prefill iteration + (D&minus;1) decode iterations = D. The first decode token is included in the prefill iteration via the +1 bonus.</span>
+  </div>
+
+  <h4><span class="i18n" data-en="What the Event Loop Actually Looks Like for This Request" data-zh="這個 Request 在事件迴圈中實際的樣子">What the Event Loop Actually Looks Like for This Request</span></h4>
+
+  <p><span class="i18n"
+    data-en="Mapping the 128 iterations back to the event chain. Each row is one pass through Events 3→4→5→6→7→3."
+    data-zh="將 128 次迭代對應回事件鏈。每一列是事件 3→4→5→6→7→3 的一次循環。">Mapping the 128 iterations back to the event chain. Each row is one pass through Events 3&rarr;4&rarr;5&rarr;6&rarr;7&rarr;3.</span></p>
+
+<pre><code><span class="cm">Iter 1 (Prefill):</span>
+  <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">_get_next_batch</span>()
+    <span class="cm">request from _request_queue, num_tokens=512</span>
+    → <span class="cl">Batch</span>(requests=[Req], num_tokens=[<span class="nr">512</span>])
+  → BatchStageArrival → ReplicaStageSchedule
+    → <span class="fn">execution_time_predictor</span>(<span class="cm">batch with 512 prefill tokens</span>) → <span class="cm">較長的 execution_time</span>
+  → BatchStageEnd → BatchEnd
+    → Batch.<span class="fn">on_batch_end</span>() → Request.<span class="fn">on_batch_end</span>(num_tokens=<span class="nr">512</span>)
+      <span class="cm">processed: 0 → 512 → 513 (bonus +1)</span>
+    → VLLMScheduler.<span class="fn">on_batch_end</span>()
+      <span class="cm">request.completed? No (513 &lt; 640) → _preempted_requests.append(request)</span>
+  → <span class="cl">ReplicaScheduleEvent</span>  <span class="cm">← 迴圈回到事件 3</span>
+
+<span class="cm">Iter 2 (Decode #1):</span>
+  <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">_get_next_batch</span>()
+    <span class="cm">request from _preempted_requests, is_prefill_complete=True → num_tokens=1</span>
+    → <span class="cl">Batch</span>(requests=[Req, ...], num_tokens=[<span class="nr">1</span>, ...])
+    <span class="cm">↑ 同一個 batch 可以包含來自不同 request 的 decode tokens</span>
+  → BatchStageArrival → ReplicaStageSchedule
+    → <span class="fn">execution_time_predictor</span>(<span class="cm">batch with N decode tokens</span>) → <span class="cm">較短的 execution_time</span>
+  → BatchStageEnd → BatchEnd
+    → Request.<span class="fn">on_batch_end</span>(num_tokens=<span class="nr">1</span>)
+      <span class="cm">processed: 513 → 514</span>
+    → <span class="cm">request not completed → _preempted_requests.append(request)</span>
+  → <span class="cl">ReplicaScheduleEvent</span>  <span class="cm">← 迴圈回到事件 3</span>
+
+<span class="cm">⋮ (repeats D-2 more times)</span>
+
+<span class="cm">Iter 128 (Decode #127, final):</span>
+  <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">_get_next_batch</span>()
+    → <span class="cl">Batch</span>(requests=[Req, ...], num_tokens=[<span class="nr">1</span>, ...])
+  → ... → BatchEnd
+    → Request.<span class="fn">on_batch_end</span>(num_tokens=<span class="nr">1</span>)
+      <span class="cm">processed: 639 → 640 = total_tokens → completed=True</span>
+    → VLLMScheduler.<span class="fn">on_batch_end</span>()
+      <span class="cm">request.completed? Yes → self.free(request.id)  ← 記憶體釋放</span></code></pre>
+
+  <h4><span class="i18n" data-en="Continuous Batching: Different Requests Share a Batch" data-zh="Continuous Batching：不同 Request 共享同一個 Batch">Continuous Batching: Different Requests Share a Batch</span></h4>
+
+  <p><span class="i18n"
+    data-en="A critical detail: in decode iterations, <code class='inline-code'>_get_next_batch()</code> pulls from <strong>both</strong> <code class='inline-code'>_preempted_requests</code> (ongoing decode) and <code class='inline-code'>_request_queue</code> (new arrivals). This means:"
+    data-zh="一個關鍵細節：在 decode 迭代中，<code class='inline-code'>_get_next_batch()</code> 同時從 <code class='inline-code'>_preempted_requests</code>（正在進行的 decode）和 <code class='inline-code'>_request_queue</code>（新到達的請求）中取出請求。這意味著：">A critical detail: in decode iterations, <code class="inline-code">_get_next_batch()</code> pulls from <strong>both</strong> <code class="inline-code">_preempted_requests</code> (ongoing decode) and <code class="inline-code">_request_queue</code> (new arrivals). This means:</span></p>
+
+  <div class="card highlight-cyan">
+<pre><code><span class="cm">Batch iteration N:</span>
+  <span class="cl">Batch</span>(
+    requests = [Req_A,  Req_B,  Req_C,  Req_D ],
+    num_tokens= [<span class="nr">1</span>,      <span class="nr">1</span>,      <span class="nr">1</span>,      <span class="nr">256</span>  ]
+  )               <span class="cm">↑decode  ↑decode  ↑decode  ↑prefill(new arrival)</span></code></pre>
+    <p><span class="i18n"
+      data-en="One batch can contain a <strong>mix of decode tokens (1 each) from ongoing requests AND prefill tokens from a newly arrived request</strong>. The execution time predictor receives the full batch and computes a single execution time that accounts for both prefill and decode work."
+      data-zh="一個 batch 可以包含<strong>來自進行中 request 的 decode tokens（各 1 個）和來自新到達 request 的 prefill tokens 的混合</strong>。執行時間預測器接收完整的 batch，計算一個同時涵蓋 prefill 和 decode 工作量的單一執行時間。">One batch can contain a <strong>mix of decode tokens (1 each) from ongoing requests AND prefill tokens from a newly arrived request</strong>. The execution time predictor receives the full batch and computes a single execution time that accounts for both prefill and decode work.</span></p>
+  </div>
+
+  <h4><span class="i18n" data-en="Sarathi Variant: Chunked Prefill Changes the Count" data-zh="Sarathi 變體：Chunked Prefill 改變迭代次數">Sarathi Variant: Chunked Prefill Changes the Count</span></h4>
+
+  <p><span class="i18n"
+    data-en="The Sarathi scheduler overrides <code class='inline-code'>_get_request_next_num_tokens()</code> to cap prefill tokens per iteration:"
+    data-zh="Sarathi 排程器覆寫 <code class='inline-code'>_get_request_next_num_tokens()</code>，限制每次迭代的 prefill token 數量：">The Sarathi scheduler overrides <code class="inline-code">_get_request_next_num_tokens()</code> to cap prefill tokens per iteration:</span></p>
+
+  <div class="card highlight-purple">
+    <span class="file-tag">scheduler/replica_scheduler/sarathi_replica_scheduler.py</span>
+<pre><code><span class="kw">def</span> <span class="fn">_get_request_next_num_tokens</span>(<span class="kw">self</span>, request, batch_contains_prefill, num_batch_tokens):
+    <span class="kw">if</span> request.is_prefill_complete:
+        <span class="kw">return</span> <span class="nr">1</span>                                          <span class="cm"># decode: 仍然 1 token</span>
+
+    next_num_tokens = <span class="fn">min</span>(
+        request.num_prefill_tokens - request.num_processed_tokens,
+        <span class="kw">self</span>._config.chunk_size - num_batch_tokens,     <span class="cm"># ← 限制在 chunk_size 內</span>
+    )
+    <span class="kw">return</span> <span class="fn">max</span>(<span class="nr">0</span>, next_num_tokens)</code></pre>
+
+    <p><span class="i18n"
+      data-en="With <code class='inline-code'>chunk_size=512</code> and P=2048 prefill tokens:"
+      data-zh="當 <code class='inline-code'>chunk_size=512</code> 且 P=2048 prefill tokens 時：">With <code class="inline-code">chunk_size=512</code> and P=2048 prefill tokens:</span></p>
+
+    <table>
+      <tr>
+        <th><span class="i18n" data-en="Iter" data-zh="迭代">Iter</span></th>
+        <th><span class="i18n" data-en="Phase" data-zh="階段">Phase</span></th>
+        <th>num_tokens</th>
+        <th><span class="i18n" data-en="processed after" data-zh="處理後">processed after</span></th>
+      </tr>
+      <tr><td>1</td><td><span style="color:#ffa500">Prefill chunk 1</span></td><td>512</td><td>512</td></tr>
+      <tr><td>2</td><td><span style="color:#ffa500">Prefill chunk 2</span></td><td>512</td><td>1024</td></tr>
+      <tr><td>3</td><td><span style="color:#ffa500">Prefill chunk 3</span></td><td>512</td><td>1536</td></tr>
+      <tr><td>4</td><td><span style="color:#ffa500">Prefill chunk 4</span></td><td>512</td><td>2048 &rarr; <span style="color:#66bb6a">2049 (+1 bonus)</span></td></tr>
+      <tr><td>5..D+3</td><td><span style="color:#4a9eff">Decode</span></td><td>1</td><td>2049 &rarr; ... &rarr; P+D</td></tr>
+    </table>
+
+    <p><span class="i18n"
+      data-en="Total: <strong>&lceil;P/chunk_size&rceil; + (D&minus;1)</strong> iterations. Chunked prefill trades more iterations for lower per-iteration latency, allowing decode requests to interleave."
+      data-zh="總計：<strong>&lceil;P/chunk_size&rceil; + (D&minus;1)</strong> 次迭代。Chunked prefill 以更多迭代次數換取更低的單次迭代延遲，允許 decode 請求交錯執行。">Total: <strong>&lceil;P/chunk_size&rceil; + (D&minus;1)</strong> iterations. Chunked prefill trades more iterations for lower per-iteration latency, allowing decode requests to interleave.</span></p>
+  </div>
+
+  <h4><span class="i18n" data-en="Summary: Iteration Counts by Scheduler" data-zh="總結：各排程器的迭代次數">Summary: Iteration Counts by Scheduler</span></h4>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Scheduler" data-zh="排程器">Scheduler</span></th>
+      <th><span class="i18n" data-en="Prefill Iterations" data-zh="Prefill 迭代數">Prefill Iterations</span></th>
+      <th><span class="i18n" data-en="Decode Iterations" data-zh="Decode 迭代數">Decode Iterations</span></th>
+      <th><span class="i18n" data-en="Total Batch Iterations" data-zh="總 Batch 迭代數">Total Batch Iterations</span></th>
+    </tr>
+    <tr>
+      <td>vLLM / Orca / FasterTransformer</td>
+      <td>1</td>
+      <td>D &minus; 1</td>
+      <td><strong>D</strong></td>
+    </tr>
+    <tr>
+      <td>Sarathi (chunk_size = C)</td>
+      <td>&lceil;P / C&rceil;</td>
+      <td>D &minus; 1</td>
+      <td><strong>&lceil;P/C&rceil; + D &minus; 1</strong></td>
+    </tr>
+  </table>
+
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Why this matters for understanding the call graph:" data-zh="為什麼這對理解呼叫圖很重要：">Why this matters for understanding the call graph:</span></strong>
+    <span class="i18n"
+      data-en="The event chain Events 3→7→3 is not a one-shot pipeline — it is a <strong>loop that executes D times per request</strong> (vLLM) or more (Sarathi). A simulation of 100 requests with average D=256 generates approximately 100 × 256 = <strong>25,600 full cycles</strong> of Events 3→4→5→6→7→3. Each cycle produces a BatchStageEndEvent with a time advance (the only point where simulation time moves forward)."
+      data-zh="事件鏈 事件 3→7→3 並不是一次性的管線 — 它是一個<strong>每個請求執行 D 次的迴圈</strong>（vLLM）或更多次（Sarathi）。模擬 100 個平均 D=256 的請求，會產生約 100 × 256 = <strong>25,600 次完整的事件 3→4→5→6→7→3 循環</strong>。每次循環產生一個 BatchStageEndEvent 帶有時間推進（模擬時間前進的唯一時間點）。">The event chain Events 3&rarr;7&rarr;3 is not a one-shot pipeline — it is a <strong>loop that executes D times per request</strong> (vLLM) or more (Sarathi). A simulation of 100 requests with average D=256 generates approximately 100 &times; 256 = <strong>25,600 full cycles</strong> of Events 3&rarr;4&rarr;5&rarr;6&rarr;7&rarr;3. Each cycle produces a BatchStageEndEvent with a time advance (the only point where simulation time moves forward).</span>
   </div>
 
   <!-- ===== EVENT TIMING ANALYSIS ===== -->
