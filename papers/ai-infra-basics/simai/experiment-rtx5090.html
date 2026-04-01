@@ -445,11 +445,52 @@ python3 -m vidur.main \
       data-zh="分離的主要好處是消除搶佔（261ms → 9ms = 每個 request 節省 252ms）。但它引入了 KV transfer（168ms）+ prefill 排隊（68ms）= <strong>236ms 新開銷</strong>。淨效果：新增 236ms &minus; 節省 252ms = 搶佔只淨改善 16ms，被 TTFT 的懲罰抵消。在此負載水平（4 GPU 上 ~3.8 req/s），聚合的搶佔足夠輕微，分離的成本大於收益。">Disagg saves 252ms preemption but adds 236ms (KV transfer + queuing). Net improvement only 16ms, wiped out by TTFT penalty.</span></p>
   </div>
 
+  <h3><span class="i18n" data-en="QPS Sweep: Does Disaggregation Ever Win?" data-zh="QPS 掃描：分離有可能贏嗎？">QPS Sweep: Does Disaggregation Ever Win?</span></h3>
+
+  <p><span class="i18n"
+    data-en="We swept Poisson arrival rate from 2 to 60 req/s with Zipf-distributed token lengths (prefill mean=490, decode mean=139), comparing three configurations: Aggregated (4 mixed GPUs), Disagg 2P+2D, and Disagg 1P+3D."
+    data-zh="我們將 Poisson 到達率從 2 掃到 60 req/s，使用 Zipf 分佈的 token 長度（prefill 平均=490，decode 平均=139），比較三種配置：聚合（4 台混合 GPU）、分離 2P+2D、分離 1P+3D。">We swept Poisson arrival rate from 2 to 60 req/s with Zipf-distributed token lengths, comparing three configurations.</span></p>
+
+  <div style="text-align:center;margin:1.5rem 0">
+    <img src="qps_sweep_comparison.png" alt="QPS sweep: Agg vs Disagg 2P2D vs 1P3D" style="max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,.08)">
+  </div>
+
+  <table>
+    <tr>
+      <th>QPS</th>
+      <th colspan="2"><span class="i18n" data-en="Agg (4 mixed)" data-zh="聚合（4 混合）">Agg (4 mixed)</span></th>
+      <th colspan="2"><span class="i18n" data-en="Disagg 2P+2D" data-zh="分離 2P+2D">Disagg 2P+2D</span></th>
+      <th colspan="2"><span class="i18n" data-en="Disagg 1P+3D" data-zh="分離 1P+3D">Disagg 1P+3D</span></th>
+    </tr>
+    <tr><th></th><th>TTFT</th><th>E2E</th><th>TTFT</th><th>E2E</th><th>TTFT</th><th>E2E</th></tr>
+    <tr><td>2</td> <td><strong>56ms</strong></td><td>1.6s</td> <td>127ms</td><td>1.7s</td> <td>133ms</td><td>1.7s</td></tr>
+    <tr><td>10</td><td><strong>61ms</strong></td><td>1.9s</td> <td>138ms</td><td>2.1s</td> <td>170ms</td><td><strong>1.9s</strong></td></tr>
+    <tr><td>20</td><td><strong>71ms</strong></td><td>2.7s</td> <td>175ms</td><td>3.3s</td> <td>306ms</td><td><strong>2.5s</strong></td></tr>
+    <tr><td>30</td><td><strong>82ms</strong></td><td>3.3s</td> <td>253ms</td><td>5.0s</td> <td>957ms</td><td><strong>3.5s</strong></td></tr>
+    <tr><td>40</td><td><strong>95ms</strong></td><td>3.7s</td> <td>354ms</td><td>6.1s</td> <td>2,693ms</td><td>5.3s</td></tr>
+    <tr><td>60</td><td><strong>133ms</strong></td><td><strong>4.4s</strong></td> <td>798ms</td><td>7.6s</td> <td>4,684ms</td><td>7.3s</td></tr>
+  </table>
+
   <div class="callout critical">
-    <strong><span class="i18n" data-en="When Would Disaggregation Win?" data-zh="什麼時候分離會贏？">When Would Disagg Win?</span></strong>
+    <strong><span class="i18n" data-en="Key Observations:" data-zh="關鍵觀察：">Key Observations:</span></strong>
+    <ol>
+      <li><span class="i18n"
+        data-en="<strong>Aggregation wins on TTFT at all QPS levels.</strong> Even at QPS=60, Agg TTFT (133ms) is far better than Disagg 2P+2D (798ms) or 1P+3D (4,684ms). KV cache transfer is an unavoidable fixed cost that dominates TTFT."
+        data-zh="<strong>聚合在所有 QPS 下的 TTFT 都更好。</strong>即使在 QPS=60，聚合 TTFT（133ms）遠優於分離 2P+2D（798ms）或 1P+3D（4,684ms）。KV cache transfer 是無法避免的固定成本，主導了 TTFT。"><strong>Aggregation wins on TTFT at all QPS levels.</strong></span></li>
+      <li><span class="i18n"
+        data-en="<strong>1P+3D has lower E2E than 2P+2D at moderate QPS (10&ndash;30).</strong> With 3 decode GPUs, decode capacity is higher, reducing decode queuing. But the single prefill GPU becomes a bottleneck at QPS&gt;30, causing TTFT to explode (prefill queuing)."
+        data-zh="<strong>1P+3D 在中等 QPS（10&ndash;30）時 E2E 比 2P+2D 低。</strong>3 台 decode GPU 有更高的 decode 容量，減少了 decode 排隊。但單一 prefill GPU 在 QPS&gt;30 時成為瓶頸，導致 TTFT 暴增（prefill 排隊）。"><strong>1P+3D has lower E2E than 2P+2D at QPS 10&ndash;30</strong>, but TTFT explodes at QPS&gt;30 (single prefill GPU bottleneck).</span></li>
+      <li><span class="i18n"
+        data-en="<strong>2P+2D's preemption explodes at QPS&gt;20</strong> (458ms → 4,113ms) because 2 decode GPUs cannot keep up, while 1P+3D keeps preemption low (&lt;80ms) thanks to 3 decode GPUs."
+        data-zh="<strong>2P+2D 的搶佔在 QPS&gt;20 時暴增</strong>（458ms → 4,113ms），因為 2 台 decode GPU 跟不上；而 1P+3D 靠 3 台 decode GPU 保持搶佔低（&lt;80ms）。"><strong>2P+2D preemption explodes at QPS&gt;20</strong>; 1P+3D keeps preemption low (&lt;80ms) with 3 decode GPUs.</span></li>
+    </ol>
+  </div>
+
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Why Disaggregation Never Crosses Over:" data-zh="為什麼分離從未逆轉：">Why Disaggregation Never Crosses Over:</span></strong>
     <span class="i18n"
-      data-en="Disaggregation wins when preemption becomes the dominant bottleneck — at higher QPS where aggregated GPUs are saturated and decode requests get starved by incoming prefills. In our 1-GPU experiment (same trace), preemption was 6.1 seconds (vs 261ms on 4 GPUs), and E2E was 16.2s. At that load, disaggregation would save ~6s preemption per request, far exceeding the ~236ms KV transfer + queuing cost. The crossover point depends on: (1) network bandwidth (higher = cheaper KV transfer), (2) QPS per GPU, and (3) model size (larger KV cache = more expensive transfer)."
-      data-zh="當搶佔成為主要瓶頸時，分離會贏——在更高 QPS 下，聚合 GPU 飽和，decode request 被新的 prefill 餓死。在我們的 1-GPU 實驗（同一 trace）中，搶佔是 6.1 秒（vs 4 GPU 上的 261ms），E2E 是 16.2s。在那個負載下，分離每個 request 可節省 ~6s 搶佔，遠超 ~236ms 的 KV transfer + 排隊成本。交叉點取決於：(1) 網路頻寬（越高 = KV transfer 越便宜），(2) 每 GPU 的 QPS，(3) 模型大小（越大的 KV cache = 越貴的 transfer）。">Disagg wins when preemption dominates — at higher QPS where aggregated GPUs are saturated. The crossover depends on network bandwidth, QPS per GPU, and model size.</span>
+      data-en="For LLaMA 3 8B on 4&times; RTX 5090 at 100 Gbps, disaggregation never outperforms aggregation because: (1) <strong>KV cache transfer is too expensive</strong> relative to the model size &mdash; mean 67ms transfer for mean 490-token prefill adds ~50% to TTFT, (2) <strong>4 GPUs is too few</strong> to split roles without severe capacity imbalance, and (3) <strong>vLLM's aggregated scheduler handles preemption well</strong> &mdash; even at QPS=60, preemption is only 1.3s. Disaggregation would become viable with: (a) higher bandwidth (400Gbps+ reduces KV transfer 4&times;), (b) larger clusters (32+ GPUs where role splitting doesn't halve capacity), or (c) larger models where prefill/decode compute asymmetry is more extreme."
+      data-zh="對於 4&times; RTX 5090 上的 LLaMA 3 8B 在 100 Gbps 下，分離從未超越聚合，因為：(1) <strong>KV cache transfer 相對於模型大小太貴</strong>——平均 490 token prefill 的 67ms 傳輸增加了 ~50% 的 TTFT，(2) <strong>4 台 GPU 太少</strong>，分角色會導致嚴重的容量不平衡，(3) <strong>vLLM 的聚合排程器處理搶佔很好</strong>——即使在 QPS=60，搶佔也只有 1.3s。分離在以下條件下會可行：(a) 更高頻寬（400Gbps+ 將 KV transfer 減少 4 倍），(b) 更大叢集（32+ GPU，角色分割不會將容量減半），(c) 更大模型（prefill/decode 計算不對稱性更極端）。">For LLaMA 3 8B on 4&times; RTX 5090 at 100 Gbps, disaggregation never outperforms aggregation. Viable with: higher bandwidth (400Gbps+), larger clusters (32+ GPUs), or larger models.</span>
   </div>
 </div>
 
