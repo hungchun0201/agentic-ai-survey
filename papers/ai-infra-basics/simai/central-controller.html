@@ -749,6 +749,111 @@ sim_send(A→B)
             </table>
         </section>
 
+        <!-- ═══════════════ 6.5 HOW TO RUN ═══════════════ -->
+        <section id="how-to-run">
+            <h2 class="i18n" data-en="How to Run the Simulation" data-zh="如何執行模擬">How to Run the Simulation</h2>
+
+            <p><span class="i18n"
+                data-en="The simulation has two modes: <strong>AstraSim workload mode</strong> (full collective communication) and <strong>TraceInjector mode</strong> (inject point-to-point flows from a CSV). Both produce the same <code>fct.txt</code> output."
+                data-zh="模擬有兩種模式：<strong>AstraSim workload 模式</strong>（完整集合通訊）和 <strong>TraceInjector 模式</strong>（從 CSV 注入點對點 flow）。兩者都產生相同的 <code>fct.txt</code> 輸出。">The simulation has two modes: <strong>AstraSim workload mode</strong> (full collective communication) and <strong>TraceInjector mode</strong> (inject point-to-point flows from a CSV). Both produce the same <code>fct.txt</code> output.</span></p>
+
+            <!-- Step 1: Build -->
+            <h3 class="i18n" data-en="Step 1: Build SimAI" data-zh="步驟 1：編譯 SimAI">Step 1: Build SimAI</h3>
+<pre><code><span class="cm"># Build NS-3 backend (compiles central-controller.cc, rdma-hw.cc patches, etc.)</span>
+./scripts/build.sh -c ns3</code></pre>
+
+            <!-- Step 2: Generate Topology -->
+            <h3 class="i18n" data-en="Step 2: Generate Topology" data-zh="步驟 2：生成拓撲">Step 2: Generate Topology</h3>
+<pre><code><span class="cm"># DCN+ fat-tree: 16 GPUs (2 servers × 8 GPU/server), 8 spine switches</span>
+python3 ./astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py \
+  -topo DCN+ -g <span class="nr">16</span> -gps <span class="nr">8</span> -gt A100 -bw 100Gbps -nvbw 2400Gbps \
+  -asn <span class="nr">2</span> -npa <span class="nr">8</span> -psn <span class="nr">8</span> -apbw 100Gbps -app <span class="nr">2</span>
+
+<span class="cm"># Spectrum-X: 128 GPUs (rail-optimized, for training workloads)</span>
+python3 ./astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py \
+  -topo Spectrum-X -g <span class="nr">128</span> -gt A100 -bw 100Gbps -nvbw 2400Gbps</code></pre>
+
+            <!-- Step 3: Run -->
+            <h3 class="i18n" data-en="Step 3: Run Simulation" data-zh="步驟 3：執行模擬">Step 3: Run Simulation</h3>
+
+            <div class="card" style="border-left:4px solid #6ec6ff">
+                <h4><span class="i18n" data-en="Mode A — TraceInjector (recommended for CC experiments)" data-zh="模式 A — TraceInjector（CC 實驗推薦）">Mode A — TraceInjector (recommended for CC experiments)</span></h4>
+                <p><span class="i18n"
+                    data-en="Bypasses AstraSim entirely. Inject flows from a CSV trace file."
+                    data-zh="完全繞過 AstraSim。從 CSV trace 檔案注入 flow。">Bypasses AstraSim entirely. Inject flows from a CSV trace file.</span></p>
+
+<pre><code><span class="cm"># 1. Generate trace (server 0 GPUs → server 1 GPUs, 10 MB each)</span>
+python3 gen_kv_trace.py \
+    --arrival server_pair --src-server <span class="nr">0</span> --dst-server <span class="nr">1</span> \
+    --gpus-per-server <span class="nr">8</span> --kv-mb <span class="nr">10</span> --rounds <span class="nr">1</span> \
+    --out traces/my_trace.csv
+
+<span class="cm"># 2a. Run WITH CC</span>
+CC_ENABLE=<span class="nr">1</span> CC_LOG_FILE=results/cc/paths.csv \
+  TRACE_INJECT_FILE=traces/my_trace.csv \
+  AS_SEND_LAT=<span class="nr">3</span> ./bin/SimAI_simulator -t <span class="nr">1</span> \
+  -n &lt;topology_dir&gt; -c results/cc/SimAI_local.conf
+
+<span class="cm"># 2b. Run WITHOUT CC (A/B comparison)</span>
+CC_ENABLE=<span class="nr">0</span> \
+  TRACE_INJECT_FILE=traces/my_trace.csv \
+  AS_SEND_LAT=<span class="nr">3</span> ./bin/SimAI_simulator -t <span class="nr">1</span> \
+  -n &lt;topology_dir&gt; -c results/nocc/SimAI_local.conf</code></pre>
+            </div>
+
+            <div class="card" style="border-left:4px solid #ffa500">
+                <h4><span class="i18n" data-en="Mode B — AstraSim Workload (full collective communication)" data-zh="模式 B — AstraSim Workload（完整集合通訊）">Mode B — AstraSim Workload (full collective communication)</span></h4>
+                <p><span class="i18n"
+                    data-en="Run real collective workloads (AllReduce, AllToAll, etc.) through AstraSim → SimCCL → NS-3."
+                    data-zh="透過 AstraSim → SimCCL → NS-3 執行真實的集合通訊工作負載（AllReduce、AllToAll 等）。">Run real collective workloads (AllReduce, AllToAll, etc.) through AstraSim &rarr; SimCCL &rarr; NS-3.</span></p>
+
+<pre><code>CC_ENABLE=<span class="nr">1</span> CC_LOG_FILE=results/cc/paths.csv \
+  AS_SEND_LAT=<span class="nr">3</span> AS_NVLS_ENABLE=<span class="nr">1</span> ./bin/SimAI_simulator -t <span class="nr">1</span> \
+  -w workloads/test_cc_compare.txt \
+  -n &lt;topology_dir&gt; \
+  -c results/cc/SimAI_local.conf</code></pre>
+            </div>
+
+            <!-- Env vars summary -->
+            <h3 class="i18n" data-en="Environment Variables" data-zh="環境變數">Environment Variables</h3>
+            <table>
+                <tr><th><span class="i18n" data-en="Variable" data-zh="變數">Variable</span></th><th><span class="i18n" data-en="Values" data-zh="值">Values</span></th><th><span class="i18n" data-en="Effect" data-zh="效果">Effect</span></th></tr>
+                <tr><td><code>CC_ENABLE</code></td><td><code>1</code> (<span class="i18n" data-en="default" data-zh="預設">default</span>) / <code>0</code></td><td><span class="i18n" data-en="Enable/disable CentralController sport assignment" data-zh="啟用/停用 CentralController sport 分配">Enable/disable CentralController sport assignment</span></td></tr>
+                <tr><td><code>CC_LOG_FILE</code></td><td><span class="i18n" data-en="file path" data-zh="檔案路徑">file path</span></td><td><span class="i18n" data-en="Write per-flow path CSV (flow_id, sip, dip, sport, hops)" data-zh="寫入每 flow 路徑 CSV（flow_id, sip, dip, sport, hops）">Write per-flow path CSV (flow_id, sip, dip, sport, hops)</span></td></tr>
+                <tr><td><code>TRACE_INJECT_FILE</code></td><td><span class="i18n" data-en="CSV path" data-zh="CSV 路徑">CSV path</span></td><td><span class="i18n" data-en="TraceInjector mode: bypass AstraSim, inject flows from CSV" data-zh="TraceInjector 模式：繞過 AstraSim，從 CSV 注入 flow">TraceInjector mode: bypass AstraSim, inject flows from CSV</span></td></tr>
+                <tr><td><code>AS_SEND_LAT</code></td><td><span class="i18n" data-en="microseconds" data-zh="微秒">microseconds</span></td><td><span class="i18n" data-en="Software send latency before NIC injection (default 6)" data-zh="NIC 注入前的軟體傳送延遲（預設 6）">Software send latency before NIC injection (default 6)</span></td></tr>
+                <tr><td><code>AS_NVLS_ENABLE</code></td><td><code>1</code> / <code>0</code></td><td><span class="i18n" data-en="Enable NVSwitch NVLS transport for intra-server flows" data-zh="為 intra-server flow 啟用 NVSwitch NVLS 傳輸">Enable NVSwitch NVLS transport for intra-server flows</span></td></tr>
+            </table>
+
+            <!-- Step 4: Analyze -->
+            <h3 class="i18n" data-en="Step 4: Analyze Results" data-zh="步驟 4：分析結果">Step 4: Analyze Results</h3>
+
+<pre><code><span class="cm"># FCT CDF plot (CC vs No CC)</span>
+python3 plot_fct_cdf.py \
+    --cc results/cc/fct.txt --nocc results/nocc/fct.txt \
+    --out results/fct_cdf.png
+
+<span class="cm"># Export per-flow analysis CSV</span>
+python3 export_flow_csv.py \
+    --fct results/cc/fct.txt --paths results/cc/paths.csv \
+    --out results/cc/flows.csv
+
+<span class="cm"># Collision analysis</span>
+python3 analyze_collisions.py \
+    --cc results/cc/paths.csv --nocc results/nocc/fct.txt \
+    --trace traces/my_trace.csv --bw-gbps <span class="nr">100</span> --send-lat-ns <span class="nr">3000</span></code></pre>
+
+            <!-- Output files -->
+            <h3 class="i18n" data-en="Output Files" data-zh="輸出檔案">Output Files</h3>
+            <table>
+                <tr><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th><th><span class="i18n" data-en="Format" data-zh="格式">Format</span></th><th><span class="i18n" data-en="Contents" data-zh="內容">Contents</span></th></tr>
+                <tr><td><code>fct.txt</code></td><td><span class="i18n" data-en="Space-separated, 1 line per flow" data-zh="空格分隔，每行一個 flow">Space-separated, 1 line per flow</span></td><td><code>sip dip sport dport size start_ns fct_ns ideal_ns</code></td></tr>
+                <tr><td><code>paths.csv</code></td><td><span class="i18n" data-en="CSV (only with CC_LOG_FILE)" data-zh="CSV（僅設定 CC_LOG_FILE 時）">CSV (only with CC_LOG_FILE)</span></td><td><code>flow_id,sip,dip,sport,dport,n_hops,hops</code></td></tr>
+                <tr><td><code>flows.csv</code></td><td><span class="i18n" data-en="CSV (from export_flow_csv.py)" data-zh="CSV（由 export_flow_csv.py 生成）">CSV (from export_flow_csv.py)</span></td><td><code>flow_id,src_gpu,dst_gpu,sport,spine_switch,fct_ns,slowdown,cc_assigned</code></td></tr>
+            </table>
+
+        </section>
+
         <!-- ═══════════════ 7. EXPERIMENTS ═══════════════ -->
         <section id="experiments">
             <span class="section-label">7</span>
