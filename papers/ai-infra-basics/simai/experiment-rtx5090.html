@@ -413,22 +413,24 @@ python3 astra-sim-alibabacloud/inputs/topo/gen_Topo_Template.py \
   <h3><span class="i18n" data-en="Step B: Pre-compute NS-3 KV Transfer Latency" data-zh="步驟 B：預計算 NS-3 KV Transfer 延遲">Step B: Pre-compute NS-3 KV Transfer Latency</span></h3>
 
   <p><span class="i18n"
-    data-en="For each KV cache size, we ran <code>SimAI_simulator</code> with a 2-GPU ALLREDUCE workload (2-node ring AllReduce = bidirectional P2P) and recorded the end-to-end latency from <code>ncclFlowModel_EndToEnd.csv</code>:"
-    data-zh="對於每個 KV cache 大小，我們用 2-GPU ALLREDUCE workload（2 節點 ring AllReduce = 雙向 P2P）執行 <code>SimAI_simulator</code>，從 <code>ncclFlowModel_EndToEnd.csv</code> 記錄端到端延遲：">For each KV cache size, we ran <code>SimAI_simulator</code> with a 2-GPU ALLREDUCE workload and recorded end-to-end latency:</span></p>
+    data-en="KV cache transfer is <strong>unidirectional</strong> (prefill GPU &rarr; decode GPU). Since astra-sim has no raw P2P workload type, we use <code>REDUCESCATTER</code> with <code>2 &times; kv_size</code> on 2 GPUs — this makes each node send exactly <code>kv_size</code> bytes in one direction, correctly modeling the single-direction transfer."
+    data-zh="KV cache transfer 是<strong>單向的</strong>（prefill GPU &rarr; decode GPU）。由於 astra-sim 沒有 raw P2P workload type，我們使用 <code>REDUCESCATTER</code> 配合 <code>2 &times; kv_size</code> 在 2 個 GPU 上——這讓每個 node 在單一方向上恰好傳送 <code>kv_size</code> bytes，正確模擬單向傳輸。">KV cache transfer is <strong>unidirectional</strong>. We use REDUCESCATTER with 2&times;kv_size on 2 GPUs to model single-direction transfer:</span></p>
 
-<pre><code><span class="cm"># Example: simulate 128 MB KV cache transfer</span>
+<pre><code><span class="cm"># Example: simulate 128 MB KV cache transfer (unidirectional)</span>
+<span class="cm"># Use REDUCESCATTER with 2x size: each node sends exactly 128 MB</span>
 cat &gt; /tmp/kv_wl.txt &lt;&lt; WL
 HYBRID_TRANSFORMER_FWD_IN_BCKWD model_parallel_NPU_group: 2 ep: 1 pp: 1 vpp: 1 ga: 1 all_gpus: 2 checkpoints: 0 checkpoint_initiates: 0
 1
-kv_xfer -1 1 ALLREDUCE 134217728 1 NONE 0 1 NONE 0 1
+kv_xfer -1 1 REDUCESCATTER 268435456 1 NONE 0 1 NONE 0 1
 WL
+<span class="cm"># ↑ 268435456 = 2 × 134217728 (2× kv_size for unidirectional P2P)</span>
 
 AS_SEND_LAT=6 AS_NVLS_ENABLE=0 ./bin/SimAI_simulator -t 2 \
   -w /tmp/kv_wl.txt \
   -n ./DCN+SingleToR_2g_2gps_100Gbps_RTX5090 \
   -c ./astra-sim-alibabacloud/inputs/config/SimAI.conf
 
-<span class="cm"># Result in ncclFlowModel_EndToEnd.csv → 10870.4 µs = 10.87 ms</span>
+<span class="cm"># Result: 10863.6 µs = 10.86 ms (vs simple 10737.4 µs = +1.2%)</span>
 
 <span class="cm"># Automated: build_ns3_kv_lookup.py sweeps 11 sizes (1-512 MB)</span>
 <span class="cm"># Output: vidur-alibabacloud/ns3_kv_transfer_lookup.json</span>
@@ -462,18 +464,18 @@ ns3_t = _ns3_kv_transfer_time(request.pd_p2p_comm_size)
 
   <table>
     <tr><th>KV Size</th><th>Simple (ms)</th><th>NS-3 (ms)</th><th><span class="i18n" data-en="Overhead" data-zh="額外開銷">Overhead</span></th></tr>
-    <tr><td>1 MB</td><td>0.08</td><td>0.10</td><td>+18%</td></tr>
-    <tr><td>16 MB</td><td>1.28</td><td>1.37</td><td>+7%</td></tr>
-    <tr><td>64 MB</td><td>5.12</td><td>5.44</td><td>+6%</td></tr>
-    <tr><td>128 MB</td><td>10.24</td><td>10.87</td><td>+6%</td></tr>
-    <tr><td>256 MB</td><td>20.48</td><td>21.73</td><td>+6%</td></tr>
-    <tr><td>512 MB</td><td>40.96</td><td>43.44</td><td>+6%</td></tr>
+    <tr><td>1 MB</td><td>0.08</td><td>0.09</td><td>+9.3%</td></tr>
+    <tr><td>16 MB</td><td>1.34</td><td>1.36</td><td>+1.6%</td></tr>
+    <tr><td>64 MB</td><td>5.37</td><td>5.44</td><td>+1.2%</td></tr>
+    <tr><td>128 MB</td><td>10.74</td><td>10.86</td><td>+1.2%</td></tr>
+    <tr><td>256 MB</td><td>21.47</td><td>21.72</td><td>+1.1%</td></tr>
+    <tr><td>512 MB</td><td>42.95</td><td>43.43</td><td>+1.1%</td></tr>
   </table>
 
   <div class="callout">
     <span class="i18n"
-      data-en="NS-3 adds ~6&ndash;18% overhead over ideal bandwidth. The overhead comes from DCQCN slow-start, packet headers (9000B MTU), and switch forwarding latency. Overhead is proportionally larger for small transfers (protocol startup dominates). For a single flow with no contention, simple division is a reasonable approximation."
-      data-zh="NS-3 比理想頻寬多 ~6&ndash;18% 的開銷。開銷來自 DCQCN 慢啟動、封包 header（9000B MTU）和 switch 轉發延遲。小傳輸的開銷比例更大（協議啟動主導）。對於無競爭的單一 flow，簡單除法是合理的近似。">NS-3 adds ~6&ndash;18% overhead. For single-flow, no-contention scenarios, simple division is a reasonable approximation.</span>
+      data-en="NS-3 adds ~1&ndash;9% overhead over ideal bandwidth via unidirectional P2P simulation (modeled as ReduceScatter with 2&times; KV size so each node sends exactly kv_size bytes). The overhead comes from DCQCN slow-start, packet headers (9000B MTU), and switch forwarding latency. Overhead is proportionally larger for small transfers (protocol startup dominates). For large transfers (&gt;64 MB), NS-3 is within ~1% of simple division."
+      data-zh="NS-3 透過單向 P2P 模擬（以 ReduceScatter 2&times; KV size 實現，讓每個 node 實際傳送 kv_size bytes）比理想頻寬多 ~1&ndash;9% 的開銷。開銷來自 DCQCN 慢啟動、封包 header（9000B MTU）和 switch 轉發延遲。小傳輸的開銷比例更大（協議啟動主導）。大傳輸（&gt;64 MB）時，NS-3 與簡單除法的差距在 ~1% 以內。">NS-3 adds ~1&ndash;9% overhead via unidirectional P2P simulation. For large transfers (&gt;64 MB), NS-3 is within ~1% of simple division.</span>
   </div>
 
   <div class="callout critical">
@@ -539,8 +541,8 @@ ns3_t = _ns3_kv_transfer_time(request.pd_p2p_comm_size)
   <div class="card highlight-purple">
     <h4><span class="i18n" data-en="3. NS-3 adds ~6&ndash;8% over simple bandwidth model" data-zh="3. NS-3 比簡單頻寬模型多 ~6&ndash;8%">3. NS-3 adds ~6&ndash;8% over simple bandwidth model</span></h4>
     <p><span class="i18n"
-      data-en="For single-flow KV transfer over 100Gbps, NS-3 RDMA simulation shows ~6&ndash;8% overhead from DCQCN, packet headers, and switch latency. The simple model is adequate for single-flow estimation."
-      data-zh="對於 100Gbps 上的單一 flow KV transfer，NS-3 RDMA 模擬顯示 DCQCN、封包 header 和 switch 延遲帶來 ~6&ndash;8% 的開銷。簡單模型對於單一 flow 估算已經足夠。">For single-flow KV transfer, NS-3 shows ~6&ndash;8% overhead from RDMA protocol stack.</span></p>
+      data-en="For single-flow unidirectional KV transfer over 100Gbps, NS-3 shows ~1&ndash;9% overhead (1% for large transfers &gt;64 MB, up to 9% for small 1 MB transfers). The simple bandwidth model is adequate for large single-flow estimation."
+      data-zh="對於 100Gbps 上的單向 KV transfer，NS-3 顯示 ~1&ndash;9% 的開銷（大於 64 MB 的傳輸為 1%，小至 1 MB 時高達 9%）。簡單頻寬模型對於大型單一 flow 估算已經足夠。">For single-flow unidirectional KV transfer, NS-3 shows ~1&ndash;9% overhead (1% for large, 9% for small).</span></p>
   </div>
 
   <div class="card highlight-red">
