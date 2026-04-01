@@ -381,11 +381,75 @@ python3 -m vidur.main \
     <tr><td><span class="i18n" data-en="Throughput" data-zh="吞吐量">Throughput</span></td><td>5,549 tok/s</td><td>5,541 tok/s</td></tr>
   </table>
 
-  <div class="callout warn">
-    <strong><span class="i18n" data-en="Finding:" data-zh="發現：">Finding:</span></strong>
+  <h3><span class="i18n" data-en="Deep Dive: Why Disaggregation's TTFT is 2.6&times; Worse" data-zh="深入分析：為什麼分離的 TTFT 差 2.6 倍">Deep Dive: Why Disaggregation's TTFT is 2.6&times; Worse</span></h3>
+
+  <p><span class="i18n"
+    data-en="True TTFT = scheduling delay + prefill compute + KV transfer + first decode iteration. Here is the per-component breakdown:"
+    data-zh="True TTFT = scheduling delay + prefill 計算 + KV transfer + 第一個 decode iteration。以下是各組件的拆解：">True TTFT breakdown:</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Component" data-zh="組件">Component</span></th>
+      <th><span class="i18n" data-en="Aggregated" data-zh="聚合">Aggregated</span></th>
+      <th><span class="i18n" data-en="Disaggregated" data-zh="分離">Disaggregated</span></th>
+      <th><span class="i18n" data-en="Delta" data-zh="差異">Delta</span></th>
+      <th><span class="i18n" data-en="% of gap" data-zh="佔差距比例">% of gap</span></th>
+    </tr>
+    <tr><td><span class="i18n" data-en="Scheduling delay" data-zh="排程延遲">Scheduling delay</span></td><td>16.1ms</td><td>37.5ms</td><td>+21.4ms</td><td>9%</td></tr>
+    <tr><td><span class="i18n" data-en="Prefill compute" data-zh="Prefill 計算">Prefill compute</span></td><td>132.9ms</td><td>200.8ms</td><td style="color:#f5a623">+68.0ms</td><td style="color:#f5a623">29%</td></tr>
+    <tr><td>KV transfer</td><td>0ms</td><td>167.7ms</td><td style="color:#ff6b6b"><strong>+167.7ms</strong></td><td style="color:#ff6b6b"><strong>71%</strong></td></tr>
+    <tr><td><span class="i18n" data-en="First decode iter" data-zh="第一個 decode">First decode iter</span></td><td>13.4ms</td><td>14.3ms</td><td>+0.9ms</td><td>&lt;1%</td></tr>
+    <tr style="font-weight:bold"><td>True TTFT</td><td>146ms</td><td>383ms</td><td>+237ms</td><td>100%</td></tr>
+  </table>
+
+  <h4><span class="i18n" data-en="Factor 1: KV Cache Transfer is the Dominant Cost (71%)" data-zh="因素 1：KV Cache Transfer 是主要成本（71%）">Factor 1: KV Cache Transfer is the Dominant Cost (71%)</span></h4>
+
+  <div class="card highlight-red">
+    <p><span class="i18n"
+      data-en="KV transfer alone accounts for <strong>71% of the TTFT gap</strong> and <strong>44% of disaggregation's total TTFT</strong>. For LLaMA 3 8B, the KV cache for a 1024-token prefill is 128 MB (= 2 &times; 1024 &times; 8 kv_heads &times; 128 head_dim &times; 32 layers &times; 2 bytes). At 100 Gbps, this takes 10.7 ms. The Azure trace's mean prefill is 1,226 tokens → mean KV = 157 MB → 167 ms transfer. This cost is <strong>unavoidable</strong> in disaggregation and <strong>zero</strong> in aggregation."
+      data-zh="KV transfer 單獨佔了 <strong>TTFT 差距的 71%</strong> 和<strong>分離總 TTFT 的 44%</strong>。對於 LLaMA 3 8B，1024 token 的 prefill 的 KV cache 是 128 MB（= 2 &times; 1024 &times; 8 kv_heads &times; 128 head_dim &times; 32 layers &times; 2 bytes）。在 100 Gbps 下需要 10.7 ms。Azure trace 的平均 prefill 是 1,226 tokens → 平均 KV = 157 MB → 167 ms 傳輸。這個成本在分離架構中<strong>無法避免</strong>，在聚合架構中<strong>為零</strong>。">KV transfer accounts for <strong>71% of the TTFT gap</strong>. Mean 157 MB transfer at 100 Gbps = 167 ms. Unavoidable in disagg, zero in agg.</span></p>
+  </div>
+
+  <h4><span class="i18n" data-en="Factor 2: Prefill Queuing from Halved Capacity (29%)" data-zh="因素 2：容量減半導致的 Prefill 排隊（29%）">Factor 2: Prefill Queuing from Halved Capacity (29%)</span></h4>
+
+  <div class="card highlight-orange">
+    <p><span class="i18n"
+      data-en="With 4-GPU aggregation, each GPU handles ~1.0 req/s. With 2P+2D disaggregation, each prefill GPU handles ~1.9 req/s — nearly <strong>2&times; the load</strong>. This causes prefill queuing: prefill compute increases from 133ms to 201ms across all token buckets."
+      data-zh="4-GPU 聚合下，每個 GPU 處理 ~1.0 req/s。2P+2D 分離下，每個 prefill GPU 處理 ~1.9 req/s——幾乎是 <strong>2 倍的負載</strong>。這導致 prefill 排隊：所有 token 區間的 prefill 計算從 133ms 增加到 201ms。">With 2P+2D, each prefill GPU handles ~1.9 req/s (2&times; the load). Prefill compute increases from 133ms to 201ms.</span></p>
+  </div>
+
+  <p><span class="i18n"
+    data-en="Prefill compute time by token bucket:"
+    data-zh="按 token 區間的 Prefill 計算時間：">Prefill compute by token bucket:</span></p>
+
+  <table>
+    <tr><th>Tokens</th><th><span class="i18n" data-en="Agg (ms)" data-zh="聚合 (ms)">Agg (ms)</span></th><th><span class="i18n" data-en="Disagg (ms)" data-zh="分離 (ms)">Disagg (ms)</span></th><th><span class="i18n" data-en="Slowdown" data-zh="減速">Slowdown</span></th></tr>
+    <tr><td>0&ndash;256</td><td>52</td><td>119</td><td>2.3&times;</td></tr>
+    <tr><td>257&ndash;512</td><td>79</td><td>152</td><td>1.9&times;</td></tr>
+    <tr><td>513&ndash;1024</td><td>106</td><td>180</td><td>1.7&times;</td></tr>
+    <tr><td>1025&ndash;2048</td><td>131</td><td>198</td><td>1.5&times;</td></tr>
+    <tr><td>2049&ndash;4096</td><td>298</td><td>356</td><td>1.2&times;</td></tr>
+  </table>
+
+  <div class="callout">
     <span class="i18n"
-      data-en="At this load level (~3.8 req/s on 4 GPUs), aggregation wins. Each GPU handles ~1 req/s, so preemption is mild (261ms). Disaggregation halves the effective capacity per role (only 2 GPUs for decode), adding scheduling overhead without enough load to justify the separation. Disaggregation's advantage (near-zero preemption) only dominates at higher QPS where decode starvation becomes the bottleneck."
-      data-zh="在此負載水平（4 GPU 上 ~3.8 req/s），聚合更好。每個 GPU 處理 ~1 req/s，搶佔很輕微（261ms）。分離將每個角色的有效容量減半（只有 2 台 GPU 做 decode），增加了排程開銷，但負載不足以證明分離的必要性。分離的優勢（接近零搶佔）只在更高 QPS 時才會主導。">At this load level, aggregation wins. Disaggregation halves effective capacity per role, adding overhead without enough load to justify separation.</span>
+      data-en="Small prefill requests suffer more (2.3&times; slowdown for 0&ndash;256 tokens) because they're fast enough that queuing delay dominates. Large prefill requests (2049&ndash;4096) are only 1.2&times; slower because GPU compute dominates over queuing."
+      data-zh="小 prefill request 受影響更大（0&ndash;256 token 時 2.3 倍減速），因為它們本身夠快，排隊延遲占主導。大 prefill request（2049&ndash;4096）只慢 1.2 倍，因為 GPU 計算主導了排隊。">Small prefill requests suffer more (2.3&times;) because queuing dominates. Large requests only 1.2&times; because GPU compute dominates.</span>
+  </div>
+
+  <h4><span class="i18n" data-en="Why Disaggregation Still Loses Despite Zero Preemption" data-zh="為什麼分離在零搶佔的情況下仍然輸">Why Disagg Loses Despite Zero Preemption</span></h4>
+
+  <div class="card highlight-blue">
+    <p><span class="i18n"
+      data-en="Disaggregation's main benefit is eliminating preemption (261ms → 9ms = saving 252ms per request). But it introduces KV transfer (168ms) + prefill queuing (68ms) = <strong>236ms new overhead</strong>. The net effect: 236ms added &minus; 252ms saved = only 16ms net improvement on preemption, which is wiped out by the TTFT penalty. At this load level (~3.8 req/s on 4 GPUs), aggregation's preemption is mild enough that disaggregation's costs outweigh its benefits."
+      data-zh="分離的主要好處是消除搶佔（261ms → 9ms = 每個 request 節省 252ms）。但它引入了 KV transfer（168ms）+ prefill 排隊（68ms）= <strong>236ms 新開銷</strong>。淨效果：新增 236ms &minus; 節省 252ms = 搶佔只淨改善 16ms，被 TTFT 的懲罰抵消。在此負載水平（4 GPU 上 ~3.8 req/s），聚合的搶佔足夠輕微，分離的成本大於收益。">Disagg saves 252ms preemption but adds 236ms (KV transfer + queuing). Net improvement only 16ms, wiped out by TTFT penalty.</span></p>
+  </div>
+
+  <div class="callout critical">
+    <strong><span class="i18n" data-en="When Would Disaggregation Win?" data-zh="什麼時候分離會贏？">When Would Disagg Win?</span></strong>
+    <span class="i18n"
+      data-en="Disaggregation wins when preemption becomes the dominant bottleneck — at higher QPS where aggregated GPUs are saturated and decode requests get starved by incoming prefills. In our 1-GPU experiment (same trace), preemption was 6.1 seconds (vs 261ms on 4 GPUs), and E2E was 16.2s. At that load, disaggregation would save ~6s preemption per request, far exceeding the ~236ms KV transfer + queuing cost. The crossover point depends on: (1) network bandwidth (higher = cheaper KV transfer), (2) QPS per GPU, and (3) model size (larger KV cache = more expensive transfer)."
+      data-zh="當搶佔成為主要瓶頸時，分離會贏——在更高 QPS 下，聚合 GPU 飽和，decode request 被新的 prefill 餓死。在我們的 1-GPU 實驗（同一 trace）中，搶佔是 6.1 秒（vs 4 GPU 上的 261ms），E2E 是 16.2s。在那個負載下，分離每個 request 可節省 ~6s 搶佔，遠超 ~236ms 的 KV transfer + 排隊成本。交叉點取決於：(1) 網路頻寬（越高 = KV transfer 越便宜），(2) 每 GPU 的 QPS，(3) 模型大小（越大的 KV cache = 越貴的 transfer）。">Disagg wins when preemption dominates — at higher QPS where aggregated GPUs are saturated. The crossover depends on network bandwidth, QPS per GPU, and model size.</span>
   </div>
 </div>
 
