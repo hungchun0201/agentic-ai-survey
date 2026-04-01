@@ -1056,6 +1056,68 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #ffa500}
       data-zh="RequestArrival → GlobalSchedule → ReplicaSchedule → BatchStageArrival → ReplicaStageSchedule → BatchStageEnd → (下一個 stage 或 BatchEnd) → ReplicaSchedule → ... 此循環重複，直到所有請求產生完所有 decode token。">RequestArrival &rarr; GlobalSchedule &rarr; ReplicaSchedule &rarr; BatchStageArrival &rarr; ReplicaStageSchedule &rarr; BatchStageEnd &rarr; (next stage OR BatchEnd) &rarr; ReplicaSchedule &rarr; ... This cycle repeats until all requests have generated all their decode tokens.</span>
   </div>
 
+  <!-- ===== WHEN DOES BATCHING ACTUALLY HAPPEN ===== -->
+  <h3 id="batching-reality"><span class="i18n" data-en="When Does Multi-Request Batching Actually Happen?" data-zh="多請求批次化實際何時發生？">When Does Multi-Request Batching Actually Happen?</span></h3>
+
+  <div class="callout critical">
+    <strong><span class="i18n" data-en="Key Question:" data-zh="關鍵問題：">Key Question:</span></strong>
+    <span class="i18n"
+      data-en="Every request arrival triggers the full chain (Events 1→2→3). Does that mean each arrival pulls multiple requests into a batch?"
+      data-zh="每個請求到達都會觸發完整事件鏈（事件 1→2→3）。這是否意味著每次到達都會撈出多個請求組成批次？">Every request arrival triggers the full chain (Events 1&rarr;2&rarr;3). Does that mean each arrival pulls multiple requests into a batch?</span>
+    <br><br>
+    <strong><span class="i18n" data-en="Answer: No." data-zh="答案：不是。">Answer: No.</span></strong>
+    <span class="i18n"
+      data-en="Most of the time, the chain is <strong>short-circuited</strong> by the guard <code class='inline-code'>_num_running_batches &lt; _num_stages</code>. When the replica is already executing a batch, <code class='inline-code'>on_schedule()</code> returns an empty list, and the request simply waits in the queue."
+      data-zh="大部分時候，事件鏈會被 guard <code class='inline-code'>_num_running_batches &lt; _num_stages</code> <strong>短路</strong>。當 replica 已在執行批次時，<code class='inline-code'>on_schedule()</code> 返回空列表，請求只是靜靜地留在佇列中。">Most of the time, the chain is <strong>short-circuited</strong> by the guard <code class="inline-code">_num_running_batches &lt; _num_stages</code>. When the replica is already executing a batch, <code class="inline-code">on_schedule()</code> returns an empty list, and the request simply waits in the queue.</span>
+  </div>
+
+  <p><span class="i18n"
+    data-en="Here is a concrete timeline showing how the two paths differ:"
+    data-zh="以下是一個具體的時間線，展示兩條路徑的差異：">Here is a concrete timeline showing how the two paths differ:</span></p>
+
+  <div class="card highlight-blue">
+    <h4><span class="i18n" data-en="Path A — Request Arrival when replica is idle (first request or queue was empty)" data-zh="路徑 A — 請求到達時 replica 閒置（第一個請求或佇列為空）">Path A — Request Arrival when replica is idle (first request or queue was empty)</span></h4>
+<pre><code><span class="cm">t=0.1  RequestArrivalEvent(Req A)</span>
+  → <span class="cl">GlobalScheduleEvent</span>  → assigns Req A to replica 0
+  → <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">on_schedule</span>()
+       _num_running_batches(<span class="nr">0</span>) < _num_stages(<span class="nr">1</span>) ✓
+       → <span class="fn">_get_next_batch</span>(): <span class="cm">pulls Req A (only 1 in queue) → Batch</span>
+       → _num_running_batches = <span class="nr">1</span>
+  → <span class="cl">BatchStageArrivalEvent</span> → ... → <span class="cm">batch starts executing</span></code></pre>
+  </div>
+
+  <div class="card highlight-orange">
+    <h4><span class="i18n" data-en="Path B — Request Arrival when replica is busy (common case)" data-zh="路徑 B — 請求到達時 replica 忙碌（常見情況）">Path B — Request Arrival when replica is busy (common case)</span></h4>
+<pre><code><span class="cm">t=0.2  RequestArrivalEvent(Req B)</span>
+  → <span class="cl">GlobalScheduleEvent</span>  → assigns Req B to replica 0
+  → <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">on_schedule</span>()
+       _num_running_batches(<span class="nr">1</span>) < _num_stages(<span class="nr">1</span>) ✗  <span class="cm">← GUARD FAILS</span>
+       → <span class="kw">return</span> []  <span class="cm">← 空列表，事件鏈到此結束</span>
+       <span class="cm">Req B stays in _request_queue, waiting...</span>
+
+<span class="cm">t=0.3  RequestArrivalEvent(Req C)  → same thing, Req C also waits</span></code></pre>
+  </div>
+
+  <div class="card highlight-green">
+    <h4><span class="i18n" data-en="Path C — BatchEnd triggers real multi-request batching" data-zh="路徑 C — BatchEnd 觸發真正的多請求批次化">Path C — BatchEnd triggers real multi-request batching</span></h4>
+<pre><code><span class="cm">t=0.5  BatchEndEvent(Batch of Req A)</span>
+  → _num_running_batches -= <span class="nr">1</span>  <span class="cm">→ now 0</span>
+  → <span class="cl">ReplicaScheduleEvent</span> → <span class="fn">on_schedule</span>()
+       _num_running_batches(<span class="nr">0</span>) < _num_stages(<span class="nr">1</span>) ✓
+       → <span class="fn">_get_next_batch</span>(): <span class="cm">queue has [Req B, Req C]</span>
+           <span class="kw">while</span> _request_queue:
+               add Req B ✓, add Req C ✓  <span class="cm">← 多個 request 組成一個 batch</span>
+       → Batch(requests=[Req B, Req C])
+  → <span class="cl">BatchStageArrivalEvent</span> → ... → <span class="cm">batch starts executing</span></code></pre>
+  </div>
+
+  <div class="callout key">
+    <strong><span class="i18n" data-en="Summary:" data-zh="總結：">Summary:</span></strong>
+    <span class="i18n"
+      data-en="The event chain triggered by <span class='event-badge arrival'>RequestArrival</span> fires every time, but is mostly a no-op when the replica is busy. The <strong>real multi-request batching</strong> happens when <span class='event-badge batch-end'>BatchEnd</span> triggers <span class='event-badge rsched'>ReplicaSchedule</span> — by that time, multiple requests have accumulated in the queue and are pulled into a single batch."
+      data-zh="由 <span class='event-badge arrival'>RequestArrival</span> 觸發的事件鏈每次都會執行，但當 replica 忙碌時大多是空操作。<strong>真正的多請求批次化</strong>發生在 <span class='event-badge batch-end'>BatchEnd</span> 觸發 <span class='event-badge rsched'>ReplicaSchedule</span> 時 — 此時多個請求已在佇列中累積，被一起拉入同一個批次。">The event chain triggered by <span class="event-badge arrival">RequestArrival</span> fires every time, but is mostly a no-op when the replica is busy. The <strong>real multi-request batching</strong> happens when <span class="event-badge batch-end">BatchEnd</span> triggers <span class="event-badge rsched">ReplicaSchedule</span> — by that time, multiple requests have accumulated in the queue and are pulled into a single batch.</span>
+  </div>
+
   <!-- ===== EVENT TIMING ANALYSIS ===== -->
   <h3 id="event-timing"><span class="i18n" data-en="Event Timestamp Propagation — Where Does Time Actually Advance?" data-zh="事件時間戳傳遞 — 模擬時間究竟在哪裡推進？">Event Timestamp Propagation — Where Does Time Actually Advance?</span></h3>
 
