@@ -697,7 +697,43 @@ block.prev_free_block = block.next_free_block = <span class="kw">None</span></co
 
   <div class="note"><strong><span class="i18n" data-en="Performance trick:" data-zh="效能技巧：">Performance trick:</span></strong> <span class="i18n" data-en="vLLM embeds &lt;code&gt;prev_free_block&lt;/code&gt; / &lt;code&gt;next_free_block&lt;/code&gt; directly on the &lt;code&gt;KVCacheBlock&lt;/code&gt; dataclass (not separate Node objects), avoiding Python object allocation overhead. &lt;code&gt;fake_head&lt;/code&gt; and &lt;code&gt;fake_tail&lt;/code&gt; sentinel nodes eliminate null-check branching." data-zh="vLLM 將 &lt;code&gt;prev_free_block&lt;/code&gt; / &lt;code&gt;next_free_block&lt;/code&gt; 直接嵌在 &lt;code&gt;KVCacheBlock&lt;/code&gt; dataclass 上（不是獨立的 Node 物件），避免 Python 物件分配開銷。&lt;code&gt;fake_head&lt;/code&gt; 和 &lt;code&gt;fake_tail&lt;/code&gt; 哨兵節點消除了 null-check 的分支。">vLLM embeds <code>prev_free_block</code> / <code>next_free_block</code> directly on the <code>KVCacheBlock</code> dataclass (not separate Node objects), avoiding Python object allocation overhead. <code>fake_head</code> and <code>fake_tail</code> sentinel nodes eliminate null-check branching.</span></div>
 
-  <h3><span class="i18n" data-en="7.6 Block Read/Write: The CUDA Kernels" data-zh="7.6 Block 讀寫：CUDA Kernels">7.6 Block Read/Write: The CUDA Kernels</span></h3>
+  <h3><span class="i18n" data-en="7.6 block_id → GPU VRAM Address Mapping" data-zh="7.6 block_id → GPU VRAM 位址映射">7.6 block_id → GPU VRAM Address Mapping</span></h3>
+  <p><span class="i18n" data-en="Each layer's KV cache is a contiguous &lt;code&gt;torch.zeros&lt;/code&gt; tensor on GPU. &lt;code&gt;block_id&lt;/code&gt; is simply an &lt;strong&gt;index into the second dimension&lt;/strong&gt; — the GPU address is computed by a single multiplication, with no hash table or pointer chasing:" data-zh="每一層的 KV cache 是 GPU 上一塊連續的 &lt;code&gt;torch.zeros&lt;/code&gt; tensor。&lt;code&gt;block_id&lt;/code&gt; 就是&lt;strong&gt;第二個維度的 index&lt;/strong&gt; — GPU 位址透過一次乘法計算，沒有 hash table 或 pointer chasing：">Each layer's KV cache is a contiguous <code>torch.zeros</code> tensor on GPU. <code>block_id</code> is simply an <strong>index into the second dimension</strong> — the GPU address is computed by a single multiplication, with no hash table or pointer chasing:</span></p>
+  <pre><code><span class="cm"># Tensor shape per layer (FlashAttention)</span>
+kv_cache.shape = (<span class="nu">2</span>, <span class="nu">5402</span>, <span class="nu">16</span>, <span class="nu">8</span>, <span class="nu">128</span>)
+                  <span class="cm">↑    ↑</span>
+                 <span class="cm">K/V  block_id ← this dimension IS the block_id</span>
+
+<span class="cm"># GPU address for block N:</span>
+base = kv_cache.data_ptr()                      <span class="cm"># tensor 起始 GPU 位址</span>
+block_size_bytes = <span class="nu">16</span> × <span class="nu">8</span> × <span class="nu">128</span> × <span class="nu">2</span> = <span class="nu">32,768</span> bytes  <span class="cm"># per block per K or V</span>
+
+key_block_N   = base + <span class="nu">0</span> × total_kv_size + N × <span class="nu">32,768</span>
+value_block_N = base + <span class="nu">1</span> × total_kv_size + N × <span class="nu">32,768</span></code></pre>
+
+  <div class="diagram" style="padding:1.2rem">
+    <p class="step-detail" style="margin-bottom:8px"><span class="i18n" data-en="Example: block_table = [1, 2, 3, 4, 5] for one layer's K cache" data-zh="範例：block_table = [1, 2, 3, 4, 5]，一層的 K cache">Example: block_table = [1, 2, 3, 4, 5] for one layer's K cache</span></p>
+    <div style="position:relative">
+      <div class="gpu-bar">
+        <div class="cell" style="background:#2d2d44;color:#6c7086;min-width:48px">null<br><small>+0</small></div>
+        <div class="cell" style="background:rgba(233,69,96,.7);color:#fff;min-width:48px">blk 1<br><small>+32K</small></div>
+        <div class="cell" style="background:rgba(110,198,255,.7);color:#fff;min-width:48px">blk 2<br><small>+64K</small></div>
+        <div class="cell" style="background:rgba(166,227,161,.7);color:#fff;min-width:48px">blk 3<br><small>+96K</small></div>
+        <div class="cell" style="background:rgba(250,179,135,.7);color:#fff;min-width:48px">blk 4<br><small>+128K</small></div>
+        <div class="cell" style="background:rgba(250,179,135,.7);color:#fff;min-width:48px">blk 5<br><small>+160K</small></div>
+        <div class="cell" style="background:#1a1a2e;color:#6c7086;min-width:48px">free<br><small>+192K</small></div>
+        <div class="cell" style="background:#1a1a2e;color:#6c7086;min-width:70px">···</div>
+      </div>
+    </div>
+    <p class="step-detail" style="margin-top:8px"><span class="i18n" data-en="Address = &lt;code&gt;base + block_id × 32,768&lt;/code&gt;. One multiplication — no lookup table, no indirection." data-zh="位址 = &lt;code&gt;base + block_id × 32,768&lt;/code&gt;。一次乘法 — 不需要查找表，不需要間接尋址。">Address = <code>base + block_id × 32,768</code>. One multiplication — no lookup table, no indirection.</span></p>
+  </div>
+
+  <p><span class="i18n" data-en="The CUDA kernel does exactly this pointer arithmetic (&lt;code&gt;csrc/cache_kernels.cu:306&lt;/code&gt;):" data-zh="CUDA kernel 做的就是這個指標算術（&lt;code&gt;csrc/cache_kernels.cu:306&lt;/code&gt;）：">The CUDA kernel does exactly this pointer arithmetic (<code>csrc/cache_kernels.cu:306</code>):</span></p>
+  <pre><code>key_dst = key_cache + block_idx * block_stride + block_offset * page_stride;
+<span class="cm">//                    ^^^^^^^^^^^^^^^^^^^^^^^^</span>
+<span class="cm">//                    block_idx × 32,768 = jump directly to that block</span></code></pre>
+
+  <h3><span class="i18n" data-en="7.7 Block Read/Write: The CUDA Kernels" data-zh="7.7 Block 讀寫：CUDA Kernels">7.7 Block Read/Write: The CUDA Kernels</span></h3>
   <p><span class="i18n" data-en="Block allocation/free is pure Python, but the actual K/V data read/write happens in two CUDA kernels:" data-zh="Block 的分配/釋放是純 Python，但實際的 K/V 資料讀寫由兩個 CUDA kernel 負責：">Block allocation/free is pure Python, but the actual K/V data read/write happens in two CUDA kernels:</span></p>
 
   <div class="cards" style="grid-template-columns:1fr 1fr">
@@ -744,7 +780,7 @@ value_dst = value_cache + block_idx * block_stride + block_offset * page_stride;
   <h4><span class="i18n" data-en="Why pin preserves data" data-zh="為什麼 pin 能保存資料">Why pin preserves data</span></h4>
   <div class="note"><span class="i18n" data-en="K/V data is &lt;strong&gt;never erased or zeroed&lt;/strong&gt; — it stays at the same GPU address. Pin simply prevents the block from being re-allocated to another request (by keeping &lt;code&gt;ref_cnt &gt; 0&lt;/code&gt;). When the next turn arrives, FlashAttention reads the &lt;strong&gt;same block_ids&lt;/strong&gt; → &lt;strong&gt;same GPU addresses&lt;/strong&gt; → old K/V data is intact." data-zh="K/V 資料&lt;strong&gt;永遠不會被清除或歸零&lt;/strong&gt; — 它始終在相同的 GPU 位址。Pin 只是防止 block 被重新分配給其他 request（透過保持 &lt;code&gt;ref_cnt &gt; 0&lt;/code&gt;）。當下一輪到來時，FlashAttention 讀取&lt;strong&gt;相同的 block_id&lt;/strong&gt; → &lt;strong&gt;相同的 GPU 位址&lt;/strong&gt; → 舊的 K/V 資料完好無損。">K/V data is <strong>never erased or zeroed</strong> — it stays at the same GPU address. Pin simply prevents the block from being re-allocated to another request (by keeping <code>ref_cnt > 0</code>). When the next turn arrives, FlashAttention reads the <strong>same block_ids</strong> → <strong>same GPU addresses</strong> → old K/V data is intact.</span></div>
 
-  <h3><span class="i18n" data-en="7.7 Block Lifecycle: Python Data Structures Only" data-zh="7.7 Block 生命週期：純 Python 資料結構">7.7 Block Lifecycle: Python Data Structures Only</span></h3>
+  <h3><span class="i18n" data-en="7.8 Block Lifecycle: Python Data Structures Only" data-zh="7.8 Block 生命週期：純 Python 資料結構">7.8 Block Lifecycle: Python Data Structures Only</span></h3>
   <table>
     <tr><th><span class="i18n" data-en="Operation" data-zh="操作">Operation</span></th><th><span class="i18n" data-en="API" data-zh="API">API</span></th><th><span class="i18n" data-en="What it does" data-zh="做了什麼">What it does</span></th><th><span class="i18n" data-en="CUDA call?" data-zh="CUDA 呼叫？">CUDA call?</span></th></tr>
     <tr>
@@ -785,7 +821,7 @@ value_dst = value_cache + block_idx * block_stride + block_offset * page_stride;
     </tr>
   </table>
 
-  <h3><span class="i18n" data-en="7.8 The FreeKVCacheBlockQueue" data-zh="7.8 FreeKVCacheBlockQueue">7.8 The FreeKVCacheBlockQueue</span></h3>
+  <h3><span class="i18n" data-en="7.9 The FreeKVCacheBlockQueue" data-zh="7.9 FreeKVCacheBlockQueue">7.9 The FreeKVCacheBlockQueue</span></h3>
   <p><span class="i18n" data-en="The core data structure is a &lt;strong&gt;doubly-linked list&lt;/strong&gt; of &lt;code&gt;KVCacheBlock&lt;/code&gt; objects. All allocate/free operations are O(1) pointer swaps:" data-zh="核心資料結構是 &lt;code&gt;KVCacheBlock&lt;/code&gt; 物件的 &lt;strong&gt;doubly-linked list&lt;/strong&gt;。所有分配/釋放操作都是 O(1) 的指標交換：">The core data structure is a <strong>doubly-linked list</strong> of <code>KVCacheBlock</code> objects. All allocate/free operations are O(1) pointer swaps:</span></p>
   <pre><code><span class="cm"># vllm/v1/core/kv_cache_utils.py:158-175 — each block is a node</span>
 <span class="kw">@dataclass</span>
@@ -806,7 +842,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
 
 <span class="cm"># Pin: do nothing (skip the free above)</span></code></pre>
 
-  <h3><span class="i18n" data-en="7.9 Why This Design?" data-zh="7.9 為什麼這樣設計？">7.9 Why This Design?</span></h3>
+  <h3><span class="i18n" data-en="7.10 Why This Design?" data-zh="7.10 為什麼這樣設計？">7.10 Why This Design?</span></h3>
   <div class="cards">
     <div class="card">
       <h4><span class="i18n" data-en="No fragmentation" data-zh="零碎片化">No fragmentation</span></h4>
@@ -822,7 +858,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
     </div>
   </div>
 
-  <h3><span class="i18n" data-en="7.10 Concrete Example: Allocating 5 Blocks" data-zh="7.10 具體範例：分配 5 個 Blocks">7.10 Concrete Example: Allocating 5 Blocks</span></h3>
+  <h3><span class="i18n" data-en="7.11 Concrete Example: Allocating 5 Blocks" data-zh="7.11 具體範例：分配 5 個 Blocks">7.11 Concrete Example: Allocating 5 Blocks</span></h3>
   <p><span class="i18n" data-en="Tracing Turn 1 (66 tokens → 5 blocks) step by step:" data-zh="追蹤 Turn 1（66 tokens → 5 blocks）的每一步：">Tracing Turn 1 (66 tokens → 5 blocks) step by step:</span></p>
 
   <div class="diagram">
@@ -886,7 +922,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
     <p class="step-detail"><span class="i18n" data-en="Total Python ops: 10 pointer swaps + 5 int increments + 1 dict insert" data-zh="Python 操作總計：10 次指標交換 + 5 次 int 遞增 + 1 次 dict 插入">Total Python ops: 10 pointer swaps + 5 int increments + 1 dict insert</span> &nbsp;|&nbsp; <span class="i18n" data-en="Total CUDA ops:" data-zh="CUDA 操作總計：">Total CUDA ops:</span> <strong>0</strong></p>
   </div>
 
-  <h3><span class="i18n" data-en="7.11 Relationship to PagedAttention" data-zh="7.11 與 PagedAttention 的關係">7.11 Relationship to PagedAttention</span></h3>
+  <h3><span class="i18n" data-en="7.12 Relationship to PagedAttention" data-zh="7.12 與 PagedAttention 的關係">7.12 Relationship to PagedAttention</span></h3>
   <p><span class="i18n" data-en="Everything described above &lt;strong&gt;is&lt;/strong&gt; PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:" data-zh="以上所描述的一切&lt;strong&gt;就是&lt;/strong&gt; PagedAttention — 原始 vLLM 論文的核心貢獻。命名直接對應 OS virtual memory 概念：">Everything described above <strong>is</strong> PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:</span></p>
 
   <div class="diagram" style="padding:1.5rem">
