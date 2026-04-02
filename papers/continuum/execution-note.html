@@ -100,6 +100,7 @@ footer a{color:#6ec6ff}
     <li><a href="#pin-verify">Pin Verification</a></li>
     <li><a href="#bugs">Bugs Found</a></li>
     <li><a href="#vllm-design">vLLM Design</a></li>
+    <li><a href="#mem-ops">Memory Ops</a></li>
     <li><a href="#kv-budget">KV Budget</a></li>
     <li><a href="#observations">Observations</a></li>
     <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
@@ -514,12 +515,113 @@ self.kv_cache_manager.free(request)  <span class="cm"># ← ref_cnt decremented 
   </table>
 </section>
 
-<!-- ====== 7. KV CACHE BUDGET ESTIMATION ====== -->
+<!-- ====== 7. MEMORY OPERATIONS ====== -->
+<section id="mem-ops">
+  <h2><span class="i18n" data-en="7. How Pin Works at the Memory Level" data-zh="7. Pin 在記憶體層級的運作原理">7. How Pin Works at the Memory Level</span></h2>
+
+  <h3><span class="i18n" data-en="7.1 No CUDA Memory API Involved" data-zh="7.1 不涉及任何 CUDA 記憶體 API">7.1 No CUDA Memory API Involved</span></h3>
+  <p><span class="i18n" data-en="vLLM's KV cache pin does &lt;strong&gt;not&lt;/strong&gt; call &lt;code&gt;cudaMalloc&lt;/code&gt;, &lt;code&gt;cudaFree&lt;/code&gt;, &lt;code&gt;cudaMemcpy&lt;/code&gt;, or any CUDA memory management API. The entire mechanism is pure Python bookkeeping on top of a pre-allocated GPU buffer." data-zh="vLLM 的 KV cache pin &lt;strong&gt;不會&lt;/strong&gt;呼叫 &lt;code&gt;cudaMalloc&lt;/code&gt;、&lt;code&gt;cudaFree&lt;/code&gt;、&lt;code&gt;cudaMemcpy&lt;/code&gt; 或任何 CUDA 記憶體管理 API。整個機制是在預先分配的 GPU buffer 之上的純 Python bookkeeping。">vLLM's KV cache pin does <strong>not</strong> call <code>cudaMalloc</code>, <code>cudaFree</code>, <code>cudaMemcpy</code>, or any CUDA memory management API. The entire mechanism is pure Python bookkeeping on top of a pre-allocated GPU buffer.</span></p>
+
+  <h3><span class="i18n" data-en="7.2 One-Time GPU Allocation at Startup" data-zh="7.2 啟動時一次性 GPU 分配">7.2 One-Time GPU Allocation at Startup</span></h3>
+  <p><span class="i18n" data-en="The &lt;strong&gt;only&lt;/strong&gt; CUDA memory allocation happens once at server startup:" data-zh="&lt;strong&gt;唯一&lt;/strong&gt;的 CUDA 記憶體分配發生在 server 啟動時：">The <strong>only</strong> CUDA memory allocation happens once at server startup:</span></p>
+  <pre><code><span class="cm"># gpu_model_runner.py:3367 — called once at init</span>
+tensor = torch.<span class="fn">zeros</span>(kv_cache_tensor.size, dtype=torch.int8, device=<span class="st">"cuda"</span>)</code></pre>
+  <p><span class="i18n" data-en="This allocates 10.55 GiB as a single contiguous tensor on GPU. This memory is &lt;strong&gt;never freed&lt;/strong&gt; until server shutdown. It is logically partitioned into 5,402 blocks:" data-zh="這會在 GPU 上分配 10.55 GiB 的單一連續 tensor。這塊記憶體在 server 關閉前&lt;strong&gt;永遠不會被釋放&lt;/strong&gt;。它被邏輯上分割為 5,402 個 blocks：">This allocates 10.55 GiB as a single contiguous tensor on GPU. This memory is <strong>never freed</strong> until server shutdown. It is logically partitioned into 5,402 blocks:</span></p>
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">GPU Memory (10.55 GiB, allocated once via torch.zeros)</span>
+┌──────┬──────┬──────┬──────┬──────┬─── ··· ───┬──────┐
+│ blk 0│ blk 1│ blk 2│ blk 3│ blk 4│           │ blk  │
+│<span class="cm">(null)</span>│      │      │      │      │           │ 5401 │
+└──────┴──────┴──────┴──────┴──────┴─── ··· ───┴──────┘
+ <span class="cm">each block = 2 MiB = 16 tokens × 32 layers × 8 KV heads × 128 dim × 2 bytes</span>
+ <span class="cm">"allocate" and "free" only move pointers in Python — zero GPU ops</span></pre>
+  </div>
+
+  <h3><span class="i18n" data-en="7.3 Block Lifecycle: Python Data Structures Only" data-zh="7.3 Block 生命週期：純 Python 資料結構">7.3 Block Lifecycle: Python Data Structures Only</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Operation" data-zh="操作">Operation</span></th><th><span class="i18n" data-en="API" data-zh="API">API</span></th><th><span class="i18n" data-en="What it does" data-zh="做了什麼">What it does</span></th><th><span class="i18n" data-en="CUDA call?" data-zh="CUDA 呼叫？">CUDA call?</span></th></tr>
+    <tr>
+      <td><span class="i18n" data-en="Init pool" data-zh="初始化 pool">Init pool</span></td>
+      <td><code>torch.zeros(..., device="cuda")</code></td>
+      <td><span class="i18n" data-en="Allocate 10.55 GiB contiguous GPU buffer" data-zh="分配 10.55 GiB 連續 GPU buffer">Allocate 10.55 GiB contiguous GPU buffer</span></td>
+      <td><span class="err"><span class="i18n" data-en="Yes (once)" data-zh="是（一次）">Yes (once)</span></span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Allocate block" data-zh="分配 block">Allocate block</span></td>
+      <td><code>FreeKVCacheBlockQueue.popleft_n()</code></td>
+      <td><span class="i18n" data-en="Remove from doubly-linked list, ref_cnt += 1" data-zh="從 doubly-linked list 移除，ref_cnt += 1">Remove from doubly-linked list, ref_cnt += 1</span></td>
+      <td><span class="ok">No</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Free block" data-zh="釋放 block">Free block</span></td>
+      <td><code>FreeKVCacheBlockQueue.append_n()</code></td>
+      <td><span class="i18n" data-en="ref_cnt -= 1, append back to linked list" data-zh="ref_cnt -= 1，加回 linked list">ref_cnt -= 1, append back to linked list</span></td>
+      <td><span class="ok">No</span></td>
+    </tr>
+    <tr>
+      <td><strong><span class="i18n" data-en="Pin (Continuum)" data-zh="Pin（Continuum）">Pin (Continuum)</span></strong></td>
+      <td><strong><span class="i18n" data-en="(nothing)" data-zh="（不呼叫任何東西）">(nothing)</span></strong></td>
+      <td><strong><span class="i18n" data-en="Skip free() → ref_cnt stays > 0 → block stays out of free queue" data-zh="跳過 free() → ref_cnt 維持 > 0 → block 不回到 free queue">Skip free() → ref_cnt stays > 0 → block stays out of free queue</span></strong></td>
+      <td><span class="ok"><strong>No</strong></span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Unpin (TTL expires)" data-zh="Unpin（TTL 到期）">Unpin (TTL expires)</span></td>
+      <td><code>kv_cache_manager.free()</code></td>
+      <td><span class="i18n" data-en="ref_cnt -= 1, block returns to free queue" data-zh="ref_cnt -= 1，block 回到 free queue">ref_cnt -= 1, block returns to free queue</span></td>
+      <td><span class="ok">No</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Use block (forward pass)" data-zh="使用 block（forward pass）">Use block (forward pass)</span></td>
+      <td>FlashAttention kernel</td>
+      <td><span class="i18n" data-en="Read/write the GPU tensor at block_id × block_size offset" data-zh="在 block_id × block_size offset 處讀寫 GPU tensor">Read/write the GPU tensor at block_id × block_size offset</span></td>
+      <td><span class="err"><span class="i18n" data-en="Yes (every step)" data-zh="是（每一步）">Yes (every step)</span></span></td>
+    </tr>
+  </table>
+
+  <h3><span class="i18n" data-en="7.4 The FreeKVCacheBlockQueue" data-zh="7.4 FreeKVCacheBlockQueue">7.4 The FreeKVCacheBlockQueue</span></h3>
+  <p><span class="i18n" data-en="The core data structure is a &lt;strong&gt;doubly-linked list&lt;/strong&gt; of &lt;code&gt;KVCacheBlock&lt;/code&gt; objects. All allocate/free operations are O(1) pointer swaps:" data-zh="核心資料結構是 &lt;code&gt;KVCacheBlock&lt;/code&gt; 物件的 &lt;strong&gt;doubly-linked list&lt;/strong&gt;。所有分配/釋放操作都是 O(1) 的指標交換：">The core data structure is a <strong>doubly-linked list</strong> of <code>KVCacheBlock</code> objects. All allocate/free operations are O(1) pointer swaps:</span></p>
+  <pre><code><span class="cm"># kv_cache_utils.py:158-175 — each block is a node</span>
+<span class="kw">@dataclass</span>
+<span class="kw">class</span> <span class="fn">KVCacheBlock</span>:
+    block_id: <span class="nu">int</span>           <span class="cm"># index into the GPU tensor</span>
+    ref_cnt: <span class="nu">int</span> = <span class="nu">0</span>       <span class="cm"># > 0 = in use, 0 = free/evictable</span>
+    _block_hash: Optional    <span class="cm"># for prefix cache lookup</span>
+    prev_free_block: Optional[<span class="st">"KVCacheBlock"</span>]  <span class="cm"># doubly-linked list</span>
+    next_free_block: Optional[<span class="st">"KVCacheBlock"</span>]  <span class="cm"># doubly-linked list</span>
+    is_null: <span class="nu">bool</span> = <span class="kw">False</span>   <span class="cm"># placeholder block</span></code></pre>
+  <pre><code><span class="cm"># Allocate: pop from front of free list</span>
+block = free_block_queue.<span class="fn">popleft</span>()   <span class="cm"># O(1) pointer swap</span>
+block.ref_cnt += <span class="nu">1</span>
+
+<span class="cm"># Free: append to tail of free list</span>
+block.ref_cnt -= <span class="nu">1</span>
+free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># O(1) pointer swap</span>
+
+<span class="cm"># Pin: do nothing (skip the free above)</span></code></pre>
+
+  <h3><span class="i18n" data-en="7.5 Why This Design?" data-zh="7.5 為什麼這樣設計？">7.5 Why This Design?</span></h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="No fragmentation" data-zh="零碎片化">No fragmentation</span></h4>
+      <p><span class="i18n" data-en="Fixed-size blocks from a pre-allocated pool. No &lt;code&gt;cudaMalloc/cudaFree&lt;/code&gt; churn, no CUDA memory fragmentation." data-zh="從預分配 pool 中取用固定大小的 block。沒有 &lt;code&gt;cudaMalloc/cudaFree&lt;/code&gt; 反覆呼叫，沒有 CUDA 記憶體碎片化。">Fixed-size blocks from a pre-allocated pool. No <code>cudaMalloc/cudaFree</code> churn, no CUDA memory fragmentation.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Zero GPU overhead for scheduling" data-zh="排程零 GPU 開銷">Zero GPU overhead for scheduling</span></h4>
+      <p><span class="i18n" data-en="Allocate/free/pin/unpin are pure CPU operations (Python linked list). The GPU only sees block_id indices in the block table — it never knows blocks were &quot;pinned&quot;." data-zh="Allocate/free/pin/unpin 都是純 CPU 操作（Python linked list）。GPU 只看到 block table 中的 block_id 索引 — 它永遠不知道 blocks 被「pin」了。">Allocate/free/pin/unpin are pure CPU operations (Python linked list). The GPU only sees block_id indices in the block table — it never knows blocks were "pinned".</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Pin is trivially simple" data-zh="Pin 極其簡單">Pin is trivially simple</span></h4>
+      <p><span class="i18n" data-en="Continuum doesn't need any special memory API. It just skips one function call (&lt;code&gt;free()&lt;/code&gt;). The block's &lt;code&gt;ref_cnt&lt;/code&gt; stays above zero, preventing the free queue from reclaiming it." data-zh="Continuum 不需要任何特殊的記憶體 API。它只是跳過一個函數呼叫（&lt;code&gt;free()&lt;/code&gt;）。Block 的 &lt;code&gt;ref_cnt&lt;/code&gt; 保持大於零，阻止 free queue 回收它。">Continuum doesn't need any special memory API. It just skips one function call (<code>free()</code>). The block's <code>ref_cnt</code> stays above zero, preventing the free queue from reclaiming it.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ====== 8. KV CACHE BUDGET ESTIMATION ====== -->
 <section id="kv-budget">
-  <h2><span class="i18n" data-en="7. KV Cache Budget Estimation" data-zh="7. KV Cache 容量估算">7. KV Cache Budget Estimation</span></h2>
+  <h2><span class="i18n" data-en="8. KV Cache Budget Estimation" data-zh="8. KV Cache 容量估算">8. KV Cache Budget Estimation</span></h2>
   <p><span class="i18n" data-en="How does vLLM decide it can allocate 5402 blocks? This section traces the math." data-zh="vLLM 怎麼決定可以分配 5402 個 blocks？本節追蹤完整計算過程。">How does vLLM decide it can allocate 5402 blocks? This section traces the math.</span></p>
 
-  <h3><span class="i18n" data-en="7.1 The Formula" data-zh="7.1 公式">7.1 The Formula</span></h3>
+  <h3><span class="i18n" data-en="8.1 The Formula" data-zh="8.1 公式">8.1 The Formula</span></h3>
   <pre><code><span class="cm"># gpu_worker.py:176-177</span>
 requested_memory = init_snapshot.<span class="fn">total_memory</span> × gpu_memory_utilization
 
@@ -530,7 +632,7 @@ num_gpu_blocks = available_kv // cache_block_size</code></pre>
 
   <div class="note"><strong><span class="i18n" data-en="Key:" data-zh="關鍵：">Key:</span></strong> <span class="i18n" data-en="&lt;code&gt;requested_memory&lt;/code&gt; uses &lt;strong&gt;total_memory&lt;/strong&gt; (not free), so it's a fixed value regardless of other processes. However, if &lt;code&gt;init_free &lt; requested_memory&lt;/code&gt;, vLLM refuses to start. Also, &lt;code&gt;peak_activation&lt;/code&gt; is &lt;strong&gt;measured&lt;/strong&gt; by running one real forward pass, not calculated analytically." data-zh="&lt;code&gt;requested_memory&lt;/code&gt; 使用的是 &lt;strong&gt;total_memory&lt;/strong&gt;（不是 free），所以它是一個與其他進程無關的固定值。但如果 &lt;code&gt;init_free &lt; requested_memory&lt;/code&gt;，vLLM 會拒絕啟動。此外，&lt;code&gt;peak_activation&lt;/code&gt; 是透過跑一次真實 forward pass &lt;strong&gt;量測&lt;/strong&gt;得到的，不是用公式計算的。"><code>requested_memory</code> uses <strong>total_memory</strong> (not free), so it's a fixed value regardless of other processes. However, if <code>init_free < requested_memory</code>, vLLM refuses to start. Also, <code>peak_activation</code> is <strong>measured</strong> by running one real forward pass, not calculated analytically.</span></div>
 
-  <h3><span class="i18n" data-en="7.2 Per-Block Size Calculation" data-zh="7.2 每個 Block 的大小計算">7.2 Per-Block Size Calculation</span></h3>
+  <h3><span class="i18n" data-en="8.2 Per-Block Size Calculation" data-zh="8.2 每個 Block 的大小計算">8.2 Per-Block Size Calculation</span></h3>
   <p><span class="i18n" data-en="Each block stores KV cache for &lt;code&gt;block_size&lt;/code&gt; tokens across all attention layers:" data-zh="每個 block 儲存 &lt;code&gt;block_size&lt;/code&gt; 個 token 在所有 attention layer 的 KV cache：">Each block stores KV cache for <code>block_size</code> tokens across all attention layers:</span></p>
   <pre><code><span class="cm"># cache_engine.py:121-145 — get_cache_block_size()</span>
 
@@ -558,7 +660,7 @@ cache_block_size = 2 × 32 × 16 × (1024 + 1024)
                  = <span class="nu">2,097,152 bytes</span>
                  = <span class="nu">2 MB per block</span></code></pre>
 
-  <h3><span class="i18n" data-en="7.3 Memory Budget Breakdown (vLLM Measured)" data-zh="7.3 記憶體預算分配（vLLM 實測值）">7.3 Memory Budget Breakdown (vLLM Measured)</span></h3>
+  <h3><span class="i18n" data-en="8.3 Memory Budget Breakdown (vLLM Measured)" data-zh="8.3 記憶體預算分配（vLLM 實測值）">8.3 Memory Budget Breakdown (vLLM Measured)</span></h3>
   <p><span class="i18n" data-en="These are &lt;strong&gt;exact values&lt;/strong&gt; reported by vLLM's startup log (&lt;code&gt;gpu_worker.py:391&lt;/code&gt;), not estimates:" data-zh="以下是 vLLM 啟動日誌（&lt;code&gt;gpu_worker.py:391&lt;/code&gt;）報告的&lt;strong&gt;精確值&lt;/strong&gt;，不是估算：">These are <strong>exact values</strong> reported by vLLM's startup log (<code>gpu_worker.py:391</code>), not estimates:</span></p>
   <pre><code><span class="cm"># vLLM startup log (gpu_worker.py:391)</span>
 Free memory on device (<span class="nu">28.66</span>/<span class="nu">31.34</span> GiB) on startup.
@@ -598,7 +700,7 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
   <div class="note"><strong><span class="i18n" data-en="Verification:" data-zh="驗證：">Verification:</span></strong> <code>10.55 GiB ÷ 2 MiB = 10,803.2 MiB ÷ 2 MiB = 5,401.6 → 5,402 blocks</code> ✓
   <br><span class="i18n" data-en="Also: vLLM reports &lt;code&gt;kv cache memory in use = 11,328,937,984 bytes = 10.55 GiB&lt;/code&gt; — matches exactly." data-zh="此外：vLLM 報告 &lt;code&gt;kv cache memory in use = 11,328,937,984 bytes = 10.55 GiB&lt;/code&gt; — 完全吻合。">Also: vLLM reports <code>kv cache memory in use = 11,328,937,984 bytes = 10.55 GiB</code> — matches exactly.</span></div>
 
-  <h3><span class="i18n" data-en="7.4 What Is Activation Memory?" data-zh="7.4 什麼是 Activation Memory？">7.4 What Is Activation Memory?</span></h3>
+  <h3><span class="i18n" data-en="8.4 What Is Activation Memory?" data-zh="8.4 什麼是 Activation Memory？">8.4 What Is Activation Memory?</span></h3>
   <p><span class="i18n" data-en="Activations are the &lt;strong&gt;intermediate tensors&lt;/strong&gt; produced during a forward pass. Unlike model weights (permanent) and KV cache (persistent across steps), activations are &lt;strong&gt;transient&lt;/strong&gt; — created during computation and discarded immediately after." data-zh="Activation 是前向傳播中產生的&lt;strong&gt;中間 tensor&lt;/strong&gt;。不同於模型權重（永久）和 KV cache（跨 step 持久），activation 是&lt;strong&gt;暫態的&lt;/strong&gt; — 計算時產生，用完立即丟棄。">Activations are the <strong>intermediate tensors</strong> produced during a forward pass. Unlike model weights (permanent) and KV cache (persistent across steps), activations are <strong>transient</strong> — created during computation and discarded immediately after.</span></p>
 
   <p><span class="i18n" data-en="The two largest activations in each Transformer layer:" data-zh="每個 Transformer layer 中最大的兩個 activation：">The two largest activations in each Transformer layer:</span></p>
@@ -616,7 +718,7 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
     </div>
   </div>
 
-  <h3><span class="i18n" data-en="7.5 GPU Memory Map" data-zh="7.5 GPU 記憶體分佈圖">7.5 GPU Memory Map</span></h3>
+  <h3><span class="i18n" data-en="8.5 GPU Memory Map" data-zh="8.5 GPU 記憶體分佈圖">8.5 GPU Memory Map</span></h3>
   <table>
     <tr><th><span class="i18n" data-en="Region" data-zh="區域">Region</span></th><th><span class="i18n" data-en="Size" data-zh="大小">Size</span></th><th><span class="i18n" data-en="Lifetime" data-zh="生命週期">Lifetime</span></th><th><span class="i18n" data-en="Configurable?" data-zh="可設定？">Configurable?</span></th></tr>
     <tr><td><span class="i18n" data-en="Other processes (e.g. Desktop)" data-zh="其他進程（如桌面環境）">Other processes (e.g. Desktop)</span></td><td>2.68 GiB</td><td><span class="i18n" data-en="Permanent" data-zh="永久">Permanent</span></td><td><span class="i18n" data-en="Kill other GPU processes" data-zh="關閉其他 GPU 進程">Kill other GPU processes</span></td></tr>
@@ -628,7 +730,7 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
     <tr><td><strong>Total GPU</strong></td><td><strong>31.34 GiB</strong></td><td></td><td></td></tr>
   </table>
 
-  <h3><span class="i18n" data-en="7.6 Why This Matters for Continuum" data-zh="7.6 這對 Continuum 的意義">7.6 Why This Matters for Continuum</span></h3>
+  <h3><span class="i18n" data-en="8.6 Why This Matters for Continuum" data-zh="8.6 這對 Continuum 的意義">8.6 Why This Matters for Continuum</span></h3>
   <p><span class="i18n" data-en="Continuum pins blocks to keep them allocated. Every pinned block is one fewer block available for new requests. With 5,402 total blocks:" data-zh="Continuum pin 住 blocks 使其保持佔用。每一個 pinned block 都意味著少一個 block 可供新 request 使用。以 5,402 個 blocks 為例：">Continuum pins blocks to keep them allocated. Every pinned block is one fewer block available for new requests. With 5,402 total blocks:</span></p>
   <table>
     <tr><th><span class="i18n" data-en="Scenario" data-zh="情境">Scenario</span></th><th><span class="i18n" data-en="Tokens pinned" data-zh="被 pin 的 tokens">Tokens pinned</span></th><th><span class="i18n" data-en="Blocks pinned" data-zh="被 pin 的 blocks">Blocks pinned</span></th><th><span class="i18n" data-en="% capacity locked" data-zh="佔用容量 %">% capacity locked</span></th></tr>
@@ -641,7 +743,7 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
 
 <!-- ====== 8. OBSERVATIONS ====== -->
 <section id="observations">
-  <h2><span class="i18n" data-en="8. Observations &amp; Takeaways" data-zh="8. 觀察與總結">8. Observations & Takeaways</span></h2>
+  <h2><span class="i18n" data-en="9. Observations &amp; Takeaways" data-zh="9. 觀察與總結">9. Observations & Takeaways</span></h2>
 
   <div class="cards">
     <div class="card">
