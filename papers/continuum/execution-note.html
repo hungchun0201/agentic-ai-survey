@@ -99,6 +99,7 @@ footer a{color:#6ec6ff}
     <li><a href="#run">Execution</a></li>
     <li><a href="#pin-verify">Pin Verification</a></li>
     <li><a href="#bugs">Bugs Found</a></li>
+    <li><a href="#vllm-design">vLLM Design</a></li>
     <li><a href="#observations">Observations</a></li>
     <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
   </ul>
@@ -303,9 +304,112 @@ request.last_func_call = self.job_to_history[job_id][<span class="nu">-1</span>]
   </div>
 </section>
 
-<!-- ====== 6. OBSERVATIONS ====== -->
+<!-- ====== 6. vLLM BLOCK POOL DESIGN ====== -->
+<section id="vllm-design">
+  <h2><span class="i18n" data-en="6. vLLM Block Pool Design — Why Continuum's Pin Works" data-zh="6. vLLM Block Pool 設計 — 為何 Continuum 的 Pin 能運作">6. vLLM Block Pool Design — Why Continuum's Pin Works</span></h2>
+  <p><span class="i18n" data-en="Understanding Continuum's pin mechanism requires understanding vLLM v1's underlying KV cache architecture. Here we document the key design decisions and community discussions." data-zh="理解 Continuum 的 pin 機制需要先理解 vLLM v1 底層的 KV cache 架構。以下整理關鍵設計決策與社群討論。">Understanding Continuum's pin mechanism requires understanding vLLM v1's underlying KV cache architecture. Here we document the key design decisions and community discussions.</span></p>
+
+  <h3><span class="i18n" data-en="6.1 Append-Only Block Table" data-zh="6.1 Append-Only Block Table">6.1 Append-Only Block Table</span></h3>
+  <p><span class="i18n" data-en="vLLM v1's block table is &lt;strong&gt;append-only&lt;/strong&gt; — once a block ID is written, it cannot be modified. This is a deliberate departure from v0:" data-zh="vLLM v1 的 block table 是 &lt;strong&gt;append-only&lt;/strong&gt; — block ID 一旦寫入就不能修改。這是刻意與 v0 不同的設計：">vLLM v1's block table is <strong>append-only</strong> — once a block ID is written, it cannot be modified. This is a deliberate departure from v0:</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4>v0: <span class="i18n" data-en="Mutable block table" data-zh="可變 block table">Mutable block table</span></h4>
+      <p><span class="i18n" data-en="If block 3 is a duplicate of block 1, v0 frees block 3 and rewrites the block table from &lt;code&gt;[0, 3]&lt;/code&gt; → &lt;code&gt;[0, 1]&lt;/code&gt;. This requires synchronization with the GPU model runner." data-zh="如果 block 3 是 block 1 的副本，v0 會釋放 block 3 並將 block table 從 &lt;code&gt;[0, 3]&lt;/code&gt; 改寫為 &lt;code&gt;[0, 1]&lt;/code&gt;。這需要與 GPU model runner 同步。">If block 3 is a duplicate of block 1, v0 frees block 3 and rewrites the block table from <code>[0, 3]</code> → <code>[0, 1]</code>. This requires synchronization with the GPU model runner.</span></p>
+    </div>
+    <div class="card hl">
+      <h4>v1: Append-only</h4>
+      <p><span class="i18n" data-en="Changing &lt;code&gt;[0, 3]&lt;/code&gt; to &lt;code&gt;[0, 1]&lt;/code&gt; is &lt;strong&gt;not allowed&lt;/strong&gt;. Duplicate blocks are tolerated and only cleaned up when the request finishes. This means the GPU can safely read block tables without locks." data-zh="將 &lt;code&gt;[0, 3]&lt;/code&gt; 改為 &lt;code&gt;[0, 1]&lt;/code&gt; &lt;strong&gt;不被允許&lt;/strong&gt;。重複的 block 被容忍，只有在 request 結束時才清理。這表示 GPU 可以安全地讀取 block table 而不需要鎖。">Changing <code>[0, 3]</code> to <code>[0, 1]</code> is <strong>not allowed</strong>. Duplicate blocks are tolerated and only cleaned up when the request finishes. This means the GPU can safely read block tables without locks.</span></p>
+    </div>
+  </div>
+  <p><span class="i18n" data-en="Source: &lt;a href='https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md'&gt;vLLM v1 Prefix Caching Design Doc&lt;/a&gt;" data-zh="來源：&lt;a href='https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md'&gt;vLLM v1 Prefix Caching 設計文件&lt;/a&gt;">Source: <a href="https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md">vLLM v1 Prefix Caching Design Doc</a></span></p>
+
+  <h3><span class="i18n" data-en="6.2 Null Block (block_id=0)" data-zh="6.2 Null Block（block_id=0）">6.2 Null Block (block_id=0)</span></h3>
+  <p><span class="i18n" data-en="The &lt;code&gt;BlockPool&lt;/code&gt; reserves one block as a permanent placeholder:" data-zh="&lt;code&gt;BlockPool&lt;/code&gt; 保留一個 block 作為永久佔位符：">The <code>BlockPool</code> reserves one block as a permanent placeholder:</span></p>
+  <pre><code><span class="cm"># block_pool.py:66-70</span>
+<span class="cm"># To represent a placeholder block with block_id=0.</span>
+<span class="cm"># The ref_cnt of null_block is not maintained, needs special care to</span>
+<span class="cm"># avoid freeing it.</span>
+self.null_block = self.free_block_queue.popleft()
+self.null_block.is_null = <span class="kw">True</span></code></pre>
+  <p><span class="i18n" data-en="Because block tables are append-only and fixed-length, positions that have no real KV data (e.g., prefix cache miss, or tokens outside the sliding window) must be filled with a placeholder rather than left empty:" data-zh="因為 block table 是 append-only 且固定長度，沒有真實 KV 資料的位置（如 prefix cache miss、或 sliding window 外的 token）必須用佔位符填充，不能留空：">Because block tables are append-only and fixed-length, positions that have no real KV data (e.g., prefix cache miss, or tokens outside the sliding window) must be filled with a placeholder rather than left empty:</span></p>
+  <pre><code><span class="cm"># Example: sliding window attention, only last 3 blocks active</span>
+block_table = [<span class="cm">null</span>, <span class="cm">null</span>, block_8, block_3, block_12]
+               <span class="cm">↑ outside window, filled with null_block</span></code></pre>
+  <p><span class="i18n" data-en="The null block is marked &lt;code&gt;is_null=True&lt;/code&gt; so it is &lt;strong&gt;never returned to the free queue&lt;/strong&gt; and never allocated to any request. This is also why &lt;code&gt;get_usage()&lt;/code&gt; subtracts 1 from total blocks:" data-zh="Null block 被標記為 &lt;code&gt;is_null=True&lt;/code&gt;，因此&lt;strong&gt;永遠不會被歸還到 free queue&lt;/strong&gt;，也不會被分配給任何 request。這也是為什麼 &lt;code&gt;get_usage()&lt;/code&gt; 會從 total blocks 減 1：">The null block is marked <code>is_null=True</code> so it is <strong>never returned to the free queue</strong> and never allocated to any request. This is also why <code>get_usage()</code> subtracts 1 from total blocks:</span></p>
+  <pre><code><span class="cm"># block_pool.py:314</span>
+total_gpu_blocks = self.num_gpu_blocks - <span class="nu">1</span>  <span class="cm"># Subtract 1 to account for null block</span></code></pre>
+
+  <h3><span class="i18n" data-en="6.3 Reference Counting &amp; Free Queue" data-zh="6.3 引用計數與 Free Queue">6.3 Reference Counting & Free Queue</span></h3>
+  <p><span class="i18n" data-en="Each &lt;code&gt;KVCacheBlock&lt;/code&gt; has a &lt;code&gt;ref_cnt&lt;/code&gt;. This is the mechanism Continuum exploits for pinning:" data-zh="每個 &lt;code&gt;KVCacheBlock&lt;/code&gt; 都有 &lt;code&gt;ref_cnt&lt;/code&gt;。這就是 Continuum 利用的 pin 機制：">Each <code>KVCacheBlock</code> has a <code>ref_cnt</code>. This is the mechanism Continuum exploits for pinning:</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Event" data-zh="事件">Event</span></th><th>ref_cnt</th><th><span class="i18n" data-en="In free queue?" data-zh="在 free queue 中？">In free queue?</span></th><th><span class="i18n" data-en="Allocatable?" data-zh="可分配？">Allocatable?</span></th></tr>
+    <tr><td><span class="i18n" data-en="Allocated to request" data-zh="分配給 request">Allocated to request</span></td><td><code>+1</code> → 1</td><td>No</td><td>No</td></tr>
+    <tr><td><span class="i18n" data-en="Normal free (no pin)" data-zh="正常釋放（無 pin）">Normal free (no pin)</span></td><td><code>-1</code> → 0</td><td><span class="ok">Yes</span></td><td><span class="ok">Yes</span></td></tr>
+    <tr><td><span class="i18n" data-en="Continuum pin (skip free)" data-zh="Continuum pin（跳過 free）">Continuum pin (skip free)</span></td><td><span class="err">stays 1</span></td><td><span class="err">No</span></td><td><span class="err">No</span></td></tr>
+    <tr><td><span class="i18n" data-en="Unpin (TTL expires)" data-zh="Unpin（TTL 到期）">Unpin (TTL expires)</span></td><td><code>-1</code> → 0</td><td><span class="ok">Yes</span></td><td><span class="ok">Yes</span></td></tr>
+  </table>
+  <p><span class="i18n" data-en="Freed blocks are added to the &lt;strong&gt;tail&lt;/strong&gt; of the free queue in &lt;strong&gt;reverse order&lt;/strong&gt; — the last block of a request hashes the most tokens and is least likely to be reused, so it should be evicted first." data-zh="釋放的 blocks 以&lt;strong&gt;反向順序&lt;/strong&gt;加入 free queue 的&lt;strong&gt;尾部&lt;/strong&gt; — request 的最後一個 block hash 了最多 token，最不可能被其他 request 重用，因此應該最先被淘汰。">Freed blocks are added to the <strong>tail</strong> of the free queue in <strong>reverse order</strong> — the last block of a request hashes the most tokens and is least likely to be reused, so it should be evicted first.</span></p>
+
+  <h3><span class="i18n" data-en="6.4 How Continuum Exploits This Design" data-zh="6.4 Continuum 如何利用這個設計">6.4 How Continuum Exploits This Design</span></h3>
+  <p><span class="i18n" data-en="Continuum's pin is remarkably simple — it doesn't add any new locking or memory management. It just &lt;strong&gt;skips calling &lt;code&gt;kv_cache_manager.free()&lt;/code&gt;&lt;/strong&gt; when a request finishes:" data-zh="Continuum 的 pin 非常簡單 — 它沒有增加任何新的鎖或記憶體管理。它只是在 request 完成時&lt;strong&gt;跳過呼叫 &lt;code&gt;kv_cache_manager.free()&lt;/code&gt;&lt;/strong&gt;：">Continuum's pin is remarkably simple — it doesn't add any new locking or memory management. It just <strong>skips calling <code>kv_cache_manager.free()</code></strong> when a request finishes:</span></p>
+  <pre><code><span class="cm"># scheduler.py — _free_blocks()</span>
+<span class="kw">if</span> policy == CONTINUUM <span class="kw">and not</span> request.is_last_step:
+    length_of_pin = tool_call_estimator.set_up_pin(request)
+    <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:
+        self.pin_request(request, length_of_pin)
+        <span class="kw">return</span>   <span class="cm"># ← kv_cache_manager.free() is SKIPPED</span>
+                 <span class="cm"># ← ref_cnt stays > 0</span>
+                 <span class="cm"># ← blocks stay out of free queue</span>
+                 <span class="cm"># ← GPU memory remains occupied</span>
+
+<span class="cm"># Normal path (not pinned):</span>
+self.kv_cache_manager.free(request)  <span class="cm"># ← ref_cnt decremented → blocks return to free queue</span></code></pre>
+  <p><span class="i18n" data-en="When the same job's next turn arrives, &lt;code&gt;get_computed_blocks()&lt;/code&gt; finds the still-allocated blocks via prefix cache hash lookup → &lt;code&gt;hit_length &gt; 0&lt;/code&gt; → skip re-prefill." data-zh="當同一個 job 的下一輪到來時，&lt;code&gt;get_computed_blocks()&lt;/code&gt; 透過 prefix cache hash 查找找到仍在分配中的 blocks → &lt;code&gt;hit_length &gt; 0&lt;/code&gt; → 跳過 re-prefill。">When the same job's next turn arrives, <code>get_computed_blocks()</code> finds the still-allocated blocks via prefix cache hash lookup → <code>hit_length > 0</code> → skip re-prefill.</span></p>
+
+  <h3><span class="i18n" data-en="6.5 Community Discussions &amp; References" data-zh="6.5 社群討論與參考資料">6.5 Community Discussions & References</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Topic" data-zh="主題">Topic</span></th><th><span class="i18n" data-en="Link" data-zh="連結">Link</span></th><th><span class="i18n" data-en="Key Insight" data-zh="關鍵內容">Key Insight</span></th></tr>
+    <tr>
+      <td><span class="i18n" data-en="Prefix Caching Design (v1)" data-zh="Prefix Caching 設計（v1）">Prefix Caching Design (v1)</span></td>
+      <td><a href="https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md">design/v1/prefix_caching.md</a></td>
+      <td><span class="i18n" data-en="Official doc explaining append-only constraint, dedup deferral, and reverse-order eviction" data-zh="官方文件，解釋 append-only 約束、延遲去重、反向淘汰">Official doc explaining append-only constraint, dedup deferral, and reverse-order eviction</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="RFC: Automatic Prefix Caching" data-zh="RFC: 自動 Prefix Caching">RFC: Automatic Prefix Caching</span></td>
+      <td><a href="https://github.com/vllm-project/vllm/issues/2614">#2614</a></td>
+      <td><span class="i18n" data-en="Original proposal for prefix-aware block management, discusses eviction policy and hash-based lookup" data-zh="Prefix-aware block 管理的原始提案，討論淘汰策略和 hash-based 查找">Original proposal for prefix-aware block management, discusses eviction policy and hash-based lookup</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Understanding vLLM KV Cache" data-zh="理解 vLLM KV Cache">Understanding vLLM KV Cache</span></td>
+      <td><a href="https://discuss.vllm.ai/t/understanding-vllm-kv-cache/2061">vLLM Forums</a></td>
+      <td><span class="i18n" data-en="Community Q&amp;A on block pool internals, ref counting, and allocation" data-zh="社群問答，涵蓋 block pool 內部機制、引用計數和分配">Community Q&A on block pool internals, ref counting, and allocation</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Hybrid KV Cache Manager" data-zh="混合 KV Cache Manager">Hybrid KV Cache Manager</span></td>
+      <td><a href="https://github.com/vllm-project/vllm/pull/22688">#22688</a></td>
+      <td><span class="i18n" data-en="Design doc for GPU↔CPU tiered block pool with async transfer — relevant to Continuum's offload scenario" data-zh="GPU↔CPU 分層 block pool 設計文件，含非同步傳輸 — 與 Continuum 的 offload 場景相關">Design doc for GPU↔CPU tiered block pool with async transfer — relevant to Continuum's offload scenario</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="RFC: CPU Offload in V1" data-zh="RFC: V1 CPU Offload">RFC: CPU Offload in V1</span></td>
+      <td><a href="https://github.com/vllm-project/vllm/issues/16144">#16144</a></td>
+      <td><span class="i18n" data-en="Discusses hiding transfer latency with pinned memory and MemcpyAsync, round-robin → LRU eviction" data-zh="討論用 pinned memory 和 MemcpyAsync 隱藏傳輸延遲，round-robin → LRU 淘汰策略">Discusses hiding transfer latency with pinned memory and MemcpyAsync, round-robin → LRU eviction</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Prefix-Caching Aware Scheduling" data-zh="Prefix-Caching 感知排程">Prefix-Caching Aware Scheduling</span></td>
+      <td><a href="https://github.com/vllm-project/vllm/issues/7883">#7883</a></td>
+      <td><span class="i18n" data-en="Discussion on scheduling that considers cache hit rate — directly related to Continuum's job-level FCFS priority" data-zh="討論考慮 cache hit rate 的排程策略 — 與 Continuum 的 job-level FCFS 優先排程直接相關">Discussion on scheduling that considers cache hit rate — directly related to Continuum's job-level FCFS priority</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="KV Cache Management (DeepWiki)" data-zh="KV Cache 管理（DeepWiki）">KV Cache Management (DeepWiki)</span></td>
+      <td><a href="https://deepwiki.com/vllm-project/vllm/3.4-kv-cache-management-and-prefix-caching">DeepWiki</a></td>
+      <td><span class="i18n" data-en="Third-party deep dive into block pool, free queue, and hash-based caching architecture" data-zh="第三方深度剖析 block pool、free queue 和 hash-based caching 架構">Third-party deep dive into block pool, free queue, and hash-based caching architecture</span></td>
+    </tr>
+  </table>
+</section>
+
+<!-- ====== 7. OBSERVATIONS ====== -->
 <section id="observations">
-  <h2><span class="i18n" data-en="6. Observations &amp; Takeaways" data-zh="6. 觀察與總結">6. Observations & Takeaways</span></h2>
+  <h2><span class="i18n" data-en="7. Observations &amp; Takeaways" data-zh="7. 觀察與總結">7. Observations & Takeaways</span></h2>
 
   <div class="cards">
     <div class="card">
