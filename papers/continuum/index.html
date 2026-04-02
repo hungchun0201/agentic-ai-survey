@@ -97,7 +97,7 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
 
 <div class="hero">
   <h1>vLLM-Continuum</h1>
-  <p class="sub"><span class="i18n" data-en="KV Cache Scheduling Strategy Implementation for Agentic LLM Workloads&lt;br&gt;&lt;strong&gt;— Complete Continuum Implementation Logic Analysis —&lt;/strong&gt;" data-zh="針對 Agentic LLM 工作負載的 KV Cache 排程策略實作— 完整 Continuum 實作邏輯分析 —">KV Cache Scheduling Strategy Implementation for Agentic LLM Workloads<br><strong>— Complete Continuum Implementation Logic Analysis —</strong></span></p>
+  <p class="sub"><span class="i18n" data-en="KV Cache Scheduling Strategy Implementation for Agentic LLM Workloads— Complete Continuum Implementation Logic Analysis —" data-zh="針對 Agentic LLM 工作負載的 KV Cache 排程策略實作— 完整 Continuum 實作邏輯分析 —">KV Cache Scheduling Strategy Implementation for Agentic LLM Workloads<br><strong>— Complete Continuum Implementation Logic Analysis —</strong></span></p>
   <div class="badges">
     <span class="badge">arXiv:2511.02230</span>
     <span class="badge">vLLM v1 Scheduler</span>
@@ -131,8 +131,6 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
 <a onclick="setLang('zh')" id="lang-zh">ZH</a>
 </div>
 </div>
-
-
 </div>
 </nav>
 
@@ -141,35 +139,32 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
 <!-- ====== 1. PROBLEM ====== -->
 <section id="problem">
   <h2><span class="i18n" data-en="1. Problem Background" data-zh="1. 問題背景">1. Problem Background</span></h2>
-  <p><span class="i18n" data-en="Traditional LLM serving (e.g., chatbot) follows a single request-response pattern: request arrives → generate tokens → finish → free KV cache.
-    However, &lt;strong&gt;Agentic workloads&lt;/strong&gt; (e.g., SWE-bench coding agent) are multi-turn:" data-zh="傳統 LLM 服務（如聊天機器人）遵循單次請求-回應模式：請求到達 → 生成 token → 完成 → 釋放 KV cache。然而，Agentic 工作負載（如 SWE-bench 程式編寫 agent）是多輪對話式的：">Traditional LLM serving (e.g., chatbot) follows a single request-response pattern: request arrives → generate tokens → finish → free KV cache.
+  <p><span class="i18n" data-en="Traditional LLM serving (e.g., chatbot) follows a single request-response pattern: request arrives → generate tokens → finish → free KV cache. However, Agentic workloads (e.g., SWE-bench coding agent) are multi-turn:" data-zh="傳統 LLM 服務（如聊天機器人）遵循單次請求-回應模式：請求到達 → 生成 token → 完成 → 釋放 KV cache。然而，Agentic 工作負載（如 SWE-bench 程式編寫 agent）是多輪對話式的：">Traditional LLM serving (e.g., chatbot) follows a single request-response pattern: request arrives → generate tokens → finish → free KV cache.
     However, <strong>Agentic workloads</strong> (e.g., SWE-bench coding agent) are multi-turn:</span></p>
   <pre><code><span class="cm">// Lifecycle of an Agent job</span>
 [LLM inference] → output bash command → [<span class="st">Agent executes tool call</span>] → result returned → [LLM inference] → ... (repeat N turns)</code></pre>
-  <p><span class="i18n" data-en="During the period when the Agent is executing a tool call (which may take milliseconds to tens of seconds), the LLM is not using this job's KV cache,
-    but if it is freed, the next turn requires re-prefilling (wasting GPU time). If it is not freed, it occupies precious VRAM." data-zh="在 Agent 執行 tool call 的期間（可能耗時毫秒到數十秒），LLM 並未使用該任務的 KV cache，但若將其釋放，下一輪就需要重新 prefill（浪費 GPU 時間）。若不釋放，則佔用寶貴的 VRAM。">During the period when the Agent is executing a tool call (which may take milliseconds to tens of seconds), the LLM is not using this job's KV cache,
+  <p><span class="i18n" data-en="During the period when the Agent is executing a tool call (which may take milliseconds to tens of seconds), the LLM is not using this job's KV cache, but if it is freed, the next turn requires re-prefilling (wasting GPU time). If it is not freed, it occupies precious VRAM." data-zh="在 Agent 執行 tool call 的期間（可能耗時毫秒到數十秒），LLM 並未使用該任務的 KV cache，但若將其釋放，下一輪就需要重新 prefill（浪費 GPU 時間）。若不釋放，則佔用寶貴的 VRAM。">During the period when the Agent is executing a tool call (which may take milliseconds to tens of seconds), the LLM is not using this job's KV cache,
     but if it is freed, the next turn requires re-prefilling (wasting GPU time). If it is not freed, it occupies precious VRAM.</span></p>
 
   <h3><span class="i18n" data-en="Core Problem" data-zh="核心問題">Core Problem</span></h3>
-  <p><span class="i18n" data-en="&lt;strong&gt;During tool call execution, should the KV cache be retained? For how long?&lt;/strong&gt;" data-zh="在 tool call 執行期間，KV cache 應該保留嗎？保留多久？"><strong>During tool call execution, should the KV cache be retained? For how long?</strong></span></p>
+  <p><span class="i18n" data-en="During tool call execution, should the KV cache be retained? For how long?" data-zh="在 tool call 執行期間，KV cache 應該保留嗎？保留多久？"><strong>During tool call execution, should the KV cache be retained? For how long?</strong></span></p>
   <ul>
     <li><span class="i18n" data-en="Retain (pin): zero prefill when re-entering next turn, but occupies VRAM" data-zh="保留（pin）：下一輪重新進入時零 prefill，但佔用 VRAM">Retain (pin): zero prefill when re-entering next turn, but occupies VRAM</span></li>
     <li><span class="i18n" data-en="Free: VRAM is available for other requests, but the next turn requires re-prefilling (expensive)" data-zh="釋放：VRAM 可供其他請求使用，但下一輪需要重新 prefill（代價高昂）">Free: VRAM is available for other requests, but the next turn requires re-prefilling (expensive)</span></li>
   </ul>
-  <p><span class="i18n" data-en="Continuum's approach: &lt;strong&gt;Dynamically determine the pin duration (TTL) based on historical tool call execution times.&lt;/strong&gt;" data-zh="Continuum 的做法：根據歷史 tool call 執行時間，動態決定 pin 的持續時間（TTL）。">Continuum's approach: <strong>Dynamically determine the pin duration (TTL) based on historical tool call execution times.</strong></span></p>
+  <p><span class="i18n" data-en="Continuum's approach: Dynamically determine the pin duration (TTL) based on historical tool call execution times." data-zh="Continuum 的做法：根據歷史 tool call 執行時間，動態決定 pin 的持續時間（TTL）。">Continuum's approach: <strong>Dynamically determine the pin duration (TTL) based on historical tool call execution times.</strong></span></p>
 </section>
 
 <!-- ====== 2. OVERVIEW ====== -->
 <section id="overview">
   <h2><span class="i18n" data-en="2. Continuum Strategy Overview" data-zh="2. Continuum 策略概覽">2. Continuum Strategy Overview</span></h2>
-  <p><span class="i18n" data-en="Continuum adds &lt;code&gt;SchedulingPolicy.CONTINUUM&lt;/code&gt; to vLLM's v1 scheduler.
-    The core logic is divided into three parts:" data-zh="Continuum 在 vLLM 的 v1 scheduler 中新增了 SchedulingPolicy.CONTINUUM。核心邏輯分為三個部分：">Continuum adds <code>SchedulingPolicy.CONTINUUM</code> to vLLM's v1 scheduler.
+  <p><span class="i18n" data-en="Continuum adds SchedulingPolicy.CONTINUUM to vLLM's v1 scheduler. The core logic is divided into three parts:" data-zh="Continuum 在 vLLM 的 v1 scheduler 中新增了 SchedulingPolicy.CONTINUUM。核心邏輯分為三個部分：">Continuum adds <code>SchedulingPolicy.CONTINUUM</code> to vLLM's v1 scheduler.
     The core logic is divided into three parts:</span></p>
 
   <div class="cards">
     <div class="card hl">
       <h4><span class="i18n" data-en="A. Tool Call Detection" data-zh="A. Tool Call 偵測">A. Tool Call Detection</span></h4>
-      <p><span class="i18n" data-en="After the LLM finishes generating tokens, parse the output for bash code blocks and extract the tool name (e.g., &lt;code&gt;ls&lt;/code&gt;, &lt;code&gt;git&lt;/code&gt;, &lt;code&gt;pytest&lt;/code&gt;)." data-zh="LLM 生成 token 完畢後，解析輸出中的 bash 程式碼區塊，並提取工具名稱（例如 ls、git、pytest）。">After the LLM finishes generating tokens, parse the output for bash code blocks and extract the tool name (e.g., <code>ls</code>, <code>git</code>, <code>pytest</code>).</span></p>
+      <p><span class="i18n" data-en="After the LLM finishes generating tokens, parse the output for bash code blocks and extract the tool name (e.g., ls, git, pytest)." data-zh="LLM 生成 token 完畢後，解析輸出中的 bash 程式碼區塊，並提取工具名稱（例如 ls、git、pytest）。">After the LLM finishes generating tokens, parse the output for bash code blocks and extract the tool name (e.g., <code>ls</code>, <code>git</code>, <code>pytest</code>).</span></p>
       <p><code>ToolCallParser.parse()</code></p>
     </div>
     <div class="card hl">
@@ -185,12 +180,12 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
   </div>
 
   <h3><span class="i18n" data-en="Policy Definition" data-zh="策略定義">Policy Definition</span></h3>
-  <p><span class="i18n" data-en="File: &lt;code&gt;vllm/v1/core/sched/request_queue.py:18-22&lt;/code&gt;" data-zh="檔案：vllm/v1/core/sched/request_queue.py:18-22">File: <code>vllm/v1/core/sched/request_queue.py:18-22</code></span></p>
+  <p><span class="i18n" data-en="File: vllm/v1/core/sched/request_queue.py:18-22" data-zh="檔案：vllm/v1/core/sched/request_queue.py:18-22">File: <code>vllm/v1/core/sched/request_queue.py:18-22</code></span></p>
   <pre><code><span class="kw">class</span> <span class="fn">SchedulingPolicy</span>(Enum):
     FCFS = <span class="st">"fcfs"</span>         <span class="cm"># Standard first-come-first-served (baseline)</span>
     PRIORITY = <span class="st">"priority"</span>  <span class="cm"># Priority scheduling</span>
     CONTINUUM = <span class="st">"continuum"</span> <span class="cm"># Continuum: tool-aware KV cache pin</span></code></pre>
-  <p><span class="i18n" data-en="Launch command: &lt;code&gt;vllm serve MODEL --scheduling-policy continuum&lt;/code&gt;" data-zh="啟動指令：vllm serve MODEL --scheduling-policy continuum">Launch command: <code>vllm serve MODEL --scheduling-policy continuum</code></span></p>
+  <p><span class="i18n" data-en="Launch command: vllm serve MODEL --scheduling-policy continuum" data-zh="啟動指令：vllm serve MODEL --scheduling-policy continuum">Launch command: <code>vllm serve MODEL --scheduling-policy continuum</code></span></p>
   <div class="note">
     <strong>Prerequisite:</strong> If you are not familiar with vLLM's inference flow and KV Cache management mechanism,
     it is recommended to first read <a href="vllm-inference-and-kvcache.html">vLLM v1 Inference &amp; KV Cache Management</a>.
@@ -207,7 +202,7 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
     <tr>
       <td><code>Continuum_Recorder</code></td>
       <td><code>estimate_with_func.py:12-62</code></td>
-      <td><span class="i18n" data-en="Record scheduling event timestamps, export &lt;code&gt;scheduler_timestamps&lt;/code&gt;" data-zh="記錄排程事件時間戳，匯出 scheduler_timestamps">Record scheduling event timestamps, export <code>scheduler_timestamps</code></span></td>
+      <td><span class="i18n" data-en="Record scheduling event timestamps, export scheduler_timestamps" data-zh="記錄排程事件時間戳，匯出 scheduler_timestamps">Record scheduling event timestamps, export <code>scheduler_timestamps</code></span></td>
     </tr>
     <tr>
       <td><code>ToolCallParser</code></td>
@@ -225,13 +220,13 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
       <td><span class="i18n" data-en="Continuum-specific scheduling queue: pinned priority + job-level FCFS" data-zh="Continuum 專用排程佇列：固定優先順序 + 任務層級 FCFS">Continuum-specific scheduling queue: pinned priority + job-level FCFS</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;code&gt;Scheduler&lt;/code&gt; (modified)" data-zh="Scheduler（已修改）"><code>Scheduler</code> (modified)</span></td>
+      <td><span class="i18n" data-en="Scheduler (modified)" data-zh="Scheduler（已修改）"><code>Scheduler</code> (modified)</span></td>
       <td><code>scheduler.py</code></td>
-      <td><span class="i18n" data-en="Added Continuum branches in &lt;code&gt;_free_blocks()&lt;/code&gt;, &lt;code&gt;schedule()&lt;/code&gt;, and other methods" data-zh="在 _free_blocks()、schedule() 及其他方法中新增了 Continuum 分支">Added Continuum branches in <code>_free_blocks()</code>, <code>schedule()</code>, and other methods</span></td>
+      <td><span class="i18n" data-en="Added Continuum branches in _free_blocks(), schedule(), and other methods" data-zh="在 _free_blocks()、schedule() 及其他方法中新增了 Continuum 分支">Added Continuum branches in <code>_free_blocks()</code>, <code>schedule()</code>, and other methods</span></td>
     </tr>
   </table>
 
-  <p><span class="i18n" data-en="The following four paths are all under &lt;code&gt;vllm/v1/core/&lt;/code&gt;:" data-zh="以下四個路徑皆位於 vllm/v1/core/ 之下：">The following four paths are all under <code>vllm/v1/core/</code>:</span></p>
+  <p><span class="i18n" data-en="The following four paths are all under vllm/v1/core/:" data-zh="以下四個路徑皆位於 vllm/v1/core/ 之下：">The following four paths are all under <code>vllm/v1/core/</code>:</span></p>
   <pre><code>vllm/v1/core/
 ├── estimate_with_func.py   <span class="cm"># Continuum_Recorder + ToolCallParser + ToolCallEstimator</span>
 ├── sched/
@@ -242,16 +237,15 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
 <!-- ====== 4. TOOL CALL PARSE ====== -->
 <section id="toolcall-parse">
   <h2><span class="i18n" data-en="4. Tool Call Parsing" data-zh="4. Tool Call 解析">4. Tool Call Parsing</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;estimate_with_func.py:64-92&lt;/code&gt;" data-zh="檔案：estimate_with_func.py:64-92">File: <code>estimate_with_func.py:64-92</code></span></p>
+  <p><span class="i18n" data-en="File: estimate_with_func.py:64-92" data-zh="檔案：estimate_with_func.py:64-92">File: <code>estimate_with_func.py:64-92</code></span></p>
 
   <h3><span class="i18n" data-en="4.1 Parsing Flow" data-zh="4.1 解析流程">4.1 Parsing Flow</span></h3>
-  <p><span class="i18n" data-en="After the LLM finishes outputting tokens, &lt;code&gt;ToolCallEstimator.request_finished()&lt;/code&gt; is called.
-    It does three things:" data-zh="當 LLM 完成 token 輸出後，會呼叫 ToolCallEstimator.request_finished()。它執行三件事：">After the LLM finishes outputting tokens, <code>ToolCallEstimator.request_finished()</code> is called.
+  <p><span class="i18n" data-en="After the LLM finishes outputting tokens, ToolCallEstimator.request_finished() is called. It does three things:" data-zh="當 LLM 完成 token 輸出後，會呼叫 ToolCallEstimator.request_finished()。它執行三件事：">After the LLM finishes outputting tokens, <code>ToolCallEstimator.request_finished()</code> is called.
     It does three things:</span></p>
   <ol>
-    <li><span class="i18n" data-en="&lt;strong&gt;Detokenize&lt;/strong&gt;: &lt;code&gt;tokenizer.decode(request.output_token_ids)&lt;/code&gt; → plain text" data-zh="Detokenize：tokenizer.decode(request.output_token_ids) → 純文字"><strong>Detokenize</strong>: <code>tokenizer.decode(request.output_token_ids)</code> → plain text</span></li>
-    <li><span class="i18n" data-en="&lt;strong&gt;Parse&lt;/strong&gt;: &lt;code&gt;ToolCallParser.parse(output_text)&lt;/code&gt; → extract tool name using regex" data-zh="Parse：ToolCallParser.parse(output_text) → 使用 regex 擷取工具名稱"><strong>Parse</strong>: <code>ToolCallParser.parse(output_text)</code> → extract tool name using regex</span></li>
-    <li><span class="i18n" data-en="&lt;strong&gt;Record&lt;/strong&gt;: store in &lt;code&gt;job_to_history[job_id]&lt;/code&gt;" data-zh="Record：儲存至 job_to_history[job_id]"><strong>Record</strong>: store in <code>job_to_history[job_id]</code></span></li>
+    <li><span class="i18n" data-en="Detokenize: tokenizer.decode(request.output_token_ids) → plain text" data-zh="Detokenize：tokenizer.decode(request.output_token_ids) → 純文字"><strong>Detokenize</strong>: <code>tokenizer.decode(request.output_token_ids)</code> → plain text</span></li>
+    <li><span class="i18n" data-en="Parse: ToolCallParser.parse(output_text) → extract tool name using regex" data-zh="Parse：ToolCallParser.parse(output_text) → 使用 regex 擷取工具名稱"><strong>Parse</strong>: <code>ToolCallParser.parse(output_text)</code> → extract tool name using regex</span></li>
+    <li><span class="i18n" data-en="Record: store in job_to_history[job_id]" data-zh="Record：儲存至 job_to_history[job_id]"><strong>Record</strong>: store in <code>job_to_history[job_id]</code></span></li>
   </ol>
 
   <h3><span class="i18n" data-en="4.2 ToolCallParser Implementation" data-zh="4.2 ToolCallParser 實作">4.2 ToolCallParser Implementation</span></h3>
@@ -271,20 +265,20 @@ footer { text-align:center; padding:36px 20px; color:#888; font-size:.83rem; }
   <h4><span class="i18n" data-en="Examples" data-zh="範例">Examples</span></h4>
   <table>
     <tr><th><span class="i18n" data-en="LLM Output" data-zh="LLM 輸出">LLM Output</span></th><th><span class="i18n" data-en="Parse Result" data-zh="解析結果">Parse Result</span></th></tr>
-    <tr><td><span class="i18n" data-en="&lt;code&gt;```bash\ngit status\n```&lt;/code&gt;" data-zh="```bash
+    <tr><td><span class="i18n" data-en="```bash\ngit status\n```" data-zh="```bash
 git status
-```"><code>```bash\ngit status\n```</code></span></td><td><span class="i18n" data-en="&lt;code&gt;&quot;git&quot;&lt;/code&gt;" data-zh="git"><code>"git"</code></span></td></tr>
-    <tr><td><span class="i18n" data-en="&lt;code&gt;```bash\nfind . -name &quot;*.py&quot; | head -20\n```&lt;/code&gt;" data-zh="```bash
+```"><code>```bash\ngit status\n```</code></span></td><td><span class="i18n" data-en="&quot;git&quot;" data-zh="git"><code>"git"</code></span></td></tr>
+    <tr><td><span class="i18n" data-en="```bash\nfind . -name &quot;*.py&quot; | head -20\n```" data-zh="```bash
 find . -name &quot;*.py&quot; | head -20
 ```
 
-找出當前目錄下所有副檔名為 `.py` 的檔案，並顯示前 20 筆結果。"><code>```bash\nfind . -name "*.py" | head -20\n```</code></span></td><td><span class="i18n" data-en="&lt;code&gt;&quot;find&quot;&lt;/code&gt;" data-zh="尋找"><code>"find"</code></span></td></tr>
-    <tr><td><span class="i18n" data-en="&lt;code&gt;```bash\npytest tests/ -x -v\n```&lt;/code&gt;" data-zh="```bash
+找出當前目錄下所有副檔名為 `.py` 的檔案，並顯示前 20 筆結果。"><code>```bash\nfind . -name "*.py" | head -20\n```</code></span></td><td><span class="i18n" data-en="&quot;find&quot;" data-zh="尋找"><code>"find"</code></span></td></tr>
+    <tr><td><span class="i18n" data-en="```bash\npytest tests/ -x -v\n```" data-zh="```bash
 pytest tests/ -x -v
 ```
 
-執行測試套件，使用 `-x` 在第一個失敗時停止，`-v` 顯示詳細輸出。"><code>```bash\npytest tests/ -x -v\n```</code></span></td><td><span class="i18n" data-en="&lt;code&gt;&quot;pytest&quot;&lt;/code&gt;" data-zh="pytest"><code>"pytest"</code></span></td></tr>
-    <tr><td><span class="i18n" data-en="(no bash block)" data-zh="I need to know what text you'd like me to translate. Could you provide the content?">(no bash block)</span></td><td><span class="i18n" data-en="&lt;code&gt;None&lt;/code&gt;" data-zh="無。"><code>None</code></span></td></tr>
+執行測試套件，使用 `-x` 在第一個失敗時停止，`-v` 顯示詳細輸出。"><code>```bash\npytest tests/ -x -v\n```</code></span></td><td><span class="i18n" data-en="&quot;pytest&quot;" data-zh="pytest"><code>"pytest"</code></span></td></tr>
+    <tr><td><span class="i18n" data-en="(no bash block)" data-zh="I need to know what text you'd like me to translate. Could you provide the content?">(no bash block)</span></td><td><span class="i18n" data-en="None" data-zh="無。"><code>None</code></span></td></tr>
   </table>
 
   <div class="note">
@@ -317,7 +311,7 @@ pytest tests/ -x -v
 <!-- ====== 5. CDF ====== -->
 <section id="cdf">
   <h2><span class="i18n" data-en="5. CDF Time Estimation" data-zh="5. CDF 時間估算">5. CDF Time Estimation</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;estimate_with_func.py:94-159&lt;/code&gt;" data-zh="I cannot find a file named `estimate_with_func.py` in this project. Could you provide the full path to the file?">File: <code>estimate_with_func.py:94-159</code></span></p>
+  <p><span class="i18n" data-en="File: estimate_with_func.py:94-159" data-zh="I cannot find a file named `estimate_with_func.py` in this project. Could you provide the full path to the file?">File: <code>estimate_with_func.py:94-159</code></span></p>
 
   <h3><span class="i18n" data-en="5.1 Data Structures" data-zh="5.1 資料結構（Data Structures）">5.1 Data Structures</span></h3>
   <pre><code><span class="kw">class</span> <span class="fn">ToolCallEstimator</span>:
@@ -364,7 +358,7 @@ pytest tests/ -x -v
   </div>
 
   <h3><span class="i18n" data-en="5.3 Pin Decision" data-zh="5.3 釘選決策">5.3 Pin Decision</span></h3>
-  <p><span class="i18n" data-en="Fixed threshold: &lt;code&gt;FIXED_THRESHOLD_CONTINUUM = 2.0&lt;/code&gt; seconds" data-zh="固定閾值：FIXED_THRESHOLD_CONTINUUM = 2.0 秒">Fixed threshold: <code>FIXED_THRESHOLD_CONTINUUM = 2.0</code> seconds</span></p>
+  <p><span class="i18n" data-en="Fixed threshold: FIXED_THRESHOLD_CONTINUUM = 2.0 seconds" data-zh="固定閾值：FIXED_THRESHOLD_CONTINUUM = 2.0 秒">Fixed threshold: <code>FIXED_THRESHOLD_CONTINUUM = 2.0</code> seconds</span></p>
   <pre><code><span class="cm"># estimate_with_func.py:150-159</span>
 <span class="kw">def</span> <span class="fn">set_up_pin</span>(self, request: Request) -> float:
     <span class="kw">if</span> request.this_func_call <span class="kw">is</span> None:
@@ -381,24 +375,24 @@ pytest tests/ -x -v
   <table>
     <tr><th><span class="i18n" data-en="Condition" data-zh="條件">Condition</span></th><th><span class="i18n" data-en="Return Value" data-zh="回傳值">Return Value</span></th><th><span class="i18n" data-en="Effect" data-zh="效果">Effect</span></th></tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;code&gt;this_func_call is None&lt;/code&gt;" data-zh="this_func_call 為 None"><code>this_func_call is None</code></span></td>
+      <td><span class="i18n" data-en="this_func_call is None" data-zh="this_func_call 為 None"><code>this_func_call is None</code></span></td>
       <td><code>0</code></td>
       <td><span class="i18n" data-en="No tool call detected → immediately free KV cache" data-zh="未偵測到 tool call → 立即釋放 KV cache">No tool call detected → immediately free KV cache</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Historical average exec_time &lt;strong&gt;&amp;gt; 2.0s&lt;/strong&gt;" data-zh="歷史平均 exec_time &gt; 2.0 秒">Historical average exec_time <strong>&gt; 2.0s</strong></span></td>
+      <td><span class="i18n" data-en="Historical average exec_time &amp;gt; 2.0s" data-zh="歷史平均 exec_time &gt; 2.0 秒">Historical average exec_time <strong>&gt; 2.0s</strong></span></td>
       <td><code>0</code></td>
       <td><span class="i18n" data-en="Tool is too slow → immediately free KV cache" data-zh="Tool 太慢 → 立即釋放 KV cache">Tool is too slow → immediately free KV cache</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Historical average exec_time &lt;strong&gt;&amp;le; 2.0s&lt;/strong&gt;" data-zh="歷史平均 exec_time ≤ 2.0 秒">Historical average exec_time <strong>&le; 2.0s</strong></span></td>
+      <td><span class="i18n" data-en="Historical average exec_time &amp;le; 2.0s" data-zh="歷史平均 exec_time ≤ 2.0 秒">Historical average exec_time <strong>&le; 2.0s</strong></span></td>
       <td><code>2.0</code></td>
       <td><span class="i18n" data-en="Tool is fast enough → pin KV cache for 2 seconds" data-zh="Tool 夠快 → 將 KV cache 釘選 2 秒">Tool is fast enough → pin KV cache for 2 seconds</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="First time seeing this tool (no history)" data-zh="首次遇到此 tool（無歷史紀錄）">First time seeing this tool (no history)</span></td>
       <td><code>2.0</code></td>
-      <td><span class="i18n" data-en="Default exec_time = 0 → &lt;strong&gt;pin for 2 seconds&lt;/strong&gt; (optimistic strategy)" data-zh="預設 exec_time = 0 → 釘選 2 秒（樂觀策略）">Default exec_time = 0 → <strong>pin for 2 seconds</strong> (optimistic strategy)</span></td>
+      <td><span class="i18n" data-en="Default exec_time = 0 → pin for 2 seconds (optimistic strategy)" data-zh="預設 exec_time = 0 → 釘選 2 秒（樂觀策略）">Default exec_time = 0 → <strong>pin for 2 seconds</strong> (optimistic strategy)</span></td>
     </tr>
   </table>
 
@@ -412,16 +406,14 @@ pytest tests/ -x -v
 <!-- ====== 6. PIN / TTL ====== -->
 <section id="pin-ttl">
   <h2><span class="i18n" data-en="6. Pin / TTL Mechanism" data-zh="6. 釘選 / TTL 機制">6. Pin / TTL Mechanism</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;scheduler.py:237-262&lt;/code&gt;" data-zh="檔案：scheduler.py:237-262">File: <code>scheduler.py:237-262</code></span></p>
+  <p><span class="i18n" data-en="File: scheduler.py:237-262" data-zh="檔案：scheduler.py:237-262">File: <code>scheduler.py:237-262</code></span></p>
 
   <h3><span class="i18n" data-en="6.1 Pin" data-zh="6.1 釘選（Pin）">6.1 Pin</span></h3>
   <pre><code><span class="cm"># scheduler.py:237-239</span>
 <span class="kw">def</span> <span class="fn">pin_request</span>(self, request: Request, length_of_pin: float) -> None:
     self.continuum_recorder.request_pinned(request)           <span class="cm"># Record event</span>
     self.pinned_requests.append((request, time.time() + length_of_pin))  <span class="cm"># Store in list</span></code></pre>
-  <p><span class="i18n" data-en="&lt;code&gt;pinned_requests&lt;/code&gt; is a &lt;code&gt;list[Tuple[Request, float]]&lt;/code&gt;,
-    where each tuple is &lt;code&gt;(request, end_time)&lt;/code&gt;.&lt;br&gt;
-    After pinning, the request's KV cache blocks &lt;strong&gt;will not be freed&lt;/strong&gt;, occupying VRAM until the TTL expires." data-zh="pinned_requests 是一個 list[Tuple[Request, float]]，每個 tuple 為 (request, end_time)。釘選後，該 request 的 KV cache blocks 不會被釋放，持續佔用 VRAM 直到 TTL 到期。"><code>pinned_requests</code> is a <code>list[Tuple[Request, float]]</code>,
+  <p><span class="i18n" data-en="pinned_requests is a list[Tuple[Request, float]], where each tuple is (request, end_time). After pinning, the request's KV cache blocks will not be freed, occupying VRAM until the TTL expires." data-zh="pinned_requests 是一個 list[Tuple[Request, float]]，每個 tuple 為 (request, end_time)。釘選後，該 request 的 KV cache blocks 不會被釋放，持續佔用 VRAM 直到 TTL 到期。"><code>pinned_requests</code> is a <code>list[Tuple[Request, float]]</code>,
     where each tuple is <code>(request, end_time)</code>.<br>
     After pinning, the request's KV cache blocks <strong>will not be freed</strong>, occupying VRAM until the TTL expires.</span></p>
 
@@ -437,8 +429,8 @@ pytest tests/ -x -v
 
   <h4><span class="i18n" data-en="Two Conditions for Unpin (both must be satisfied):" data-zh="解除釘選的兩個條件（兩者皆須滿足）：">Two Conditions for Unpin (both must be satisfied):</span></h4>
   <ol>
-    <li><span class="i18n" data-en="&lt;code&gt;request.job_id not in waiting_job_ids&lt;/code&gt; — the job has not returned yet (tool is still executing)" data-zh="request.job_id not in waiting_job_ids &amp;mdash; 該 job 尚未返回（tool 仍在執行中）"><code>request.job_id not in waiting_job_ids</code> — the job has not returned yet (tool is still executing)</span></li>
-    <li><span class="i18n" data-en="&lt;code&gt;time.time() &gt;= end_time&lt;/code&gt; — TTL has expired" data-zh="time.time() &gt;= end_time &amp;mdash; TTL 已到期"><code>time.time() >= end_time</code> — TTL has expired</span></li>
+    <li><span class="i18n" data-en="request.job_id not in waiting_job_ids — the job has not returned yet (tool is still executing)" data-zh="request.job_id not in waiting_job_ids &amp;mdash; 該 job 尚未返回（tool 仍在執行中）"><code>request.job_id not in waiting_job_ids</code> — the job has not returned yet (tool is still executing)</span></li>
+    <li><span class="i18n" data-en="time.time() &gt;= end_time — TTL has expired" data-zh="time.time() &gt;= end_time &amp;mdash; TTL 已到期"><code>time.time() >= end_time</code> — TTL has expired</span></li>
   </ol>
   <p><span class="i18n" data-en="If the job has already returned to the waiting queue, it will not be unpinned (because its cache will be used for scheduling soon)." data-zh="若該 job 已返回等待佇列，則不會被解除釘選（因為其 cache 即將用於排程）。">If the job has already returned to the waiting queue, it will not be unpinned (because its cache will be used for scheduling soon).</span></p>
 
@@ -480,9 +472,8 @@ pytest tests/ -x -v
 <!-- ====== 7. QUEUE ====== -->
 <section id="queue">
   <h2><span class="i18n" data-en="7. ContinuumRequestQueue Scheduling Queue" data-zh="7. ContinuumRequestQueue 排程佇列">7. ContinuumRequestQueue Scheduling Queue</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;request_queue.py:220-339&lt;/code&gt;" data-zh="檔案：request_queue.py:220-339">File: <code>request_queue.py:220-339</code></span></p>
-  <p><span class="i18n" data-en="Continuum does not use the standard FCFS queue, but instead uses &lt;code&gt;ContinuumRequestQueue&lt;/code&gt;.
-    Scheduling priority: &lt;strong&gt;Pinned jobs first → otherwise job-level FCFS&lt;/strong&gt;." data-zh="Continuum 不使用標準的 FCFS 佇列，而是採用 ContinuumRequestQueue。排程優先順序：已釘選的 job 優先 → 否則按 job 層級 FCFS。">Continuum does not use the standard FCFS queue, but instead uses <code>ContinuumRequestQueue</code>.
+  <p><span class="i18n" data-en="File: request_queue.py:220-339" data-zh="檔案：request_queue.py:220-339">File: <code>request_queue.py:220-339</code></span></p>
+  <p><span class="i18n" data-en="Continuum does not use the standard FCFS queue, but instead uses ContinuumRequestQueue. Scheduling priority: Pinned jobs first → otherwise job-level FCFS." data-zh="Continuum 不使用標準的 FCFS 佇列，而是採用 ContinuumRequestQueue。排程優先順序：已釘選的 job 優先 → 否則按 job 層級 FCFS。">Continuum does not use the standard FCFS queue, but instead uses <code>ContinuumRequestQueue</code>.
     Scheduling priority: <strong>Pinned jobs first → otherwise job-level FCFS</strong>.</span></p>
 
   <h3><span class="i18n" data-en="7.1 peek_request() — Core Scheduling Logic" data-zh="7.1 peek_request() &amp;mdash; 核心排程邏輯">7.1 peek_request() — Core Scheduling Logic</span></h3>
@@ -514,9 +505,7 @@ pytest tests/ -x -v
     <span class="kw">return</span> earliest_request</code></pre>
 
   <h4><span class="i18n" data-en="Why Job-level FCFS?" data-zh="為什麼要用 Job 層級的 FCFS？">Why Job-level FCFS?</span></h4>
-  <p><span class="i18n" data-en="A job enters and exits the scheduler multiple times (re-entering after each tool call turn).
-    If request-level FCFS were used, newly arrived requests would be placed far back in the queue, which is unfair to older jobs.
-    &lt;strong&gt;Job-level FCFS orders by the time the job first entered&lt;/strong&gt;, ensuring long-term fairness." data-zh="一個 job 會多次進出 scheduler（每次 tool call 輪次後重新進入）。若使用 request 層級的 FCFS，新到達的 request 會被排到佇列很後面，這對較早的 job 不公平。Job 層級的 FCFS 依據 job 首次進入的時間排序，確保長期公平性。">A job enters and exits the scheduler multiple times (re-entering after each tool call turn).
+  <p><span class="i18n" data-en="A job enters and exits the scheduler multiple times (re-entering after each tool call turn). If request-level FCFS were used, newly arrived requests would be placed far back in the queue, which is unfair to older jobs. Job-level FCFS orders by the time the job first entered, ensuring long-term fairness." data-zh="一個 job 會多次進出 scheduler（每次 tool call 輪次後重新進入）。若使用 request 層級的 FCFS，新到達的 request 會被排到佇列很後面，這對較早的 job 不公平。Job 層級的 FCFS 依據 job 首次進入的時間排序，確保長期公平性。">A job enters and exits the scheduler multiple times (re-entering after each tool call turn).
     If request-level FCFS were used, newly arrived requests would be placed far back in the queue, which is unfair to older jobs.
     <strong>Job-level FCFS orders by the time the job first entered</strong>, ensuring long-term fairness.</span></p>
 
@@ -531,7 +520,7 @@ pytest tests/ -x -v
 <!-- ====== 8. EVICTION ====== -->
 <section id="eviction">
   <h2><span class="i18n" data-en="8. Eviction (Preemption) Logic" data-zh="8. 驅逐（搶占）邏輯">8. Eviction (Preemption) Logic</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;scheduler.py:195-234, 359-407&lt;/code&gt;" data-zh="檔案：scheduler.py:195-234, 359-407">File: <code>scheduler.py:195-234, 359-407</code></span></p>
+  <p><span class="i18n" data-en="File: scheduler.py:195-234, 359-407" data-zh="檔案：scheduler.py:195-234, 359-407">File: <code>scheduler.py:195-234, 359-407</code></span></p>
   <p><span class="i18n" data-en="When a new request to be scheduled needs KV blocks but VRAM is insufficient, an existing request must be evicted (preempted)." data-zh="當新排程的 request 需要 KV blocks 但 VRAM 不足時，必須驅逐（搶占）一個既有的 request。">When a new request to be scheduled needs KV blocks but VRAM is insufficient, an existing request must be evicted (preempted).</span></p>
 
   <h3><span class="i18n" data-en="8.1 Trigger Condition" data-zh="8.1 觸發條件">8.1 Trigger Condition</span></h3>
@@ -564,7 +553,7 @@ new_blocks = self.kv_cache_manager.allocate_slots(request, num_new_tokens, ...)
     <tr><th><span class="i18n" data-en="Priority" data-zh="優先順序">Priority</span></th><th><span class="i18n" data-en="Eviction Target" data-zh="驅逐目標">Eviction Target</span></th><th><span class="i18n" data-en="Reason" data-zh="原因">Reason</span></th></tr>
     <tr>
       <td><span class="i18n" data-en="1 (evicted first)" data-zh="1（最先被驅逐）">1 (evicted first)</span></td>
-      <td><span class="i18n" data-en="Running with &lt;code&gt;is_last_step=False&lt;/code&gt; and latest entry_time" data-zh="執行中且 is_last_step=False，entry_time 最晚者">Running with <code>is_last_step=False</code> and latest entry_time</span></td>
+      <td><span class="i18n" data-en="Running with is_last_step=False and latest entry_time" data-zh="執行中且 is_last_step=False，entry_time 最晚者">Running with <code>is_last_step=False</code> and latest entry_time</span></td>
       <td><span class="i18n" data-en="Not the last step = more tool calls ahead, can retry later" data-zh="不是最後一步 = 後面還有 tool call，可稍後重試">Not the last step = more tool calls ahead, can retry later</span></td>
     </tr>
     <tr>
@@ -659,9 +648,8 @@ self.encoder_cache_manager.free(preempted_req)
 <!-- ====== 10. RECORDER ====== -->
 <section id="recorder">
   <h2><span class="i18n" data-en="10. Trace Recording (Continuum_Recorder)" data-zh="10. 追蹤記錄（Continuum_Recorder）">10. Trace Recording (Continuum_Recorder)</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;estimate_with_func.py:12-62&lt;/code&gt;" data-zh="檔案：estimate_with_func.py:12-62">File: <code>estimate_with_func.py:12-62</code></span></p>
-  <p><span class="i18n" data-en="&lt;code&gt;Continuum_Recorder&lt;/code&gt; inserts timestamps at each critical point in the request lifecycle,
-    and ultimately exports them as a JSON file for offline analysis." data-zh="Continuum_Recorder 在請求生命週期的每個關鍵節點插入時間戳記，最終匯出為 JSON 檔案供離線分析使用。"><code>Continuum_Recorder</code> inserts timestamps at each critical point in the request lifecycle,
+  <p><span class="i18n" data-en="File: estimate_with_func.py:12-62" data-zh="檔案：estimate_with_func.py:12-62">File: <code>estimate_with_func.py:12-62</code></span></p>
+  <p><span class="i18n" data-en="Continuum_Recorder inserts timestamps at each critical point in the request lifecycle, and ultimately exports them as a JSON file for offline analysis." data-zh="Continuum_Recorder 在請求生命週期的每個關鍵節點插入時間戳記，最終匯出為 JSON 檔案供離線分析使用。"><code>Continuum_Recorder</code> inserts timestamps at each critical point in the request lifecycle,
     and ultimately exports them as a JSON file for offline analysis.</span></p>
 
   <h3><span class="i18n" data-en="10.1 Recorded Events" data-zh="10.1 記錄的事件">10.1 Recorded Events</span></h3>
@@ -689,7 +677,7 @@ self.encoder_cache_manager.free(preempted_req)
         json.dump(self.job_id_to_history, f, indent=<span class="nu">2</span>)
     os.replace(tmp_path, final_path)</code></pre>
 
-  <h4><span class="i18n" data-en="Output Format: &lt;code&gt;scheduler_timestamps&lt;/code&gt; (JSON)" data-zh="輸出格式：scheduler_timestamps（JSON）">Output Format: <code>scheduler_timestamps</code> (JSON)</span></h4>
+  <h4><span class="i18n" data-en="Output Format: scheduler_timestamps (JSON)" data-zh="輸出格式：scheduler_timestamps（JSON）">Output Format: <code>scheduler_timestamps</code> (JSON)</span></h4>
   <pre><code>{
   <span class="st">"job_1"</span>: [
     {<span class="st">"Request_arrival_time"</span>: <span class="nu">1711234567.89</span>},
@@ -708,9 +696,8 @@ self.encoder_cache_manager.free(preempted_req)
 <!-- ====== 11. AGENT ====== -->
 <section id="agent">
   <h2><span class="i18n" data-en="11. mini-swe-agent Interface" data-zh="11. mini-swe-agent 介面">11. mini-swe-agent Interface</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141&lt;/code&gt;" data-zh="檔案：mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141">File: <code>mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141</code></span></p>
-  <p><span class="i18n" data-en="The Agent communicates with the vLLM server via an OpenAI-compatible API,
-    passing Continuum-specific parameters in &lt;code&gt;extra_body&lt;/code&gt;:" data-zh="Agent 透過 OpenAI 相容 API 與 vLLM 伺服器通訊，並在 extra_body 中傳遞 Continuum 專屬參數：">The Agent communicates with the vLLM server via an OpenAI-compatible API,
+  <p><span class="i18n" data-en="File: mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141" data-zh="檔案：mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141">File: <code>mini-swe-agent/src/minisweagent/models/vllm_model.py:124-141</code></span></p>
+  <p><span class="i18n" data-en="The Agent communicates with the vLLM server via an OpenAI-compatible API, passing Continuum-specific parameters in extra_body:" data-zh="Agent 透過 OpenAI 相容 API 與 vLLM 伺服器通訊，並在 extra_body 中傳遞 Continuum 專屬參數：">The Agent communicates with the vLLM server via an OpenAI-compatible API,
     passing Continuum-specific parameters in <code>extra_body</code>:</span></p>
 
   <pre><code><span class="cm"># vllm_model.py:124-141</span>
@@ -748,7 +735,7 @@ extra_body = {
   </table>
 
   <h3><span class="i18n" data-en="Experiment Automation" data-zh="實驗自動化">Experiment Automation</span></h3>
-  <p><span class="i18n" data-en="File: &lt;code&gt;mini-swe-agent/run_experiments.py&lt;/code&gt;" data-zh="檔案：mini-swe-agent/run_experiments.py">File: <code>mini-swe-agent/run_experiments.py</code></span></p>
+  <p><span class="i18n" data-en="File: mini-swe-agent/run_experiments.py" data-zh="檔案：mini-swe-agent/run_experiments.py">File: <code>mini-swe-agent/run_experiments.py</code></span></p>
   <pre><code>SCHEDULING_POLICIES = [<span class="st">"fcfs"</span>, <span class="st">"continuum"</span>]
 JPS_VALUES = [<span class="nu">0.05</span>, <span class="nu">0.1</span>, <span class="nu">0.15</span>, <span class="nu">0.2</span>, <span class="nu">0.25</span>, <span class="nu">0.3</span>, <span class="nu">0.5</span>, <span class="nu">0.7</span>, <span class="nu">0.9</span>]
 MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
@@ -796,20 +783,18 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
     <h4><span class="i18n" data-en="12.A — In-Depth Discussion: How Were the Traces Generated and Used?" data-zh="12.A &amp;mdash; 深入討論：Trace 是如何產生與使用的？">12.A — In-Depth Discussion: How Were the Traces Generated and Used?</span></h4>
 
     <h4 style="margin-top:16px;"><span class="i18n" data-en="Step 1: Collecting Traces with GPT-5" data-zh="步驟一：使用 GPT-5 蒐集 Trace">Step 1: Collecting Traces with GPT-5</span></h4>
-    <p><span class="i18n" data-en="Paper Section 3.1: &quot;We collect and analyze 100 traces from mini-swe-agent running SWE-Bench and 100 traces from BFCL V4, both running &lt;strong&gt;GPT-5&lt;/strong&gt; as the base model.&quot;" data-zh="論文第 3.1 節：「我們蒐集並分析了 mini-swe-agent 執行 SWE-Bench 的 100 條 trace，以及 BFCL V4 的 100 條 trace，兩者均使用 GPT-5 作為基礎模型。」">Paper Section 3.1: "We collect and analyze 100 traces from mini-swe-agent running SWE-Bench and 100 traces from BFCL V4, both running <strong>GPT-5</strong> as the base model."</span></p>
+    <p><span class="i18n" data-en="Paper Section 3.1: &quot;We collect and analyze 100 traces from mini-swe-agent running SWE-Bench and 100 traces from BFCL V4, both running GPT-5 as the base model.&quot;" data-zh="論文第 3.1 節：「我們蒐集並分析了 mini-swe-agent 執行 SWE-Bench 的 100 條 trace，以及 BFCL V4 的 100 條 trace，兩者均使用 GPT-5 作為基礎模型。」">Paper Section 3.1: "We collect and analyze 100 traces from mini-swe-agent running SWE-Bench and 100 traces from BFCL V4, both running <strong>GPT-5</strong> as the base model."</span></p>
     <p><span class="i18n" data-en="The process is:" data-zh="流程如下：">The process is:</span></p>
     <pre style="background:var(--code-bg); color:var(--code-fg)"><code>mini-swe-agent (GPT-5 as backend)
   → LLM inference → output bash command → <strong>actually execute in Docker sandbox</strong> → tool output returned
   → LLM inference → ... repeat ~10 turns
   → Record each turn's (prompt, response, tool_call, tool_output, exec_time)</code></pre>
-    <p><span class="i18n" data-en="These traces record GPT-5's &lt;strong&gt;complete conversation history&lt;/strong&gt; as a coding agent,
-      including each turn's prompt token count, output token count, tool call command, and tool execution time." data-zh="這些 trace 記錄了 GPT-5 作為 coding agent 的完整對話歷史，包括每一輪的 prompt token 數量、output token 數量、tool call 指令，以及工具執行時間。">These traces record GPT-5's <strong>complete conversation history</strong> as a coding agent,
+    <p><span class="i18n" data-en="These traces record GPT-5's complete conversation history as a coding agent, including each turn's prompt token count, output token count, tool call command, and tool execution time." data-zh="這些 trace 記錄了 GPT-5 作為 coding agent 的完整對話歷史，包括每一輪的 prompt token 數量、output token 數量、tool call 指令，以及工具執行時間。">These traces record GPT-5's <strong>complete conversation history</strong> as a coding agent,
       including each turn's prompt token count, output token count, tool call command, and tool execution time.</span></p>
 
     <h4><span class="i18n" data-en="Step 2: Using Llama to Evaluate on These Traces?" data-zh="第二步：使用 Llama 在這些 Trace 上進行評估？">Step 2: Using Llama to Evaluate on These Traces?</span></h4>
-    <p><span class="i18n" data-en="Paper Section 6.1: &quot;For results other than the real SWE-bench experiments in Figure 11, we evaluate on two &lt;strong&gt;collected workloads&lt;/strong&gt; running GPT-5 and using poisson distribution for the arrival pattern.&quot;" data-zh="論文第 6.1 節：「除了圖 11 中的真實 SWE-bench 實驗外，其餘結果均在兩組收集的工作負載上進行評估，這些工作負載使用 GPT-5 執行，並以 Poisson 分佈作為請求到達模式。」">Paper Section 6.1: "For results other than the real SWE-bench experiments in Figure 11, we evaluate on two <strong>collected workloads</strong> running GPT-5 and using poisson distribution for the arrival pattern."</span></p>
-    <p><span class="i18n" data-en="&lt;strong&gt;However, the repo does not contain a trace replay mechanism.&lt;/strong&gt;
-      Looking at &lt;code&gt;mini-swe-agent&lt;/code&gt;'s code, the agent's execution flow is:" data-zh="然而，repo 中並未包含 trace 重播機制。查看 mini-swe-agent 的程式碼，agent 的執行流程為："><strong>However, the repo does not contain a trace replay mechanism.</strong>
+    <p><span class="i18n" data-en="Paper Section 6.1: &quot;For results other than the real SWE-bench experiments in Figure 11, we evaluate on two collected workloads running GPT-5 and using poisson distribution for the arrival pattern.&quot;" data-zh="論文第 6.1 節：「除了圖 11 中的真實 SWE-bench 實驗外，其餘結果均在兩組收集的工作負載上進行評估，這些工作負載使用 GPT-5 執行，並以 Poisson 分佈作為請求到達模式。」">Paper Section 6.1: "For results other than the real SWE-bench experiments in Figure 11, we evaluate on two <strong>collected workloads</strong> running GPT-5 and using poisson distribution for the arrival pattern."</span></p>
+    <p><span class="i18n" data-en="However, the repo does not contain a trace replay mechanism. Looking at mini-swe-agent's code, the agent's execution flow is:" data-zh="然而，repo 中並未包含 trace 重播機制。查看 mini-swe-agent 的程式碼，agent 的執行流程為："><strong>However, the repo does not contain a trace replay mechanism.</strong>
       Looking at <code>mini-swe-agent</code>'s code, the agent's execution flow is:</span></p>
     <pre style="background:var(--code-bg); color:var(--code-fg)"><code><span class="cm"># agents/default.py — real agent loop, not replay</span>
 <span class="kw">def</span> <span class="fn">run</span>(self, task):
@@ -823,61 +808,49 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
     action = self.parse_action(response) <span class="cm"># 2. Parse bash command from response</span>
     output = self.env.execute(action)    <span class="cm"># 3. <strong>Actually execute in Docker</strong></span>
     self.add_message(<span class="st">"user"</span>, output)      <span class="cm"># 4. Add tool output back to context</span></code></pre>
-    <p><span class="i18n" data-en="&lt;code&gt;self.env.execute(action)&lt;/code&gt; &lt;strong&gt;actually runs the bash command in a Docker/bubblewrap sandbox&lt;/strong&gt;,
-      not a simulation. There is no code path that &quot;loads GPT-5 traces and skips LLM inference.&quot;" data-zh="self.env.execute(action) 實際上是在 Docker/bubblewrap sandbox 中執行 bash 指令，而非模擬。不存在任何「載入 GPT-5 trace 並跳過 LLM 推論」的程式碼路徑。"><code>self.env.execute(action)</code> <strong>actually runs the bash command in a Docker/bubblewrap sandbox</strong>,
+    <p><span class="i18n" data-en="self.env.execute(action) actually runs the bash command in a Docker/bubblewrap sandbox, not a simulation. There is no code path that &quot;loads GPT-5 traces and skips LLM inference.&quot;" data-zh="self.env.execute(action) 實際上是在 Docker/bubblewrap sandbox 中執行 bash 指令，而非模擬。不存在任何「載入 GPT-5 trace 並跳過 LLM 推論」的程式碼路徑。"><code>self.env.execute(action)</code> <strong>actually runs the bash command in a Docker/bubblewrap sandbox</strong>,
       not a simulation. There is no code path that "loads GPT-5 traces and skips LLM inference."</span></p>
 
     <h4><span class="i18n" data-en="Two Possible Experimental Methods (Paper Does Not Explicitly State)" data-zh="兩種可能的實驗方法（論文未明確說明）">Two Possible Experimental Methods (Paper Does Not Explicitly State)</span></h4>
     <table>
       <tr><th><span class="i18n" data-en="Possibility" data-zh="可能性">Possibility</span></th><th><span class="i18n" data-en="Approach" data-zh="方法">Approach</span></th><th><span class="i18n" data-en="Issues" data-zh="問題">Issues</span></th></tr>
       <tr>
-        <td><span class="i18n" data-en="&lt;strong&gt;A. Llama runs real Agent&lt;/strong&gt;" data-zh="A. Llama 執行真實 Agent"><strong>A. Llama runs real Agent</strong></span></td>
-        <td><span class="i18n" data-en="Use Llama as the LLM backend to actually run SWE-bench.&lt;br&gt;
-          GPT-5 traces are only used to analyze workload characteristics (Table 1, Fig 3, 5).&lt;br&gt;
-          Llama generates its own responses and output token counts." data-zh="使用 Llama 作為 LLM 後端，實際執行 SWE-bench。GPT-5 trace 僅用於分析工作負載特徵（表 1、圖 3、5）。Llama 自行生成回應及 output token 數量。">Use Llama as the LLM backend to actually run SWE-bench.<br>
+        <td><span class="i18n" data-en="A. Llama runs real Agent" data-zh="A. Llama 執行真實 Agent"><strong>A. Llama runs real Agent</strong></span></td>
+        <td><span class="i18n" data-en="Use Llama as the LLM backend to actually run SWE-bench. GPT-5 traces are only used to analyze workload characteristics (Table 1, Fig 3, 5). Llama generates its own responses and output token counts." data-zh="使用 Llama 作為 LLM 後端，實際執行 SWE-bench。GPT-5 trace 僅用於分析工作負載特徵（表 1、圖 3、5）。Llama 自行生成回應及 output token 數量。">Use Llama as the LLM backend to actually run SWE-bench.<br>
           GPT-5 traces are only used to analyze workload characteristics (Table 1, Fig 3, 5).<br>
           Llama generates its own responses and output token counts.</span></td>
-        <td><span class="i18n" data-en="Llama-8B's coding capability is far inferior to GPT-5, producing entirely different tool call sequences.&lt;br&gt;
-          Paper Footnote 2 also acknowledges &quot;Base small models often fail to accomplish the task.&quot;&lt;br&gt;
-          However, &lt;strong&gt;this may not affect scheduling experiments&lt;/strong&gt;:
-          the scheduler only looks at token counts and tool exec time, not code correctness." data-zh="Llama-8B 的程式撰寫能力遠遜於 GPT-5，會產生完全不同的 tool call 序列。論文註腳 2 也承認「基礎小模型通常無法完成任務」。不過，這可能不影響排程實驗：scheduler 只關注 token 數量和工具執行時間，而非程式碼正確性。">Llama-8B's coding capability is far inferior to GPT-5, producing entirely different tool call sequences.<br>
+        <td><span class="i18n" data-en="Llama-8B's coding capability is far inferior to GPT-5, producing entirely different tool call sequences. Paper Footnote 2 also acknowledges &quot;Base small models often fail to accomplish the task.&quot; However, this may not affect scheduling experiments: the scheduler only looks at token counts and tool exec time, not code correctness." data-zh="Llama-8B 的程式撰寫能力遠遜於 GPT-5，會產生完全不同的 tool call 序列。論文註腳 2 也承認「基礎小模型通常無法完成任務」。不過，這可能不影響排程實驗：scheduler 只關注 token 數量和工具執行時間，而非程式碼正確性。">Llama-8B's coding capability is far inferior to GPT-5, producing entirely different tool call sequences.<br>
           Paper Footnote 2 also acknowledges "Base small models often fail to accomplish the task."<br>
           However, <strong>this may not affect scheduling experiments</strong>:
           the scheduler only looks at token counts and tool exec time, not code correctness.</span></td>
       </tr>
       <tr>
-        <td><span class="i18n" data-en="&lt;strong&gt;B. Use GPT-5 traces to drive replay&lt;/strong&gt;" data-zh="B. 使用 GPT-5 trace 驅動重播"><strong>B. Use GPT-5 traces to drive replay</strong></span></td>
-        <td><span class="i18n" data-en="Feed GPT-5's conversation history to Llama, controlling prompt length and turn count.&lt;br&gt;
-          Possibly fix Llama's output token count in some way (e.g., &lt;code&gt;max_tokens&lt;/code&gt;)." data-zh="將 GPT-5 的對話歷史餵給 Llama，控制 prompt 長度和對話輪數。可能以某種方式固定 Llama 的 output token 數量（例如 max_tokens）。">Feed GPT-5's conversation history to Llama, controlling prompt length and turn count.<br>
+        <td><span class="i18n" data-en="B. Use GPT-5 traces to drive replay" data-zh="B. 使用 GPT-5 trace 驅動重播"><strong>B. Use GPT-5 traces to drive replay</strong></span></td>
+        <td><span class="i18n" data-en="Feed GPT-5's conversation history to Llama, controlling prompt length and turn count. Possibly fix Llama's output token count in some way (e.g., max_tokens)." data-zh="將 GPT-5 的對話歷史餵給 Llama，控制 prompt 長度和對話輪數。可能以某種方式固定 Llama 的 output token 數量（例如 max_tokens）。">Feed GPT-5's conversation history to Llama, controlling prompt length and turn count.<br>
           Possibly fix Llama's output token count in some way (e.g., <code>max_tokens</code>).</span></td>
-        <td><span class="i18n" data-en="&lt;strong&gt;This mechanism does not exist in the repo.&lt;/strong&gt; There is no trace loader or replay mode.&lt;br&gt;
-          If it exists, it may be in internal tools that were not open-sourced." data-zh="此機制在 repo 中不存在。沒有 trace 載入器或重播模式。若存在，可能在未開源的內部工具中。"><strong>This mechanism does not exist in the repo.</strong> There is no trace loader or replay mode.<br>
+        <td><span class="i18n" data-en="This mechanism does not exist in the repo. There is no trace loader or replay mode. If it exists, it may be in internal tools that were not open-sourced." data-zh="此機制在 repo 中不存在。沒有 trace 載入器或重播模式。若存在，可能在未開源的內部工具中。"><strong>This mechanism does not exist in the repo.</strong> There is no trace loader or replay mode.<br>
           If it exists, it may be in internal tools that were not open-sourced.</span></td>
       </tr>
     </table>
 
     <h4><span class="i18n" data-en="The Output Token Count Problem" data-zh="Output Token 數量問題">The Output Token Count Problem</span></h4>
-    <p><span class="i18n" data-en="If method A is used (Llama runs real agent), the output token count is entirely determined by Llama.
-      For the same SWE-bench instance:" data-zh="若使用方法 A（Llama 執行真實 agent），output token 數量完全由 Llama 決定。對於同一個 SWE-bench 實例：">If method A is used (Llama runs real agent), the output token count is entirely determined by Llama.
+    <p><span class="i18n" data-en="If method A is used (Llama runs real agent), the output token count is entirely determined by Llama. For the same SWE-bench instance:" data-zh="若使用方法 A（Llama 執行真實 agent），output token 數量完全由 Llama 決定。對於同一個 SWE-bench 實例：">If method A is used (Llama runs real agent), the output token count is entirely determined by Llama.
       For the same SWE-bench instance:</span></p>
     <ul>
       <li><span class="i18n" data-en="GPT-5 might output 200 tokens (precise patch + explanation)" data-zh="GPT-5 可能輸出 200 個 token（精確的 patch + 說明）">GPT-5 might output 200 tokens (precise patch + explanation)</span></li>
       <li><span class="i18n" data-en="Llama-8B might output 50 tokens (incorrect attempt) or 500 tokens (verbose debugging process)" data-zh="Llama-8B 可能輸出 50 個 token（錯誤的嘗試）或 500 個 token（冗長的除錯過程）">Llama-8B might output 50 tokens (incorrect attempt) or 500 tokens (verbose debugging process)</span></li>
     </ul>
-    <p><span class="i18n" data-en="This means the statistics in Table 1 (Token Per Program: 70,126 +/- 19,732) are GPT-5 data,
-      and may not represent the actual token counts during Llama experiments." data-zh="這意味著表 1 中的統計數據（Token Per Program: 70,126 +/- 19,732）是 GPT-5 的數據，可能無法代表 Llama 實驗中的實際 token 數量。">This means the statistics in Table 1 (Token Per Program: 70,126 +/- 19,732) are GPT-5 data,
+    <p><span class="i18n" data-en="This means the statistics in Table 1 (Token Per Program: 70,126 +/- 19,732) are GPT-5 data, and may not represent the actual token counts during Llama experiments." data-zh="這意味著表 1 中的統計數據（Token Per Program: 70,126 +/- 19,732）是 GPT-5 的數據，可能無法代表 Llama 實驗中的實際 token 數量。">This means the statistics in Table 1 (Token Per Program: 70,126 +/- 19,732) are GPT-5 data,
       and may not represent the actual token counts during Llama experiments.</span></p>
     <p><span class="i18n" data-en="If method B is used (replay), the following needs to be resolved:" data-zh="若使用方法 B（重播），需要解決以下問題：">If method B is used (replay), the following needs to be resolved:</span></p>
     <ul>
-      <li><span class="i18n" data-en="&lt;strong&gt;Prompt length&lt;/strong&gt;: Can be controlled — directly feed GPT-5 trace conversation history to Llama" data-zh="Prompt 長度：可以控制 &amp;mdash; 直接將 GPT-5 trace 的對話歷史餵給 Llama"><strong>Prompt length</strong>: Can be controlled — directly feed GPT-5 trace conversation history to Llama</span></li>
-      <li><span class="i18n" data-en="&lt;strong&gt;Output token count&lt;/strong&gt;: Difficult to precisely control — &lt;code&gt;max_tokens&lt;/code&gt; only sets an upper limit, cannot guarantee Llama generates exactly the same number of tokens as GPT-5" data-zh="Output token 數量：難以精確控制 &amp;mdash; max_tokens 只設定上限，無法保證 Llama 生成與 GPT-5 完全相同數量的 token"><strong>Output token count</strong>: Difficult to precisely control — <code>max_tokens</code> only sets an upper limit, cannot guarantee Llama generates exactly the same number of tokens as GPT-5</span></li>
-      <li><span class="i18n" data-en="&lt;strong&gt;Tool call content&lt;/strong&gt;: If Llama generates a different bash command → tool exec time differs → the entire subsequent flow diverges" data-zh="Tool call 內容：若 Llama 生成不同的 bash 指令 → 工具執行時間不同 → 整個後續流程產生偏離"><strong>Tool call content</strong>: If Llama generates a different bash command → tool exec time differs → the entire subsequent flow diverges</span></li>
+      <li><span class="i18n" data-en="Prompt length: Can be controlled — directly feed GPT-5 trace conversation history to Llama" data-zh="Prompt 長度：可以控制 &amp;mdash; 直接將 GPT-5 trace 的對話歷史餵給 Llama"><strong>Prompt length</strong>: Can be controlled — directly feed GPT-5 trace conversation history to Llama</span></li>
+      <li><span class="i18n" data-en="Output token count: Difficult to precisely control — max_tokens only sets an upper limit, cannot guarantee Llama generates exactly the same number of tokens as GPT-5" data-zh="Output token 數量：難以精確控制 &amp;mdash; max_tokens 只設定上限，無法保證 Llama 生成與 GPT-5 完全相同數量的 token"><strong>Output token count</strong>: Difficult to precisely control — <code>max_tokens</code> only sets an upper limit, cannot guarantee Llama generates exactly the same number of tokens as GPT-5</span></li>
+      <li><span class="i18n" data-en="Tool call content: If Llama generates a different bash command → tool exec time differs → the entire subsequent flow diverges" data-zh="Tool call 內容：若 Llama 生成不同的 bash 指令 → 工具執行時間不同 → 整個後續流程產生偏離"><strong>Tool call content</strong>: If Llama generates a different bash command → tool exec time differs → the entire subsequent flow diverges</span></li>
     </ul>
 
     <h4><span class="i18n" data-en="Conclusion" data-zh="結論">Conclusion</span></h4>
-    <p><span class="i18n" data-en="&lt;strong&gt;The paper does not explicitly state whether Llama is replaying GPT-5 traces in the Fig 8-10 experiments.&lt;/strong&gt;
-      The repo only contains the real agent loop (method A), no replay mechanism (method B).
-      The most likely scenario is:" data-zh="論文未明確說明圖 8-10 的實驗中 Llama 是否在重播 GPT-5 trace。Repo 中僅包含真實 agent 迴圈（方法 A），沒有重播機制（方法 B）。最可能的情況是："><strong>The paper does not explicitly state whether Llama is replaying GPT-5 traces in the Fig 8-10 experiments.</strong>
+    <p><span class="i18n" data-en="The paper does not explicitly state whether Llama is replaying GPT-5 traces in the Fig 8-10 experiments. The repo only contains the real agent loop (method A), no replay mechanism (method B). The most likely scenario is:" data-zh="論文未明確說明圖 8-10 的實驗中 Llama 是否在重播 GPT-5 trace。Repo 中僅包含真實 agent 迴圈（方法 A），沒有重播機制（方法 B）。最可能的情況是："><strong>The paper does not explicitly state whether Llama is replaying GPT-5 traces in the Fig 8-10 experiments.</strong>
       The repo only contains the real agent loop (method A), no replay mechanism (method B).
       The most likely scenario is:</span></p>
     <ul>
@@ -885,8 +858,7 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
       <li><span class="i18n" data-en="Fig 11 (real): Run real SWE-agent on Tensormesh (possibly with a stronger model)" data-zh="圖 11（真實）：在 Tensormesh 上執行真實 SWE-agent（可能使用更強的模型）">Fig 11 (real): Run real SWE-agent on Tensormesh (possibly with a stronger model)</span></li>
       <li><span class="i18n" data-en="Llama's token counts and tool call sequences differ from GPT-5, but the paper uses Table 1's GPT-5 statistics to describe workload characteristics" data-zh="Llama 的 token 數量和 tool call 序列與 GPT-5 不同，但論文使用表 1 中 GPT-5 的統計數據來描述工作負載特徵">Llama's token counts and tool call sequences differ from GPT-5, but the paper uses Table 1's GPT-5 statistics to describe workload characteristics</span></li>
     </ul>
-    <p><span class="i18n" data-en="This is a &lt;strong&gt;methodologically questionable point&lt;/strong&gt;: if workload statistics come from GPT-5 but experiments run on Llama,
-      then Table 1's data does not represent the actual experimental workload." data-zh="這是一個方法論上值得質疑的點：若工作負載統計來自 GPT-5，但實驗卻在 Llama 上執行，那麼表 1 的數據並不代表實際的實驗工作負載。">This is a <strong>methodologically questionable point</strong>: if workload statistics come from GPT-5 but experiments run on Llama,
+    <p><span class="i18n" data-en="This is a methodologically questionable point: if workload statistics come from GPT-5 but experiments run on Llama, then Table 1's data does not represent the actual experimental workload." data-zh="這是一個方法論上值得質疑的點：若工作負載統計來自 GPT-5，但實驗卻在 Llama 上執行，那麼表 1 的數據並不代表實際的實驗工作負載。">This is a <strong>methodologically questionable point</strong>: if workload statistics come from GPT-5 but experiments run on Llama,
       then Table 1's data does not represent the actual experimental workload.</span></p>
   </div>
 
@@ -897,37 +869,37 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
       <td><strong>Vanilla vLLM</strong></td>
       <td>0.10.2</td>
       <td><span class="i18n" data-en="Standard FCFS + end-of-turn eviction, chunked-prefill chunk size 2048" data-zh="標準 FCFS + 輪次結束時驅逐，chunked-prefill chunk 大小為 2048">Standard FCFS + end-of-turn eviction, chunked-prefill chunk size 2048</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--green)&quot;&gt;Yes&lt;/span&gt; (&lt;code&gt;--scheduling-policy fcfs&lt;/code&gt;)" data-zh="是（--scheduling-policy fcfs）"><span style="color:var(--green)">Yes</span> (<code>--scheduling-policy fcfs</code>)</span></td>
+      <td><span class="i18n" data-en="Yes (--scheduling-policy fcfs)" data-zh="是（--scheduling-policy fcfs）"><span style="color:var(--green)">Yes</span> (<code>--scheduling-policy fcfs</code>)</span></td>
     </tr>
     <tr>
       <td><strong>CPU DRAM offloading</strong></td>
       <td>vLLM 0.10.2 + LMCache 0.3.7</td>
       <td><span class="i18n" data-en="KV cache offload to CPU DRAM (A100: 100GB, B200/H100: 200GB/GPU)" data-zh="KV cache 卸載至 CPU DRAM（A100：100GB，B200/H100：200GB/GPU）">KV cache offload to CPU DRAM (A100: 100GB, B200/H100: 200GB/GPU)</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--amber)&quot;&gt;Partial&lt;/span&gt; (vLLM has built-in LMCache connector, but no standalone test script)" data-zh="部分支援（vLLM 內建 LMCache 連接器，但無獨立測試腳本）"><span style="color:var(--amber)">Partial</span> (vLLM has built-in LMCache connector, but no standalone test script)</span></td>
+      <td><span class="i18n" data-en="Partial (vLLM has built-in LMCache connector, but no standalone test script)" data-zh="部分支援（vLLM 內建 LMCache 連接器，但無獨立測試腳本）"><span style="color:var(--amber)">Partial</span> (vLLM has built-in LMCache connector, but no standalone test script)</span></td>
     </tr>
     <tr>
       <td><strong>Autellix / Autellix+</strong></td>
       <td><span class="i18n" data-en="PLAS algorithm on vLLM" data-zh="基於 vLLM 的 PLAS 演算法">PLAS algorithm on vLLM</span></td>
       <td><span class="i18n" data-en="Program-Level Attained Service: ordered by cumulative service time. Autellix+ adds LMCache CPU offloading" data-zh="Program-Level Attained Service：依累積服務時間排序。Autellix+ 加入 LMCache CPU 卸載功能">Program-Level Attained Service: ordered by cumulative service time. Autellix+ adds LMCache CPU offloading</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
     </tr>
     <tr>
       <td><strong>InferCept</strong></td>
       <td><span class="i18n" data-en="preserve/swap/evict on vLLM + LMCache" data-zh="基於 vLLM + LMCache 的 preserve/swap/evict 策略">preserve/swap/evict on vLLM + LMCache</span></td>
       <td><span class="i18n" data-en="Static KV cache retain: unconditionally preserve KV cache during tool calls" data-zh="靜態 KV cache 保留：在工具呼叫期間無條件保留 KV cache">Static KV cache retain: unconditionally preserve KV cache during tool calls</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
     </tr>
     <tr>
       <td><strong>SGLang</strong></td>
       <td>0.5.5.post3</td>
       <td><span class="i18n" data-en="Native cache-aware routing" data-zh="原生快取感知路由">Native cache-aware routing</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--amber)&quot;&gt;Partial&lt;/span&gt; (has client class &lt;code&gt;sglang_model.py&lt;/code&gt;, but no test script)" data-zh="部分支援（有客戶端類別 sglang_model.py，但無測試腳本）"><span style="color:var(--amber)">Partial</span> (has client class <code>sglang_model.py</code>, but no test script)</span></td>
+      <td><span class="i18n" data-en="Partial (has client class sglang_model.py, but no test script)" data-zh="部分支援（有客戶端類別 sglang_model.py，但無測試腳本）"><span style="color:var(--amber)">Partial</span> (has client class <code>sglang_model.py</code>, but no test script)</span></td>
     </tr>
     <tr>
       <td><strong>Dynamo</strong></td>
       <td>0.7.0.post1</td>
-      <td><span class="i18n" data-en="&lt;a href=&quot;https://github.com/ai-dynamo/dynamo&quot;&gt;ai-dynamo/dynamo&lt;/a&gt; — NVIDIA's distributed inference framework, 1P1D PD Disaggregation" data-zh="ai-dynamo/dynamo &amp;mdash; NVIDIA 的分散式推論框架，1P1D PD 分離架構"><a href="https://github.com/ai-dynamo/dynamo">ai-dynamo/dynamo</a> — NVIDIA's distributed inference framework, 1P1D PD Disaggregation</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="ai-dynamo/dynamo — NVIDIA's distributed inference framework, 1P1D PD Disaggregation" data-zh="ai-dynamo/dynamo &amp;mdash; NVIDIA 的分散式推論框架，1P1D PD 分離架構"><a href="https://github.com/ai-dynamo/dynamo">ai-dynamo/dynamo</a> — NVIDIA's distributed inference framework, 1P1D PD Disaggregation</span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
     </tr>
   </table>
 
@@ -941,28 +913,28 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
   <table>
     <tr><th><span class="i18n" data-en="Figure" data-zh="圖表">Figure</span></th><th><span class="i18n" data-en="Experiment" data-zh="實驗">Experiment</span></th><th><span class="i18n" data-en="Compared Baselines" data-zh="比較基準線">Compared Baselines</span></th><th><span class="i18n" data-en="Hardware" data-zh="硬體">Hardware</span></th><th><span class="i18n" data-en="Offloading" data-zh="卸載">Offloading</span></th></tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;strong&gt;Fig 8&lt;/strong&gt;" data-zh="圖 8"><strong>Fig 8</strong></span></td>
+      <td><span class="i18n" data-en="Fig 8" data-zh="圖 8"><strong>Fig 8</strong></span></td>
       <td><span class="i18n" data-en="End-to-end (no offload)" data-zh="端到端（無卸載）">End-to-end (no offload)</span></td>
       <td>vLLM vs <strong>Continuum</strong> vs Autellix</td>
       <td><span class="i18n" data-en="70B/4xB200, 8B/1xB200, 8B/1xA100" data-zh="70B/4xB200、8B/1xB200、8B/1xA100">70B/4xB200, 8B/1xB200, 8B/1xA100</span></td>
       <td><span class="i18n" data-en="Disabled" data-zh="停用">Disabled</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;strong&gt;Fig 9&lt;/strong&gt;" data-zh="圖 9"><strong>Fig 9</strong></span></td>
+      <td><span class="i18n" data-en="Fig 9" data-zh="圖 9"><strong>Fig 9</strong></span></td>
       <td><span class="i18n" data-en="End-to-end (with DRAM offload)" data-zh="端到端（搭配 DRAM 卸載）">End-to-end (with DRAM offload)</span></td>
       <td>vLLM vs <strong>Continuum</strong> vs Autellix+ vs InferCept</td>
       <td><span class="i18n" data-en="Same as above" data-zh="同上">Same as above</span></td>
       <td><span class="i18n" data-en="LMCache CPU offload" data-zh="LMCache CPU 卸載">LMCache CPU offload</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;strong&gt;Fig 10&lt;/strong&gt;" data-zh="圖 10"><strong>Fig 10</strong></span></td>
+      <td><span class="i18n" data-en="Fig 10" data-zh="圖 10"><strong>Fig 10</strong></span></td>
       <td><span class="i18n" data-en="P90 / P95 tail latency" data-zh="P90 / P95 尾端延遲">P90 / P95 tail latency</span></td>
       <td>vLLM vs <strong>Continuum</strong> vs Autellix+ vs InferCept</td>
       <td>8B/1xB200</td>
       <td><span class="i18n" data-en="LMCache CPU offload" data-zh="LMCache CPU 卸載">LMCache CPU offload</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="&lt;strong&gt;Fig 11&lt;/strong&gt;" data-zh="圖 11"><strong>Fig 11</strong></span></td>
+      <td><span class="i18n" data-en="Fig 11" data-zh="圖 11"><strong>Fig 11</strong></span></td>
       <td><span class="i18n" data-en="Real SWE-Agent distributed deployment" data-zh="實際 SWE-Agent 分散式部署">Real SWE-Agent distributed deployment</span></td>
       <td><strong>Continuum</strong> vs SGLang vs Dynamo</td>
       <td>Tensormesh H100</td>
@@ -991,16 +963,16 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
   <div class="cards">
     <div class="card hl">
       <h4><span class="i18n" data-en="Latency Improvement" data-zh="延遲改善">Latency Improvement</span></h4>
-      <p><span class="i18n" data-en="Continuum reduces latency by &lt;strong&gt;1.12x ~ 3.66x&lt;/strong&gt; compared to vanilla vLLM" data-zh="Continuum 相較於原版 vLLM，延遲降低 1.12x ~ 3.66x">Continuum reduces latency by <strong>1.12x ~ 3.66x</strong> compared to vanilla vLLM</span></p>
+      <p><span class="i18n" data-en="Continuum reduces latency by 1.12x ~ 3.66x compared to vanilla vLLM" data-zh="Continuum 相較於原版 vLLM，延遲降低 1.12x ~ 3.66x">Continuum reduces latency by <strong>1.12x ~ 3.66x</strong> compared to vanilla vLLM</span></p>
       <p><span class="i18n" data-en="Also shows significant improvement over Autellix/InferCept" data-zh="相較於 Autellix/InferCept 也展現顯著改善">Also shows significant improvement over Autellix/InferCept</span></p>
     </div>
     <div class="card hl">
       <h4><span class="i18n" data-en="Throughput Improvement" data-zh="吞吐量改善">Throughput Improvement</span></h4>
-      <p><span class="i18n" data-en="Improves throughput by &lt;strong&gt;1.10x ~ 3.22x&lt;/strong&gt;" data-zh="吞吐量提升 1.10x ~ 3.22x">Improves throughput by <strong>1.10x ~ 3.22x</strong></span></p>
+      <p><span class="i18n" data-en="Improves throughput by 1.10x ~ 3.22x" data-zh="吞吐量提升 1.10x ~ 3.22x">Improves throughput by <strong>1.10x ~ 3.22x</strong></span></p>
     </div>
     <div class="card hl">
       <h4><span class="i18n" data-en="Real SWE-Agent" data-zh="真實 SWE-Agent">Real SWE-Agent</span></h4>
-      <p><span class="i18n" data-en="Reduces latency by &lt;strong&gt;up to 8.18x&lt;/strong&gt; on the Tensormesh testbed" data-zh="在 Tensormesh 測試平台上延遲最高降低 8.18x">Reduces latency by <strong>up to 8.18x</strong> on the Tensormesh testbed</span></p>
+      <p><span class="i18n" data-en="Reduces latency by up to 8.18x on the Tensormesh testbed" data-zh="在 Tensormesh 測試平台上延遲最高降低 8.18x">Reduces latency by <strong>up to 8.18x</strong> on the Tensormesh testbed</span></p>
       <p><span class="i18n" data-en="Higher pass rate than baselines (baselines get killed by 15min timeout)" data-zh="通過率高於 baseline（baseline 因 15 分鐘 timeout 被終止）">Higher pass rate than baselines (baselines get killed by 15min timeout)</span></p>
     </div>
   </div>
@@ -1009,11 +981,10 @@ MODEL_NAME = <span class="st">"meta-llama/Llama-3.1-70B-Instruct"</span>
 <!-- ====== 13. REPO EXPERIMENT ====== -->
 <section id="repo-experiment">
   <h2><span class="i18n" data-en="13. Executable Experiment Workflow in the Repo" data-zh="13. Repo 中可執行的實驗流程">13. Executable Experiment Workflow in the Repo</span></h2>
-  <p><span class="i18n" data-en="The paper has 6 baselines, but &lt;strong&gt;the repo can only run FCFS vs Continuum&lt;/strong&gt;.
-    Below is the experiment code that actually exists in the repo." data-zh="論文有 6 個 baseline，但 repo 中只能執行 FCFS vs Continuum。以下是 repo 中實際存在的實驗程式碼。">The paper has 6 baselines, but <strong>the repo can only run FCFS vs Continuum</strong>.
+  <p><span class="i18n" data-en="The paper has 6 baselines, but the repo can only run FCFS vs Continuum. Below is the experiment code that actually exists in the repo." data-zh="論文有 6 個 baseline，但 repo 中只能執行 FCFS vs Continuum。以下是 repo 中實際存在的實驗程式碼。">The paper has 6 baselines, but <strong>the repo can only run FCFS vs Continuum</strong>.
     Below is the experiment code that actually exists in the repo.</span></p>
 
-  <h3><span class="i18n" data-en="13.1 Automation Script: &lt;code&gt;run_experiments.py&lt;/code&gt;" data-zh="13.1 自動化腳本：run_experiments.py">13.1 Automation Script: <code>run_experiments.py</code></span></h3>
+  <h3><span class="i18n" data-en="13.1 Automation Script: run_experiments.py" data-zh="13.1 自動化腳本：run_experiments.py">13.1 Automation Script: <code>run_experiments.py</code></span></h3>
   <pre><code><span class="cm"># mini-swe-agent/run_experiments.py</span>
 SCHEDULING_POLICIES = [<span class="st">"fcfs"</span>, <span class="st">"continuum"</span>]   <span class="cm"># Only these two</span>
 JPS_VALUES = [<span class="nu">0.05</span>, <span class="nu">0.1</span>, <span class="nu">0.15</span>, <span class="nu">0.2</span>, <span class="nu">0.25</span>, <span class="nu">0.3</span>, <span class="nu">0.5</span>, <span class="nu">0.7</span>, <span class="nu">0.9</span>]
@@ -1115,13 +1086,13 @@ mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
   <table>
     <tr><th><span class="i18n" data-en="Paper Description" data-zh="論文描述">Paper Description</span></th><th><span class="i18n" data-en="Repo Implementation" data-zh="Repo 實作">Repo Implementation</span></th><th><span class="i18n" data-en="Gap" data-zh="差距">Gap</span></th></tr>
     <tr>
-      <td><span class="i18n" data-en="CDF: Use empirical CDF &lt;code&gt;P(τ,f) = Σ𝟙[t≤τ] / |S[f]|&lt;/code&gt; to estimate tool call completion probability" data-zh="CDF：使用經驗 CDF P(τ,f) = Σ𝟙[t≤τ] / |S[f]| 估計 tool call 完成機率">CDF: Use empirical CDF <code>P(τ,f) = Σ𝟙[t≤τ] / |S[f]|</code> to estimate tool call completion probability</span></td>
-      <td><span class="i18n" data-en="Only simple average &lt;code&gt;avg(samples)&lt;/code&gt;" data-zh="僅使用簡單平均 avg(samples)">Only simple average <code>avg(samples)</code></span></td>
+      <td><span class="i18n" data-en="CDF: Use empirical CDF P(τ,f) = Σ𝟙[t≤τ] / |S[f]| to estimate tool call completion probability" data-zh="CDF：使用經驗 CDF P(τ,f) = Σ𝟙[t≤τ] / |S[f]| 估計 tool call 完成機率">CDF: Use empirical CDF <code>P(τ,f) = Σ𝟙[t≤τ] / |S[f]|</code> to estimate tool call completion probability</span></td>
+      <td><span class="i18n" data-en="Only simple average avg(samples)" data-zh="僅使用簡單平均 avg(samples)">Only simple average <code>avg(samples)</code></span></td>
       <td><span class="i18n" data-en="CDF not implemented" data-zh="CDF 未實作">CDF not implemented</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Cost Model: &lt;code&gt;τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)&lt;/code&gt;" data-zh="Cost Model：τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)">Cost Model: <code>τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)</code></span></td>
-      <td><span class="i18n" data-en="Fixed threshold &lt;code&gt;if avg &gt; 2.0s → free, else pin 2.0s&lt;/code&gt;" data-zh="固定閾值：若 avg &gt; 2.0s → 釋放，否則 pin 2.0s">Fixed threshold <code>if avg > 2.0s → free, else pin 2.0s</code></span></td>
+      <td><span class="i18n" data-en="Cost Model: τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)" data-zh="Cost Model：τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)">Cost Model: <code>τ* = argmax P(τ,f) × Benefit(r) - Cost(τ,r)</code></span></td>
+      <td><span class="i18n" data-en="Fixed threshold if avg &gt; 2.0s → free, else pin 2.0s" data-zh="固定閾值：若 avg &gt; 2.0s → 釋放，否則 pin 2.0s">Fixed threshold <code>if avg > 2.0s → free, else pin 2.0s</code></span></td>
       <td><span class="i18n" data-en="Cost model not implemented" data-zh="Cost model 未實作">Cost model not implemented</span></td>
     </tr>
     <tr>
@@ -1145,7 +1116,7 @@ mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
       <td><span class="i18n" data-en="Severely simplified" data-zh="嚴重簡化">Severely simplified</span></td>
     </tr>
     <tr>
-      <td><span class="i18n" data-en="Cold-start: When &lt;code&gt;|S[f]| ≤ K&lt;/code&gt;, use global CDF, then fall back to T_default" data-zh="冷啟動：當 |S[f]| ≤ K 時，使用全域 CDF，再退回到 T_default">Cold-start: When <code>|S[f]| ≤ K</code>, use global CDF, then fall back to T_default</span></td>
+      <td><span class="i18n" data-en="Cold-start: When |S[f]| ≤ K, use global CDF, then fall back to T_default" data-zh="冷啟動：當 |S[f]| ≤ K 時，使用全域 CDF，再退回到 T_default">Cold-start: When <code>|S[f]| ≤ K</code>, use global CDF, then fall back to T_default</span></td>
       <td><span class="i18n" data-en="First-time tool → exec_time=0 → directly pin for 2s (optimistic strategy)" data-zh="首次工具呼叫 → exec_time=0 → 直接 pin 住 2 秒（樂觀策略）">First-time tool → exec_time=0 → directly pin for 2s (optimistic strategy)</span></td>
       <td><span class="i18n" data-en="Different cold-start strategy" data-zh="不同的冷啟動策略">Different cold-start strategy</span></td>
     </tr>
@@ -1161,32 +1132,32 @@ mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
     <tr><th><span class="i18n" data-en="Paper Experiment" data-zh="論文實驗">Paper Experiment</span></th><th><span class="i18n" data-en="Reproducible with Repo?" data-zh="可透過程式碼重現？">Reproducible with Repo?</span></th><th><span class="i18n" data-en="What's Missing" data-zh="缺少什麼">What's Missing</span></th></tr>
     <tr>
       <td><span class="i18n" data-en="Fig 8: vLLM vs Continuum vs Autellix (no offload)" data-zh="Fig 8：vLLM vs Continuum vs Autellix（無 offload）">Fig 8: vLLM vs Continuum vs Autellix (no offload)</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--amber)&quot;&gt;Partial&lt;/span&gt;" data-zh="部分可重現"><span style="color:var(--amber)">Partial</span></span></td>
+      <td><span class="i18n" data-en="Partial" data-zh="部分可重現"><span style="color:var(--amber)">Partial</span></span></td>
       <td><span class="i18n" data-en="Autellix (PLAS) is not open-sourced" data-zh="Autellix (PLAS) 未開源">Autellix (PLAS) is not open-sourced</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="Fig 9: vLLM vs Continuum vs Autellix+ vs InferCept (with offload)" data-zh="Fig 9：vLLM vs Continuum vs Autellix+ vs InferCept（含 offload）">Fig 9: vLLM vs Continuum vs Autellix+ vs InferCept (with offload)</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
       <td><span class="i18n" data-en="Autellix+ and InferCept are not open-sourced; LMCache integration has no test script" data-zh="Autellix+ 與 InferCept 未開源；LMCache 整合無測試腳本">Autellix+ and InferCept are not open-sourced; LMCache integration has no test script</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="Fig 10: P90/P95 tail latency" data-zh="Fig 10：P90/P95 尾端延遲">Fig 10: P90/P95 tail latency</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
       <td><span class="i18n" data-en="Same as above" data-zh="同上">Same as above</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="Fig 11: Real SWE-Agent (Continuum vs SGLang vs Dynamo)" data-zh="Fig 11：真實 SWE-Agent（Continuum vs SGLang vs Dynamo）">Fig 11: Real SWE-Agent (Continuum vs SGLang vs Dynamo)</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
       <td><span class="i18n" data-en="Requires Tensormesh H100 testbed + Dynamo 0.7.0.post1 deployment + job distributor + session-aware router (none open-sourced)" data-zh="需要 Tensormesh H100 測試環境 + Dynamo 0.7.0.post1 部署 + 任務分配器 + session 感知路由器（皆未開源）">Requires Tensormesh H100 testbed + Dynamo 0.7.0.post1 deployment + job distributor + session-aware router (none open-sourced)</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="vLLM (FCFS) vs Continuum comparison" data-zh="vLLM (FCFS) vs Continuum 比較">vLLM (FCFS) vs Continuum comparison</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--green)&quot;&gt;Yes&lt;/span&gt;" data-zh="是"><span style="color:var(--green)">Yes</span></span></td>
-      <td><span class="i18n" data-en="&lt;code&gt;run_experiments.py&lt;/code&gt; can be run directly" data-zh="run_experiments.py 可直接執行"><code>run_experiments.py</code> can be run directly</span></td>
+      <td><span class="i18n" data-en="Yes" data-zh="是"><span style="color:var(--green)">Yes</span></span></td>
+      <td><span class="i18n" data-en="run_experiments.py can be run directly" data-zh="run_experiments.py 可直接執行"><code>run_experiments.py</code> can be run directly</span></td>
     </tr>
     <tr>
       <td><span class="i18n" data-en="Table 1: SWE-Bench / BFCL trace statistics" data-zh="Table 1：SWE-Bench / BFCL trace 統計">Table 1: SWE-Bench / BFCL trace statistics</span></td>
-      <td><span class="i18n" data-en="&lt;span style=&quot;color:var(--primary)&quot;&gt;No&lt;/span&gt;" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
+      <td><span class="i18n" data-en="No" data-zh="否"><span style="color:var(--primary)">No</span></span></td>
       <td><span class="i18n" data-en="GPT-5 generated trace data is not included in the repo" data-zh="GPT-5 生成的 trace 資料未包含在程式碼庫中">GPT-5 generated trace data is not included in the repo</span></td>
     </tr>
   </table>
@@ -1196,7 +1167,7 @@ mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
     <tr><th><span class="i18n" data-en="Aspect" data-zh="面向">Aspect</span></th><th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th><th><span class="i18n" data-en="Description" data-zh="描述">Description</span></th></tr>
     <tr><td>TODO / NOTE (Hanchen)</td><td>15+</td><td><span class="i18n" data-en="Numerous incomplete markers scattered throughout scheduler.py" data-zh="大量未完成標記散佈於 scheduler.py 中">Numerous incomplete markers scattered throughout scheduler.py</span></td></tr>
     <tr><td><span class="i18n" data-en="Unit tests" data-zh="單元測試">Unit tests</span></td><td>0</td><td><span class="i18n" data-en="No Continuum-specific tests at all" data-zh="完全沒有 Continuum 專屬的測試">No Continuum-specific tests at all</span></td></tr>
-    <tr><td><span class="i18n" data-en="Debug print" data-zh="除錯 print">Debug print</span></td><td><span class="i18n" data-en="Multiple" data-zh="多處">Multiple</span></td><td><span class="i18n" data-en="Commented-out &lt;code&gt;#print(...)&lt;/code&gt; left in the code" data-zh="程式碼中留有被註解掉的 #print(...)">Commented-out <code>#print(...)</code> left in the code</span></td></tr>
+    <tr><td><span class="i18n" data-en="Debug print" data-zh="除錯 print">Debug print</span></td><td><span class="i18n" data-en="Multiple" data-zh="多處">Multiple</span></td><td><span class="i18n" data-en="Commented-out #print(...) left in the code" data-zh="程式碼中留有被註解掉的 #print(...)">Commented-out <code>#print(...)</code> left in the code</span></td></tr>
     <tr><td><span class="i18n" data-en="CDF algorithm" data-zh="CDF 演算法">CDF algorithm</span></td><td><span class="i18n" data-en="Not implemented" data-zh="未實作">Not implemented</span></td><td><span class="i18n" data-en="Only moving average + fixed threshold" data-zh="僅使用移動平均 + 固定閾值">Only moving average + fixed threshold</span></td></tr>
     <tr><td><span class="i18n" data-en="C++/CUDA modifications" data-zh="C++/CUDA 修改">C++/CUDA modifications</span></td><td>0</td><td><span class="i18n" data-en="191 CUDA files have zero modifications, only Python scheduler changed" data-zh="191 個 CUDA 檔案零修改，僅變更 Python scheduler">191 CUDA files have zero modifications, only Python scheduler changed</span></td></tr>
     <tr><td><span class="i18n" data-en="vLLM version" data-zh="vLLM 版本">vLLM version</span></td><td>0.10.2 fork</td><td><span class="i18n" data-en="Upstream git history not preserved (initial commit contains the entire vLLM)" data-zh="未保留上游 git 歷史（初始 commit 包含整個 vLLM）">Upstream git history not preserved (initial commit contains the entire vLLM)</span></td></tr>
@@ -1206,7 +1177,7 @@ mini-extra swebench --model-class vllm --model $MODEL --port 8001 \
 <!-- ====== 15. ANALYSIS ====== -->
 <section id="analysis">
   <h2><span class="i18n" data-en="15. Analysis Methods" data-zh="15. 分析方法">15. Analysis Methods</span></h2>
-  <p><span class="i18n" data-en="File: &lt;code&gt;continuum_exp/analyze.py&lt;/code&gt;" data-zh="檔案：continuum_exp/analyze.py">File: <code>continuum_exp/analyze.py</code></span></p>
+  <p><span class="i18n" data-en="File: continuum_exp/analyze.py" data-zh="檔案：continuum_exp/analyze.py">File: <code>continuum_exp/analyze.py</code></span></p>
 
   <h3><span class="i18n" data-en="15.1 JCT Computation" data-zh="15.1 JCT 計算">15.1 JCT Computation</span></h3>
   <pre><code><span class="cm"># JCT for each job:</span>
@@ -1228,7 +1199,7 @@ wall_time = max(all jobs' departure) - min(all jobs' arrival)</code></pre>
   </table>
 
   <h3><span class="i18n" data-en="15.3 Derivable Cache Metrics" data-zh="15.3 可推導的快取指標">15.3 Derivable Cache Metrics</span></h3>
-  <p><span class="i18n" data-en="From the &lt;code&gt;waiting_to_running&lt;/code&gt; events in &lt;code&gt;scheduler_timestamps&lt;/code&gt;, the following can be computed:" data-zh="從 scheduler_timestamps 中的 waiting_to_running 事件，可以計算以下指標：">From the <code>waiting_to_running</code> events in <code>scheduler_timestamps</code>, the following can be computed:</span></p>
+  <p><span class="i18n" data-en="From the waiting_to_running events in scheduler_timestamps, the following can be computed:" data-zh="從 scheduler_timestamps 中的 waiting_to_running 事件，可以計算以下指標：">From the <code>waiting_to_running</code> events in <code>scheduler_timestamps</code>, the following can be computed:</span></p>
   <table>
     <tr><th><span class="i18n" data-en="Metric" data-zh="指標">Metric</span></th><th><span class="i18n" data-en="Computation" data-zh="計算方式">Computation</span></th><th><span class="i18n" data-en="Meaning" data-zh="意義">Meaning</span></th></tr>
     <tr>
@@ -1269,9 +1240,14 @@ wall_time = max(all jobs' departure) - min(all jobs' arrival)</code></pre>
 
 <footer>
   <p><span class="i18n" data-en="vLLM-Continuum (arXiv:2511.02230) — Complete Continuum Implementation Logic Analysis" data-zh="vLLM-Continuum (arXiv:2511.02230) — 完整 Continuum 實作邏輯分析">vLLM-Continuum (arXiv:2511.02230) — Complete Continuum Implementation Logic Analysis</span></p>
-  <p><span class="i18n" data-en="Source code: &lt;code&gt;github.com/Hanchenli/vllm-continuum&lt;/code&gt;" data-zh="原始碼：github.com/Hanchenli/vllm-continuum">Source code: <code>github.com/Hanchenli/vllm-continuum</code></span></p>
+  <p><span class="i18n" data-en="Source code: github.com/Hanchenli/vllm-continuum" data-zh="原始碼：github.com/Hanchenli/vllm-continuum">Source code: <code>github.com/Hanchenli/vllm-continuum</code></span></p>
   <p><span class="i18n" data-en="Generated 2026-03-26" data-zh="產生日期：2026-03-26">Generated 2026-03-26</span></p>
 </footer>
 
+
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)}
+(function(){var l=localStorage.getItem('lang');if(l)setLang(l)})();
+</script>
 </body>
 </html>
