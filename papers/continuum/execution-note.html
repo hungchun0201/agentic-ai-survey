@@ -614,6 +614,122 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
       <p><span class="i18n" data-en="Continuum doesn't need any special memory API. It just skips one function call (&lt;code&gt;free()&lt;/code&gt;). The block's &lt;code&gt;ref_cnt&lt;/code&gt; stays above zero, preventing the free queue from reclaiming it." data-zh="Continuum 不需要任何特殊的記憶體 API。它只是跳過一個函數呼叫（&lt;code&gt;free()&lt;/code&gt;）。Block 的 &lt;code&gt;ref_cnt&lt;/code&gt; 保持大於零，阻止 free queue 回收它。">Continuum doesn't need any special memory API. It just skips one function call (<code>free()</code>). The block's <code>ref_cnt</code> stays above zero, preventing the free queue from reclaiming it.</span></p>
     </div>
   </div>
+
+  <h3><span class="i18n" data-en="7.6 Concrete Example: Allocating 5 Blocks" data-zh="7.6 具體範例：分配 5 個 Blocks">7.6 Concrete Example: Allocating 5 Blocks</span></h3>
+  <p><span class="i18n" data-en="Tracing Turn 1 (66 tokens → 5 blocks) step by step:" data-zh="追蹤 Turn 1（66 tokens → 5 blocks）的每一步：">Tracing Turn 1 (66 tokens → 5 blocks) step by step:</span></p>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">① Initial state — FreeKVCacheBlockQueue (5401 free blocks)</span>
+
+  <span style="color:#6c7086">fake_head</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 1</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 2</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 3</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 4</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 5</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 6</span> ⇄ ··· ⇄ <span style="color:#6c7086">fake_tail</span>
+  ref_cnt:       <span style="color:#6c7086">0</span>        <span style="color:#6c7086">0</span>        <span style="color:#6c7086">0</span>        <span style="color:#6c7086">0</span>        <span style="color:#6c7086">0</span>        <span style="color:#6c7086">0</span>
+  num_free_blocks = 5401</pre>
+  </div>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">② popleft_n(5) — pop 5 blocks from front (10 pointer swaps, O(1) each)</span>
+
+  <span style="color:#6c7086">fake_head</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 6</span> ⇄ <span style="background:#0f3460;padding:2px 6px;border-radius:4px">blk 7</span> ⇄ ··· ⇄ <span style="color:#6c7086">fake_tail</span>
+
+  popped: <span style="background:#e94560;padding:2px 6px;border-radius:4px;color:#fff">blk 1</span> <span style="background:#e94560;padding:2px 6px;border-radius:4px;color:#fff">blk 2</span> <span style="background:#e94560;padding:2px 6px;border-radius:4px;color:#fff">blk 3</span> <span style="background:#e94560;padding:2px 6px;border-radius:4px;color:#fff">blk 4</span> <span style="background:#e94560;padding:2px 6px;border-radius:4px;color:#fff">blk 5</span>
+  ref_cnt:    <span style="color:#e94560">1</span>        <span style="color:#e94560">1</span>        <span style="color:#e94560">1</span>        <span style="color:#e94560">1</span>        <span style="color:#e94560">1</span>    ← ref_cnt += 1
+  num_free_blocks = 5396</pre>
+  </div>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">③ Build block table — passed to FlashAttention kernel</span>
+
+  req_to_blocks["req_abc"] = [blk 1, blk 2, blk 3, blk 4, blk 5]
+
+  block_table = [<span style="color:#e94560">1</span>, <span style="color:#e94560">2</span>, <span style="color:#e94560">3</span>, <span style="color:#e94560">4</span>, <span style="color:#e94560">5</span>]   ← indices into GPU tensor
+
+  <span class="cm">GPU tensor (10.55 GiB, unchanged):</span>
+  ┌──────┬<span style="background:rgba(233,69,96,0.3)">──────┬──────┬──────┬──────┬──────</span>┬──────┬─── ··· ───┐
+  │<span style="color:#6c7086">null</span>  │<span style="color:#e94560"> blk1 </span>│<span style="color:#e94560"> blk2 </span>│<span style="color:#e94560"> blk3 </span>│<span style="color:#e94560"> blk4 </span>│<span style="color:#e94560"> blk5 </span>│<span style="color:#6c7086"> free </span>│           │
+  └──────┴<span style="background:rgba(233,69,96,0.3)">──────┴──────┴──────┴──────┴──────</span>┴──────┴─── ··· ───┘
+           <span style="color:#e94560">↑ FlashAttention reads/writes here via block_id offset</span>
+           <span class="cm">GPU memory itself is never malloc'd or free'd</span></pre>
+  </div>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">④ /metrics observes the state</span>
+
+  usage = 1 − (free_blocks / total_blocks)
+        = 1 − (5396 / 5401)
+        = <span class="ok">5 / 5401 ≈ 0.000926</span>
+
+  <span class="cm">Total Python operations: 10 pointer swaps + 5 int increments + 1 dict insert</span>
+  <span class="cm">Total CUDA operations: 0</span></pre>
+  </div>
+
+  <h3><span class="i18n" data-en="7.7 Relationship to PagedAttention" data-zh="7.7 與 PagedAttention 的關係">7.7 Relationship to PagedAttention</span></h3>
+  <p><span class="i18n" data-en="Everything described above &lt;strong&gt;is&lt;/strong&gt; PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:" data-zh="以上所描述的一切&lt;strong&gt;就是&lt;/strong&gt; PagedAttention — 原始 vLLM 論文的核心貢獻。命名直接對應 OS virtual memory 概念：">Everything described above <strong>is</strong> PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:</span></p>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">OS Virtual Memory                      vLLM PagedAttention</span>
+<span class="cm">═══════════════════                    ════════════════════</span>
+
+┌─────────────────┐                    ┌──────────────────────────┐
+│   <span style="color:#6ec6ff">Page Frame</span>     │  ──────────────►   │   <span style="color:#6ec6ff">KVCacheBlock</span>             │
+│   (4 KB)        │                    │   (2 MiB = 16 tokens)    │
+└─────────────────┘                    └──────────────────────────┘
+
+┌─────────────────┐                    ┌──────────────────────────┐
+│   <span style="color:#a6e3a1">Page Table</span>     │  ──────────────►   │   <span style="color:#a6e3a1">block_table</span>              │
+│   VA → PA map   │                    │   [1, 2, 3, 4, 5]        │
+└─────────────────┘                    └──────────────────────────┘
+
+┌─────────────────┐                    ┌──────────────────────────┐
+│ <span style="color:#f5a623">Physical Memory</span> │  ──────────────►   │ <span style="color:#f5a623">torch.zeros(10.55 GiB)</span>    │
+│ (pre-allocated) │                    │ (pre-allocated on GPU)    │
+└─────────────────┘                    └──────────────────────────┘
+
+┌─────────────────┐                    ┌──────────────────────────┐
+│  <span style="color:#cba6f7">Free Page List</span> │  ──────────────►   │  <span style="color:#cba6f7">FreeKVCacheBlockQueue</span>    │
+│  (linked list)  │                    │  (doubly-linked list)     │
+└─────────────────┘                    └──────────────────────────┘
+
+┌─────────────────┐                    ┌──────────────────────────┐
+│  <span style="color:#fab387">ref_count</span>      │  ──────────────►   │  <span style="color:#fab387">block.ref_cnt</span>             │
+│  (page sharing) │                    │  (prefix cache sharing)   │
+└─────────────────┘                    └──────────────────────────┘</pre>
+  </div>
+
+  <p><span class="i18n" data-en="Just as OS paging lets processes use non-contiguous physical memory via a page table, PagedAttention lets requests use non-contiguous GPU memory via a block table:" data-zh="就像 OS 分頁讓進程透過 page table 使用不連續的實體記憶體，PagedAttention 讓 request 透過 block table 使用不連續的 GPU 記憶體：">Just as OS paging lets processes use non-contiguous physical memory via a page table, PagedAttention lets requests use non-contiguous GPU memory via a block table:</span></p>
+
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">Logical token positions (contiguous in attention computation)</span>
+
+  token:  0  1  2  ···  15 │ 16 17 18 ···  31 │ 32 33 ···  47 │ 48 ···  65
+          <span style="background:rgba(233,69,96,0.25);padding:0 2px">───── block 1 ─────</span> │ <span style="background:rgba(110,198,255,0.25);padding:0 2px">───── block 2 ─────</span> │ <span style="background:rgba(166,227,161,0.25);padding:0 2px">───── block 3 ─────</span> │ <span style="background:rgba(250,179,135,0.25);padding:0 2px">── block 4 + 5</span>
+
+<span class="cm">Physical GPU memory (non-contiguous — blocks scattered anywhere)</span>
+
+  ┌──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┐
+  │<span style="color:#6c7086">null</span>  │<span style="background:rgba(233,69,96,0.3)"> blk1 </span>│<span style="background:rgba(110,198,255,0.3)"> blk2 </span>│<span style="background:rgba(166,227,161,0.3)"> blk3 </span>│<span style="background:rgba(250,179,135,0.3)"> blk4 </span>│<span style="background:rgba(250,179,135,0.3)"> blk5 </span>│<span style="color:#6c7086"> free </span>│<span style="color:#6c7086"> free </span>│ ···  │
+  └──────┴──────┴──────┴──────┴──────┴──────┴──────┴──────┴──────┘
+           <span style="color:#e94560">↑</span>      <span style="color:#6ec6ff">↑</span>      <span style="color:#a6e3a1">↑</span>      <span style="color:#fab387">↑  ↑</span>
+  block_table = [<span style="color:#e94560">1</span>, <span style="color:#6ec6ff">2</span>, <span style="color:#a6e3a1">3</span>, <span style="color:#fab387">4</span>, <span style="color:#fab387">5</span>]  ← indirection table (like page table)</pre>
+  </div>
+
+  <h4><span class="i18n" data-en="Where Continuum Fits" data-zh="Continuum 在其中的位置">Where Continuum Fits</span></h4>
+  <p><span class="i18n" data-en="Continuum operates entirely within PagedAttention's framework. It adds one behavior:" data-zh="Continuum 完全在 PagedAttention 的框架內運作。它只加了一個行為：">Continuum operates entirely within PagedAttention's framework. It adds one behavior:</span></p>
+  <div class="diagram">
+<pre style="margin:0;color:#cdd6f4"><span class="cm">Normal vLLM (request finishes → free pages immediately):</span>
+
+  request done → free(blk 1,2,3,4,5) → ref_cnt all → 0 → <span style="color:#f38ba8">back to free queue</span>
+                                                          <span style="color:#f38ba8">next request can overwrite</span>
+
+<span class="cm">Continuum (request finishes → skip free, keep pages):</span>
+
+  request done → <span style="color:#a6e3a1;font-weight:bold">skip free()</span> → ref_cnt all stay 1 → <span style="color:#a6e3a1">blocks NOT in free queue</span>
+                                                     <span style="color:#a6e3a1">next turn of same job reuses them</span>
+
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  <span style="color:#ffb74d">Continuum = "don't return the pages to the OS after process</span>    │
+  │  <span style="color:#ffb74d">pauses, because it will resume soon and need them back"</span>        │
+  └──────────────────────────────────────────────────────────────────┘</pre>
+  </div>
 </section>
 
 <!-- ====== 8. KV CACHE BUDGET ESTIMATION ====== -->
