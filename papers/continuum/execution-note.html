@@ -100,6 +100,7 @@ footer a{color:#6ec6ff}
     <li><a href="#pin-verify">Pin Verification</a></li>
     <li><a href="#bugs">Bugs Found</a></li>
     <li><a href="#vllm-design">vLLM Design</a></li>
+    <li><a href="#kv-budget">KV Budget</a></li>
     <li><a href="#observations">Observations</a></li>
     <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
   </ul>
@@ -407,9 +408,114 @@ self.kv_cache_manager.free(request)  <span class="cm"># ← ref_cnt decremented 
   </table>
 </section>
 
-<!-- ====== 7. OBSERVATIONS ====== -->
+<!-- ====== 7. KV CACHE BUDGET ESTIMATION ====== -->
+<section id="kv-budget">
+  <h2><span class="i18n" data-en="7. KV Cache Budget Estimation" data-zh="7. KV Cache 容量估算">7. KV Cache Budget Estimation</span></h2>
+  <p><span class="i18n" data-en="How does vLLM decide it can allocate 5402 blocks? This section traces the math." data-zh="vLLM 怎麼決定可以分配 5402 個 blocks？本節追蹤完整計算過程。">How does vLLM decide it can allocate 5402 blocks? This section traces the math.</span></p>
+
+  <h3><span class="i18n" data-en="7.1 The Formula" data-zh="7.1 公式">7.1 The Formula</span></h3>
+  <pre><code><span class="cm"># worker.py:294-331 — determine_num_available_blocks()</span>
+
+available_kv_cache_memory = total_gpu_memory × gpu_memory_utilization
+                          − model_weights
+                          − peak_activation_memory
+
+num_gpu_blocks = available_kv_cache_memory // cache_block_size</code></pre>
+
+  <p><span class="i18n" data-en="vLLM does NOT compute &lt;code&gt;peak_activation_memory&lt;/code&gt; analytically. It runs a &lt;strong&gt;profile run&lt;/strong&gt; — one real forward pass with a dummy batch — and measures the actual GPU memory delta:" data-zh="vLLM &lt;strong&gt;不用公式&lt;/strong&gt;計算 &lt;code&gt;peak_activation_memory&lt;/code&gt;。它直接跑一次 &lt;strong&gt;profile run&lt;/strong&gt; — 用假 batch 做一次真實 forward pass — 然後量 GPU 記憶體差值：">vLLM does NOT compute <code>peak_activation_memory</code> analytically. It runs a <strong>profile run</strong> — one real forward pass with a dummy batch — and measures the actual GPU memory delta:</span></p>
+  <pre><code><span class="cm"># Simplified from worker.py</span>
+free_memory_pre, total = torch.cuda.mem_get_info()
+self.model_runner.profile_run()      <span class="cm"># run forward pass with dummy batch</span>
+free_memory_post, _ = torch.cuda.mem_get_info()
+
+peak_activation = free_memory_pre − free_memory_post  <span class="cm"># measured, not calculated</span></code></pre>
+
+  <h3><span class="i18n" data-en="7.2 Per-Block Size Calculation" data-zh="7.2 每個 Block 的大小計算">7.2 Per-Block Size Calculation</span></h3>
+  <p><span class="i18n" data-en="Each block stores KV cache for &lt;code&gt;block_size&lt;/code&gt; tokens across all attention layers:" data-zh="每個 block 儲存 &lt;code&gt;block_size&lt;/code&gt; 個 token 在所有 attention layer 的 KV cache：">Each block stores KV cache for <code>block_size</code> tokens across all attention layers:</span></p>
+  <pre><code><span class="cm"># cache_engine.py:121-145 — get_cache_block_size()</span>
+
+cache_block_size = dtype_size × num_layers × block_size × (key_entry + value_entry)
+
+<span class="cm"># where:</span>
+key_entry   = num_kv_heads × head_size
+value_entry = num_kv_heads × head_size   <span class="cm"># same as key (except MLA)</span></code></pre>
+
+  <h4><span class="i18n" data-en="Llama 3.1 8B concrete values:" data-zh="Llama 3.1 8B 具體數值：">Llama 3.1 8B concrete values:</span></h4>
+  <table>
+    <tr><th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th><th><span class="i18n" data-en="Value" data-zh="值">Value</span></th><th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th></tr>
+    <tr><td><code>num_attention_layers</code></td><td>32</td><td>config.json</td></tr>
+    <tr><td><code>num_kv_heads</code></td><td>8</td><td>GQA (32 Q heads / 4 groups)</td></tr>
+    <tr><td><code>head_size</code></td><td>128</td><td>hidden_size 4096 / 32 heads</td></tr>
+    <tr><td><code>block_size</code></td><td>16</td><td>vLLM default (<code>--block-size</code>)</td></tr>
+    <tr><td><code>dtype_size</code></td><td>2 bytes</td><td>bfloat16</td></tr>
+  </table>
+
+  <pre><code>key_entry   = 8 × 128 = <span class="nu">1024</span>
+value_entry = 8 × 128 = <span class="nu">1024</span>
+
+cache_block_size = 2 × 32 × 16 × (1024 + 1024)
+                 = 2 × 32 × 16 × 2048
+                 = <span class="nu">2,097,152 bytes</span>
+                 = <span class="nu">2 MB per block</span></code></pre>
+
+  <h3><span class="i18n" data-en="7.3 Memory Budget Breakdown" data-zh="7.3 記憶體預算分配">7.3 Memory Budget Breakdown</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Component" data-zh="項目">Component</span></th><th><span class="i18n" data-en="Size" data-zh="大小">Size</span></th><th><span class="i18n" data-en="How determined" data-zh="如何決定">How determined</span></th></tr>
+    <tr><td>GPU total</td><td>32,607 MB</td><td>RTX 5090 spec</td></tr>
+    <tr><td>× <code>gpu_memory_utilization</code></td><td>× 0.85</td><td><code>--gpu-memory-utilization</code></td></tr>
+    <tr><td>= <span class="i18n" data-en="Usable" data-zh="可用">Usable</span></td><td><strong>27,716 MB</strong></td><td></td></tr>
+    <tr><td>− <span class="i18n" data-en="Model weights" data-zh="模型權重">Model weights</span></td><td>~15,000 MB</td><td>Llama 3.1 8B in bf16</td></tr>
+    <tr><td>− <span class="i18n" data-en="Peak activation" data-zh="Peak activation">Peak activation</span></td><td>~1,700 MB</td><td><span class="i18n" data-en="Measured by profile run" data-zh="由 profile run 量測">Measured by profile run</span></td></tr>
+    <tr><td>= <span class="i18n" data-en="Available for KV cache" data-zh="可用於 KV cache">Available for KV cache</span></td><td><strong>~11,016 MB</strong></td><td></td></tr>
+    <tr><td>÷ cache_block_size</td><td>÷ 2 MB</td><td></td></tr>
+    <tr><td>= <code>num_gpu_blocks</code></td><td><strong>≈ 5,508</strong></td><td></td></tr>
+    <tr><td><span class="i18n" data-en="Actual (after fragmentation)" data-zh="實際（扣除碎片化）">Actual (after fragmentation)</span></td><td><strong>5,402</strong></td><td><code>/metrics</code></td></tr>
+  </table>
+  <div class="note"><strong><span class="i18n" data-en="Note:" data-zh="注意：">Note:</span></strong> <span class="i18n" data-en="The ~100 block gap between estimated (5,508) and actual (5,402) comes from CUDA context, torch.compile cache, memory fragmentation, and other CUDA runtime overhead that the profile run captures but our formula does not." data-zh="估算值（5,508）和實際值（5,402）之間約 100 blocks 的差距來自 CUDA context、torch.compile cache、記憶體碎片化和其他 CUDA runtime 開銷 — profile run 會捕捉到但我們的公式沒有。">The ~100 block gap between estimated (5,508) and actual (5,402) comes from CUDA context, torch.compile cache, memory fragmentation, and other CUDA runtime overhead that the profile run captures but our formula does not.</span></div>
+
+  <h3><span class="i18n" data-en="7.4 What Is Activation Memory?" data-zh="7.4 什麼是 Activation Memory？">7.4 What Is Activation Memory?</span></h3>
+  <p><span class="i18n" data-en="Activations are the &lt;strong&gt;intermediate tensors&lt;/strong&gt; produced during a forward pass. Unlike model weights (permanent) and KV cache (persistent across steps), activations are &lt;strong&gt;transient&lt;/strong&gt; — created during computation and discarded immediately after." data-zh="Activation 是前向傳播中產生的&lt;strong&gt;中間 tensor&lt;/strong&gt;。不同於模型權重（永久）和 KV cache（跨 step 持久），activation 是&lt;strong&gt;暫態的&lt;/strong&gt; — 計算時產生，用完立即丟棄。">Activations are the <strong>intermediate tensors</strong> produced during a forward pass. Unlike model weights (permanent) and KV cache (persistent across steps), activations are <strong>transient</strong> — created during computation and discarded immediately after.</span></p>
+
+  <p><span class="i18n" data-en="The two largest activations in each Transformer layer:" data-zh="每個 Transformer layer 中最大的兩個 activation：">The two largest activations in each Transformer layer:</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4>Attention scores</h4>
+      <p><code>num_heads × S × S × dtype_size</code></p>
+      <p><span class="i18n" data-en="With FlashAttention, this is &lt;strong&gt;never materialized&lt;/strong&gt; as a full S×S matrix — computed in tiles, so actual memory ≈ 0." data-zh="使用 FlashAttention 時，完整的 S×S 矩陣&lt;strong&gt;不會被實體化&lt;/strong&gt; — 以 tile 方式計算，實際記憶體 ≈ 0。">With FlashAttention, this is <strong>never materialized</strong> as a full S×S matrix — computed in tiles, so actual memory ≈ 0.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="FFN up + gate projection" data-zh="FFN up + gate 投影">FFN up + gate projection</span> <span style="color:#e94560">(dominant)</span></h4>
+      <p><code>max_batch_tokens × intermediate_size × 2 × dtype_size</code></p>
+      <p>Llama 8B: <code>8192 × 14336 × 2 × 2 = <strong>~448 MB</strong></code></p>
+      <p><span class="i18n" data-en="Only one layer's activation is alive at a time (inference has no backprop), so this is the &lt;strong&gt;peak&lt;/strong&gt;, not cumulative." data-zh="同時間只有一層的 activation 存活（inference 不需要反向傳播），所以這是&lt;strong&gt;峰值&lt;/strong&gt;，不是累計值。">Only one layer's activation is alive at a time (inference has no backprop), so this is the <strong>peak</strong>, not cumulative.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="7.5 GPU Memory Map" data-zh="7.5 GPU 記憶體分佈圖">7.5 GPU Memory Map</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Region" data-zh="區域">Region</span></th><th><span class="i18n" data-en="Size" data-zh="大小">Size</span></th><th><span class="i18n" data-en="Lifetime" data-zh="生命週期">Lifetime</span></th><th><span class="i18n" data-en="Configurable?" data-zh="可設定？">Configurable?</span></th></tr>
+    <tr><td><span class="i18n" data-en="Model weights" data-zh="模型權重">Model weights</span></td><td>~15 GB</td><td><span class="i18n" data-en="Permanent" data-zh="永久">Permanent</span></td><td><span class="i18n" data-en="Choose model / quantization" data-zh="選擇模型 / 量化">Choose model / quantization</span></td></tr>
+    <tr><td>Peak activation</td><td>~1.7 GB</td><td><span class="i18n" data-en="Transient (per forward pass)" data-zh="暫態（每次 forward pass）">Transient (per forward pass)</span></td><td><code>--max-num-batched-tokens</code></td></tr>
+    <tr><td><strong>KV cache blocks</strong></td><td><strong>~10.5 GB</strong></td><td><span class="i18n" data-en="Persistent (across steps)" data-zh="持久（跨 step）">Persistent (across steps)</span></td><td><code>--gpu-memory-utilization</code>, <code>--block-size</code></td></tr>
+    <tr><td>CUDA overhead</td><td>~0.5 GB</td><td><span class="i18n" data-en="Permanent" data-zh="永久">Permanent</span></td><td><span class="i18n" data-en="Not configurable" data-zh="不可設定">Not configurable</span></td></tr>
+    <tr><td><span class="i18n" data-en="Reserved (15%)" data-zh="保留（15%）">Reserved (15%)</span></td><td>~4.9 GB</td><td>—</td><td><code>--gpu-memory-utilization</code></td></tr>
+    <tr><td><strong>Total</strong></td><td><strong>32.6 GB</strong></td><td></td><td></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="7.6 Why This Matters for Continuum" data-zh="7.6 這對 Continuum 的意義">7.6 Why This Matters for Continuum</span></h3>
+  <p><span class="i18n" data-en="Continuum pins blocks to keep them allocated. Every pinned block is one fewer block available for new requests. With 5,402 total blocks:" data-zh="Continuum pin 住 blocks 使其保持佔用。每一個 pinned block 都意味著少一個 block 可供新 request 使用。以 5,402 個 blocks 為例：">Continuum pins blocks to keep them allocated. Every pinned block is one fewer block available for new requests. With 5,402 total blocks:</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Scenario" data-zh="情境">Scenario</span></th><th><span class="i18n" data-en="Tokens pinned" data-zh="被 pin 的 tokens">Tokens pinned</span></th><th><span class="i18n" data-en="Blocks pinned" data-zh="被 pin 的 blocks">Blocks pinned</span></th><th><span class="i18n" data-en="% capacity locked" data-zh="佔用容量 %">% capacity locked</span></th></tr>
+    <tr><td><span class="i18n" data-en="1 short agent job" data-zh="1 個短 agent job">1 short agent job</span></td><td>~100</td><td>~7</td><td>0.1%</td></tr>
+    <tr><td><span class="i18n" data-en="10 concurrent jobs, 2K ctx each" data-zh="10 個並行 job，各 2K context">10 concurrent jobs, 2K ctx each</span></td><td>20,000</td><td>1,250</td><td>23%</td></tr>
+    <tr><td><span class="i18n" data-en="64 concurrent jobs (SWE-bench)" data-zh="64 個並行 job（SWE-bench）">64 concurrent jobs (SWE-bench)</span></td><td>128,000+</td><td>8,000+</td><td><span class="err">&gt;100% → eviction needed</span></td></tr>
+  </table>
+  <p><span class="i18n" data-en="This is why Continuum's pin TTL and eviction policy matter — aggressive pinning without eviction would exhaust the KV cache budget and stall all new requests." data-zh="這就是為什麼 Continuum 的 pin TTL 和淘汰策略很重要 — 沒有淘汰機制的激進 pinning 會耗盡 KV cache 預算，導致所有新 request 被阻塞。">This is why Continuum's pin TTL and eviction policy matter — aggressive pinning without eviction would exhaust the KV cache budget and stall all new requests.</span></p>
+</section>
+
+<!-- ====== 8. OBSERVATIONS ====== -->
 <section id="observations">
-  <h2><span class="i18n" data-en="7. Observations &amp; Takeaways" data-zh="7. 觀察與總結">7. Observations & Takeaways</span></h2>
+  <h2><span class="i18n" data-en="8. Observations &amp; Takeaways" data-zh="8. 觀察與總結">8. Observations & Takeaways</span></h2>
 
   <div class="cards">
     <div class="card">
