@@ -437,18 +437,80 @@ request.last_func_call = self.job_to_history[job_id][<span class="nu">-1</span>]
   <p><span class="i18n" data-en="Understanding Continuum's pin mechanism requires understanding vLLM v1's underlying KV cache architecture. Here we document the key design decisions and community discussions." data-zh="理解 Continuum 的 pin 機制需要先理解 vLLM v1 底層的 KV cache 架構。以下整理關鍵設計決策與社群討論。">Understanding Continuum's pin mechanism requires understanding vLLM v1's underlying KV cache architecture. Here we document the key design decisions and community discussions.</span></p>
 
   <h3><span class="i18n" data-en="6.1 Append-Only Block Table" data-zh="6.1 Append-Only Block Table">6.1 Append-Only Block Table</span></h3>
-  <p><span class="i18n" data-en="vLLM v1's block table is &lt;strong&gt;append-only&lt;/strong&gt; — once a block ID is written, it cannot be modified. This is a deliberate departure from v0:" data-zh="vLLM v1 的 block table 是 &lt;strong&gt;append-only&lt;/strong&gt; — block ID 一旦寫入就不能修改。這是刻意與 v0 不同的設計：">vLLM v1's block table is <strong>append-only</strong> — once a block ID is written, it cannot be modified. This is a deliberate departure from v0:</span></p>
-  <div class="cards">
-    <div class="card">
-      <h4>v0: <span class="i18n" data-en="Mutable block table" data-zh="可變 block table">Mutable block table</span></h4>
-      <p><span class="i18n" data-en="If block 3 is a duplicate of block 1, v0 frees block 3 and rewrites the block table from &lt;code&gt;[0, 3]&lt;/code&gt; → &lt;code&gt;[0, 1]&lt;/code&gt;. This requires synchronization with the GPU model runner." data-zh="如果 block 3 是 block 1 的副本，v0 會釋放 block 3 並將 block table 從 &lt;code&gt;[0, 3]&lt;/code&gt; 改寫為 &lt;code&gt;[0, 1]&lt;/code&gt;。這需要與 GPU model runner 同步。">If block 3 is a duplicate of block 1, v0 frees block 3 and rewrites the block table from <code>[0, 3]</code> → <code>[0, 1]</code>. This requires synchronization with the GPU model runner.</span></p>
+  <p><span class="i18n" data-en="vLLM v1's block table is &lt;strong&gt;append-only&lt;/strong&gt; — once a block ID is written into a request's block table, it &lt;strong&gt;cannot be changed&lt;/strong&gt;. New blocks can only be appended at the end. To understand why, consider this scenario:" data-zh="vLLM v1 的 block table 是 &lt;strong&gt;append-only&lt;/strong&gt; — block ID 一旦寫入 request 的 block table 就&lt;strong&gt;不能修改&lt;/strong&gt;。新 block 只能追加在尾部。要理解為什麼，考慮以下情境：">vLLM v1's block table is <strong>append-only</strong> — once a block ID is written into a request's block table, it <strong>cannot be changed</strong>. New blocks can only be appended at the end. To understand why, consider this scenario:</span></p>
+
+  <h4><span class="i18n" data-en="Scenario: Two requests with the same system prompt" data-zh="情境：兩個 request 有相同的 system prompt">Scenario: Two requests with the same system prompt</span></h4>
+
+  <div class="diagram" style="padding:1.2rem">
+    <p class="step-title"><span class="i18n" data-en="Step 1 — Request A arrives first" data-zh="Step 1 — Request A 先到達">Step 1 — Request A arrives first</span></p>
+    <p class="step-detail"><span class="i18n" data-en="System prompt = &quot;You are a helpful assistant.&quot; → needs 1 block" data-zh="System prompt = &quot;You are a helpful assistant.&quot; → 需要 1 個 block">System prompt = "You are a helpful assistant." → needs 1 block</span></p>
+    <div class="blk-row">
+      <span class="blk-label">A:</span>
+      <span class="blk used">blk 3</span>
+      <span style="font-size:.78rem;color:#8fa4c0">← <span class="i18n" data-en="allocated fresh, stores K/V for system prompt" data-zh="新分配，存 system prompt 的 K/V">allocated fresh, stores K/V for system prompt</span></span>
     </div>
-    <div class="card hl">
-      <h4>v1: Append-only</h4>
-      <p><span class="i18n" data-en="Changing &lt;code&gt;[0, 3]&lt;/code&gt; to &lt;code&gt;[0, 1]&lt;/code&gt; is &lt;strong&gt;not allowed&lt;/strong&gt;. Duplicate blocks are tolerated and only cleaned up when the request finishes. This means the GPU can safely read block tables without locks." data-zh="將 &lt;code&gt;[0, 3]&lt;/code&gt; 改為 &lt;code&gt;[0, 1]&lt;/code&gt; &lt;strong&gt;不被允許&lt;/strong&gt;。重複的 block 被容忍，只有在 request 結束時才清理。這表示 GPU 可以安全地讀取 block table 而不需要鎖。">Changing <code>[0, 3]</code> to <code>[0, 1]</code> is <strong>not allowed</strong>. Duplicate blocks are tolerated and only cleaned up when the request finishes. This means the GPU can safely read block tables without locks.</span></p>
+
+    <p class="step-title" style="margin-top:1.2rem"><span class="i18n" data-en="Step 2 — Request B arrives with the same system prompt" data-zh="Step 2 — Request B 到達，有相同的 system prompt">Step 2 — Request B arrives with the same system prompt</span></p>
+    <p class="step-detail"><span class="i18n" data-en="Prefix cache hit: block hash matches → B also needs block 3's K/V data" data-zh="Prefix cache hit：block hash 匹配 → B 也需要 block 3 的 K/V 資料">Prefix cache hit: block hash matches → B also needs block 3's K/V data</span></p>
+    <p class="step-detail"><span class="i18n" data-en="(Block hash = hash of token IDs + parent block hash, so same tokens at same position = same hash)" data-zh="（Block hash = token IDs + parent block hash 的 hash，所以相同位置的相同 tokens = 相同 hash）">(Block hash = hash of token IDs + parent block hash, so same tokens at same position = same hash)</span></p>
+  </div>
+
+  <p><span class="i18n" data-en="Here's where v0 and v1 diverge:" data-zh="這裡是 v0 和 v1 的分歧點：">Here's where v0 and v1 diverge:</span></p>
+
+  <div class="cards" style="grid-template-columns:1fr 1fr">
+    <div class="card" style="border-left:4px solid #f38ba8">
+      <h4 style="color:#f38ba8">v0: <span class="i18n" data-en="Mutable block table" data-zh="可變 block table">Mutable block table</span></h4>
+      <p class="step-detail"><span class="i18n" data-en="B shares A's block directly. Then scheduler rewrites A's block table to point to a canonical copy:" data-zh="B 直接共享 A 的 block。然後 scheduler 改寫 A 的 block table 指向標準副本：">B shares A's block directly. Then scheduler rewrites A's block table to point to a canonical copy:</span></p>
+      <div class="blk-row" style="margin:6px 0">
+        <span class="blk-label">A:</span>
+        <span class="blk freed" style="font-size:.72rem">blk 3→1</span>
+        <span style="font-size:.72rem;color:#f38ba8">rewritten!</span>
+      </div>
+      <div class="blk-row" style="margin:6px 0">
+        <span class="blk-label">B:</span>
+        <span class="blk used" style="font-size:.72rem;background:rgba(233,69,96,.6)">blk 1</span>
+      </div>
+      <div class="warn" style="margin-top:8px;font-size:.78rem;padding:6px 10px"><span class="i18n" data-en="Problem: GPU's FlashAttention kernel may be reading A's block table at this exact moment. CPU rewrites it mid-read → inconsistent data → wrong attention output." data-zh="問題：GPU 的 FlashAttention kernel 可能正在讀取 A 的 block table。CPU 在讀取中途改寫 → 資料不一致 → attention 輸出錯誤。">Problem: GPU's FlashAttention kernel may be reading A's block table at this exact moment. CPU rewrites it mid-read → inconsistent data → wrong attention output.</span></div>
+    </div>
+    <div class="card" style="border-left:4px solid #a6e3a1">
+      <h4 style="color:#a6e3a1">v1: Append-only</h4>
+      <p class="step-detail"><span class="i18n" data-en="B gets its own block. Both co-exist with the same K/V content:" data-zh="B 分配自己的 block。兩者共存，內容相同：">B gets its own block. Both co-exist with the same K/V content:</span></p>
+      <div class="blk-row" style="margin:6px 0">
+        <span class="blk-label">A:</span>
+        <span class="blk used" style="font-size:.72rem">blk 3</span>
+        <span style="font-size:.72rem;color:#a6e3a1"><span class="i18n" data-en="untouched" data-zh="不改">untouched</span></span>
+      </div>
+      <div class="blk-row" style="margin:6px 0">
+        <span class="blk-label">B:</span>
+        <span class="blk used" style="font-size:.72rem;background:rgba(110,198,255,.6)">blk 9</span>
+        <span style="font-size:.72rem;color:#8fa4c0"><span class="i18n" data-en="same content, different block" data-zh="相同內容，不同 block">same content, different block</span></span>
+      </div>
+      <div class="ok-box" style="margin-top:8px;font-size:.78rem;padding:6px 10px"><span class="i18n" data-en="GPU reads block tables safely — no entry is ever modified. Duplicate blocks waste a little memory but are cleaned up when requests finish." data-zh="GPU 安全讀取 block table — 沒有 entry 會被修改。重複的 block 浪費一點記憶體，但在 request 結束時會被清理。">GPU reads block tables safely — no entry is ever modified. Duplicate blocks waste a little memory but are cleaned up when requests finish.</span></div>
     </div>
   </div>
-  <p><span class="i18n" data-en="Source: &lt;a href='https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md'&gt;vLLM v1 Prefix Caching Design Doc&lt;/a&gt;" data-zh="來源：&lt;a href='https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md'&gt;vLLM v1 Prefix Caching 設計文件&lt;/a&gt;">Source: <a href="https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md">vLLM v1 Prefix Caching Design Doc</a></span></p>
+
+  <h4><span class="i18n" data-en="After Request A finishes" data-zh="Request A 完成後">After Request A finishes</span></h4>
+  <div class="diagram" style="padding:1.2rem">
+    <p class="step-detail"><span class="i18n" data-en="Block 3 returns to free queue, but its hash stays in the prefix cache. Future requests with the same system prompt get a cache hit and reuse block 3 directly — no duplication needed." data-zh="Block 3 回到 free queue，但它的 hash 保留在 prefix cache 中。未來有相同 system prompt 的 request 可以直接命中 cache 並復用 block 3 — 不需要重複分配。">Block 3 returns to free queue, but its hash stays in the prefix cache. Future requests with the same system prompt get a cache hit and reuse block 3 directly — no duplication needed.</span></p>
+    <div class="blk-row">
+      <span class="blk-label"><span class="i18n" data-en="Free queue:" data-zh="Free queue：">Free queue:</span></span>
+      <span class="blk free" style="position:relative">blk 3 <span style="position:absolute;top:-14px;right:-4px;font-size:.6rem;color:#a6e3a1;background:rgba(166,227,161,.15);padding:1px 4px;border-radius:3px">hash cached</span></span>
+      <span class="blk-arrow">⇄</span>
+      <span class="blk free">blk 7</span>
+      <span class="blk-arrow">⇄</span>
+      <span class="blk free" style="opacity:.5">···</span>
+    </div>
+    <div class="blk-row" style="margin-top:8px">
+      <span class="blk-label"><span class="i18n" data-en="Request C arrives:" data-zh="Request C 到達：">Request C arrives:</span></span>
+      <span class="blk pinned" style="font-size:.72rem">blk 3</span>
+      <span style="font-size:.78rem;color:#a6e3a1"><span class="i18n" data-en="← prefix cache hit! reuse block 3, no re-computation" data-zh="← prefix cache 命中！復用 block 3，不需要重新計算">← prefix cache hit! reuse block 3, no re-computation</span></span>
+    </div>
+  </div>
+
+  <h4><span class="i18n" data-en="Why this matters for Continuum" data-zh="這對 Continuum 的意義">Why this matters for Continuum</span></h4>
+  <p><span class="i18n" data-en="Continuum pins blocks after a request finishes. Because block tables are append-only, the pinned blocks' IDs are &lt;strong&gt;guaranteed stable&lt;/strong&gt; — no other process can rewrite them. When the next turn arrives, prefix cache finds the pinned blocks by hash and appends their IDs to the new block table." data-zh="Continuum 在 request 完成後 pin blocks。因為 block table 是 append-only，被 pin 的 block ID &lt;strong&gt;保證穩定&lt;/strong&gt; — 沒有其他進程可以改寫它們。當下一輪到來時，prefix cache 透過 hash 找到被 pin 的 blocks，將它們的 ID 追加到新的 block table。">Continuum pins blocks after a request finishes. Because block tables are append-only, the pinned blocks' IDs are <strong>guaranteed stable</strong> — no other process can rewrite them. When the next turn arrives, prefix cache finds the pinned blocks by hash and appends their IDs to the new block table.</span></p>
+
+  <p style="font-size:.85rem"><span class="i18n" data-en="Source: " data-zh="來源：">Source: </span><a href="https://docs.vllm.ai/en/stable/design/prefix_caching/">vLLM v1 Prefix Caching Design Doc</a></p>
 
   <h3><span class="i18n" data-en="6.2 Null Block (block_id=0)" data-zh="6.2 Null Block（block_id=0）">6.2 Null Block (block_id=0)</span></h3>
   <p><span class="i18n" data-en="The &lt;code&gt;BlockPool&lt;/code&gt; reserves one block as a permanent placeholder:" data-zh="&lt;code&gt;BlockPool&lt;/code&gt; 保留一個 block 作為永久佔位符：">The <code>BlockPool</code> reserves one block as a permanent placeholder:</span></p>
@@ -498,7 +560,7 @@ self.kv_cache_manager.free(request)  <span class="cm"># ← ref_cnt decremented 
     <tr><th><span class="i18n" data-en="Topic" data-zh="主題">Topic</span></th><th><span class="i18n" data-en="Link" data-zh="連結">Link</span></th><th><span class="i18n" data-en="Key Insight" data-zh="關鍵內容">Key Insight</span></th></tr>
     <tr>
       <td><span class="i18n" data-en="Prefix Caching Design (v1)" data-zh="Prefix Caching 設計（v1）">Prefix Caching Design (v1)</span></td>
-      <td><a href="https://github.com/vllm-project/vllm/blob/main/docs/source/design/v1/prefix_caching.md">design/v1/prefix_caching.md</a></td>
+      <td><a href="https://docs.vllm.ai/en/stable/design/prefix_caching/">design/v1/prefix_caching.md</a></td>
       <td><span class="i18n" data-en="Official doc explaining append-only constraint, dedup deferral, and reverse-order eviction" data-zh="官方文件，解釋 append-only 約束、延遲去重、反向淘汰">Official doc explaining append-only constraint, dedup deferral, and reverse-order eviction</span></td>
     </tr>
     <tr>
