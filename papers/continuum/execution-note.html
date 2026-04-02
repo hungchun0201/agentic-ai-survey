@@ -569,43 +569,41 @@ shape = (<span class="nu">2</span>, num_blocks, block_size, num_kv_heads, head_s
 
   <p><span class="i18n" data-en="One block (block_id = N) in one layer:" data-zh="一個 block（block_id = N）在一層中：">One block (block_id = N) in one layer:</span></p>
   <div class="diagram" style="padding:1.2rem">
-    <table style="margin:8px 0">
-      <tr>
-        <th></th>
-        <th><span class="i18n" data-en="Index" data-zh="索引">Index</span></th>
-        <th>Shape</th>
-        <th><span class="i18n" data-en="Size" data-zh="大小">Size</span></th>
-      </tr>
-      <tr>
-        <td><strong style="color:#e94560">K tensor</strong></td>
-        <td><code>kv_cache[0, N, :, :, :]</code></td>
-        <td>[16, 8, 128] bf16</td>
-        <td><strong>32 KiB</strong></td>
-      </tr>
-      <tr>
-        <td><strong style="color:#6ec6ff">V tensor</strong></td>
-        <td><code>kv_cache[1, N, :, :, :]</code></td>
-        <td>[16, 8, 128] bf16</td>
-        <td><strong>32 KiB</strong></td>
-      </tr>
-      <tr style="border-top:2px solid rgba(233,69,96,0.3)">
-        <td><span class="i18n" data-en="Per layer" data-zh="每層">Per layer</span></td>
-        <td></td>
-        <td>K + V</td>
-        <td><strong>64 KiB</strong></td>
-      </tr>
-      <tr>
-        <td><span class="i18n" data-en="× 32 layers" data-zh="× 32 層">× 32 layers</span></td>
-        <td></td>
-        <td></td>
-        <td><strong style="color:#ffb74d">2 MiB / block</strong></td>
-      </tr>
-    </table>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <p class="step-detail" style="margin-bottom:6px"><strong style="color:#e94560">K tensor</strong> &nbsp; <code>kv_cache[0, N, :, :, :]</code></p>
+        <div class="gpu-bar" style="margin:4px 0">
+          <div class="cell" style="background:rgba(233,69,96,.15);color:#e94560;flex:1;font-size:.78rem;height:auto;padding:8px 10px;text-align:left">
+            [16, 8, 128] bf16 = <strong>32 KiB</strong>
+          </div>
+        </div>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <p class="step-detail" style="margin-bottom:6px"><strong style="color:#6ec6ff">V tensor</strong> &nbsp; <code>kv_cache[1, N, :, :, :]</code></p>
+        <div class="gpu-bar" style="margin:4px 0">
+          <div class="cell" style="background:rgba(110,198,255,.15);color:#6ec6ff;flex:1;font-size:.78rem;height:auto;padding:8px 10px;text-align:left">
+            [16, 8, 128] bf16 = <strong>32 KiB</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="step-detail" style="margin-top:8px"><span class="i18n" data-en="Per layer: 32 + 32 = 64 KiB. Across 32 layers: 64 KiB × 32 = &lt;strong&gt;2 MiB per block&lt;/strong&gt;." data-zh="每層：32 + 32 = 64 KiB。跨 32 層：64 KiB × 32 = &lt;strong&gt;每個 block 2 MiB&lt;/strong&gt;。">Per layer: 32 + 32 = 64 KiB. Across 32 layers: 64 KiB × 32 = <strong>2 MiB per block</strong>.</span></p>
   </div>
 
   <p><span class="i18n" data-en="FlashAttention kernel uses &lt;code&gt;block_id&lt;/code&gt; to index directly into this tensor — no copying, no indirection beyond the block table lookup." data-zh="FlashAttention kernel 用 &lt;code&gt;block_id&lt;/code&gt; 直接索引到這個 tensor — 不需要複製，除了 block table 查找外沒有額外的間接尋址。">FlashAttention kernel uses <code>block_id</code> to index directly into this tensor — no copying, no indirection beyond the block table lookup.</span></p>
 
-  <h3><span class="i18n" data-en="7.4 Why a Doubly-Linked List?" data-zh="7.4 為什麼用 Doubly-Linked List？">7.4 Why a Doubly-Linked List?</span></h3>
+  <h3><span class="i18n" data-en="7.4 ref_cnt — Who Owns a Block?" data-zh="7.4 ref_cnt — 誰擁有一個 Block？">7.4 ref_cnt — Who Owns a Block?</span></h3>
+  <p><span class="i18n" data-en="Each &lt;code&gt;KVCacheBlock&lt;/code&gt; has a &lt;code&gt;ref_cnt&lt;/code&gt; (reference count) that tracks how many requests are using it. This is needed because &lt;strong&gt;prefix caching allows multiple requests to share the same block&lt;/strong&gt; — if two requests have the same system prompt, their first blocks contain identical K/V data, so vLLM lets them share instead of duplicating." data-zh="每個 &lt;code&gt;KVCacheBlock&lt;/code&gt; 都有一個 &lt;code&gt;ref_cnt&lt;/code&gt;（引用計數），追蹤有多少 request 正在使用它。這是因為 &lt;strong&gt;prefix caching 允許多個 request 共享同一個 block&lt;/strong&gt; — 如果兩個 request 有相同的 system prompt，它們的第一個 block 包含相同的 K/V 資料，所以 vLLM 讓它們共享而不是複製。">Each <code>KVCacheBlock</code> has a <code>ref_cnt</code> (reference count) that tracks how many requests are using it. This is needed because <strong>prefix caching allows multiple requests to share the same block</strong> — if two requests have the same system prompt, their first blocks contain identical K/V data, so vLLM lets them share instead of duplicating.</span></p>
+
+  <table>
+    <tr><th>ref_cnt</th><th><span class="i18n" data-en="State" data-zh="狀態">State</span></th><th><span class="i18n" data-en="Meaning" data-zh="意義">Meaning</span></th></tr>
+    <tr><td><code>0</code></td><td><span class="i18n" data-en="Free (in free queue)" data-zh="Free（在 free queue 中）">Free (in free queue)</span></td><td><span class="i18n" data-en="No one uses this block. Can be evicted or re-allocated." data-zh="沒有人使用這個 block。可以被淘汰或重新分配。">No one uses this block. Can be evicted or re-allocated.</span></td></tr>
+    <tr><td><code>1</code></td><td><span class="i18n" data-en="In use (1 request)" data-zh="使用中（1 個 request）">In use (1 request)</span></td><td><span class="i18n" data-en="Exactly one request owns it. Normal case." data-zh="恰好一個 request 擁有它。正常情況。">Exactly one request owns it. Normal case.</span></td></tr>
+    <tr><td><code>≥ 2</code></td><td><span class="i18n" data-en="Shared (prefix cache)" data-zh="共享（prefix cache）">Shared (prefix cache)</span></td><td><span class="i18n" data-en="Multiple requests share this block (same prefix). Block is freed only when ALL requests release it." data-zh="多個 request 共享此 block（相同 prefix）。只有當所有 request 都釋放時，block 才會被回收。">Multiple requests share this block (same prefix). Block is freed only when ALL requests release it.</span></td></tr>
+  </table>
+  <p><span class="i18n" data-en="Continuum's pin exploits this: by keeping &lt;code&gt;ref_cnt = 1&lt;/code&gt; (skipping &lt;code&gt;free()&lt;/code&gt;), the block stays out of the free queue — exactly the same as if a request were still using it." data-zh="Continuum 的 pin 利用了這個機制：透過保持 &lt;code&gt;ref_cnt = 1&lt;/code&gt;（跳過 &lt;code&gt;free()&lt;/code&gt;），block 不會回到 free queue — 效果和有 request 還在使用它完全一樣。">Continuum's pin exploits this: by keeping <code>ref_cnt = 1</code> (skipping <code>free()</code>), the block stays out of the free queue — exactly the same as if a request were still using it.</span></p>
+
+  <h3><span class="i18n" data-en="7.5 Why a Doubly-Linked List?" data-zh="7.5 為什麼用 Doubly-Linked List？">7.5 Why a Doubly-Linked List?</span></h3>
   <p><span class="i18n" data-en="The &lt;code&gt;FreeKVCacheBlockQueue&lt;/code&gt; is a doubly-linked list instead of Python's &lt;code&gt;deque&lt;/code&gt;. The reason: &lt;strong&gt;prefix cache hit requires removing a block from the middle&lt;/strong&gt;." data-zh="&lt;code&gt;FreeKVCacheBlockQueue&lt;/code&gt; 使用 doubly-linked list 而非 Python 的 &lt;code&gt;deque&lt;/code&gt;。原因：&lt;strong&gt;prefix cache hit 需要從中間移除 block&lt;/strong&gt;。">The <code>FreeKVCacheBlockQueue</code> is a doubly-linked list instead of Python's <code>deque</code>. The reason: <strong>prefix cache hit requires removing a block from the middle</strong>.</span></p>
 
   <p><span class="i18n" data-en="When a new request shares a prefix with a cached block, that block (which is free and evictable) must be pulled out of the free queue immediately:" data-zh="當一個新 request 與 cached block 共享 prefix 時，那個 block（目前是 free 且可被淘汰的）必須被立即從 free queue 中抽出：">When a new request shares a prefix with a cached block, that block (which is free and evictable) must be pulled out of the free queue immediately:</span></p>
@@ -637,7 +635,7 @@ block.prev_free_block = block.next_free_block = <span class="kw">None</span></co
 
   <div class="note"><strong><span class="i18n" data-en="Performance trick:" data-zh="效能技巧：">Performance trick:</span></strong> <span class="i18n" data-en="vLLM embeds &lt;code&gt;prev_free_block&lt;/code&gt; / &lt;code&gt;next_free_block&lt;/code&gt; directly on the &lt;code&gt;KVCacheBlock&lt;/code&gt; dataclass (not separate Node objects), avoiding Python object allocation overhead. &lt;code&gt;fake_head&lt;/code&gt; and &lt;code&gt;fake_tail&lt;/code&gt; sentinel nodes eliminate null-check branching." data-zh="vLLM 將 &lt;code&gt;prev_free_block&lt;/code&gt; / &lt;code&gt;next_free_block&lt;/code&gt; 直接嵌在 &lt;code&gt;KVCacheBlock&lt;/code&gt; dataclass 上（不是獨立的 Node 物件），避免 Python 物件分配開銷。&lt;code&gt;fake_head&lt;/code&gt; 和 &lt;code&gt;fake_tail&lt;/code&gt; 哨兵節點消除了 null-check 的分支。">vLLM embeds <code>prev_free_block</code> / <code>next_free_block</code> directly on the <code>KVCacheBlock</code> dataclass (not separate Node objects), avoiding Python object allocation overhead. <code>fake_head</code> and <code>fake_tail</code> sentinel nodes eliminate null-check branching.</span></div>
 
-  <h3><span class="i18n" data-en="7.5 Block Read/Write: The CUDA Kernels" data-zh="7.5 Block 讀寫：CUDA Kernels">7.5 Block Read/Write: The CUDA Kernels</span></h3>
+  <h3><span class="i18n" data-en="7.6 Block Read/Write: The CUDA Kernels" data-zh="7.6 Block 讀寫：CUDA Kernels">7.6 Block Read/Write: The CUDA Kernels</span></h3>
   <p><span class="i18n" data-en="Block allocation/free is pure Python, but the actual K/V data read/write happens in two CUDA kernels:" data-zh="Block 的分配/釋放是純 Python，但實際的 K/V 資料讀寫由兩個 CUDA kernel 負責：">Block allocation/free is pure Python, but the actual K/V data read/write happens in two CUDA kernels:</span></p>
 
   <div class="cards" style="grid-template-columns:1fr 1fr">
@@ -725,7 +723,7 @@ value_dst = value_cache + block_idx * block_stride + block_offset * page_stride;
     </tr>
   </table>
 
-  <h3><span class="i18n" data-en="7.6 The FreeKVCacheBlockQueue" data-zh="7.6 FreeKVCacheBlockQueue">7.6 The FreeKVCacheBlockQueue</span></h3>
+  <h3><span class="i18n" data-en="7.8 The FreeKVCacheBlockQueue" data-zh="7.8 FreeKVCacheBlockQueue">7.8 The FreeKVCacheBlockQueue</span></h3>
   <p><span class="i18n" data-en="The core data structure is a &lt;strong&gt;doubly-linked list&lt;/strong&gt; of &lt;code&gt;KVCacheBlock&lt;/code&gt; objects. All allocate/free operations are O(1) pointer swaps:" data-zh="核心資料結構是 &lt;code&gt;KVCacheBlock&lt;/code&gt; 物件的 &lt;strong&gt;doubly-linked list&lt;/strong&gt;。所有分配/釋放操作都是 O(1) 的指標交換：">The core data structure is a <strong>doubly-linked list</strong> of <code>KVCacheBlock</code> objects. All allocate/free operations are O(1) pointer swaps:</span></p>
   <pre><code><span class="cm"># vllm/v1/core/kv_cache_utils.py:158-175 — each block is a node</span>
 <span class="kw">@dataclass</span>
@@ -746,7 +744,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
 
 <span class="cm"># Pin: do nothing (skip the free above)</span></code></pre>
 
-  <h3><span class="i18n" data-en="7.7 Why This Design?" data-zh="7.7 為什麼這樣設計？">7.7 Why This Design?</span></h3>
+  <h3><span class="i18n" data-en="7.9 Why This Design?" data-zh="7.9 為什麼這樣設計？">7.9 Why This Design?</span></h3>
   <div class="cards">
     <div class="card">
       <h4><span class="i18n" data-en="No fragmentation" data-zh="零碎片化">No fragmentation</span></h4>
@@ -762,7 +760,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
     </div>
   </div>
 
-  <h3><span class="i18n" data-en="7.8 Concrete Example: Allocating 5 Blocks" data-zh="7.8 具體範例：分配 5 個 Blocks">7.8 Concrete Example: Allocating 5 Blocks</span></h3>
+  <h3><span class="i18n" data-en="7.10 Concrete Example: Allocating 5 Blocks" data-zh="7.10 具體範例：分配 5 個 Blocks">7.10 Concrete Example: Allocating 5 Blocks</span></h3>
   <p><span class="i18n" data-en="Tracing Turn 1 (66 tokens → 5 blocks) step by step:" data-zh="追蹤 Turn 1（66 tokens → 5 blocks）的每一步：">Tracing Turn 1 (66 tokens → 5 blocks) step by step:</span></p>
 
   <div class="diagram">
@@ -826,7 +824,7 @@ free_block_queue.<span class="fn">append</span>(block)       <span class="cm"># 
     <p class="step-detail"><span class="i18n" data-en="Total Python ops: 10 pointer swaps + 5 int increments + 1 dict insert" data-zh="Python 操作總計：10 次指標交換 + 5 次 int 遞增 + 1 次 dict 插入">Total Python ops: 10 pointer swaps + 5 int increments + 1 dict insert</span> &nbsp;|&nbsp; <span class="i18n" data-en="Total CUDA ops:" data-zh="CUDA 操作總計：">Total CUDA ops:</span> <strong>0</strong></p>
   </div>
 
-  <h3><span class="i18n" data-en="7.9 Relationship to PagedAttention" data-zh="7.9 與 PagedAttention 的關係">7.9 Relationship to PagedAttention</span></h3>
+  <h3><span class="i18n" data-en="7.11 Relationship to PagedAttention" data-zh="7.11 與 PagedAttention 的關係">7.11 Relationship to PagedAttention</span></h3>
   <p><span class="i18n" data-en="Everything described above &lt;strong&gt;is&lt;/strong&gt; PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:" data-zh="以上所描述的一切&lt;strong&gt;就是&lt;/strong&gt; PagedAttention — 原始 vLLM 論文的核心貢獻。命名直接對應 OS virtual memory 概念：">Everything described above <strong>is</strong> PagedAttention — the core contribution of the original vLLM paper. The naming maps directly to OS virtual memory concepts:</span></p>
 
   <div class="diagram" style="padding:1.5rem">
