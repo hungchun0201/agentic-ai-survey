@@ -469,65 +469,121 @@ footer a{color:#6ec6ff}
 <!-- ====== 6. PIN / TTL ====== -->
 <section id="pin-ttl">
   <h2><span class="i18n" data-en="6. Pin / TTL Mechanism" data-zh="6. 釘選 / TTL 機制">6. Pin / TTL Mechanism</span></h2>
-  <p>File: <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:237-262</code></p>
+  <p><span class="i18n" data-en="The Pin/TTL mechanism is the heart of Continuum. It answers: &lt;strong&gt;after a request finishes generating tokens, should its KV cache blocks be kept or freed?&lt;/strong&gt;" data-zh="Pin/TTL 機制是 Continuum 的核心。它回答的問題是：&lt;strong&gt;request 完成 token 生成後，它的 KV cache blocks 應該保留還是釋放？&lt;/strong&gt;">The Pin/TTL mechanism is the heart of Continuum. It answers: <strong>after a request finishes generating tokens, should its KV cache blocks be kept or freed?</strong></span></p>
 
-  <h3><span class="i18n" data-en="6.1 Pin" data-zh="6.1 釘選（Pin）">6.1 Pin</span></h3>
-  <pre><code><span class="cm"># scheduler.py:237-239</span>
-<span class="kw">def</span> <span class="fn">pin_request</span>(self, request: Request, length_of_pin: float) -> None:
-    self.continuum_recorder.request_pinned(request)           <span class="cm"># Record event</span>
-    self.pinned_requests.append((request, time.time() + length_of_pin))  <span class="cm"># Store in list</span></code></pre>
-  <p><span class="i18n" data-en="pinned_requests is a list[Tuple[Request, float]], where each tuple is (request, end_time). After pinning, the request's KV cache blocks will not be freed, occupying VRAM until the TTL expires." data-zh="pinned_requests 是一個 list[Tuple[Request, float]]，每個 tuple 為 (request, end_time)。釘選後，該 request 的 KV cache blocks 不會被釋放，持續佔用 VRAM 直到 TTL 到期。"><code>pinned_requests</code> is a <code>list[Tuple[Request, float]]</code>,
-    where each tuple is <code>(request, end_time)</code>.<br>
-    After pinning, the request's KV cache blocks <strong>will not be freed</strong>, occupying VRAM until the TTL expires.</span></p>
+  <h3><span class="i18n" data-en="6.1 The Big Picture: 3 Possible Outcomes" data-zh="6.1 全貌：3 種可能結果">6.1 The Big Picture: 3 Possible Outcomes</span></h3>
+  <p><span class="i18n" data-en="When a request finishes, &lt;code&gt;_free_blocks()&lt;/code&gt; makes a decision:" data-zh="當 request 完成時，&lt;code&gt;_free_blocks()&lt;/code&gt; 做出決策：">When a request finishes, <code>_free_blocks()</code> makes a decision:</span></p>
 
-  <h3><span class="i18n" data-en="6.2 TTL Auto-Expiry (Unpin)" data-zh="6.2 TTL 自動到期（Unpin）">6.2 TTL Auto-Expiry (Unpin)</span></h3>
-  <pre><code><span class="cm"># scheduler.py:248-256</span>
+  <div class="vflow">
+    <div class="box gray" style="text-align:center">
+      <h4 style="color:#8fa4c0"><span class="i18n" data-en="Request finishes token generation" data-zh="Request 完成 token 生成">Request finishes token generation</span></h4>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="box blue" style="text-align:center">
+      <h4 style="color:#6ec6ff"><code>_free_blocks()</code></h4>
+      <p style="font-size:.85rem"><span class="i18n" data-en="Checks: is_last_step? → detected tool call? → exec_time ≤ 2s?" data-zh="檢查：is_last_step? → 偵測到 tool call? → exec_time ≤ 2s?">Checks: is_last_step? → detected tool call? → exec_time ≤ 2s?</span></p>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="branch">
+      <div class="box green" style="text-align:center">
+        <h4 style="color:#a6e3a1"><span class="i18n" data-en="PIN (2s TTL)" data-zh="PIN（2s TTL）">PIN (2s TTL)</span></h4>
+        <p style="font-size:.8rem"><span class="i18n" data-en="Tool detected &amp; exec ≤ 2s &amp; not last step" data-zh="偵測到工具 &amp; exec ≤ 2s &amp; 非最後一步">Tool detected & exec ≤ 2s & not last step</span></p>
+        <p style="font-size:.78rem;color:#a6e3a1"><span class="i18n" data-en="→ skip free(), blocks stay in VRAM" data-zh="→ 跳過 free()，blocks 保留在 VRAM">→ skip free(), blocks stay in VRAM</span></p>
+      </div>
+      <div class="box red" style="text-align:center">
+        <h4 style="color:#f38ba8"><span class="i18n" data-en="FREE immediately" data-zh="立即 FREE">FREE immediately</span></h4>
+        <p style="font-size:.8rem"><span class="i18n" data-en="No tool / exec &gt; 2s / is_last_step" data-zh="無工具 / exec &gt; 2s / is_last_step">No tool / exec > 2s / is_last_step</span></p>
+        <p style="font-size:.78rem;color:#f38ba8"><span class="i18n" data-en="→ free(), blocks return to pool" data-zh="→ free()，blocks 回到 pool">→ free(), blocks return to pool</span></p>
+      </div>
+      <div class="box orange" style="text-align:center">
+        <h4 style="color:#f5a623"><span class="i18n" data-en="UNPIN later" data-zh="稍後 UNPIN">UNPIN later</span></h4>
+        <p style="font-size:.8rem"><span class="i18n" data-en="Was pinned, job didn't return in time" data-zh="曾被 pin，job 沒及時返回">Was pinned, job didn't return in time</span></p>
+        <p style="font-size:.78rem;color:#f5a623"><span class="i18n" data-en="→ TTL expires → free blocks" data-zh="→ TTL 到期 → 釋放 blocks">→ TTL expires → free blocks</span></p>
+      </div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="6.2 Pin/Unpin Timeline" data-zh="6.2 Pin/Unpin 時間軸">6.2 Pin/Unpin Timeline</span></h3>
+  <p><span class="i18n" data-en="Two scenarios showing what happens to KV cache blocks:" data-zh="兩個情境展示 KV cache blocks 的變化：">Two scenarios showing what happens to KV cache blocks:</span></p>
+
+  <div class="diagram" style="padding:1.2rem">
+    <p class="step-title" style="color:#a6e3a1"><span class="i18n" data-en="Happy path: Tool returns within TTL" data-zh="理想路徑：工具在 TTL 內返回">Happy path: Tool returns within TTL</span></p>
+    <div class="tbar" style="margin-bottom:2.2rem">
+      <div class="seg llm" style="min-width:110px;border-radius:6px 0 0 6px">Turn 1<br><small>LLM inference</small><span class="marker" style="right:0">finish</span></div>
+      <div class="seg" style="background:rgba(166,227,161,.2);color:#a6e3a1;min-width:90px"><strong>PINNED</strong><br><small>ref_cnt=1</small><span class="marker" style="left:0;right:0;text-align:center">← 2s TTL →</span></div>
+      <div class="seg tool" style="min-width:90px"><span class="i18n" data-en="tool" data-zh="工具">tool</span><br><small>~1s</small></div>
+      <div class="seg llm2" style="min-width:110px;border-radius:0 6px 6px 0">Turn 2<br><small>cache hit!</small><span class="marker" style="left:0"><span class="i18n" data-en="zero re-prefill" data-zh="零 re-prefill">zero re-prefill</span></span></div>
+    </div>
+
+    <p class="step-title" style="color:#f38ba8"><span class="i18n" data-en="Slow tool: TTL expires before tool returns" data-zh="慢工具：TTL 在工具返回前到期">Slow tool: TTL expires before tool returns</span></p>
+    <div class="tbar" style="margin-bottom:2.2rem">
+      <div class="seg llm" style="min-width:110px;border-radius:6px 0 0 6px">Turn 1<br><small>LLM inference</small><span class="marker" style="right:0">finish</span></div>
+      <div class="seg" style="background:rgba(166,227,161,.2);color:#a6e3a1;min-width:70px"><strong>PIN</strong><span class="marker" style="left:0;right:0;text-align:center">← 2s →</span></div>
+      <div class="seg" style="background:rgba(243,139,168,.2);color:#f38ba8;min-width:60px"><strong>UNPIN</strong><br><small>freed</small></div>
+      <div class="seg tool" style="min-width:120px;border-radius:0 6px 6px 0"><span class="i18n" data-en="tool still running..." data-zh="工具仍在執行...">tool still running...</span><br><small>~15s</small><span class="marker" style="left:0"><span class="i18n" data-en="full re-prefill needed" data-zh="需要完整 re-prefill">full re-prefill needed</span></span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="6.3 Pin Implementation" data-zh="6.3 Pin 實作">6.3 Pin Implementation</span></h3>
+  <p>File: <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:237-239</code></p>
+  <pre><code><span class="kw">def</span> <span class="fn">pin_request</span>(self, request: Request, length_of_pin: float) -> None:
+    self.continuum_recorder.request_pinned(request)
+    self.pinned_requests.append((request, time.time() + length_of_pin))
+    <span class="cm"># pinned_requests: list[(Request, end_time)]</span>
+    <span class="cm"># After this, _free_blocks() returns → free() is SKIPPED → ref_cnt stays > 0</span></code></pre>
+
+  <h3><span class="i18n" data-en="6.4 TTL Expiry Check" data-zh="6.4 TTL 到期檢查">6.4 TTL Expiry Check</span></h3>
+  <p><span class="i18n" data-en="Called at the &lt;strong&gt;beginning of every scheduling step&lt;/strong&gt;:" data-zh="在&lt;strong&gt;每個排程步驟的開頭&lt;/strong&gt;被呼叫：">Called at the <strong>beginning of every scheduling step</strong>:</span></p>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:248-256</span>
 <span class="kw">def</span> <span class="fn">unpin_requests_regular</span>(self) -> None:
-    <span class="cm"># Called at the beginning of each scheduling step</span>
     waiting_job_ids = [req.job_id <span class="kw">for</span> req <span class="kw">in</span> self.waiting]
 
     <span class="kw">for</span> request, end_time <span class="kw">in</span> self.pinned_requests:
         <span class="kw">if</span> request.job_id <span class="kw">not in</span> waiting_job_ids <span class="kw">and</span> time.time() >= end_time:
             self.<span class="fn">unpin_request</span>(request, end_time)</code></pre>
 
-  <h4><span class="i18n" data-en="Two Conditions for Unpin (both must be satisfied):" data-zh="解除釘選的兩個條件（兩者皆須滿足）：">Two Conditions for Unpin (both must be satisfied):</span></h4>
-  <ol>
-    <li><span class="i18n" data-en="request.job_id not in waiting_job_ids — the job has not returned yet (tool is still executing)" data-zh="request.job_id not in waiting_job_ids &amp;mdash; 該 job 尚未返回（tool 仍在執行中）"><code>request.job_id not in waiting_job_ids</code> — the job has not returned yet (tool is still executing)</span></li>
-    <li><span class="i18n" data-en="time.time() &gt;= end_time — TTL has expired" data-zh="time.time() &gt;= end_time &amp;mdash; TTL 已到期"><code>time.time() >= end_time</code> — TTL has expired</span></li>
-  </ol>
-  <p><span class="i18n" data-en="If the job has already returned to the waiting queue, it will not be unpinned (because its cache will be used for scheduling soon)." data-zh="若該 job 已返回等待佇列，則不會被解除釘選（因為其 cache 即將用於排程）。">If the job has already returned to the waiting queue, it will not be unpinned (because its cache will be used for scheduling soon).</span></p>
+  <div class="cards" style="grid-template-columns:1fr 1fr">
+    <div class="card" style="border-left:4px solid #a6e3a1">
+      <h4 style="color:#a6e3a1"><span class="i18n" data-en="Keep pin (don't unpin)" data-zh="保持 pin（不 unpin）">Keep pin (don't unpin)</span></h4>
+      <p style="font-size:.85rem"><span class="i18n" data-en="&lt;code&gt;job_id IN waiting_job_ids&lt;/code&gt; — job already came back! Its KV cache is about to be used." data-zh="&lt;code&gt;job_id IN waiting_job_ids&lt;/code&gt; — job 已經回來了！它的 KV cache 即將被使用。"><code>job_id IN waiting_job_ids</code> — job already came back! Its KV cache is about to be used.</span></p>
+    </div>
+    <div class="card" style="border-left:4px solid #f38ba8">
+      <h4 style="color:#f38ba8"><span class="i18n" data-en="Unpin (free blocks)" data-zh="Unpin（釋放 blocks）">Unpin (free blocks)</span></h4>
+      <p style="font-size:.85rem"><span class="i18n" data-en="&lt;code&gt;job_id NOT in waiting&lt;/code&gt; AND &lt;code&gt;TTL expired&lt;/code&gt; — tool taking too long, free VRAM." data-zh="&lt;code&gt;job_id NOT in waiting&lt;/code&gt; 且 &lt;code&gt;TTL 到期&lt;/code&gt; — 工具耗時太久，釋放 VRAM。"><code>job_id NOT in waiting</code> AND <code>TTL expired</code> — tool taking too long, free VRAM.</span></p>
+    </div>
+  </div>
 
-  <h3><span class="i18n" data-en="6.3 Unpin Implementation" data-zh="6.3 解除釘選的實作">6.3 Unpin Implementation</span></h3>
-  <pre><code><span class="cm"># scheduler.py:241-244</span>
+  <h3><span class="i18n" data-en="6.5 Unpin Implementation" data-zh="6.5 Unpin 實作">6.5 Unpin Implementation</span></h3>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:241-244</span>
 <span class="kw">def</span> <span class="fn">unpin_request</span>(self, request: Request, end_time: float) -> None:
     self.pinned_requests.remove((request, end_time))   <span class="cm"># Remove from list</span>
     self.continuum_recorder.request_unpinned(request)   <span class="cm"># Record event</span>
-    self.kv_cache_manager.free(request)                 <span class="cm"># Actually free KV blocks</span></code></pre>
+    self.kv_cache_manager.free(request)                 <span class="cm"># ref_cnt -= 1 → blocks return to free queue</span></code></pre>
 
-  <h3><span class="i18n" data-en="6.4 _free_blocks() — Pin Trigger Point" data-zh="6.4 _free_blocks() &amp;mdash; 釘選觸發點">6.4 _free_blocks() — Pin Trigger Point</span></h3>
-  <p><span class="i18n" data-en="When a request finishes decode (token generation complete):" data-zh="當一個 request 完成 decode（token 生成完畢）時：">When a request finishes decode (token generation complete):</span></p>
-  <pre><code><span class="cm"># scheduler.py:1349-1370</span>
+  <h3><span class="i18n" data-en="6.6 _free_blocks() — The Decision Point" data-zh="6.6 _free_blocks() — 決策點">6.6 _free_blocks() — The Decision Point</span></h3>
+  <p><span class="i18n" data-en="This function runs when a request finishes. It decides pin or free:" data-zh="此函數在 request 完成時執行。它決定 pin 或 free：">This function runs when a request finishes. It decides pin or free:</span></p>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:1349-1370</span>
 <span class="kw">def</span> <span class="fn">_free_blocks</span>(self, request: Request):
-    <span class="cm"># First cleanup: if this job_id was previously pinned, unpin it first</span>
+    <span class="cm"># Step 1: Unpin previous pin for same job_id</span>
     <span class="kw">for</span> req, end_time <span class="kw">in</span> self.pinned_requests:
         <span class="kw">if</span> req.job_id == request.job_id:
             self.unpin_request(req, end_time)
 
-    <span class="cm"># Continuum policy + not the last step → consider pinning</span>
+    <span class="cm"># Step 2: Decide whether to pin</span>
     <span class="kw">if</span> self.policy == SchedulingPolicy.CONTINUUM <span class="kw">and not</span> request.is_last_step:
         length_of_pin = self.tool_call_estimator.set_up_pin(request)
 
-        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:   <span class="cm"># Floating point error protection</span>
+        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:
             self.pin_request(request, length_of_pin)
             <span class="kw">del</span> self.requests[request.request_id]
-            <span class="kw">return</span>           <span class="cm"># PIN — do not free KV blocks</span>
+            <span class="kw">return</span>           <span class="cm"># ← PIN: skip free()</span>
 
-    <span class="cm"># Not pinning → normal free</span>
+    <span class="cm"># Step 3: Normal free</span>
     self.kv_cache_manager.free(request)
     <span class="kw">del</span> self.requests[request.request_id]</code></pre>
 
   <div class="warn">
-    <strong><span class="i18n" data-en="is_last_step is important:" data-zh="is_last_step 很重要：">is_last_step is important:</span></strong> <span class="i18n" data-en="If the Agent marks this as the last step (job is complete), it will not pin. Otherwise it would occupy VRAM forever, since there will be no next-turn request to re-enter." data-zh="如果 Agent 標記這是最後一步（job 完成），就不會 pin。否則 KV cache 會永遠佔用 VRAM，因為不會有下一輪 request 重新進入。">If the Agent marks this as the last step (job is complete), it will not pin. Otherwise it would occupy VRAM forever, since there will be no next-turn request to re-enter.</span>
+    <strong><span class="i18n" data-en="is_last_step is critical:" data-zh="is_last_step 至關重要：">is_last_step is critical:</span></strong> <span class="i18n" data-en="If the Agent marks this as the last step (job complete), it will &lt;strong&gt;never pin&lt;/strong&gt;. Without this check, KV cache would be pinned forever — no next turn will ever come to release it." data-zh="如果 Agent 標記這是最後一步（job 完成），就&lt;strong&gt;永遠不會 pin&lt;/strong&gt;。沒有這個檢查，KV cache 會被永久 pin — 不會有下一輪 request 來釋放它。">If the Agent marks this as the last step (job complete), it will <strong>never pin</strong>. Without this check, KV cache would be pinned forever — no next turn will ever come to release it.</span>
   </div>
 </section>
 
