@@ -23,27 +23,88 @@ GitHub Pages site for agentic AI survey. Deployed at `https://hungchun0201.githu
 - vLLM source: `/home/hclin/vllm-continuum/vllm/` (editable install)
 - Models: `/home/hclin/shared_models/Meta-Llama-3.1-8B-Instruct`
 
-### Starting vLLM server (important!)
-When switching between scheduling policies (fcfs/continuum), the server must be killed and restarted.
+### ⚠️ CRITICAL: vLLM Server Lifecycle (DO NOT USE kill -9)
 
-**Known issue**: `nohup vllm serve ... &` via SSH often fails silently because the background process gets SIGHUP when SSH session closes. Use this pattern instead:
+**NEVER use `kill -9` on vLLM or any GPU process.** It corrupts the CUDA driver state, making the GPU unusable until full machine reboot. There is no recovery short of rebooting.
+
+#### Graceful shutdown (MANDATORY)
+
+Always use `kill -2` (SIGINT, same as Ctrl+C). vLLM handles SIGINT to:
+1. Stop accepting new requests
+2. Let in-flight requests finish
+3. Clean up CUDA resources and free GPU memory
 
 ```bash
-ssh lab 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate contextserve && cd ~/vllm-continuum && vllm serve /home/hclin/shared_models/Meta-Llama-3.1-8B-Instruct --scheduling-policy <POLICY> --port 8199 --max-model-len 4096 --gpu-memory-utilization 0.85 > server.log 2>&1 &'
-```
+# Step 1: Find PID and send SIGINT
+ssh lab 'kill -2 $(pgrep -f "vllm serve" | head -1)'
 
-Then in a **separate** SSH call, poll for health:
-```bash
-ssh lab 'for i in $(seq 1 30); do sleep 5; curl -s http://localhost:8199/health && echo " READY" && exit 0; done; echo TIMEOUT'
-```
+# Step 2: Wait for process to exit (up to 30 seconds)
+ssh lab 'for i in $(seq 1 30); do sleep 1; pgrep -f "vllm serve" > /dev/null || break; done'
 
-**Kill cleanly before switching policies**:
-```bash
-ssh lab 'kill $(pgrep -f "vllm serve") 2>/dev/null; sleep 5'
-# Verify GPU is clear:
+# Step 3: VERIFY GPU memory is released before doing anything else
 ssh lab 'nvidia-smi --query-gpu=memory.used --format=csv,noheader'
-# Should show ~1500-2000 MiB (desktop only), then start new server
+# Must show ~1500 MiB (desktop only). If higher, WAIT — do not proceed.
 ```
+
+**If the process doesn't exit after 30 seconds**, use `kill -15` (SIGTERM) as escalation. Only as absolute last resort, and understanding it may require a reboot, use `kill -9`.
+
+#### Starting a server
+
+`nohup` via SSH fails silently (SIGHUP on disconnect). Use direct background instead:
+
+```bash
+ssh lab 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate contextserve && \
+  cd ~/vllm-continuum && \
+  vllm serve /home/hclin/shared_models/Meta-Llama-3.1-8B-Instruct \
+    --scheduling-policy <POLICY> --port 8199 \
+    --max-model-len 4096 --gpu-memory-utilization 0.85 \
+    > server.log 2>&1 &'
+```
+
+Then poll health in a **separate** SSH call:
+```bash
+ssh lab 'for i in $(seq 1 30); do sleep 5; \
+  curl -s http://localhost:8199/health && echo " READY" && exit 0; done; echo TIMEOUT'
+```
+
+#### Complete server switch SOP
+
+```bash
+# 1. Graceful shutdown
+ssh lab 'kill -2 $(pgrep -f "vllm serve" | head -1)'
+ssh lab 'for i in $(seq 1 30); do sleep 1; pgrep -f "vllm serve" > /dev/null || break; done'
+
+# 2. Verify GPU clear (~1500 MiB)
+ssh lab 'nvidia-smi --query-gpu=memory.used --format=csv,noheader'
+
+# 3. Start new server with different policy
+ssh lab 'source ~/anaconda3/etc/profile.d/conda.sh && conda activate contextserve && \
+  cd ~/vllm-continuum && vllm serve MODEL --scheduling-policy NEW_POLICY ... > server.log 2>&1 &'
+
+# 4. Wait for health
+ssh lab 'for i in $(seq 1 30); do sleep 5; \
+  curl -s http://localhost:8199/health && echo " READY" && exit 0; done; echo TIMEOUT'
+```
+
+### LMCache (CPU DRAM offload)
+
+**Status**: lmcache 0.3.7 imports OK with torch 2.8.0, but `cudaHostAlloc` fails at runtime.
+
+**Root cause**: Pinned (page-locked) CPU memory allocation is limited by `ulimit -l` (memlock). After vLLM loads the model and allocates CUDA resources, the remaining memlock budget is insufficient for LMCache.
+
+**Fix (requires root, do after reboot)**:
+```bash
+# Temporary
+ulimit -l unlimited
+
+# Permanent
+echo "hclin soft memlock unlimited" | sudo tee -a /etc/security/limits.conf
+echo "hclin hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
+```
+
+**Version compatibility**:
+- lmcache 0.4.2: C extension ABI mismatch with torch 2.8.0 (undefined symbol)
+- lmcache 0.3.7: imports OK, needs memlock fix above
 
 ### A/B Benchmark
 Script: `ab_benchmark.py` on remote at `/home/hclin/vllm-continuum/ab_benchmark.py`
