@@ -122,6 +122,7 @@ footer a{color:#6ec6ff}
     <li><a href="#mem-ops">Memory Ops</a></li>
     <li><a href="#kv-budget">KV Budget</a></li>
     <li><a href="#ab-bench">A/B Benchmark</a></li>
+    <li><a href="#code-arch">Code Architecture</a></li>
     <li><a href="#observations">Observations</a></li>
     <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
   </ul>
@@ -1122,8 +1123,8 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
   <p><span class="i18n" data-en="This is why Continuum's pin TTL and eviction policy matter — aggressive pinning without eviction would exhaust the KV cache budget and stall all new requests." data-zh="這就是為什麼 Continuum 的 pin TTL 和淘汰策略很重要 — 沒有淘汰機制的激進 pinning 會耗盡 KV cache 預算，導致所有新 request 被阻塞。">This is why Continuum's pin TTL and eviction policy matter — aggressive pinning without eviction would exhaust the KV cache budget and stall all new requests.</span></p>
 </section>
 
-<!-- ====== 8. OBSERVATIONS ====== -->
-<section id="observations">
+<!-- ====== 9. A/B BENCHMARK ====== -->
+<section id="ab-bench">
   <h2><span class="i18n" data-en="9. A/B Benchmark: FCFS vs Continuum" data-zh="9. A/B 對照實驗：FCFS vs Continuum">9. A/B Benchmark: FCFS vs Continuum</span></h2>
 
   <h3><span class="i18n" data-en="9.1 Experiment Design" data-zh="9.1 實驗設計">9.1 Experiment Design</span></h3>
@@ -1189,9 +1190,404 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
   </div>
 </section>
 
-<!-- ====== 10. OBSERVATIONS ====== -->
+<!-- ====== 10. CODE ARCHITECTURE ====== -->
+<section id="code-arch">
+  <h2><span class="i18n" data-en="10. Code Architecture: FCFS / Continuum / LMCache" data-zh="10. 程式碼架構：FCFS / Continuum / LMCache">10. Code Architecture: FCFS / Continuum / LMCache</span></h2>
+  <p><span class="i18n" data-en="This section traces exactly how each scheduling strategy is implemented in the vllm-continuum codebase. All three share the same scheduler loop (<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/sched/scheduler.py</code>), but differ in <strong>request ordering</strong>, <strong>preemption policy</strong>, and <strong>post-completion block handling</strong>." data-zh="本節精確追蹤每個排程策略在 vllm-continuum 程式碼中的實作。三者共用相同的 scheduler 迴圈（<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/sched/scheduler.py</code>），區別在於 <strong>request 排序</strong>、<strong>搶佔策略</strong>、<strong>完成後 block 處理</strong>。">This section traces exactly how each scheduling strategy is implemented in the vllm-continuum codebase. All three share the same scheduler loop (<code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py</code>), but differ in <strong>request ordering</strong>, <strong>preemption policy</strong>, and <strong>post-completion block handling</strong>.</span></p>
+
+  <!-- 10.1 Policy Enum & Queue Factory -->
+  <h3><span class="i18n" data-en="10.1 Policy Enum &amp; Queue Factory" data-zh="10.1 Policy Enum 與 Queue 工廠">10.1 Policy Enum & Queue Factory</span></h3>
+  <p><span class="i18n" data-en="The four supported policies and their queue implementations are registered in a single factory:" data-zh="四個支援的策略及其 queue 實作在一個工廠函式中註冊：">The four supported policies and their queue implementations are registered in a single factory:</span></p>
+
+  <pre><code><span class="cm"># vllm/v1/core/sched/request_queue.py:17-22</span>
+<span class="kw">class</span> <span class="fn">SchedulingPolicy</span>(Enum):
+    FCFS          = <span class="st">"fcfs"</span>
+    PRIORITY      = <span class="st">"priority"</span>
+    CONTINUUM     = <span class="st">"continuum"</span>
+    CONTEXT_SERVE = <span class="st">"context_serve"</span>
+
+<span class="cm"># vllm/v1/core/sched/request_queue.py:342-353</span>
+<span class="kw">def</span> <span class="fn">create_request_queue</span>(policy):
+    <span class="kw">if</span> policy == SchedulingPolicy.FCFS:
+        <span class="kw">return</span> <span class="fn">FCFSRequestQueue</span>()        <span class="cm"># deque[Request], pure FIFO</span>
+    <span class="kw">elif</span> policy == SchedulingPolicy.CONTINUUM:
+        <span class="kw">return</span> <span class="fn">ContinuumRequestQueue</span>()   <span class="cm"># deque + job_id-level FCFS</span>
+    <span class="kw">elif</span> policy == SchedulingPolicy.CONTEXT_SERVE:
+        <span class="kw">return</span> <span class="fn">ContinuumRequestQueue</span>()   <span class="cm"># reuses Continuum queue logic</span></code></pre>
+
+  <div class="note"><strong><span class="i18n" data-en="CLI usage:" data-zh="CLI 使用方式：">CLI usage:</span></strong> <code>vllm serve MODEL --scheduling-policy fcfs|continuum|context_serve</code> <span class="i18n" data-en="(arg parsed at " data-zh="（在 "><br>(</span><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/engine/arg_utils.py:875</code><span class="i18n" data-en=", default: &lt;code&gt;fcfs&lt;/code&gt;)" data-zh=" 解析，預設：&lt;code&gt;fcfs&lt;/code&gt;）">, default: <code>fcfs</code>)</span></div>
+
+  <!-- 10.2 FCFS -->
+  <h3><span class="i18n" data-en="10.2 FCFS — First-Come-First-Served" data-zh="10.2 FCFS — 先到先服務">10.2 FCFS — First-Come-First-Served</span></h3>
+  <p><span class="i18n" data-en="The simplest policy — pure FIFO with no job awareness." data-zh="最簡單的策略 — 純 FIFO，不感知 job。">The simplest policy — pure FIFO with no job awareness.</span></p>
+
+  <h4><span class="i18n" data-en="Request Queue" data-zh="Request Queue">Request Queue</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/request_queue.py:85-140</span>
+<span class="kw">class</span> <span class="fn">FCFSRequestQueue</span>(deque[Request], RequestQueue):
+    <span class="kw">def</span> <span class="fn">add_request</span>(self, request):
+        self.<span class="fn">append</span>(request)           <span class="cm"># → right end (newest)</span>
+
+    <span class="kw">def</span> <span class="fn">pop_request</span>(self):
+        <span class="kw">return</span> self.<span class="fn">popleft</span>()          <span class="cm"># ← left end (oldest)</span>
+
+    <span class="kw">def</span> <span class="fn">peek_request</span>(self):
+        <span class="kw">return</span> self[<span class="nu">0</span>]                <span class="cm"># oldest, without removing</span>
+
+    <span class="kw">def</span> <span class="fn">prepend_request</span>(self, request):
+        self.<span class="fn">appendleft</span>(request)       <span class="cm"># preempted → back to head</span></code></pre>
+
+  <h4><span class="i18n" data-en="Scheduling dispatch" data-zh="排程分派">Scheduling dispatch</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:470-472 — schedule() waiting loop</span>
+<span class="kw">if</span> self.policy == SchedulingPolicy.FCFS:
+    request = self.waiting.<span class="fn">peek_request</span>()   <span class="cm"># oldest arrival</span></code></pre>
+
+  <h4><span class="i18n" data-en="Preemption" data-zh="搶佔">Preemption</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:394-396</span>
+<span class="kw">else</span>:  <span class="cm"># FCFS</span>
+    preempted_req = self.running.<span class="fn">pop</span>()  <span class="cm"># evict last-added running request</span></code></pre>
+
+  <h4><span class="i18n" data-en="Post-completion" data-zh="完成後處理">Post-completion</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:1398-1399</span>
+self.kv_cache_manager.<span class="fn">free</span>(request)  <span class="cm"># ref_cnt → 0, blocks → free queue</span>
+<span class="kw">del</span> self.requests[request.request_id]</code></pre>
+
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="FCFS Summary" data-zh="FCFS 總結">FCFS Summary</span></h4>
+      <table style="font-size:.85rem">
+        <tr><td><span class="i18n" data-en="Request order" data-zh="Request 排序">Request order</span></td><td><span class="i18n" data-en="Strict arrival time (deque FIFO)" data-zh="嚴格到達時間（deque FIFO）">Strict arrival time (deque FIFO)</span></td></tr>
+        <tr><td><span class="i18n" data-en="Preempt victim" data-zh="搶佔對象">Preempt victim</span></td><td><span class="i18n" data-en="Last request in running list (<code>pop()</code>)" data-zh="Running list 最後一個 request（<code>pop()</code>）">Last request in running list (<code>pop()</code>)</span></td></tr>
+        <tr><td><span class="i18n" data-en="Block handling" data-zh="Block 處理">Block handling</span></td><td><span class="i18n" data-en="Always <code>free()</code> → blocks return to free queue immediately" data-zh="總是 <code>free()</code> → blocks 立即回到 free queue">Always <code>free()</code> → blocks return to free queue immediately</span></td></tr>
+        <tr><td><span class="i18n" data-en="Job awareness" data-zh="Job 感知">Job awareness</span></td><td><span class="i18n" data-en="None — treats every request independently" data-zh="無 — 每個 request 獨立處理">None — treats every request independently</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 10.3 Continuum -->
+  <h3><span class="i18n" data-en="10.3 Continuum — Pin-based KV Cache Reservation" data-zh="10.3 Continuum — 基於 Pin 的 KV Cache 保留">10.3 Continuum — Pin-based KV Cache Reservation</span></h3>
+  <p><span class="i18n" data-en="Continuum adds three mechanisms on top of the base scheduler: <strong>(1) job-ID level FCFS ordering with pinned-job priority</strong>, <strong>(2) smart preemption that protects last-step requests</strong>, <strong>(3) TTL-based KV cache pinning after request completion</strong>." data-zh="Continuum 在基礎 scheduler 上新增三個機制：<strong>(1) 帶 pinned-job 優先的 job-ID 級 FCFS 排序</strong>、<strong>(2) 保護 last-step request 的智慧搶佔</strong>、<strong>(3) request 完成後的 TTL KV cache pinning</strong>。">Continuum adds three mechanisms on top of the base scheduler: <strong>(1) job-ID level FCFS ordering with pinned-job priority</strong>, <strong>(2) smart preemption that protects last-step requests</strong>, <strong>(3) TTL-based KV cache pinning after request completion</strong>.</span></p>
+
+  <h4><span class="i18n" data-en="① Request Queue: ContinuumRequestQueue" data-zh="① Request Queue：ContinuumRequestQueue">① Request Queue: ContinuumRequestQueue</span></h4>
+  <p><span class="i18n" data-en="Two-tier priority: pinned jobs first, then job-ID level FCFS (not request-level)." data-zh="雙層優先順序：pinned jobs 優先，然後是 job-ID 級的 FCFS（不是 request 級）。">Two-tier priority: pinned jobs first, then job-ID level FCFS (not request-level).</span></p>
+  <pre><code><span class="cm"># vllm/v1/core/sched/request_queue.py:221-274</span>
+<span class="kw">class</span> <span class="fn">ContinuumRequestQueue</span>(deque[Request], RequestQueue):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self):
+        self.job_id_first_entry_time: dict[str, float] = {}  <span class="cm"># job → first arrival</span>
+
+    <span class="kw">def</span> <span class="fn">peek_request</span>(self, pinned_requests, kv_cache_manager, connector):
+        pinned_job_ids = {req.job_id <span class="kw">for</span> req, _ <span class="kw">in</span> pinned_requests}
+
+        <span class="cm"># Tier 1: find the waiting request whose job has pinned blocks</span>
+        <span class="cm">#         (among pinned jobs, pick the one with earliest first-entry)</span>
+        earliest = <span class="kw">None</span>
+        <span class="kw">for</span> request <span class="kw">in</span> self:
+            <span class="kw">if</span> request.job_id <span class="kw">in</span> pinned_job_ids:
+                entry = self.job_id_first_entry_time.get(request.job_id)
+                <span class="kw">if</span> entry < earliest_time:
+                    earliest = request
+
+        <span class="kw">if</span> earliest:
+            <span class="kw">return</span> earliest   <span class="cm"># ← pinned-job request goes first!</span>
+
+        <span class="cm"># Tier 2: job-ID level FCFS — the job that arrived earliest overall</span>
+        <span class="kw">for</span> request <span class="kw">in</span> self:
+            entry = self.job_id_first_entry_time.get(request.job_id)
+            <span class="kw">if</span> entry < earliest_time:
+                earliest = request
+        <span class="kw">return</span> earliest</code></pre>
+
+  <div class="note"><strong><span class="i18n" data-en="Key difference from FCFS:" data-zh="與 FCFS 的關鍵區別：">Key difference from FCFS:</span></strong> <span class="i18n" data-en="FCFS picks the oldest <em>request</em>. Continuum picks the request whose <em>job</em> arrived earliest — so a Turn-5 request of an old job beats a Turn-1 request of a new job. Pinned jobs (those with KV cache still reserved in VRAM) get <strong>absolute priority</strong> to minimize wasted pin time." data-zh="FCFS 選最老的 <em>request</em>。Continuum 選 <em>job</em> 最早到達的 request — 所以舊 job 的 Turn-5 會勝過新 job 的 Turn-1。Pinned jobs（KV cache 仍保留在 VRAM 的 jobs）獲得<strong>絕對優先</strong>以最小化 pin 時間浪費。">FCFS picks the oldest <em>request</em>. Continuum picks the request whose <em>job</em> arrived earliest — so a Turn-5 request of an old job beats a Turn-1 request of a new job. Pinned jobs (those with KV cache still reserved in VRAM) get <strong>absolute priority</strong> to minimize wasted pin time.</span></div>
+
+  <h4><span class="i18n" data-en="② Preemption: Protect Last-Step Requests" data-zh="② 搶佔：保護 Last-Step Requests">② Preemption: Protect Last-Step Requests</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:197-236</span>
+<span class="kw">def</span> <span class="fn">pop_running_request_based_on_last_step</span>(self, request):
+    <span class="cm"># Priority 1: evict non-last-step request with latest job entry time</span>
+    <span class="kw">for</span> req <span class="kw">in</span> self.running:
+        <span class="kw">if not</span> req.is_last_step and job_entry_time > latest:
+            latest_request = req
+
+    <span class="cm"># Priority 2: if all are last-step, evict the latest entry regardless</span>
+    <span class="kw">if</span> latest_request <span class="kw">is None</span>:
+        <span class="kw">for</span> req <span class="kw">in</span> self.running:
+            <span class="kw">if</span> job_entry_time > latest:
+                latest_request = req
+
+    <span class="cm"># Edge case: if running ≤ 1, steal from pinned_requests instead</span>
+    <span class="kw">if</span> len(self.running) <= <span class="nu">1</span>:
+        <span class="cm"># Pop the pinned request with the largest end_time</span>
+        <span class="kw">return</span> latest_pinned, <span class="kw">True</span>  <span class="cm"># is_unpin=True</span></code></pre>
+
+  <div class="note"><strong><span class="i18n" data-en="Rationale:" data-zh="邏輯：">Rationale:</span></strong> <span class="i18n" data-en="Last-step requests (<code>is_last_step=True</code>) are about to free their blocks permanently. Evicting them wastes their entire computation. Non-last-step requests will be pinned after completion anyway, so evicting them is cheaper — they'll get priority when they re-enter the waiting queue." data-zh="Last-step requests（<code>is_last_step=True</code>）即將永久釋放它們的 blocks。Evict 它們會浪費整個計算。Non-last-step requests 完成後反正會被 pin，所以 evict 它們的代價更低 — 它們重新進入 waiting queue 時會獲得優先。">Last-step requests (<code>is_last_step=True</code>) are about to free their blocks permanently. Evicting them wastes their entire computation. Non-last-step requests will be pinned after completion anyway, so evicting them is cheaper — they'll get priority when they re-enter the waiting queue.</span></div>
+
+  <h4><span class="i18n" data-en="③ Pin Lifecycle: TTL-based Reservation" data-zh="③ Pin 生命週期：TTL 保留機制">③ Pin Lifecycle: TTL-based Reservation</span></h4>
+  <p><span class="i18n" data-en="The complete pin/unpin lifecycle is managed by three methods in the scheduler:" data-zh="完整的 pin/unpin 生命週期由 scheduler 中的三個方法管理：">The complete pin/unpin lifecycle is managed by three methods in the scheduler:</span></p>
+
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:239-258</span>
+
+<span class="cm">## 1. Pin: skip free(), store (request, end_time) tuple</span>
+<span class="kw">def</span> <span class="fn">pin_request</span>(self, request, length_of_pin):
+    self.pinned_requests.<span class="fn">append</span>((request, time.<span class="fn">time</span>() + length_of_pin))
+
+<span class="cm">## 2. Unpin: remove from list, call free() to release blocks</span>
+<span class="kw">def</span> <span class="fn">unpin_request</span>(self, request, end_time):
+    self.pinned_requests.<span class="fn">remove</span>((request, end_time))
+    self.kv_cache_manager.<span class="fn">free</span>(request)  <span class="cm"># ref_cnt → 0</span>
+
+<span class="cm">## 3. Regular cleanup: called at the start of every schedule() step</span>
+<span class="kw">def</span> <span class="fn">unpin_requests_regular</span>(self):
+    waiting_job_ids = [req.job_id <span class="kw">for</span> req <span class="kw">in</span> self.waiting]
+    <span class="kw">for</span> request, end_time <span class="kw">in</span> self.pinned_requests:
+        <span class="cm"># Only unpin if: (a) TTL expired AND (b) no waiting request for this job</span>
+        <span class="kw">if</span> request.job_id <span class="kw">not in</span> waiting_job_ids <span class="kw">and</span> time.<span class="fn">time</span>() >= end_time:
+            self.<span class="fn">unpin_request</span>(request, end_time)</code></pre>
+
+  <h4><span class="i18n" data-en="④ TTL Decision: ToolCallEstimator" data-zh="④ TTL 決策：ToolCallEstimator">④ TTL Decision: ToolCallEstimator</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/estimate_with_func.py:151-160</span>
+FIXED_THRESHOLD_CONTINUUM = <span class="nu">2.0</span>   <span class="cm"># seconds</span>
+
+<span class="kw">def</span> <span class="fn">set_up_pin</span>(self, request):
+    <span class="kw">if</span> request.this_func_call <span class="kw">is None</span>:
+        <span class="kw">return</span> <span class="nu">0</span>                        <span class="cm"># can't detect tool → don't pin</span>
+
+    exec_time = self.<span class="fn">get_func_call_exec_time</span>(request.this_func_call)
+
+    <span class="kw">if</span> exec_time > FIXED_THRESHOLD_CONTINUUM:
+        <span class="kw">return</span> <span class="nu">0</span>                        <span class="cm"># slow tool (>2s) → don't pin</span>
+
+    <span class="kw">return</span> FIXED_THRESHOLD_CONTINUUM    <span class="cm"># fast tool → pin for 2.0s</span></code></pre>
+
+  <div class="warn"><strong><span class="i18n" data-en="Implementation vs Paper:" data-zh="實作 vs 論文：">Implementation vs Paper:</span></strong> <span class="i18n" data-en="The paper describes a CDF-based TTL estimator that uses the <em>historical execution time distribution</em> to compute optimal pin durations. The implementation uses a <strong>fixed 2-second threshold</strong>: if avg exec time ≤ 2s → pin for exactly 2s; otherwise → don't pin at all. This is a significant simplification." data-zh="論文描述了一個基於 CDF 的 TTL 估算器，使用<em>歷史執行時間分佈</em>來計算最佳 pin 時長。實作使用<strong>固定 2 秒閾值</strong>：如果平均執行時間 ≤ 2s → pin 恰好 2s；否則 → 不 pin。這是一個顯著的簡化。">The paper describes a CDF-based TTL estimator that uses the <em>historical execution time distribution</em> to compute optimal pin durations. The implementation uses a <strong>fixed 2-second threshold</strong>: if avg exec time ≤ 2s → pin for exactly 2s; otherwise → don't pin at all. This is a significant simplification.</span></div>
+
+  <h4><span class="i18n" data-en="⑤ Post-completion: _free_blocks() Dispatch" data-zh="⑤ 完成後：_free_blocks() 分派">⑤ Post-completion: _free_blocks() Dispatch</span></h4>
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:1356-1399</span>
+<span class="kw">def</span> <span class="fn">_free_blocks</span>(self, request):
+    <span class="cm"># Step 1: unpin any sibling pinned request with same job_id</span>
+    <span class="kw">for</span> req, end_time <span class="kw">in</span> self.pinned_requests:
+        <span class="kw">if</span> req.job_id == request.job_id:
+            self.<span class="fn">unpin_request</span>(req, end_time)
+
+    <span class="cm"># Step 2: Continuum decision</span>
+    <span class="kw">if</span> self.policy == SchedulingPolicy.CONTINUUM <span class="kw">and not</span> request.is_last_step:
+        length_of_pin = self.tool_call_estimator.<span class="fn">set_up_pin</span>(request)
+        <span class="kw">if</span> length_of_pin > <span class="nu">0.01</span>:
+            self.<span class="fn">pin_request</span>(request, length_of_pin)   <span class="cm"># ← SKIP free()</span>
+            <span class="kw">del</span> self.requests[request.request_id]
+            <span class="kw">return</span>
+
+    <span class="cm"># Default: free blocks (FCFS path, or is_last_step=True)</span>
+    self.kv_cache_manager.<span class="fn">free</span>(request)
+    <span class="kw">del</span> self.requests[request.request_id]</code></pre>
+
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Continuum Summary" data-zh="Continuum 總結">Continuum Summary</span></h4>
+      <table style="font-size:.85rem">
+        <tr><td><span class="i18n" data-en="Request order" data-zh="Request 排序">Request order</span></td><td><span class="i18n" data-en="Pinned-job requests first, then job-ID level FCFS" data-zh="Pinned-job requests 優先，然後 job-ID 級 FCFS">Pinned-job requests first, then job-ID level FCFS</span></td></tr>
+        <tr><td><span class="i18n" data-en="Preempt victim" data-zh="搶佔對象">Preempt victim</span></td><td><span class="i18n" data-en="Newest non-last-step job → newest last-step → steal from pinned" data-zh="最新的 non-last-step job → 最新 last-step → 從 pinned 竊取">Newest non-last-step job → newest last-step → steal from pinned</span></td></tr>
+        <tr><td><span class="i18n" data-en="Block handling" data-zh="Block 處理">Block handling</span></td><td><span class="i18n" data-en="<code>is_last_step=False</code> + fast tool → <strong>pin</strong> (skip free, TTL=2s); otherwise → <code>free()</code>" data-zh="<code>is_last_step=False</code> + 快工具 → <strong>pin</strong>（跳過 free，TTL=2s）；否則 → <code>free()</code>"><code>is_last_step=False</code> + fast tool → <strong>pin</strong> (skip free, TTL=2s); otherwise → <code>free()</code></span></td></tr>
+        <tr><td><span class="i18n" data-en="Job awareness" data-zh="Job 感知">Job awareness</span></td><td><span class="i18n" data-en="Full: tracks <code>job_id</code>, <code>is_last_step</code>, <code>this_func_call</code>, per-job history" data-zh="完整：追蹤 <code>job_id</code>、<code>is_last_step</code>、<code>this_func_call</code>、per-job 歷史">Full: tracks <code>job_id</code>, <code>is_last_step</code>, <code>this_func_call</code>, per-job history</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- 10.4 ContextServe -->
+  <h3><span class="i18n" data-en="10.4 ContextServe — Three-Way Dispatch Extension" data-zh="10.4 ContextServe — 三路分派擴展">10.4 ContextServe — Three-Way Dispatch Extension</span></h3>
+  <p><span class="i18n" data-en="ContextServe extends Continuum's binary pin/no-pin decision into a <strong>three-way dispatch</strong>: FAST (strict pin), SLOW (proactive free), UNCERTAIN (fallback to Continuum TTL). It shares the same <code>ContinuumRequestQueue</code> and preemption logic." data-zh="ContextServe 將 Continuum 的 pin/不 pin 二元決策擴展為<strong>三路分派</strong>：FAST（嚴格 pin）、SLOW（主動釋放）、UNCERTAIN（回退到 Continuum TTL）。它共用相同的 <code>ContinuumRequestQueue</code> 和搶佔邏輯。">ContextServe extends Continuum's binary pin/no-pin decision into a <strong>three-way dispatch</strong>: FAST (strict pin), SLOW (proactive free), UNCERTAIN (fallback to Continuum TTL). It shares the same <code>ContinuumRequestQueue</code> and preemption logic.</span></p>
+
+  <pre><code><span class="cm"># vllm/v1/core/sched/scheduler.py:1364-1388</span>
+<span class="kw">if</span> self.policy == SchedulingPolicy.CONTEXT_SERVE <span class="kw">and not</span> request.is_last_step:
+    speed, pin_duration = self.tool_call_estimator.<span class="fn">set_up_pin_contextserve</span>(request)
+
+    <span class="kw">if</span> speed == ToolSpeed.<span class="ok">FAST</span>:           <span class="cm"># ls, cat, pwd, git status ...</span>
+        self.<span class="fn">pin_request</span>(request, pin_duration)   <span class="cm"># lock in VRAM</span>
+
+    <span class="kw">elif</span> speed == ToolSpeed.<span class="err">SLOW</span>:         <span class="cm"># pytest, pip install, docker build ...</span>
+        self.kv_cache_manager.<span class="fn">free</span>(request)     <span class="cm"># proactive free at t=0</span>
+
+    <span class="kw">else</span>:                                <span class="cm"># ToolSpeed.UNCERTAIN</span>
+        <span class="kw">if</span> pin_duration > <span class="nu">0.01</span>:             <span class="cm"># fallback to Continuum TTL</span>
+            self.<span class="fn">pin_request</span>(request, pin_duration)</code></pre>
+
+  <h4><span class="i18n" data-en="Three-Layer Prediction Stack" data-zh="三層預測堆疊">Three-Layer Prediction Stack</span></h4>
+  <p><span class="i18n" data-en="The <code>ContextAwarePredictor</code> (<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/context_predictor.py</code>) uses a three-layer classification strategy:" data-zh="<code>ContextAwarePredictor</code>（<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/context_predictor.py</code>）使用三層分類策略：">The <code>ContextAwarePredictor</code> (<code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/context_predictor.py</code>) uses a three-layer classification strategy:</span></p>
+
+  <table>
+    <tr><th><span class="i18n" data-en="Layer" data-zh="層">Layer</span></th><th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th><th><span class="i18n" data-en="Example" data-zh="範例">Example</span></th></tr>
+    <tr><td><span class="i18n" data-en="1. Rule-based" data-zh="1. 規則">1. Rule-based</span></td><td><span class="i18n" data-en="Hardcoded sets: <code>DEFINITELY_FAST</code> (ls, cat, pwd), <code>DEFINITELY_SLOW_PREFIXES</code> (make, pip install, docker build)" data-zh="硬編碼集合：<code>DEFINITELY_FAST</code>（ls, cat, pwd）、<code>DEFINITELY_SLOW_PREFIXES</code>（make, pip install, docker build）">Hardcoded sets: <code>DEFINITELY_FAST</code> (ls, cat, pwd), <code>DEFINITELY_SLOW_PREFIXES</code> (make, pip install, docker build)</span></td><td><code>ls</code> → FAST 3.0s</td></tr>
+    <tr><td><span class="i18n" data-en="2a. Bayesian" data-zh="2a. 貝葉斯">2a. Bayesian</span></td><td><span class="i18n" data-en="Normal-Inverse-Gamma conjugate prior + Thompson Sampling (<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/bayesian_predictor.py</code>)" data-zh="Normal-Inverse-Gamma 共軛先驗 + Thompson Sampling（<code style='background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px'>vllm/v1/core/bayesian_predictor.py</code>）">Normal-Inverse-Gamma conjugate prior + Thompson Sampling (<code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/bayesian_predictor.py</code>)</span></td><td><span class="i18n" data-en="Posterior quantile → TTL" data-zh="後驗分位 → TTL">Posterior quantile → TTL</span></td></tr>
+    <tr><td><span class="i18n" data-en="2b. XGBoost" data-zh="2b. XGBoost">2b. XGBoost</span></td><td><span class="i18n" data-en="25-feature extraction (pipes, redirects, loops, etc.) → classification" data-zh="25 特徵提取（pipes、redirects、loops 等）→ 分類">25-feature extraction (pipes, redirects, loops, etc.) → classification</span></td><td><span class="i18n" data-en="Fallback if Bayesian fails" data-zh="貝葉斯失敗時的 fallback">Fallback if Bayesian fails</span></td></tr>
+    <tr><td><span class="i18n" data-en="3. Fallback" data-zh="3. Fallback">3. Fallback</span></td><td><span class="i18n" data-en="Returns UNCERTAIN + Continuum CDF TTL" data-zh="返回 UNCERTAIN + Continuum CDF TTL">Returns UNCERTAIN + Continuum CDF TTL</span></td><td>—</td></tr>
+  </table>
+
+  <!-- 10.5 LMCache -->
+  <h3><span class="i18n" data-en="10.5 LMCache — CPU DRAM Offload" data-zh="10.5 LMCache — CPU DRAM Offload">10.5 LMCache — CPU DRAM Offload</span></h3>
+  <p><span class="i18n" data-en="LMCache is an <strong>orthogonal strategy</strong> to Continuum. Instead of pinning blocks in GPU VRAM (which reduces capacity for other jobs), LMCache offloads evicted KV cache blocks to <strong>CPU DRAM</strong> or a <strong>remote server</strong>, then retrieves them when the same job returns. It integrates via the <code>KVConnectorBase_V1</code> connector interface." data-zh="LMCache 是與 Continuum <strong>正交的策略</strong>。不同於將 blocks pin 在 GPU VRAM 中（會減少其他 job 的容量），LMCache 將被淘汰的 KV cache blocks offload 到 <strong>CPU DRAM</strong> 或<strong>遠端 server</strong>，在同一 job 回來時取回。它透過 <code>KVConnectorBase_V1</code> connector 介面整合。">LMCache is an <strong>orthogonal strategy</strong> to Continuum. Instead of pinning blocks in GPU VRAM (which reduces capacity for other jobs), LMCache offloads evicted KV cache blocks to <strong>CPU DRAM</strong> or a <strong>remote server</strong>, then retrieves them when the same job returns. It integrates via the <code>KVConnectorBase_V1</code> connector interface.</span></p>
+
+  <h4><span class="i18n" data-en="Connector Architecture" data-zh="Connector 架構">Connector Architecture</span></h4>
+  <pre><code><span class="cm"># vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py:23-27</span>
+<span class="kw">class</span> <span class="fn">LMCacheConnectorV1</span>(KVConnectorBase_V1):
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, vllm_config, role):
+        self._lmcache_engine = <span class="fn">LMCacheConnectorV1Impl</span>(vllm_config, role, self)
+        <span class="cm"># Delegates to lmcache.integration.vllm.vllm_v1_adapter</span></code></pre>
+
+  <p><span class="i18n" data-en="Two operational roles, split across scheduler and worker processes:" data-zh="兩個操作角色，分布在 scheduler 和 worker 進程中：">Two operational roles, split across scheduler and worker processes:</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Role" data-zh="角色">Role</span></th><th><span class="i18n" data-en="Location" data-zh="位置">Location</span></th><th><span class="i18n" data-en="Methods" data-zh="方法">Methods</span></th></tr>
+    <tr>
+      <td><code>SCHEDULER</code></td>
+      <td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:84-93</code></td>
+      <td><span class="i18n" data-en="<code>get_num_new_matched_tokens()</code> — query how many tokens are cached externally<br><code>update_state_after_alloc()</code> — track block↔token mapping<br><code>build_connector_meta()</code> — encode store/load plan for workers" data-zh="<code>get_num_new_matched_tokens()</code> — 查詢外部快取了多少 tokens<br><code>update_state_after_alloc()</code> — 追蹤 block↔token 映射<br><code>build_connector_meta()</code> — 為 workers 編碼 store/load 計畫"><code>get_num_new_matched_tokens()</code> — query how many tokens are cached externally<br><code>update_state_after_alloc()</code> — track block↔token mapping<br><code>build_connector_meta()</code> — encode store/load plan for workers</span></td>
+    </tr>
+    <tr>
+      <td><code>WORKER</code></td>
+      <td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/worker/kv_connector_model_runner_mixin.py</code></td>
+      <td><span class="i18n" data-en="<code>start_load_kv()</code> — async load from CPU before forward<br><code>wait_for_layer_load(layer)</code> — per-layer sync point<br><code>save_kv_layer(layer, tensor)</code> — async save to CPU after compute<br><code>wait_for_save()</code> — ensure save completes" data-zh="<code>start_load_kv()</code> — forward 前從 CPU 非同步載入<br><code>wait_for_layer_load(layer)</code> — 每層同步點<br><code>save_kv_layer(layer, tensor)</code> — 計算後非同步存到 CPU<br><code>wait_for_save()</code> — 確保存儲完成"><code>start_load_kv()</code> — async load from CPU before forward<br><code>wait_for_layer_load(layer)</code> — per-layer sync point<br><code>save_kv_layer(layer, tensor)</code> — async save to CPU after compute<br><code>wait_for_save()</code> — ensure save completes</span></td>
+    </tr>
+  </table>
+
+  <h4><span class="i18n" data-en="Data Flow: Store &amp; Retrieve" data-zh="資料流：Store 與 Retrieve">Data Flow: Store & Retrieve</span></h4>
+  <pre><code><span class="cm">## Store (after each forward step)</span>
+Attention layer → <span class="fn">save_kv_layer</span>(layer_name, kv_tensor, attn_metadata)
+    → LMCache chunks KV by <span class="nu">256</span> tokens (configurable)
+    → Stores to CPU DRAM (<span class="st">LMCACHE_LOCAL_CPU=True</span>)
+       or remote server (<span class="st">LMCACHE_REMOTE_URL=lm://host:port</span>)
+
+<span class="cm">## Retrieve (on new request for same prefix)</span>
+Scheduler → connector.<span class="fn">get_num_new_matched_tokens</span>(request)
+    → LMCache matches prompt prefix hash against stored chunks
+    → Returns count of externally cached tokens
+
+Worker → connector.<span class="fn">start_load_kv</span>(forward_context)
+    → Per-layer: <span class="fn">wait_for_layer_load</span>(layer_name)
+    → Loaded KV appears in GPU paged buffer
+    → Attention skips recomputation for loaded tokens</code></pre>
+
+  <h4><span class="i18n" data-en="Configuration" data-zh="設定">Configuration</span></h4>
+  <pre><code><span class="cm"># CLI: pass via JSON to --kv-transfer-config</span>
+vllm serve MODEL --kv-transfer-config <span class="st">'{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'</span>
+
+<span class="cm"># Environment variables (set before launch)</span>
+<span class="kw">export</span> LMCACHE_USE_EXPERIMENTAL=<span class="st">"True"</span>
+<span class="kw">export</span> LMCACHE_LOCAL_CPU=<span class="st">"True"</span>              <span class="cm"># enable CPU DRAM backend</span>
+<span class="kw">export</span> LMCACHE_MAX_LOCAL_CPU_SIZE=<span class="st">"5.0"</span>     <span class="cm"># 5 GB CPU memory limit</span>
+<span class="kw">export</span> LMCACHE_CHUNK_SIZE=<span class="st">"256"</span>             <span class="cm"># tokens per chunk</span></code></pre>
+
+  <!-- 10.6 Comparison -->
+  <h3><span class="i18n" data-en="10.6 Side-by-Side Comparison" data-zh="10.6 策略對照比較">10.6 Side-by-Side Comparison</span></h3>
+  <table>
+    <tr>
+      <th></th>
+      <th>FCFS</th>
+      <th>Continuum</th>
+      <th>LMCache</th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Strategy" data-zh="策略">Strategy</span></td>
+      <td><span class="i18n" data-en="No KV retention — evicted blocks immediately available" data-zh="不保留 KV — 被淘汰的 blocks 立即可用">No KV retention — evicted blocks immediately available</span></td>
+      <td><span class="i18n" data-en="Pin in GPU VRAM — blocks reserved for returning job" data-zh="Pin 在 GPU VRAM — blocks 為回來的 job 保留">Pin in GPU VRAM — blocks reserved for returning job</span></td>
+      <td><span class="i18n" data-en="Offload to CPU DRAM — blocks freed on GPU, cached on CPU" data-zh="Offload 到 CPU DRAM — blocks 在 GPU 上釋放，在 CPU 上快取">Offload to CPU DRAM — blocks freed on GPU, cached on CPU</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="GPU capacity impact" data-zh="GPU 容量影響">GPU capacity impact</span></td>
+      <td><span class="i18n" data-en="None (100% available)" data-zh="無（100% 可用）">None (100% available)</span></td>
+      <td><span class="i18n" data-en="Reduces available blocks (pinned blocks are locked)" data-zh="減少可用 blocks（pinned blocks 被鎖定）">Reduces available blocks (pinned blocks are locked)</span></td>
+      <td><span class="i18n" data-en="None (blocks freed on GPU, stored on CPU)" data-zh="無（blocks 在 GPU 上釋放，存在 CPU 上）">None (blocks freed on GPU, stored on CPU)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Resume cost" data-zh="恢復成本">Resume cost</span></td>
+      <td><span class="i18n" data-en="Full re-prefill (recompute all tokens)" data-zh="完整 re-prefill（重新計算所有 tokens）">Full re-prefill (recompute all tokens)</span></td>
+      <td><span class="i18n" data-en="Zero (KV still in GPU, same addresses)" data-zh="零（KV 仍在 GPU，相同位址）">Zero (KV still in GPU, same addresses)</span></td>
+      <td><span class="i18n" data-en="PCIe transfer (CPU→GPU, ~12 GB/s)" data-zh="PCIe 傳輸（CPU→GPU，~12 GB/s）">PCIe transfer (CPU→GPU, ~12 GB/s)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Where it shines" data-zh="最佳場景">Where it shines</span></td>
+      <td><span class="i18n" data-en="Low load; prefix caching handles reuse" data-zh="低負載；prefix caching 處理重用">Low load; prefix caching handles reuse</span></td>
+      <td><span class="i18n" data-en="Small GPU, high load, fast tools" data-zh="小 GPU、高負載、快工具">Small GPU, high load, fast tools</span></td>
+      <td><span class="i18n" data-en="Large GPU, high load, abundant CPU DRAM" data-zh="大 GPU、高負載、充足的 CPU DRAM">Large GPU, high load, abundant CPU DRAM</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Key files" data-zh="關鍵檔案">Key files</span></td>
+      <td><code>request_queue.py:85</code></td>
+      <td><code>request_queue.py:221</code><br><code>estimate_with_func.py:151</code><br><code>scheduler.py:239</code></td>
+      <td><code>lmcache_connector.py</code><br><code>kv_transfer.py</code><br><code>attention/layer.py:445</code></td>
+    </tr>
+  </table>
+
+  <!-- 10.7 Data Flow Diagram -->
+  <h3><span class="i18n" data-en="10.7 Request Lifecycle per Strategy" data-zh="10.7 每個策略的 Request 生命週期">10.7 Request Lifecycle per Strategy</span></h3>
+
+  <div class="cards" style="grid-template-columns:1fr">
+    <div class="card">
+      <h4 style="color:#f38ba8">FCFS</h4>
+      <pre style="margin:8px 0;font-size:.82rem;background:transparent;border:none;padding:0"><code>API Request → <span class="fn">add_request()</span> → waiting deque (append right)
+  → <span class="fn">schedule()</span> → peek left → allocate KV blocks → running
+    → forward pass → tokens generated → request finished
+      → <span class="fn">_free_blocks()</span> → <span class="err">kv_cache_manager.free()</span> → blocks → free queue
+        → <span class="cm">blocks immediately available for any new request</span></code></pre>
+    </div>
+    <div class="card">
+      <h4 style="color:#a6e3a1">Continuum</h4>
+      <pre style="margin:8px 0;font-size:.82rem;background:transparent;border:none;padding:0"><code>API Request (job_id, is_last_step) → <span class="fn">add_request()</span> → ContinuumRequestQueue
+  → <span class="fn">schedule()</span> → <span class="ok">peek pinned-job-first, then job-ID FCFS</span>
+    → allocate KV blocks → running → forward → finished
+      → <span class="fn">_free_blocks()</span>:
+        <span class="kw">if</span> is_last_step: → <span class="err">free()</span> → blocks released
+        <span class="kw">else if</span> fast tool: → <span class="ok">pin_request(2.0s)</span> → blocks RESERVED
+          → next turn arrives → <span class="ok">pinned-job gets priority</span>
+          → <span class="fn">unpin_requests_regular()</span> → TTL expired → <span class="err">free()</span></code></pre>
+    </div>
+    <div class="card">
+      <h4 style="color:#6ec6ff">LMCache</h4>
+      <pre style="margin:8px 0;font-size:.82rem;background:transparent;border:none;padding:0"><code>API Request → <span class="fn">add_request()</span> → waiting queue (any policy)
+  → <span class="fn">schedule()</span> → connector.<span class="fn">get_num_new_matched_tokens()</span>
+    → <span class="kw">if</span> cached: <span class="ok">skip prefill for cached portion</span>
+      → start_load_kv() → per-layer wait_for_layer_load()
+    → allocate remaining KV blocks → running → forward
+      → per-layer: <span class="fn">save_kv_layer()</span> → <span class="ok">async copy to CPU DRAM</span>
+      → <span class="fn">wait_for_save()</span> → request finished
+        → <span class="err">free()</span> → GPU blocks released
+          → <span class="cm">KV data persists on CPU, retrievable by future requests</span></code></pre>
+    </div>
+  </div>
+
+  <!-- 10.8 JPS Sweep -->
+  <h3><span class="i18n" data-en="10.8 Multi-GPU JPS Sweep Results" data-zh="10.8 多 GPU JPS Sweep 結果">10.8 Multi-GPU JPS Sweep Results</span></h3>
+  <p><span class="i18n" data-en="Three policies tested across three GPUs at varying load levels. Key findings:" data-zh="三個策略在三塊 GPU 上以不同負載測試。關鍵發現：">Three policies tested across three GPUs at varying load levels. Key findings:</span></p>
+
+  <table>
+    <tr><th>GPU</th><th>VRAM</th><th><span class="i18n" data-en="~KV Blocks" data-zh="~KV Blocks">~KV Blocks</span></th><th><span class="i18n" data-en="Best Strategy at High Load" data-zh="高負載最佳策略">Best Strategy at High Load</span></th><th><span class="i18n" data-en="Key Observation" data-zh="關鍵觀察">Key Observation</span></th></tr>
+    <tr><td>RTX 6000</td><td>24 GB</td><td>~3,000</td><td style="color:#a6e3a1"><strong>Continuum</strong></td><td><span class="i18n" data-en="71% faster at JPS=1.0; 26% faster at JPS=12.0 — pin prevents eviction on small VRAM" data-zh="JPS=1.0 時快 71%；JPS=12.0 快 26% — pin 在小 VRAM 上防止被淘汰">71% faster at JPS=1.0; 26% faster at JPS=12.0 — pin prevents eviction on small VRAM</span></td></tr>
+    <tr><td>A100</td><td>40 GB</td><td>~9,000</td><td style="color:#6ec6ff"><strong>LMCache</strong></td><td><span class="i18n" data-en="39-65% faster than FCFS at JPS=10+. Continuum provides no benefit — sometimes slower" data-zh="JPS=10+ 時比 FCFS 快 39-65%。Continuum 無收益 — 有時更慢">39-65% faster than FCFS at JPS=10+. Continuum provides no benefit — sometimes slower</span></td></tr>
+    <tr><td>L40S</td><td>48 GB</td><td>~13,000</td><td style="color:#6ec6ff"><strong>LMCache</strong></td><td><span class="i18n" data-en="39-60% faster at JPS=10+. Same pattern — large GPU favors DRAM offload over VRAM pin" data-zh="JPS=10+ 時快 39-60%。相同模式 — 大 GPU 偏好 DRAM offload 而非 VRAM pin">39-60% faster at JPS=10+. Same pattern — large GPU favors DRAM offload over VRAM pin</span></td></tr>
+  </table>
+
+  <div class="ok-box"><strong><span class="i18n" data-en="Takeaway:" data-zh="結論：">Takeaway:</span></strong> <span class="i18n" data-en="Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity." data-zh="Continuum 的 VRAM pin 策略以容量換速度 — 在 VRAM 稀缺（&lt;32 GB）且工具快速時有益。在更大的 GPU（&gt;40 GB）上，pinning 的容量成本超過其收益；LMCache 的 CPU DRAM offload 提供相同的恢復加速，且不減少 GPU 容量。">Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity.</span></div>
+
+  <!-- 10.9 Key Files Reference -->
+  <h3><span class="i18n" data-en="10.9 Key Files Reference" data-zh="10.9 關鍵檔案參照">10.9 Key Files Reference</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th><th><span class="i18n" data-en="Lines" data-zh="行數">Lines</span></th></tr>
+    <tr><td><span class="i18n" data-en="Policy enum + queue factory" data-zh="Policy enum + queue 工廠">Policy enum + queue factory</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/request_queue.py</code></td><td>17-353</td></tr>
+    <tr><td>FCFSRequestQueue</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/request_queue.py</code></td><td>85-140</td></tr>
+    <tr><td>ContinuumRequestQueue</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/request_queue.py</code></td><td>221-340</td></tr>
+    <tr><td><span class="i18n" data-en="Scheduler core" data-zh="Scheduler 核心">Scheduler core</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py</code></td><td>116-130, 197-264, 370-418, 1356-1399</td></tr>
+    <tr><td>ToolCallEstimator (TTL)</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/estimate_with_func.py</code></td><td>95-228</td></tr>
+    <tr><td>ContextAwarePredictor</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/context_predictor.py</code></td><td>43-268</td></tr>
+    <tr><td>BayesianPredictor</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/bayesian_predictor.py</code></td><td>39-150</td></tr>
+    <tr><td>LMCache connector</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py</code></td><td>1-168</td></tr>
+    <tr><td><span class="i18n" data-en="Connector factory" data-zh="Connector 工廠">Connector factory</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/distributed/kv_transfer/kv_connector/factory.py</code></td><td>95-98</td></tr>
+    <tr><td><span class="i18n" data-en="KV transfer config" data-zh="KV transfer 設定">KV transfer config</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/config/kv_transfer.py</code></td><td>1-112</td></tr>
+    <tr><td><span class="i18n" data-en="API protocol (job_id extraction)" data-zh="API protocol（job_id 抽取）">API protocol (job_id extraction)</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/protocol.py</code></td><td>294-296, 364-384</td></tr>
+    <tr><td>Request dataclass</td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/request.py</code></td><td>23-46, 136-175</td></tr>
+    <tr><td><span class="i18n" data-en="CLI argument" data-zh="CLI 參數">CLI argument</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/engine/arg_utils.py</code></td><td>875-876</td></tr>
+    <tr><td><span class="i18n" data-en="A/B benchmark script" data-zh="A/B 基準測試腳本">A/B benchmark script</span></td><td><code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">our_experiments/scripts/ab_benchmark.py</code></td><td>547</td></tr>
+    <tr><td><span class="i18n" data-en="JPS sweep plotter" data-zh="JPS sweep 繪圖腳本">JPS sweep plotter</span></td><td><code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">our_experiments/scripts/plot_jps_sweep.py</code></td><td>153</td></tr>
+  </table>
+</section>
+
+<!-- ====== 11. OBSERVATIONS ====== -->
 <section id="observations">
-  <h2><span class="i18n" data-en="10. Observations &amp; Takeaways" data-zh="10. 觀察與總結">10. Observations & Takeaways</span></h2>
+  <h2><span class="i18n" data-en="11. Observations &amp; Takeaways" data-zh="11. 觀察與總結">11. Observations & Takeaways</span></h2>
 
   <div class="cards">
     <div class="card">
@@ -1221,7 +1617,7 @@ num_gpu_blocks = <span class="nu">10.55 GiB</span> ÷ <span class="nu">2 MiB</sp
 
 <footer>
   <p><span class="i18n" data-en="vLLM-Continuum Execution Note — Hands-on Verification" data-zh="vLLM-Continuum 執行筆記 — 實機驗證">vLLM-Continuum Execution Note — Hands-on Verification</span></p>
-  <p><span class="i18n" data-en="Experiment date: 2026-04-02" data-zh="實驗日期：2026-04-02">Experiment date: 2026-04-02</span></p>
+  <p><span class="i18n" data-en="Experiment date: 2026-04-02 — Code analysis update: 2026-04-05" data-zh="實驗日期：2026-04-02 — 程式碼分析更新：2026-04-05">Experiment date: 2026-04-02 — Code analysis update: 2026-04-05</span></p>
 </footer>
 
 <script>
