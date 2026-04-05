@@ -1960,8 +1960,148 @@ vllm serve MODEL --kv-transfer-config <span class="st">'{"kv_connector":"LMCache
 
   <div class="ok-box"><strong><span class="i18n" data-en="Takeaway:" data-zh="結論：">Takeaway:</span></strong> <span class="i18n" data-en="Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity." data-zh="Continuum 的 VRAM pin 策略以容量換速度 — 在 VRAM 稀缺（&lt;32 GB）且工具快速時有益。在更大的 GPU（&gt;40 GB）上，pinning 的容量成本超過其收益；LMCache 的 CPU DRAM offload 提供相同的恢復加速，且不減少 GPU 容量。">Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity.</span></div>
 
-  <!-- 10.10 Experiment Scripts Source Walkthrough -->
-  <h3><span class="i18n" data-en="10.10 Experiment Scripts — Source Code Walkthrough" data-zh="10.10 實驗腳本 — 原始碼解析">10.10 Experiment Scripts — Source Code Walkthrough</span></h3>
+  <!-- 10.10 Full Call Graph -->
+  <h3><span class="i18n" data-en="10.10 Full Call Graph: Experiment → vLLM Internals → Response" data-zh="10.10 完整 Call Graph：實驗腳本 → vLLM 內部 → 回應">10.10 Full Call Graph: Experiment → vLLM Internals → Response</span></h3>
+  <p><span class="i18n" data-en="End-to-end trace from <code>ab_benchmark.py</code> request through every vLLM layer to HTTP response. Shows how <code>job_id</code> / <code>is_last_step</code> propagate and where each strategy diverges." data-zh="從 <code>ab_benchmark.py</code> 的 request 到 HTTP response 的端到端追蹤。顯示 <code>job_id</code> / <code>is_last_step</code> 如何傳播，以及每個策略在哪裡分歧。">End-to-end trace from <code>ab_benchmark.py</code> request through every vLLM layer to HTTP response. Shows how <code>job_id</code> / <code>is_last_step</code> propagate and where each strategy diverges.</span></p>
+
+  <div class="metric-chart" style="font-size:.78rem;line-height:2">
+<span style="color:#fab387;font-weight:700"><span class="i18n" data-en="── Request Path (inbound) ──" data-zh="── Request 路徑（入站）──">── Request Path (inbound) ──</span></span>
+
+<span class="cm">① Experiment script</span>
+   <code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">our_experiments/scripts/ab_benchmark.py:329</code>
+   client.chat.completions.<span class="fn">create</span>(<span class="st">extra_body</span>={<span class="st">"job_id"</span>: <span class="st">"job_0042"</span>, <span class="st">"is_last_step"</span>: <span class="kw">False</span>})
+       │
+       ▼
+<span class="cm">② HTTP endpoint (FastAPI)</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/api_server.py:688</code>
+   <span class="fn">create_chat_completion</span>(request: <span class="kw">ChatCompletionRequest</span>)
+       │  <span class="cm">← OpenAI SDK merges extra_body keys into top-level JSON body</span>
+       ▼
+<span class="cm">③ Protocol parsing (Pydantic model, extra="allow")</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/protocol.py:635-638</code>
+   ChatCompletionRequest.<span class="st">job_id</span> = <span class="st">"job_0042"</span>
+   ChatCompletionRequest.<span class="st">is_last_step</span> = <span class="kw">False</span>
+       │
+       ▼
+<span class="cm">④ Pack into SamplingParams.extra_args</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/protocol.py:730-737</code>
+   <span class="fn">to_sampling_params</span>() → extra_args = {<span class="st">"job_id"</span>: .., <span class="st">"is_last_step"</span>: ..}
+       │
+       ▼
+<span class="cm">⑤ Serving handler → engine client</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/serving_chat.py:300</code>
+   engine_client.<span class="fn">generate</span>(prompt, <span class="st">sampling_params</span>, request_id)
+       │
+       ▼
+<span class="cm">⑥ AsyncLLM → Processor → EngineCoreRequest</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/engine/async_llm.py:289</code>  →  <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/engine/processor.py:424</code>
+   EngineCoreRequest.sampling_params.<span class="st">extra_args</span> <span class="cm">← preserved</span>
+       │
+       ▼
+<span class="cm">⑦ EngineCore → Request object creation</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/request.py:146-152</code>
+   Request.<span class="fn">from_engine_core_request</span>()
+     → Request.<span class="st">job_id</span> = extra_args[<span class="st">"job_id"</span>]
+     → Request.<span class="st">is_last_step</span> = extra_args[<span class="st">"is_last_step"</span>]
+       │
+       ▼
+<span class="cm">⑧ Scheduler.add_request()</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:1276-1290</code>
+   tool_call_estimator.<span class="fn">request_arrives</span>(request)   <span class="cm">← records job history</span>
+   waiting.<span class="fn">add_request</span>(request)                   <span class="cm">← into queue (FCFS or Continuum)</span>
+
+<span style="color:#6ec6ff;font-weight:700"><span class="i18n" data-en="── Scheduling & Execution ──" data-zh="── 排程與執行 ──">── Scheduling & Execution ──</span></span>
+
+<span class="cm">⑨ Scheduler.schedule() — main loop</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:271</code>
+   <span class="fn">unpin_requests_regular</span>()                     <span class="cm">← TTL cleanup (Continuum only)</span>
+       │
+       ├─ <span style="color:#f38ba8">FCFS</span>:      waiting.<span class="fn">peek_request</span>()        <span class="cm">← deque popleft (oldest first)</span>
+       ├─ <span style="color:#a6e3a1">Continuum</span>: waiting.<span class="fn">peek_request</span>(pinned..)  <span class="cm">← pinned-job priority → job-ID FCFS</span>
+       └─ <span style="color:#cba6f7">LMCache</span>:   connector.<span class="fn">get_num_new_matched_tokens</span>()  <span class="cm">← check CPU cache</span>
+       │
+       ▼
+<span class="cm">⑩ KVCacheManager.allocate_slots()</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/kv_cache_manager.py:192</code>
+   <span class="cm">If fails → preemption:</span>
+       ├─ <span style="color:#f38ba8">FCFS</span>:      running.<span class="fn">pop</span>()                <span class="cm">← evict last-added</span>
+       ├─ <span style="color:#a6e3a1">Continuum</span>: <span class="fn">pop_running_request_based_on_last_step</span>()
+       │              <span class="cm">← protect is_last_step, evict newest non-last-step</span>
+       └─ <span style="color:#cba6f7">LMCache</span>:   <span class="cm">← fewer evictions (GPU blocks freed during offload)</span>
+       │
+       ▼
+<span class="cm">⑪ GPU forward pass</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/worker/gpu_model_runner.py:2064</code>
+   model_output = self.model(<span class="st">input_ids</span>, <span class="st">positions</span>, ...)
+       │
+       ├─ <span style="color:#cba6f7">LMCache</span>: <span class="fn">start_load_kv</span>() <span class="cm">before</span> forward │ <span class="fn">save_kv_layer</span>() <span class="cm">per layer</span> │ <span class="fn">wait_for_save</span>() <span class="cm">after</span>
+       │  <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/worker/kv_connector_model_runner_mixin.py:44,112,117</code>
+       │
+       ▼
+<span class="cm">⑫ Sample tokens</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/worker/gpu_model_runner.py:2118</code>
+   sampler_output = self.<span class="fn">_sample</span>(logits)
+
+<span style="color:#a6e3a1;font-weight:700"><span class="i18n" data-en="── Completion & Pin Decision ──" data-zh="── 完成與 Pin 決策 ──">── Completion & Pin Decision ──</span></span>
+
+<span class="cm">⑬ Scheduler.update_from_output()</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:1042</code>
+   <span class="kw">if</span> stopped → <span class="fn">_free_request</span>() → <span class="fn">_free_blocks</span>()
+       │
+       ▼
+<span class="cm">⑭ _free_blocks() — THE STRATEGY DIVERGENCE POINT</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/scheduler.py:1356-1399</code>
+       │
+       ├─ <span style="color:#f38ba8">FCFS</span>: kv_cache_manager.<span class="fn">free</span>(request)   <span class="cm">← always free, blocks → free queue</span>
+       │
+       ├─ <span style="color:#a6e3a1">Continuum</span>:
+       │    tool_call_estimator.<span class="fn">request_finished</span>()  <span class="cm">← parse output → extract func_call</span>
+       │    <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/estimate_with_func.py:151</code>
+       │    <span class="fn">set_up_pin</span>(): exec_time ≤ 2s → <span class="ok">pin_request(2.0s)</span>   <span class="cm">← skip free!</span>
+       │                  exec_time &gt; 2s → <span class="err">free()</span>
+       │
+       └─ <span style="color:#cba6f7">ContextServe</span>:
+            <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/context_predictor.py</code>
+            <span class="fn">set_up_pin_contextserve</span>() → ContextAwarePredictor.<span class="fn">predict</span>()
+              ├─ FAST  → <span class="ok">pin_request(ttl)</span>
+              ├─ SLOW  → <span class="err">free()</span> proactively
+              └─ UNCERTAIN → <span class="ok">pin_request(continuum_ttl)</span> fallback
+
+<span style="color:#f38ba8;font-weight:700"><span class="i18n" data-en="── Response Path (outbound) ──" data-zh="── Response 路徑（出站）──">── Response Path (outbound) ──</span></span>
+
+<span class="cm">⑮ Output pipeline</span>
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/engine/core.py:766</code>  output_queue → ZMQ socket
+       │
+       ▼
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/engine/async_llm.py:427</code>  <span class="fn">_run_output_handler</span>() → per-request queue
+       │
+       ▼
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/serving_chat.py</code>  → ChatCompletionResponse
+       │
+       ▼
+   <code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/entrypoints/openai/api_server.py:703</code>  → JSON HTTP 200
+       │
+       ▼
+<span class="cm">⑯ Back to experiment script</span>
+   <code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">our_experiments/scripts/ab_benchmark.py:335</code>
+   result.turns.<span class="fn">append</span>({latency_ms, prompt_tokens, completion_tokens})
+   time.<span class="fn">sleep</span>(<span class="fn">sample_tool_time</span>(turn))  <span class="cm">← simulate tool execution</span>
+   <span class="cm">→ next turn (loop back to ①)</span>
+  </div>
+
+  <h4><span class="i18n" data-en="Variable Propagation: extra_body → pin decision" data-zh="變數傳播：extra_body → pin 決策">Variable Propagation: extra_body → pin decision</span></h4>
+  <table>
+    <tr><th><span class="i18n" data-en="Stage" data-zh="階段">Stage</span></th><th><span class="i18n" data-en="Variable Form" data-zh="變數形態">Variable Form</span></th><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th></tr>
+    <tr><td>①</td><td><code>extra_body={"job_id": "job_0042", "is_last_step": False}</code></td><td><code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">ab_benchmark.py:329</code></td></tr>
+    <tr><td>③</td><td><code>ChatCompletionRequest.job_id = "job_0042"</code></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">protocol.py:635</code></td></tr>
+    <tr><td>④</td><td><code>SamplingParams.extra_args = {"job_id": .., "is_last_step": ..}</code></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">protocol.py:730</code></td></tr>
+    <tr><td>⑦</td><td><code>Request.job_id = "job_0042"</code>, <code>Request.is_last_step = False</code></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">request.py:146</code></td></tr>
+    <tr><td>⑧</td><td><code>waiting.add_request(request)</code> <span class="i18n" data-en="+ job history recorded" data-zh="+ job 歷史記錄">+ job history recorded</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">scheduler.py:1287</code></td></tr>
+    <tr><td>⑭</td><td><code>is_last_step=False</code> + fast tool → <code>pin_request(2.0s)</code></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">scheduler.py:1391</code></td></tr>
+  </table>
+
+  <!-- 10.11 Experiment Scripts Source Walkthrough -->
+  <h3><span class="i18n" data-en="10.11 Experiment Scripts — Source Code Walkthrough" data-zh="10.11 實驗腳本 — 原始碼解析">10.11 Experiment Scripts — Source Code Walkthrough</span></h3>
   <p><span class="i18n" data-en="Three key scripts drive all experiments: the A/B benchmark, KV pin verifier, and JPS sweep plotter." data-zh="三個關鍵腳本驅動所有實驗：A/B 基準測試、KV pin 驗證器、JPS sweep 繪圖。">Three key scripts drive all experiments: the A/B benchmark, KV pin verifier, and JPS sweep plotter.</span></p>
 
   <h4><span class="i18n" data-en="① ab_benchmark.py — Poisson-Arrival A/B Benchmark" data-zh="① ab_benchmark.py — Poisson 到達 A/B 基準測試">① ab_benchmark.py — Poisson-Arrival A/B Benchmark</span></h4>
@@ -2048,8 +2188,8 @@ speedup = (fcfs[<span class="st">"avg_duration_s"</span>] - other[<span class="s
 <span class="cm"># 2. jps_sweep_combined.png — 3-subplot side-by-side comparison</span>
 <span class="cm"># 3. jps_sweep_speedup.png  — % improvement over FCFS baseline</span></code></pre>
 
-  <!-- 10.11 Key Files Reference -->
-  <h3><span class="i18n" data-en="10.11 Key Files Reference" data-zh="10.11 關鍵檔案參照">10.11 Key Files Reference</span></h3>
+  <!-- 10.12 Key Files Reference -->
+  <h3><span class="i18n" data-en="10.12 Key Files Reference" data-zh="10.12 關鍵檔案參照">10.12 Key Files Reference</span></h3>
   <table>
     <tr><th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th><th><span class="i18n" data-en="Lines" data-zh="行數">Lines</span></th></tr>
     <tr><td><span class="i18n" data-en="Policy enum + queue factory" data-zh="Policy enum + queue 工廠">Policy enum + queue factory</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/request_queue.py</code></td><td>17-353</td></tr>
