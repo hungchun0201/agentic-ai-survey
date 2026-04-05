@@ -1960,8 +1960,96 @@ vllm serve MODEL --kv-transfer-config <span class="st">'{"kv_connector":"LMCache
 
   <div class="ok-box"><strong><span class="i18n" data-en="Takeaway:" data-zh="結論：">Takeaway:</span></strong> <span class="i18n" data-en="Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity." data-zh="Continuum 的 VRAM pin 策略以容量換速度 — 在 VRAM 稀缺（&lt;32 GB）且工具快速時有益。在更大的 GPU（&gt;40 GB）上，pinning 的容量成本超過其收益；LMCache 的 CPU DRAM offload 提供相同的恢復加速，且不減少 GPU 容量。">Continuum's VRAM pin strategy trades capacity for speed — beneficial when VRAM is scarce (&lt;32 GB) and tools are fast. On larger GPUs (&gt;40 GB), the capacity cost of pinning outweighs its benefit; LMCache's CPU DRAM offload provides the same resume-speedup without reducing GPU capacity.</span></div>
 
-  <!-- 10.10 Key Files Reference -->
-  <h3><span class="i18n" data-en="10.10 Key Files Reference" data-zh="10.10 關鍵檔案參照">10.10 Key Files Reference</span></h3>
+  <!-- 10.10 Experiment Scripts Source Walkthrough -->
+  <h3><span class="i18n" data-en="10.10 Experiment Scripts — Source Code Walkthrough" data-zh="10.10 實驗腳本 — 原始碼解析">10.10 Experiment Scripts — Source Code Walkthrough</span></h3>
+  <p><span class="i18n" data-en="Three key scripts drive all experiments: the A/B benchmark, KV pin verifier, and JPS sweep plotter." data-zh="三個關鍵腳本驅動所有實驗：A/B 基準測試、KV pin 驗證器、JPS sweep 繪圖。">Three key scripts drive all experiments: the A/B benchmark, KV pin verifier, and JPS sweep plotter.</span></p>
+
+  <h4><span class="i18n" data-en="① ab_benchmark.py — Poisson-Arrival A/B Benchmark" data-zh="① ab_benchmark.py — Poisson 到達 A/B 基準測試">① ab_benchmark.py — Poisson-Arrival A/B Benchmark</span></h4>
+  <p><span class="i18n" data-en="547 lines. Simulates realistic multi-turn agentic workload with Poisson-distributed job arrivals." data-zh="547 行。模擬真實多輪 agentic 工作負載，jobs 以 Poisson 分佈到達。">547 lines. Simulates realistic multi-turn agentic workload with Poisson-distributed job arrivals.</span></p>
+
+  <pre><code><span class="cm"># CLI usage</span>
+python3 ab_benchmark.py --policy continuum --port <span class="nu">8199</span> --jps <span class="nu">8.0</span> --duration <span class="nu">90</span> --turns <span class="nu">8</span></code></pre>
+
+  <pre><code><span class="cm"># Core: Poisson arrival process (line 381)</span>
+<span class="kw">def</span> <span class="fn">poisson_arrival</span>(jps, duration_s, base_url, model_id, n_turns):
+    gap = random.<span class="fn">expovariate</span>(jps)   <span class="cm"># exponential inter-arrival time</span>
+    time.<span class="fn">sleep</span>(gap)
+    <span class="cm"># spawn job as thread with job_id = f"job_{count:04d}"</span>
+
+<span class="cm"># Core: how Continuum metadata is passed (line 329)</span>
+resp = client.chat.completions.<span class="fn">create</span>(
+    model=model_id,
+    messages=messages,       <span class="cm"># accumulated context (grows each turn)</span>
+    max_tokens=<span class="nu">150</span>,
+    extra_body={
+        <span class="st">"job_id"</span>: job_id,
+        <span class="st">"is_last_step"</span>: (i == n_turns - <span class="nu">1</span>),  <span class="cm"># True only on final turn</span>
+    },
+)
+
+<span class="cm"># Tool execution time per turn (line 276-286)</span>
+TOOL_TIME_DISTRIBUTIONS = [
+    (<span class="nu">0.05</span>, <span class="nu">0.15</span>),   <span class="cm"># Turn 1: find/ls — fast</span>
+    (<span class="nu">0.05</span>, <span class="nu">0.10</span>),   <span class="cm"># Turn 2: cat — fast</span>
+    (<span class="nu">0.05</span>, <span class="nu">0.10</span>),   <span class="cm"># Turn 3: cat — fast</span>
+    (<span class="nu">0.08</span>, <span class="nu">0.20</span>),   <span class="cm"># Turn 4: grep — fast</span>
+    (<span class="nu">2.0</span>,  <span class="nu">5.0</span>),    <span class="cm"># Turn 5: pytest — SLOW (long-tailed)</span>
+    (<span class="nu">0.05</span>, <span class="nu">0.10</span>),   <span class="cm"># Turn 6: cat — fast</span>
+    (<span class="nu">0.10</span>, <span class="nu">0.30</span>),   <span class="cm"># Turn 7: patch — fast</span>
+]</code></pre>
+
+  <pre><code><span class="cm"># Output JSON schema (line 516-538)</span>
+{
+  <span class="st">"policy"</span>: <span class="st">"continuum"</span>,
+  <span class="st">"jps"</span>: <span class="nu">8.0</span>,
+  <span class="st">"avg_duration_s"</span>: <span class="nu">12.465</span>,
+  <span class="st">"p90_duration_s"</span>: <span class="nu">14.371</span>,
+  <span class="st">"p95_duration_s"</span>: <span class="nu">14.629</span>,
+  <span class="st">"per_turn_avg_latency_ms"</span>: {<span class="st">"1"</span>: <span class="nu">1051</span>, <span class="st">"2"</span>: <span class="nu">519</span>, ...},
+  <span class="st">"per_turn_avg_prompt_tokens"</span>: {<span class="st">"1"</span>: <span class="nu">92</span>, <span class="st">"2"</span>: <span class="nu">469</span>, ...},
+  <span class="st">"job_durations"</span>: [<span class="nu">6.185</span>, <span class="nu">6.607</span>, ...]
+}</code></pre>
+
+  <h4><span class="i18n" data-en="② test_pin_verify.py — KV Cache Pin Verification" data-zh="② test_pin_verify.py — KV Cache Pin 驗證">② test_pin_verify.py — KV Cache Pin Verification</span></h4>
+  <p><span class="i18n" data-en="102 lines. Verifies Continuum's pin mechanism by polling <code>vllm:kv_cache_usage_perc</code> from the Prometheus <code>/metrics</code> endpoint during tool execution gaps." data-zh="102 行。透過在工具執行間隔輪詢 Prometheus <code>/metrics</code> 端點的 <code>vllm:kv_cache_usage_perc</code> 來驗證 Continuum 的 pin 機制。">102 lines. Verifies Continuum's pin mechanism by polling <code>vllm:kv_cache_usage_perc</code> from the Prometheus <code>/metrics</code> endpoint during tool execution gaps.</span></p>
+
+  <pre><code><span class="cm"># Parse Prometheus metric (line 36-41)</span>
+<span class="kw">def</span> <span class="fn">get_kv_usage</span>():
+    r = req.<span class="fn">get</span>(f<span class="st">"{BASE}/metrics"</span>, timeout=<span class="nu">5</span>)
+    <span class="kw">for</span> line <span class="kw">in</span> r.text.<span class="fn">split</span>(<span class="st">"\n"</span>):
+        <span class="kw">if</span> line.<span class="fn">startswith</span>(<span class="st">"vllm:kv_cache_usage_perc{"</span>):
+            <span class="kw">return</span> <span class="fn">float</span>(line.<span class="fn">split</span>()[-<span class="nu">1</span>])
+
+<span class="cm"># Verification: poll every 0.3s during 1s tool gap (line 84-95)</span>
+<span class="kw">if not</span> is_last:
+    <span class="fn">print</span>(<span class="st">"  Simulating tool execution (1s) — KV should stay pinned..."</span>)
+    <span class="kw">for</span> t <span class="kw">in</span> [<span class="nu">0.3</span>, <span class="nu">0.6</span>, <span class="nu">0.9</span>]:
+        time.<span class="fn">sleep</span>(<span class="nu">0.3</span>)
+        u = <span class="fn">get_kv_usage</span>()
+        <span class="fn">print</span>(f<span class="st">"    t+{t:.1f}s: KV usage = {u:.6f}"</span>)
+        <span class="cm"># Expected: u ≈ usage_post (constant = pinned)</span>
+        <span class="cm"># Failure:  u drops → blocks evicted, pin broken</span></code></pre>
+
+  <h4><span class="i18n" data-en="③ plot_jps_sweep.py — Multi-GPU Comparison Plots" data-zh="③ plot_jps_sweep.py — 多 GPU 比較圖">③ plot_jps_sweep.py — Multi-GPU Comparison Plots</span></h4>
+  <p><span class="i18n" data-en="153 lines. Reads JSON results from 3 GPUs × 3 policies, generates publication-quality comparison figures." data-zh="153 行。讀取 3 塊 GPU × 3 個策略的 JSON 結果，生成出版品質的比較圖。">153 lines. Reads JSON results from 3 GPUs × 3 policies, generates publication-quality comparison figures.</span></p>
+
+  <pre><code><span class="cm"># GPU configurations (line 13-17)</span>
+GPUS = {
+    <span class="st">"rtx_6000"</span>: {<span class="st">"name"</span>: <span class="st">"RTX 6000 (24 GB)"</span>, <span class="st">"jps"</span>: [<span class="nu">1.0</span>, <span class="nu">2.0</span>, <span class="nu">5.0</span>, <span class="nu">8.0</span>, <span class="nu">12.0</span>]},
+    <span class="st">"A100"</span>:     {<span class="st">"name"</span>: <span class="st">"A100 (40 GB)"</span>,      <span class="st">"jps"</span>: [<span class="nu">2.0</span>, <span class="nu">5.0</span>, <span class="nu">10.0</span>, <span class="nu">15.0</span>, <span class="nu">25.0</span>, <span class="nu">40.0</span>]},
+    <span class="st">"L40S"</span>:     {<span class="st">"name"</span>: <span class="st">"L40S (48 GB)"</span>,      <span class="st">"jps"</span>: [<span class="nu">2.0</span>, <span class="nu">5.0</span>, <span class="nu">10.0</span>, <span class="nu">15.0</span>, <span class="nu">25.0</span>]},
+}
+
+<span class="cm"># Speedup formula (line 124)</span>
+speedup = (fcfs[<span class="st">"avg_duration_s"</span>] - other[<span class="st">"avg_duration_s"</span>]) / fcfs[<span class="st">"avg_duration_s"</span>] * <span class="nu">100</span>
+
+<span class="cm"># Generates 3 figure types:</span>
+<span class="cm"># 1. jps_sweep_{gpu}.png   — per-GPU: avg duration vs JPS for 3 policies</span>
+<span class="cm"># 2. jps_sweep_combined.png — 3-subplot side-by-side comparison</span>
+<span class="cm"># 3. jps_sweep_speedup.png  — % improvement over FCFS baseline</span></code></pre>
+
+  <!-- 10.11 Key Files Reference -->
+  <h3><span class="i18n" data-en="10.11 Key Files Reference" data-zh="10.11 關鍵檔案參照">10.11 Key Files Reference</span></h3>
   <table>
     <tr><th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th><th><span class="i18n" data-en="Lines" data-zh="行數">Lines</span></th></tr>
     <tr><td><span class="i18n" data-en="Policy enum + queue factory" data-zh="Policy enum + queue 工廠">Policy enum + queue factory</span></td><td><code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">vllm/v1/core/sched/request_queue.py</code></td><td>17-353</td></tr>
