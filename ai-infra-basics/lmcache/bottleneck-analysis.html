@@ -1401,10 +1401,202 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 </section>
 
 <!-- ================================================================== -->
-<!-- Section 5: Key Findings -->
+<!-- Section 9: Deep Dive — KV Transfer Pipeline -->
+<!-- ================================================================== -->
+<section id="deep-dive">
+<h2><span class="sec-num">9</span> <span class="i18n" data-en="Deep Dive: KV Transfer Pipeline" data-zh="深入分析：KV 傳輸管線">Deep Dive: KV Transfer Pipeline</span></h2>
+
+<h3><span class="i18n" data-en="9.1 vLLM Step Lifecycle" data-zh="9.1 vLLM Step 生命週期">9.1 vLLM Step Lifecycle</span></h3>
+
+<p><span class="i18n"
+  data-en="A vLLM <strong>step</strong> = one <code class='inline-code'>schedule()</code> + one <code class='inline-code'>model.forward()</code> + sampling. Each step produces <strong>one output token per request</strong> in the batch."
+  data-zh="一個 vLLM <strong>step</strong> = 一次 <code class='inline-code'>schedule()</code> + 一次 <code class='inline-code'>model.forward()</code> + 取樣。每步為批次中的每個請求產生<strong>一個輸出 token</strong>。">A vLLM <strong>step</strong> = one <code class="inline-code">schedule()</code> + one <code class="inline-code">model.forward()</code> + sampling. Each step produces <strong>one output token per request</strong> in the batch.</span></p>
+
+<div class="vflow">
+  <div class="box blue">
+    <h4 style="color:var(--accent-blue)"><code class="inline-code">schedule()</code></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Decide which requests to batch" data-zh="決定要批次處理哪些請求">Decide which requests to batch</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4 style="color:var(--accent-orange)"><code class="inline-code">build_connector_meta()</code></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Build KV work list — per-request ReqMeta with load_spec + save_spec. Pure decode requests are filtered out entirely (skip_save=True + load_spec=None)." data-zh="建構 KV 工作清單 — 每個請求的 ReqMeta 含 load_spec + save_spec。純 decode 請求被完全過濾掉（skip_save=True + load_spec=None）。">Build KV work list — per-request ReqMeta with load_spec + save_spec. Pure decode requests are filtered out entirely (skip_save=True + load_spec=None).</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box green">
+    <h4 style="color:var(--accent-green)"><code class="inline-code">start_load_kv()</code> <span style="font-size:0.75rem;color:var(--text-muted)">— 0.2ms avg, 4.1% of steps</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="CPU→GPU onload (only for new requests with cache hit)" data-zh="CPU→GPU 載入（僅限有快取命中的新請求）">CPU→GPU onload (only for new requests with cache hit)</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box purple">
+    <h4 style="color:var(--accent-purple)"><code class="inline-code">model.forward()</code> — 32 <span class="i18n" data-en="attention layers" data-zh="注意力層">attention layers</span></h4>
+    <ul>
+      <li><code class="inline-code">wait_for_layer_load()</code> <span class="i18n" data-en="— wait for this layer's onload" data-zh="— 等待此層載入">— wait for this layer's onload</span></li>
+      <li><span class="i18n" data-en="attention + MLP (actual GPU compute)" data-zh="attention + MLP（實際 GPU 計算）">attention + MLP (actual GPU compute)</span></li>
+      <li><code class="inline-code">save_kv_layer()</code> <span class="i18n" data-en="— start async GPU→CPU offload" data-zh="— 啟動異步 GPU→CPU offload">— start async GPU→CPU offload</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">wait_for_save()</code> <span style="font-size:0.75rem;color:var(--accent-red)">— 224ms median on prefill steps</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Block until ALL async GPU→CPU copies complete. One prefill in a batch of 23 requests blocks all 22 decode requests." data-zh="阻塞直到所有異步 GPU→CPU 複製完成。一個批次中 23 個請求裡的一個 prefill 會阻塞所有 22 個 decode 請求。">Block until ALL async GPU→CPU copies complete. One prefill in a batch of 23 requests blocks all 22 decode requests.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box gray">
+    <h4><span class="i18n" data-en="sample → 1 token per request" data-zh="取樣 → 每個請求 1 token">sample → 1 token per request</span></h4>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="9.2 Onload vs Offload: The Asymmetry" data-zh="9.2 Onload vs Offload：不對稱性">9.2 Onload vs Offload: The Asymmetry</span></h3>
+
+<p><span class="i18n"
+  data-en="The mean of 134ms for <code class='inline-code'>wait_for_save</code> is misleading — the distribution is <strong>bimodal</strong>:"
+  data-zh="<code class='inline-code'>wait_for_save</code> 的 134ms 平均值具有誤導性 — 分佈是<strong>雙峰的</strong>：">The mean of 134ms for <code class="inline-code">wait_for_save</code> is misleading — the distribution is <strong>bimodal</strong>:</span></p>
+
+<div class="grid-2">
+  <div class="card" style="border-left:4px solid var(--accent-green)">
+    <div class="card-header" style="color:var(--accent-green)">
+      <span class="i18n" data-en="Onload (CPU→GPU) Distribution" data-zh="Onload（CPU→GPU）分佈">Onload (CPU→GPU) Distribution</span>
+    </div>
+    <p style="font-size:0.82rem;margin-bottom:0.5rem"><span class="i18n" data-en="H200, 8,168 steps:" data-zh="H200，8,168 步：">H200, 8,168 steps:</span></p>
+    <div class="bar-chart">
+      <div class="bar-row">
+        <div class="bar-label" style="min-width:60px;font-size:0.75rem">&lt; 0.1ms</div>
+        <div class="bar-track"><div class="bar-fill" style="width:95.9%;background:var(--accent-green);font-size:0.7rem">95.9% — skip</div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label" style="min-width:60px;font-size:0.75rem">≥ 1.0ms</div>
+        <div class="bar-track"><div class="bar-fill" style="width:4.1%;background:var(--accent-blue);font-size:0.7rem;min-width:80px">4.1% — 5.4ms avg</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-red)">
+    <div class="card-header" style="color:var(--accent-red)">
+      <span class="i18n" data-en="Offload (GPU→CPU) Distribution" data-zh="Offload（GPU→CPU）分佈">Offload (GPU→CPU) Distribution</span>
+    </div>
+    <p style="font-size:0.82rem;margin-bottom:0.5rem"><span class="i18n" data-en="H200, 8,047 calls:" data-zh="H200，8,047 次呼叫：">H200, 8,047 calls:</span></p>
+    <div class="bar-chart">
+      <div class="bar-row">
+        <div class="bar-label" style="min-width:60px;font-size:0.75rem">&lt; 0.1ms</div>
+        <div class="bar-track"><div class="bar-fill" style="width:43.6%;background:var(--accent-teal);font-size:0.7rem">43.6% — decode only</div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label" style="min-width:60px;font-size:0.75rem">200-300ms</div>
+        <div class="bar-track"><div class="bar-fill" style="width:52.7%;background:var(--accent-red);font-size:0.7rem">52.7% — 224ms median</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h4><span class="i18n" data-en="Why offload transfers much more data" data-zh="為什麼 offload 傳輸更多數據">Why offload transfers much more data</span></h4>
+<table>
+  <tr>
+    <th></th>
+    <th style="color:var(--accent-green)"><span class="i18n" data-en="Onload (CPU→GPU)" data-zh="Onload（CPU→GPU）">Onload (CPU→GPU)</span></th>
+    <th style="color:var(--accent-red)"><span class="i18n" data-en="Offload (GPU→CPU)" data-zh="Offload（GPU→CPU）">Offload (GPU→CPU)</span></th>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Triggers when" data-zh="觸發條件">Triggers when</span></td>
+    <td><span class="i18n" data-en="New request with cache hit" data-zh="有快取命中的新請求">New request with cache hit</span></td>
+    <td><span class="i18n" data-en="Any prefill step with can_save" data-zh="任何 can_save 的 prefill 步驟">Any prefill step with can_save</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Frequency" data-zh="頻率">Frequency</span></td>
+    <td>4.1% <span class="i18n" data-en="of steps" data-zh="的步驟">of steps</span></td>
+    <td style="color:var(--accent-red);font-weight:600">56.4% <span class="i18n" data-en="of steps" data-zh="的步驟">of steps</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Data transferred" data-zh="傳輸數據">Data transferred</span></td>
+    <td><span class="i18n" data-en="Only cached prefix chunks" data-zh="僅快取前綴區塊">Only cached prefix chunks</span></td>
+    <td><span class="i18n" data-en="All computed tokens (~3.2 GB for 13K ctx)" data-zh="所有計算的 token（13K ctx 約 3.2 GB）">All computed tokens (~3.2 GB for 13K ctx)</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Actual latency" data-zh="實際延遲">Actual latency</span></td>
+    <td style="color:var(--accent-green);font-weight:600">5.4ms <span class="i18n" data-en="mean" data-zh="平均">mean</span></td>
+    <td style="color:var(--accent-red);font-weight:600">224ms <span class="i18n" data-en="median" data-zh="中位數">median</span></td>
+  </tr>
+</table>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="PCIe Bandwidth Check" data-zh="PCIe 頻寬檢驗">PCIe Bandwidth Check</span></div>
+  <p><span class="i18n"
+    data-en="3.2 GB / ~25 GB/s (PCIe Gen4) ≈ 128ms + overhead = 224ms. This is physically limited by PCIe bandwidth — no software optimization can make this faster without reducing transfer size."
+    data-zh="3.2 GB / ~25 GB/s（PCIe Gen4）≈ 128ms + 開銷 = 224ms。這受到 PCIe 頻寬的物理限制 — 沒有軟體優化可以在不減少傳輸大小的情況下使其更快。">3.2 GB / ~25 GB/s (PCIe Gen4) ≈ 128ms + overhead = 224ms. This is physically limited by PCIe bandwidth — no software optimization can make this faster without reducing transfer size.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="9.3 Per-JPS Breakdown: Why High Concurrency Hurts More" data-zh="9.3 Per-JPS 分解：為什麼高並發更受影響">9.3 Per-JPS Breakdown: Why High Concurrency Hurts More</span></h3>
+
+<table>
+  <tr>
+    <th>JPS</th>
+    <th><span class="i18n" data-en="Steps" data-zh="步驟數">Steps</span></th>
+    <th><span class="i18n" data-en="Batch" data-zh="批次">Batch</span></th>
+    <th><span class="i18n" data-en="Tokens/Step" data-zh="Tokens/步">Tokens/Step</span></th>
+    <th><span class="i18n" data-en="Real Save %" data-zh="實際保存 %">Real Save %</span></th>
+    <th><code class="inline-code">wait_for_save</code></th>
+  </tr>
+  <tr><td>1</td><td>1,497</td><td>5.3</td><td>431</td><td style="color:var(--accent-green)">10%</td><td style="color:var(--accent-green)">13.1ms</td></tr>
+  <tr><td>3</td><td>1,603</td><td>13.1</td><td>882</td><td>16%</td><td>29.9ms</td></tr>
+  <tr><td>6</td><td>1,893</td><td>21.6</td><td>5,789</td><td style="color:var(--accent-orange)">72%</td><td style="color:var(--accent-orange)">175.2ms</td></tr>
+  <tr><td>10</td><td>3,170</td><td>23.3</td><td>7,174</td><td style="color:var(--accent-red);font-weight:700">88%</td><td style="color:var(--accent-red);font-weight:700">215.1ms</td></tr>
+</table>
+
+<div class="callout danger">
+  <div class="callout-title"><span class="i18n" data-en="Scaling Law" data-zh="縮放定律">Scaling Law</span></div>
+  <p><span class="i18n"
+    data-en="Higher concurrency = more prefill requests per step = more offload transfers = more blocking. At JPS=1, only 10% of steps trigger real saves (13ms). At JPS=10, 88% trigger saves (215ms). This is why LMCache's penalty scales with load."
+    data-zh="更高並發 = 每步更多 prefill 請求 = 更多 offload 傳輸 = 更多阻塞。JPS=1 時，僅 10% 的步驟觸發實際保存（13ms）。JPS=10 時，88% 觸發保存（215ms）。這就是為什麼 LMCache 的懲罰隨負載增長。">Higher concurrency = more prefill requests per step = more offload transfers = more blocking. At JPS=1, only 10% of steps trigger real saves (13ms). At JPS=10, 88% trigger saves (215ms). This is why LMCache's penalty scales with load.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="9.4 Full Call Chain" data-zh="9.4 完整呼叫鏈">9.4 Full Call Chain</span></h3>
+
+<div class="vflow">
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">wait_for_save()</code> <span class="file-badge">vllm_v1_adapter.py:1019</span></h4>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4 style="color:var(--accent-orange)"><code class="inline-code">lmcache_engine.store()</code> <span class="file-badge">cache_engine.py:176</span></h4>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="branch">
+    <div class="box blue">
+      <h4 style="color:var(--accent-blue)"><code class="inline-code">token_database.process_tokens()</code></h4>
+      <p style="font-size:0.78rem"><span class="i18n" data-en="Compute chunk boundaries, hash keys" data-zh="計算區塊邊界、雜湊鍵">Compute chunk boundaries, hash keys</span></p>
+    </div>
+    <div class="box blue">
+      <h4 style="color:var(--accent-blue)"><code class="inline-code">storage_manager.allocate()</code></h4>
+      <p style="font-size:0.78rem"><span class="i18n" data-en="Allocate CPU memory for KV" data-zh="為 KV 分配 CPU 記憶體">Allocate CPU memory for KV</span></p>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">gpu_connector.batched_from_gpu()</code> <span style="font-size:0.75rem">← <span class="i18n" data-en="dominant cost" data-zh="主要成本">dominant cost</span></span></h4>
+    <ul>
+      <li><code class="inline-code">from_gpu()</code> → <code class="inline-code">lmc_ops.multi_layer_kv_transfer()</code> <span class="i18n" data-en="(CUDA kernel)" data-zh="（CUDA 核心）">(CUDA kernel)</span></li>
+      <li><code class="inline-code">store_stream.synchronize()</code> <span class="i18n" data-en="— wait for DMA completion" data-zh="— 等待 DMA 完成">— wait for DMA completion</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box gray">
+    <h4><code class="inline-code">storage_manager.batched_put()</code></h4>
+    <p style="font-size:0.78rem"><span class="i18n" data-en="Insert into hash table" data-zh="插入雜湊表">Insert into hash table</span></p>
+  </div>
+</div>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="The 224ms is PCIe-limited" data-zh="224ms 受 PCIe 限制">The 224ms is PCIe-limited</span></div>
+  <p><span class="i18n"
+    data-en="The dominant cost is <code class='inline-code'>batched_from_gpu</code> → <code class='inline-code'>store_stream.synchronize()</code>: a physical PCIe DMA transfer of ~3.2 GB. This cannot be made faster without reducing transfer size (lazy save, selective save) or hardware changes."
+    data-zh="主要成本是 <code class='inline-code'>batched_from_gpu</code> → <code class='inline-code'>store_stream.synchronize()</code>：一個 ~3.2 GB 的物理 PCIe DMA 傳輸。如果不減少傳輸大小（延遲保存、選擇性保存）或硬體變更，這無法變得更快。">The dominant cost is <code class="inline-code">batched_from_gpu</code> → <code class="inline-code">store_stream.synchronize()</code>: a physical PCIe DMA transfer of ~3.2 GB. This cannot be made faster without reducing transfer size (lazy save, selective save) or hardware changes.</span></p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 10: Key Findings -->
 <!-- ================================================================== -->
 <section id="findings">
-<h2><span class="sec-num">9</span> <span class="i18n" data-en="Key Findings" data-zh="關鍵發現">Key Findings</span></h2>
+<h2><span class="sec-num">10</span> <span class="i18n" data-en="Key Findings" data-zh="關鍵發現">Key Findings</span></h2>
 
 <div class="card" style="border-left:4px solid var(--accent-red)">
   <div class="card-header" style="color:var(--accent-red)">
@@ -1452,13 +1644,29 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
     <tr><td>L40S (48GB)</td><td>26.7</td><td>8.0</td><td><span class="no">0.30×</span></td></tr>
   </table>
 </div>
+
+<div class="card" style="border-left:4px solid var(--accent-orange)">
+  <div class="card-header" style="color:var(--accent-orange)">
+    <span class="i18n" data-en="Finding 6: Offload overhead scales with concurrency" data-zh="發現 6：Offload 開銷隨並發度增長">Finding 6: Offload overhead scales with concurrency</span>
+  </div>
+  <table>
+    <tr><th>JPS</th><th><span class="i18n" data-en="Real save frequency" data-zh="實際保存頻率">Real save frequency</span></th><th><code class="inline-code">wait_for_save</code></th></tr>
+    <tr><td>1</td><td>10%</td><td style="color:var(--accent-green)">13ms</td></tr>
+    <tr><td>3</td><td>16%</td><td>30ms</td></tr>
+    <tr><td>6</td><td>72%</td><td style="color:var(--accent-orange)">175ms</td></tr>
+    <tr><td>10</td><td style="color:var(--accent-red);font-weight:700">88%</td><td style="color:var(--accent-red);font-weight:700">215ms</td></tr>
+  </table>
+  <p><span class="i18n"
+    data-en="Higher concurrency = more prefill requests per step = more offload transfers. At JPS=10, one prefill in a batch of 23 requests blocks all 22 decode requests for 215ms."
+    data-zh="更高並發 = 每步更多 prefill 請求 = 更多 offload 傳輸。JPS=10 時，一個批次 23 個請求中的一個 prefill 會阻塞所有 22 個 decode 請求 215ms。">Higher concurrency = more prefill requests per step = more offload transfers. At JPS=10, one prefill in a batch of 23 requests blocks all 22 decode requests for 215ms.</span></p>
+</div>
 </section>
 
 <!-- ================================================================== -->
-<!-- Section 6: Revised Bottleneck Model -->
+<!-- Section 11: Revised Bottleneck Model -->
 <!-- ================================================================== -->
 <section id="model">
-<h2><span class="sec-num">10</span> <span class="i18n" data-en="Revised Bottleneck Model" data-zh="修訂後的瓶頸模型">Revised Bottleneck Model</span></h2>
+<h2><span class="sec-num">11</span> <span class="i18n" data-en="Revised Bottleneck Model" data-zh="修訂後的瓶頸模型">Revised Bottleneck Model</span></h2>
 
 <h3><span class="i18n" data-en="Original Hypothesis (FALSIFIED)" data-zh="原始假說（已否定）">Original Hypothesis (FALSIFIED)</span></h3>
 
@@ -1476,10 +1684,10 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 
 <div class="vflow">
   <div class="box red">
-    <h4 style="color:var(--accent-red)">① <code class="inline-code">wait_for_save()</code> <span class="i18n" data-en="— 130–190ms/step" data-zh="— 130–190ms/步">— 130–190ms/step</span></h4>
+    <h4 style="color:var(--accent-red)">① <code class="inline-code">wait_for_save()</code> <span class="i18n" data-en="— 224ms median per prefill step" data-zh="— 每個 prefill 步驟中位數 224ms">— 224ms median per prefill step</span></h4>
     <p style="font-size:0.85rem"><span class="i18n"
-      data-en="GPU→CPU offload sync runs after <strong>every</strong> forward pass. The largest single contributor. Runs even when nocache — the save pipeline is unconditional."
-      data-zh="GPU→CPU offload 同步在<strong>每次</strong>前向傳播後運行。最大的單一貢獻者。即使 nocache 也會運行 — save 管線是無條件的。">GPU→CPU offload sync runs after <strong>every</strong> forward pass. The largest single contributor. Runs even when nocache — the save pipeline is unconditional.</span></p>
+      data-en="GPU→CPU offload of ~3.2 GB per 13K-token request, PCIe Gen4 bandwidth-limited. Bimodal: 0ms on decode-only steps, 224ms on prefill steps. At JPS=10, 88% of steps trigger real saves. One prefill in a batch of 23 blocks all 22 decode requests."
+      data-zh="每個 13K-token 請求的 ~3.2 GB GPU→CPU offload，受 PCIe Gen4 頻寬限制。雙峰分佈：decode-only 步驟 0ms，prefill 步驟 224ms。JPS=10 時 88% 的步驟觸發實際保存。批次 23 個請求中的一個 prefill 阻塞所有 22 個 decode 請求。">GPU→CPU offload of ~3.2 GB per 13K-token request, PCIe Gen4 bandwidth-limited. Bimodal: 0ms on decode-only steps, 224ms on prefill steps. At JPS=10, 88% of steps trigger real saves. One prefill in a batch of 23 blocks all 22 decode requests.</span></p>
   </div>
   <div class="arrow">↓</div>
   <div class="box orange">
@@ -1526,7 +1734,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 7: Future Directions -->
 <!-- ================================================================== -->
 <section id="future">
-<h2><span class="sec-num">11</span> <span class="i18n" data-en="Future Directions" data-zh="未來方向">Future Directions</span></h2>
+<h2><span class="sec-num">12</span> <span class="i18n" data-en="Future Directions" data-zh="未來方向">Future Directions</span></h2>
 
 <div class="card" style="border-left:4px solid var(--accent-red)">
   <div class="card-header">
@@ -1583,7 +1791,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Code Files Reference -->
 <!-- ================================================================== -->
 <section id="files">
-<h2><span class="sec-num">12</span> <span class="i18n" data-en="Code & Data Files" data-zh="程式碼與資料檔案">Code & Data Files</span></h2>
+<h2><span class="sec-num">13</span> <span class="i18n" data-en="Code & Data Files" data-zh="程式碼與資料檔案">Code & Data Files</span></h2>
 
 <h3><span class="i18n" data-en="Code Changes" data-zh="程式碼變更">Code Changes</span></h3>
 <table>
