@@ -93,22 +93,56 @@ papers/<paper-slug>/其他補充頁面.html  ← 可選
 
 ## 4. CSS Specification
 
-### 4.1 Color System
+### 4.1 Per-Page Accent Color System
 
-| 用途 | 色碼 |
-|------|------|
-| 頁面背景 | `#0e0b12` |
-| 主文字色 | `#d0d5e0` |
-| 標題文字 | `#fff` |
-| 連結色 | `#6ec6ff`（hover: `#ff9f43`） |
-| 強調色（紅） | `#e94560` |
-| 次強調色（橙） | `#ffb74d` |
-| 輔助色（綠） | `#a6e3a1` / `#2ecc71` |
-| 輔助色（藍） | `#0f3460` / `#89b4fa` |
-| 次要文字 | `#8fa4c0` |
-| 註解/弱化文字 | `#6c7086` |
-| 程式碼背景 | `#1e1e2e` |
-| 程式碼邊框 | `#2d2d44` |
+每頁有自己的**主視覺色 (accent)**，透過 3 個 CSS 變數控制。頁面其餘 CSS 完全共用。
+
+```css
+/* ===== ACCENT (change per paper) ===== */
+:root {
+  --accent: #e94560;                  /* 主強調色 hex */
+  --accent-rgb: 233, 69, 96;         /* 同色 RGB 值，用於 rgba() */
+  --nav-bg: rgba(45, 12, 22, 0.95);  /* accent 極暗版，用於 nav 背景 */
+}
+```
+
+所有 UI 元素（nav active、badge、h2 border、th、card、warn、tbar）透過 `var(--accent)` 和 `rgba(var(--accent-rgb), opacity)` 引用此色，**不再硬編碼**。
+
+#### Accent Palette（按主題群組）
+
+| 色名 | `--accent` | `--accent-rgb` | `--nav-bg` | 適用主題 |
+|------|-----------|----------------|------------|----------|
+| **Rose** | `#e94560` | `233, 69, 96` | `rgba(45,12,22,0.95)` | KV cache 排程 (continuum, cacheus, rlcache…) |
+| **Coral** | `#e87461` | `232, 116, 97` | `rgba(45,18,14,0.95)` | 效能優化 (nanoflow, splitwise, distserve…) |
+| **Amber** | `#e5a130` | `229, 161, 48` | `rgba(40,28,8,0.95)` | 成本/資源 (cost-of-dynamic-reasoning, serverlessllm…) |
+| **Lime** | `#8bc34a` | `139, 195, 74` | `rgba(16,32,10,0.95)` | 推測/預測 (speculative-actions, speculative-tool-calling…) |
+| **Emerald** | `#2ecc71` | `46, 204, 113` | `rgba(8,35,18,0.95)` | Cache 策略 (cacheblend, cachegen, lmcache…) |
+| **Teal** | `#26a69a` | `38, 166, 154` | `rgba(6,30,28,0.95)` | Agent 框架 (agentinfer, thunderagent, aragog…) |
+| **Cyan** | `#29b6f6` | `41, 182, 246` | `rgba(8,22,38,0.95)` | 分散式系統 (helix, mooncake, preble…) |
+| **Blue** | `#5c6bc0` | `92, 107, 192` | `rgba(14,14,35,0.95)` | 注意力機制 (flashinfer, deepseek-mla, mha2mla…) |
+| **Indigo** | `#7e57c2` | `126, 87, 194` | `rgba(18,12,32,0.95)` | 模型架構 (diffkv, lookaheadkv, attention-gate…) |
+| **Purple** | `#ab47bc` | `171, 71, 188` | `rgba(28,10,30,0.95)` | 排程/調度 (sarathi-serve, epic, duetserve…) |
+| **Pink** | `#ec407a` | `236, 64, 122` | `rgba(40,10,22,0.95)` | Prefill 相關 (prefillshare, ppd, helium…) |
+| **Sky** | `#4fc3f7` | `79, 195, 247` | `rgba(10,24,35,0.95)` | 基礎設施 (vllm, sglang, nvidia-dynamo…) |
+
+選色原則：OKLCH lightness ≈ 0.70–0.75、chroma ≈ 0.15–0.19，確保對 `#0e0b12` 暗底 WCAG AA 4.5:1 對比。同主題論文共用同色，建立「顏色＝主題」的直覺。
+
+#### 不隨 accent 變化的固定色
+
+| 用途 | 色碼 | 原因 |
+|------|------|------|
+| 頁面背景 | `#0e0b12` | 全站統一暗底 |
+| 主文字色 | `#d0d5e0` | 全站統一 |
+| 標題文字 | `#fff` | 全站統一 |
+| 連結色 | `#6ec6ff` / hover `#ff9f43` | 全站統一 |
+| h4 標題 | `#ffb74d`（橙） | 語意色：子標題 |
+| `.note` 提示框 | `#ffb74d`（橙） | 語意色：info |
+| 語法高亮 | `.kw` `.fn` `.cm` `.st` `.nu` | 語意色：code |
+| `.check` / `.cross` / `.partial` | 綠/紅/橙 | 語意色：狀態 |
+| `.vflow .box.blue/green/orange/gray` | 各自固定色 | 圖表語意色 |
+| 程式碼背景 | `#1e1e2e` / 邊框 `#2d2d44` | 全站統一 |
+| 次要文字 | `#8fa4c0` | 全站統一 |
+| 弱化文字 | `#6c7086` | 全站統一 |
 
 ### 4.2 Fonts
 
@@ -120,6 +154,9 @@ code, pre code { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', mo
 ### 4.3 Complete CSS (directly copy into `<style>`)
 
 ```css
+/* ===== ACCENT (change per paper — see Section 4.1 palette) ===== */
+:root{--accent:#e94560;--accent-rgb:233,69,96;--nav-bg:rgba(45,12,22,0.95)}
+
 /* ===== RESET & BASE ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth;font-size:16px}
@@ -128,23 +165,23 @@ a{color:#6ec6ff;text-decoration:none;transition:color .2s}
 a:hover{color:#ff9f43}
 
 /* ===== STICKY NAV ===== */
-nav{position:sticky;top:0;z-index:1000;background:rgba(45,12,22,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(233,69,96,0.25);padding:0 2rem}
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
 nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
 nav ul::-webkit-scrollbar{display:none}
 nav ul li a{display:block;padding:0.85rem 1rem;color:#c0a0a8;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
-nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #e94560}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
 .lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
 .lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
 .lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
 
 /* ===== HERO ===== */
-.hero{background:linear-gradient(135deg,#1e1020 0%,#2d1428 50%,#1a1030 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
-.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(110,198,255,.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+.hero{background:linear-gradient(135deg,#1e1020 0%,#1a1428 50%,#1a1030 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
 @keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
 .hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
 .hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:720px;margin:0 auto 1.5rem;position:relative}
 .hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
-.hero .badge{display:inline-block;background:rgba(233,69,96,0.15);border:1px solid rgba(233,69,96,0.3);color:#e94560;padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative}
 
 /* ===== CONTAINER ===== */
 .container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
@@ -152,7 +189,7 @@ nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #e94560}
 /* ===== SECTIONS ===== */
 section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
 section:last-of-type{border-bottom:none}
-h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(233,69,96,0.3);position:relative}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
 h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
 h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
 h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
@@ -162,20 +199,20 @@ h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
 pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
 pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
 code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
-p code,li code,td code{background:rgba(233,69,96,0.08);padding:.1em .4em;border-radius:4px;color:#f0a0b0;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
 .kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
 
 /* ===== TABLES ===== */
 table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
-th{background:rgba(233,69,96,0.1);color:#e94560;padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(233,69,96,0.3)}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
 td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
 tr:hover td{background:rgba(110,198,255,.03)}
 
 /* ===== CARDS ===== */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
-.card{background:rgba(30,30,46,.7);border:1px solid rgba(233,69,96,0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
-.card:hover{border-color:rgba(233,69,96,0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
-.card.hl{border-left:4px solid #e94560}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
 .card h4{margin-top:0;color:#ffb74d}
 
 /* ===== FLOW (horizontal steps) ===== */
@@ -183,7 +220,7 @@ tr:hover td{background:rgba(110,198,255,.03)}
 .flow .step{flex:1;min-width:170px;text-align:center;position:relative}
 .flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
 .flow .step:nth-child(1) .c{background:#0f3460}
-.flow .step:nth-child(2) .c{background:#e94560}
+.flow .step:nth-child(2) .c{background:var(--accent)}
 .flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
 .flow .step:nth-child(4) .c{background:#2ecc71}
 .flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
@@ -210,7 +247,7 @@ tr:hover td{background:rgba(110,198,255,.03)}
 .tbar{display:flex;align-items:center;gap:0;margin:1rem 0 1.8rem;flex-wrap:nowrap;overflow:visible}
 .tbar .seg{height:56px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:500;white-space:nowrap;padding:0 16px;position:relative}
 .tbar .seg.llm{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:6px 0 0 6px}
-.tbar .seg.tool{background:rgba(233,69,96,.2);color:#e94560;flex:1;min-width:120px}
+.tbar .seg.tool{background:rgba(var(--accent-rgb),.2);color:var(--accent);flex:1;min-width:120px}
 .tbar .seg.llm2{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:0 6px 6px 0}
 .tbar .seg .marker{position:absolute;bottom:-18px;font-size:.7rem;color:#8fa4c0}
 
@@ -220,7 +257,7 @@ tr:hover td{background:rgba(110,198,255,.03)}
 /* ===== NOTES & WARNINGS ===== */
 .note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
 .note strong{color:#fff}
-.warn{background:rgba(233,69,96,.06);border-left:4px solid #e94560;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
 .warn strong{color:#fff}
 
 /* ===== LISTS ===== */
