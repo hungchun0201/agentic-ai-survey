@@ -724,6 +724,146 @@ model = AutoModelForCausalLM.from_pretrained(
 </div>
 </section>
 
+<!-- ============ CUDA IMPLEMENTATION ============ -->
+<section id="cuda-impl">
+<h2><span class="i18n" data-en="CUDA Kernel &amp; Storage Details" data-zh="CUDA Kernel 與儲存細節">CUDA Kernel &amp; Storage Details</span></h2>
+
+<h3><span class="i18n" data-en="Why a Custom CUDA Kernel Is Needed" data-zh="為何需要自訂 CUDA Kernel">Why a Custom CUDA Kernel Is Needed</span></h3>
+<p><span class="i18n" data-en="Standard PyTorch operations assume a uniform number of KV pairs per head, making them incompatible with Ada-KV's variable-length caches. The custom kernel update_flatten_view operates directly on the flattened contiguous buffer, updating each head's slice in a single GPU dispatch rather than H sequential Python calls." data-zh="標準 PyTorch 操作假設每個 head 具有相同數量的 KV pair，這與 Ada-KV 的可變長度快取不相容。自訂 kernel update_flatten_view 直接操作扁平化的連續緩衝區，在單次 GPU 排程中更新每個 head 的切片，而非執行 H 次順序 Python 呼叫。">Standard PyTorch operations assume a uniform number of KV pairs per head, making them incompatible with Ada-KV's variable-length caches. The custom kernel <code>update_flatten_view</code> operates directly on the flattened contiguous buffer, updating each head's slice in a single GPU dispatch rather than H sequential Python calls.</span></p>
+
+<h3><span class="i18n" data-en="Flattened Storage Layout" data-zh="扁平化儲存佈局">Flattened Storage Layout</span></h3>
+<p><span class="i18n" data-en="Ada-KV stores all per-head KV slices contiguously in a single tensor per layer. Two auxiliary arrays track the variable boundaries:" data-zh="Ada-KV 將每個 head 的 KV 切片以連續方式儲存在每層的單一 tensor 中。兩個輔助陣列用於追蹤可變邊界：">Ada-KV stores all per-head KV slices contiguously in a single tensor per layer. Two auxiliary arrays track the variable boundaries:</span></p>
+
+<table>
+<thead><tr><th><span class="i18n" data-en="Array" data-zh="陣列">Array</span></th><th><span class="i18n" data-en="Shape" data-zh="形狀">Shape</span></th><th><span class="i18n" data-en="Description" data-zh="說明">Description</span></th></tr></thead>
+<tbody>
+<tr><td><code>key_cache[l]</code></td><td><span class="i18n" data-en="[sum(Bi), d_head]" data-zh="[sum(Bi), d_head]">[sum(B<sub>i</sub>), d_head]</span></td><td><span class="i18n" data-en="Flattened key vectors for all heads in layer l" data-zh="層 l 中所有 head 的扁平化 key 向量">Flattened key vectors for all heads in layer l</span></td></tr>
+<tr><td><code>value_cache[l]</code></td><td><span class="i18n" data-en="[sum(Bi), d_head]" data-zh="[sum(Bi), d_head]">[sum(B<sub>i</sub>), d_head]</span></td><td><span class="i18n" data-en="Flattened value vectors for all heads in layer l" data-zh="層 l 中所有 head 的扁平化 value 向量">Flattened value vectors for all heads in layer l</span></td></tr>
+<tr><td><code>head_lens</code></td><td><span class="i18n" data-en="[h]" data-zh="[h]">[h]</span></td><td><span class="i18n" data-en="Per-head cache sizes: head_lens[i] = Bi*" data-zh="每個 head 的快取大小：head_lens[i] = Bi*">Per-head cache sizes: head_lens[i] = B<sub>i</sub>*</span></td></tr>
+<tr><td><code>cu_klen</code></td><td><span class="i18n" data-en="[h+1]" data-zh="[h+1]">[h+1]</span></td><td><span class="i18n" data-en="Cumulative sum of head_lens (0, B1*, B1*+B2*, ...)" data-zh="head_lens 的累積和（0, B1*, B1*+B2*, ...）">Cumulative sum of head_lens (0, B<sub>1</sub>*, B<sub>1</sub>*+B<sub>2</sub>*, ...)</span></td></tr>
+</tbody>
+</table>
+
+<h3><span class="i18n" data-en="Decode Kernel Dispatch" data-zh="Decode Kernel 排程">Decode Kernel Dispatch</span></h3>
+<p><span class="i18n" data-en="During auto-regressive decoding each new token generates one new KV pair per head. The update kernel appends the new KV pair to the correct slice in the flattened buffer using cu_klen as an offset table:" data-zh="在自迴歸 decode 過程中，每個新 token 為每個 head 生成一個新的 KV pair。更新 kernel 使用 cu_klen 作為偏移量表，將新的 KV pair 附加到扁平化緩衝區的正確切片中：">During auto-regressive decoding each new token generates one new KV pair per head. The update kernel appends the new KV pair to the correct slice in the flattened buffer using <code>cu_klen</code> as an offset table:</span></p>
+
+<pre><code><span class="label">CUDA (conceptual) -- update_flatten_view</span>
+<span class="cm">// Each thread block handles one head</span>
+<span class="kw">__global__ void</span> <span class="fn">update_flatten_view</span>(
+    <span class="ty">float</span>* flat_cache, <span class="cm">// [sum(Bi), d_head]</span>
+    <span class="ty">float</span>* new_kv,     <span class="cm">// [h, d_head]</span>
+    <span class="ty">int</span>*   cu_klen,    <span class="cm">// [h+1]</span>
+    <span class="ty">int</span>    d_head
+) {
+    <span class="ty">int</span> head_id = blockIdx.x;
+    <span class="ty">int</span> slot    = cu_klen[head_id + <span class="num">1</span>] - <span class="num">1</span>; <span class="cm">// last position of this head</span>
+    <span class="kw">for</span> (<span class="ty">int</span> d = threadIdx.x; d < d_head; d += blockDim.x)
+        flat_cache[slot * d_head + d] = new_kv[head_id * d_head + d];
+}
+</code></pre>
+
+<p><span class="i18n" data-en="Because the write offset for each head is independent, all heads execute in parallel. This single kernel replaces H Python-level index operations and avoids CUDA stream synchronization overhead between heads." data-zh="由於每個 head 的寫入偏移量是獨立的，所有 head 可以並行執行。這個單一 kernel 取代了 H 個 Python 層級的索引操作，並避免了 head 之間的 CUDA 串流同步開銷。">Because the write offset for each head is independent, all heads execute in parallel. This single kernel replaces H Python-level index operations and avoids CUDA stream synchronization overhead between heads.</span></p>
+
+<h3><span class="i18n" data-en="Variable-Length FlashAttention During Decode" data-zh="Decode 階段的可變長度 FlashAttention">Variable-Length FlashAttention During Decode</span></h3>
+<p><span class="i18n" data-en="Ada-KV leverages flash_attn_varlen_func from the FlashAttention-2 library. This function accepts cumulative sequence-length arrays (cu_seqlens_k) that describe the variable-length batches, avoiding padding and allowing the attention kernel to skip unnecessary computations:" data-zh="Ada-KV 利用 FlashAttention-2 函式庫中的 flash_attn_varlen_func。此函式接受描述可變長度批次的累積序列長度陣列（cu_seqlens_k），避免了填充並允許 attention kernel 跳過不必要的計算：">Ada-KV leverages <code>flash_attn_varlen_func</code> from the FlashAttention-2 library. This function accepts cumulative sequence-length arrays (<code>cu_seqlens_k</code>) that describe the variable-length batches, avoiding padding and allowing the attention kernel to skip unnecessary computations:</span></p>
+
+<pre><code><span class="label">Python -- Variable-Length Decode Attention</span>
+<span class="kw">from</span> flash_attn <span class="kw">import</span> flash_attn_varlen_func
+
+attn_output = flash_attn_varlen_func(
+    q=query_states.view(<span class="num">-1</span>, num_heads, head_dim),
+    k=key_cache[layer_idx],    <span class="cm"># shape [sum(Bi), head_dim]</span>
+    v=value_cache[layer_idx],  <span class="cm"># shape [sum(Bi), head_dim]</span>
+    cu_seqlens_q=cu_seqlens_q, <span class="cm"># [batch*h+1] -- one query token per head</span>
+    cu_seqlens_k=cu_klen,      <span class="cm"># [h+1] -- variable KV lengths</span>
+    max_seqlen_q=<span class="num">1</span>,            <span class="cm"># decoding: always 1 query token</span>
+    max_seqlen_k=max_budget,
+    causal=<span class="kw">False</span>,              <span class="cm"># KV already evicted; no mask needed</span>
+)
+</code></pre>
+</section>
+
+<!-- ============ HYPERPARAMETER REFERENCE ============ -->
+<section id="hyperparams">
+<h2><span class="i18n" data-en="Hyperparameter Reference" data-zh="超參數參考">Hyperparameter Reference</span></h2>
+
+<p><span class="i18n" data-en="Ada-KV exposes a small set of hyperparameters through config_compress. Understanding each one helps users calibrate the quality-vs-efficiency trade-off for their deployment scenario:" data-zh="Ada-KV 透過 config_compress 提供了少量超參數。了解每個超參數有助於使用者為其部署場景校準品質與效率之間的取捨：">Ada-KV exposes a small set of hyperparameters through <code>config_compress</code>. Understanding each one helps users calibrate the quality-vs-efficiency trade-off for their deployment scenario:</span></p>
+
+<table>
+<thead><tr>
+<th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th>
+<th><span class="i18n" data-en="Default" data-zh="預設值">Default</span></th>
+<th><span class="i18n" data-en="Range" data-zh="範圍">Range</span></th>
+<th><span class="i18n" data-en="Effect" data-zh="效果">Effect</span></th>
+</tr></thead>
+<tbody>
+<tr>
+<td><code>base_capacity</code></td>
+<td>512</td>
+<td><span class="i18n" data-en="64 – 4096" data-zh="64 – 4096">64 – 4096</span></td>
+<td><span class="i18n" data-en="Total KV budget B per layer (excluding window). Higher = better quality, more memory." data-zh="每層的 KV 預算 B（不含窗口）。越高品質越好，記憶體用量也越多。">Total KV budget B per layer (excluding window). Higher = better quality, more memory.</span></td>
+</tr>
+<tr>
+<td><code>window_size</code></td>
+<td>32</td>
+<td><span class="i18n" data-en="8 – 128" data-zh="8 – 128">8 – 128</span></td>
+<td><span class="i18n" data-en="Observation window length for computing importance scores. Larger = more stable scoring, higher cost." data-zh="用於計算重要性分數的觀察窗口長度。越大評分越穩定，成本也越高。">Observation window length for computing importance scores. Larger = more stable scoring, higher cost.</span></td>
+</tr>
+<tr>
+<td><code>kernel_size</code></td>
+<td>7</td>
+<td><span class="i18n" data-en="1 – 15 (odd)" data-zh="1 – 15（奇數）">1 – 15 (odd)</span></td>
+<td><span class="i18n" data-en="Max-pooling kernel for importance smoothing. Larger = smoother selection, fewer isolated tokens." data-zh="用於重要性平滑的最大池化 kernel。越大選擇越平滑，孤立 token 越少。">Max-pooling kernel for importance smoothing. Larger = smoother selection, fewer isolated tokens.</span></td>
+</tr>
+<tr>
+<td><code>floor_alpha</code></td>
+<td>0.2</td>
+<td><span class="i18n" data-en="0.0 – 1.0" data-zh="0.0 – 1.0">0.0 – 1.0</span></td>
+<td><span class="i18n" data-en="Safeguard blend weight. 0 = fully adaptive; 1 = fully uniform. Recommended: 0.1 – 0.3." data-zh="安全混合權重。0 = 完全自適應；1 = 完全均勻。建議值：0.1 – 0.3。">Safeguard blend weight. 0 = fully adaptive; 1 = fully uniform. Recommended: 0.1 – 0.3.</span></td>
+</tr>
+<tr>
+<td><code>pyram_mode</code></td>
+<td>False</td>
+<td><span class="i18n" data-en="True / False" data-zh="True / False">True / False</span></td>
+<td><span class="i18n" data-en="Enable Ada-Pyramid mode: pyramidal per-layer budget + adaptive per-head allocation." data-zh="啟用 Ada-Pyramid 模式：每層金字塔式預算 + 每個 head 的自適應分配。">Enable Ada-Pyramid mode: pyramidal per-layer budget + adaptive per-head allocation.</span></td>
+</tr>
+<tr>
+<td><code>beta</code></td>
+<td>20</td>
+<td><span class="i18n" data-en="5 – 50" data-zh="5 – 50">5 – 50</span></td>
+<td><span class="i18n" data-en="Pyramid slope parameter (Ada-Pyramid only). Controls how steeply budget decreases across layers." data-zh="金字塔斜率參數（僅限 Ada-Pyramid）。控制預算在各層間減少的陡峭程度。">Pyramid slope parameter (Ada-Pyramid only). Controls how steeply budget decreases across layers.</span></td>
+</tr>
+<tr>
+<td><code>pooling</code></td>
+<td><code>maxpool</code></td>
+<td><code>maxpool</code> / <code>avgpool</code></td>
+<td><span class="i18n" data-en="Pooling mode for importance scoring. maxpool is recommended; avgpool gives smoother but less discriminative scores." data-zh="重要性評分的池化模式。建議使用 maxpool；avgpool 給出更平滑但鑑別性較低的分數。">Pooling mode for importance scoring. maxpool is recommended; avgpool gives smoother but less discriminative scores.</span></td>
+</tr>
+</tbody>
+</table>
+
+<h3><span class="i18n" data-en="Recommended Configurations by Use Case" data-zh="各使用場景的建議配置">Recommended Configurations by Use Case</span></h3>
+<div class="card-grid">
+<div class="card">
+<h4><span class="i18n" data-en="High-Throughput Serving" data-zh="高吞吐量服務">High-Throughput Serving</span></h4>
+<p><span class="i18n" data-en="base_capacity=256, window_size=16, floor_alpha=0.2, pyram_mode=False. Prioritises memory savings and decode speed. Suitable for question-agnostic prefix caching where many concurrent requests share the same context." data-zh="base_capacity=256, window_size=16, floor_alpha=0.2, pyram_mode=False。優先考慮記憶體節省和 decode 速度。適用於多個並發請求共享相同上下文的 question-agnostic 前綴快取場景。">base_capacity=256, window_size=16, floor_alpha=0.2, pyram_mode=False. Prioritises memory savings and decode speed. Suitable for question-agnostic prefix caching where many concurrent requests share the same context.</span></p>
+</div>
+<div class="card">
+<h4><span class="i18n" data-en="Quality-First RAG" data-zh="品質優先的 RAG">Quality-First RAG</span></h4>
+<p><span class="i18n" data-en="base_capacity=1024, window_size=64, floor_alpha=0.1, pyram_mode=False. Maximises retrieval accuracy for document QA. The larger window and lower floor let the adaptive allocation work more freely on diverse document heads." data-zh="base_capacity=1024, window_size=64, floor_alpha=0.1, pyram_mode=False。最大化文件問答的檢索準確性。更大的窗口和更低的下限讓自適應分配能在多樣化的文件 head 上更自由地工作。">base_capacity=1024, window_size=64, floor_alpha=0.1, pyram_mode=False. Maximises retrieval accuracy for document QA. The larger window and lower floor let the adaptive allocation work more freely on diverse document heads.</span></p>
+</div>
+<div class="card">
+<h4><span class="i18n" data-en="Long-Context Summarisation" data-zh="長上下文摘要">Long-Context Summarisation</span></h4>
+<p><span class="i18n" data-en="base_capacity=512, window_size=32, floor_alpha=0.2, pyram_mode=True, beta=20. Pyramid mode assigns more budget to early layers that encode global structure, while Ada-KV adapts within each layer to preserve dispersed attention heads." data-zh="base_capacity=512, window_size=32, floor_alpha=0.2, pyram_mode=True, beta=20。Pyramid 模式為編碼全域結構的早期層分配更多預算，而 Ada-KV 在每一層內自適應地保護分散的 attention head。">base_capacity=512, window_size=32, floor_alpha=0.2, pyram_mode=True, beta=20. Pyramid mode assigns more budget to early layers that encode global structure, while Ada-KV adapts within each layer to preserve dispersed attention heads.</span></p>
+</div>
+</div>
+
+<div class="note">
+<strong><span class="i18n" data-en="Practical Tip" data-zh="實用建議">Practical Tip</span>:</strong>
+<span class="i18n" data-en="When migrating from SnapKV, set base_capacity to the same token count you were using for SnapKV's budget. Ada-KV will deliver equal or better accuracy at the same memory footprint, with no other changes required." data-zh="從 SnapKV 遷移時，將 base_capacity 設定為您在 SnapKV 預算中使用的相同 token 數量。Ada-KV 將在相同的記憶體佔用下提供同等或更好的準確性，無需其他更改。">When migrating from SnapKV, set <code>base_capacity</code> to the same token count you were using for SnapKV's budget. Ada-KV will deliver equal or better accuracy at the same memory footprint, with no other changes required.</span>
+</div>
+</section>
+
 <footer>
 Ada-KV Paper Summary &middot; arXiv:2407.11550 &middot; NeurIPS 2025 &middot; Generated for the Agentic AI Survey
 </footer>

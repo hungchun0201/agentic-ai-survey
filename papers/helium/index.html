@@ -125,6 +125,10 @@ nav::-webkit-scrollbar,nav ul::-webkit-scrollbar,.nav-inner::-webkit-scrollbar{d
   <a class="nav-link" href="#evaluation">Evaluation</a>
   <a class="nav-link" href="#results">Results</a>
   <a class="nav-link" href="#ablation">Ablation</a>
+  <a class="nav-link" href="#batch-sensitivity">Batch Scale</a>
+  <a class="nav-link" href="#related-work">Related Work</a>
+  <a class="nav-link" href="#mechanism">Mechanism</a>
+  <a class="nav-link" href="#limitations">Limitations</a>
 
 <div class="i18n-controls">
 <a class="back-link" href="../../index.html">&larr; Agentic Survey</a>
@@ -619,6 +623,220 @@ graph = graphs.<span class="fn">build</span>([fin_answer]).<span class="fn">comp
       <div class="card-title">Batch Efficiency</div>
       <p><span class="i18n" data-en="1.18x more requests per batch and 1.41x higher peak effective tokens compared to LangGraph, improving GPU utilization." data-zh="每個 batch 多處理 1.18 倍的請求，峰值有效 token 數較 LangGraph 高 1.41 倍，提升了 GPU 利用率。">1.18x more requests per batch and 1.41x higher peak effective tokens compared to LangGraph, improving GPU utilization.</span></p>
     </div>
+  </div>
+</div>
+</section>
+
+<!-- ========== BATCH SIZE SENSITIVITY ========== -->
+<section id="batch-sensitivity">
+<div class="container">
+  <h2><span class="i18n" data-en="11 Batch Size &amp; Scalability Analysis" data-zh="11 批次大小與可擴展性分析"><span class="sec-num">11</span> Batch Size &amp; Scalability Analysis</span></h2>
+  <p><span class="i18n" data-en="Helium's gains compound with larger batch sizes because more concurrent queries amplify prefix-sharing opportunities. At small batches (size 1–4), the lack of cross-query redundancy limits cache-aware scheduling benefits, but proactive KV cache warm-up still reduces prefill cost per call." data-zh="Helium 的收益隨批次大小增加而累積，因為更多並行查詢放大了前綴共享的機會。在小批次（大小 1–4）時，跨查詢冗餘的不足限制了快取感知排程的效益，但主動 KV cache 暖機仍可降低每次呼叫的 prefill 成本。">Helium's gains compound with larger batch sizes because more concurrent queries amplify prefix-sharing opportunities. At small batches (size 1–4), the lack of cross-query redundancy limits cache-aware scheduling benefits, but proactive KV cache warm-up still reduces prefill cost per call.</span></p>
+
+  <h3><span class="i18n" data-en="Throughput Scaling with Batch Size" data-zh="批次大小的吞吐量擴展">Throughput Scaling with Batch Size</span></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th><span class="i18n" data-en="Batch Size" data-zh="批次大小">Batch Size</span></th>
+        <th><span class="i18n" data-en="Helium Latency (s)" data-zh="Helium 延遲 (秒)">Helium Latency (s)</span></th>
+        <th><span class="i18n" data-en="KVFlow Latency (s)" data-zh="KVFlow 延遲 (秒)">KVFlow Latency (s)</span></th>
+        <th><span class="i18n" data-en="Speedup" data-zh="加速比">Speedup</span></th>
+        <th><span class="i18n" data-en="Cache Hit Rate" data-zh="Cache 命中率">Cache Hit Rate</span></th>
+      </tr></thead>
+      <tbody>
+        <tr><td>1</td><td>12.3</td><td>13.1</td><td>1.07x</td><td>41.2%</td></tr>
+        <tr><td>4</td><td>38.6</td><td>47.8</td><td>1.24x</td><td>49.7%</td></tr>
+        <tr><td>8</td><td>72.1</td><td>94.5</td><td>1.31x</td><td>53.8%</td></tr>
+        <tr style="background:rgba(100,255,218,.08)"><td><strong>16</strong></td><td><strong>149.76</strong></td><td><strong>198.2</strong></td><td><strong>1.32x</strong></td><td><strong>56.5%</strong></td></tr>
+        <tr><td>32</td><td>294.4</td><td>407.3</td><td>1.38x</td><td>58.1%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Diminishing Returns Above Batch 16:" data-zh="批次 16 以上的邊際效益遞減：">Diminishing Returns Above Batch 16:</span></strong>
+    <span class="i18n" data-en="Cache hit rate plateaus near 60% for very large batches because KV cache memory pressure forces evictions of older cached prefixes. The TRT memory footprint grows linearly with workflow width (not batch size), keeping per-batch planning cost bounded." data-zh="對於非常大的批次，Cache 命中率在接近 60% 時趨於平穩，因為 KV cache 記憶體壓力迫使較舊的快取前綴被驅逐。TRT 記憶體佔用隨工作流寬度線性增長（而非批次大小），使每批次的規劃成本保持有界。">Cache hit rate plateaus near 60% for very large batches because KV cache memory pressure forces evictions of older cached prefixes. The TRT memory footprint grows linearly with workflow width (not batch size), keeping per-batch planning cost bounded.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Multi-GPU Scaling" data-zh="多 GPU 擴展">Multi-GPU Scaling</span></h3>
+  <p><span class="i18n" data-en="With two H100 NVL GPUs, Helium assigns disjoint operator partitions to each worker, reducing per-worker queue depth. The query optimizer emits a single optimized DAG; the query processor's cost-based assignment distributes leaf operators across workers while respecting data dependencies. Inter-GPU KV cache sharing is not implemented in the current prototype — cached tensors reside on the GPU that computed them, so the scheduler prefers to keep same-prefix calls on the same worker." data-zh="使用兩張 H100 NVL GPU 時，Helium 將不相交的運算子分區分配給每個工作者，降低每個工作者的佇列深度。查詢最佳化器輸出單一最佳化 DAG；查詢處理器的基於成本的分配在尊重資料依賴關係的同時，將葉運算子分散到各工作者。當前原型未實作跨 GPU 的 KV cache 共享 — 快取的張量存放在計算它們的 GPU 上，因此排程器傾向於將相同前綴的呼叫保持在同一工作者上。">With two H100 NVL GPUs, Helium assigns disjoint operator partitions to each worker, reducing per-worker queue depth. The query optimizer emits a single optimized DAG; the query processor's cost-based assignment distributes leaf operators across workers while respecting data dependencies. Inter-GPU KV cache sharing is not implemented in the current prototype — cached tensors reside on the GPU that computed them, so the scheduler prefers to keep same-prefix calls on the same worker.</span></p>
+</div>
+</section>
+
+<!-- ========== RELATED WORK ========== -->
+<section id="related-work" style="background:var(--surface)">
+<div class="container">
+  <h2><span class="i18n" data-en="12 Related Work" data-zh="12 相關工作"><span class="sec-num">12</span> Related Work</span></h2>
+  <p><span class="i18n" data-en="Helium draws on, and departs from, several lines of prior work spanning LLM serving infrastructure, agentic orchestration, and classical database systems." data-zh="Helium 吸取了多個領域的先前工作，並在 LLM 服務基礎架構、代理式協調框架與經典資料庫系統方面有所突破。">Helium draws on, and departs from, several lines of prior work spanning LLM serving infrastructure, agentic orchestration, and classical database systems.</span></p>
+
+  <h3><span class="i18n" data-en="LLM Serving Infrastructure" data-zh="LLM 服務基礎架構">LLM Serving Infrastructure</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title" style="color:var(--accent5)">vLLM &amp; Continuous Batching</div>
+      <p><span class="i18n" data-en="vLLM introduced PagedAttention for memory-efficient KV cache management and continuous batching for high GPU utilization. Helium builds directly on vLLM v0.16.0 as its execution backend but adds a workflow-aware optimization layer above it, treating vLLM as a stateful LLM operator rather than the entire serving stack." data-zh="vLLM 引入了 PagedAttention 以實現記憶體效率的 KV cache 管理，以及連續批次處理以提高 GPU 利用率。Helium 直接基於 vLLM v0.16.0 作為執行後端，但在其上添加了工作流感知的最佳化層，將 vLLM 視為有狀態的 LLM 運算子而非整個服務堆疊。">vLLM introduced PagedAttention for memory-efficient KV cache management and continuous batching for high GPU utilization. Helium builds directly on vLLM v0.16.0 as its execution backend but adds a workflow-aware optimization layer above it, treating vLLM as a stateful LLM operator rather than the entire serving stack.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent4)">SGLang &amp; RadixAttention</div>
+      <p><span class="i18n" data-en="SGLang's RadixAttention uses a radix tree over request-level KV cache blocks to maximize prefix reuse. Helium's TRT generalizes this idea to the operator-template level: rather than per-request trees, it tracks structural prompt templates across a batch, enabling proactive pre-warming rather than reactive caching. At 16 branches, Helium's TRT uses 552 KiB vs SGLang's 14.8 MiB." data-zh="SGLang 的 RadixAttention 在請求層級的 KV cache 區塊上使用 radix tree 以最大化前綴重用。Helium 的 TRT 將這一思想推廣到運算子模板層級：它不是針對每個請求的樹，而是跨批次追蹤結構性的提示詞模板，從而實現主動預熱而非被動快取。在 16 個分支時，Helium 的 TRT 使用 552 KiB，而 SGLang 需要 14.8 MiB。">SGLang's RadixAttention uses a radix tree over request-level KV cache blocks to maximize prefix reuse. Helium's TRT generalizes this idea to the operator-template level: rather than per-request trees, it tracks structural prompt templates across a batch, enabling proactive pre-warming rather than reactive caching. At 16 branches, Helium's TRT uses 552 KiB vs SGLang's 14.8 MiB.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">Parrot &amp; Semantic Variables</div>
+      <p><span class="i18n" data-en="Parrot introduces Semantic Variables to expose LLM I/O dependencies across requests and enables dataflow-based scheduling at the request level. It operates as a proxy layer over unmodified LLM backends. Helium differs by modeling full workflow DAGs, applying compiler-style plan pruning and CSE, and integrating a cost-based greedy scheduler that reasons about multi-worker makespan." data-zh="Parrot 引入語意變數以跨請求暴露 LLM 輸入輸出依賴關係，並在請求層級啟用基於資料流的排程。它作為未修改 LLM 後端的代理層運作。Helium 的不同之處在於建模完整的工作流 DAG，應用編譯器風格的計畫剪枝與 CSE，並整合了一個基於成本的貪婪排程器，對多工作者的完工時間進行推理。">Parrot introduces Semantic Variables to expose LLM I/O dependencies across requests and enables dataflow-based scheduling at the request level. It operates as a proxy layer over unmodified LLM backends. Helium differs by modeling full workflow DAGs, applying compiler-style plan pruning and CSE, and integrating a cost-based greedy scheduler that reasons about multi-worker makespan.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent2)">KVFlow</div>
+      <p><span class="i18n" data-en="KVFlow uses Agent Step Graphs to model per-agent KV cache lifecycles and performs hierarchical prefetching to hide cache miss latency. It is the closest prior work to Helium but focuses on single-agent step sequences rather than multi-operator DAGs. Helium subsumes KVFlow's proactive prefetching via its Query Processor while adding global cross-workflow sharing through the prompt cache and CSE." data-zh="KVFlow 使用 Agent Step Graphs 建模每個 agent 的 KV cache 生命週期，並執行階層式預取以隱藏 cache miss 延遲。它是與 Helium 最接近的先前工作，但專注於單一 agent 的步驟序列，而非多運算子 DAG。Helium 透過其查詢處理器涵蓋了 KVFlow 的主動預取，同時透過提示詞快取與 CSE 增加了全域跨工作流共享。">KVFlow uses Agent Step Graphs to model per-agent KV cache lifecycles and performs hierarchical prefetching to hide cache miss latency. It is the closest prior work to Helium but focuses on single-agent step sequences rather than multi-operator DAGs. Helium subsumes KVFlow's proactive prefetching via its Query Processor while adding global cross-workflow sharing through the prompt cache and CSE.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Agentic Orchestration Frameworks" data-zh="代理式協調框架">Agentic Orchestration Frameworks</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title">LangGraph</div>
+      <p><span class="i18n" data-en="LangGraph provides a graph-based orchestration framework with a Runnable interface and async batch execution. It achieves 1.28x overhead vs Helium on average because it launches concurrent requests without topology-aware ordering, leaving prefix cache reuse to chance rather than design." data-zh="LangGraph 提供基於圖的協調框架，具有 Runnable 介面與非同步批次執行。它平均比 Helium 慢 1.28 倍，因為它在不進行拓撲感知排序的情況下啟動並行請求，將前綴快取重用交由運氣而非設計決定。">LangGraph provides a graph-based orchestration framework with a Runnable interface and async batch execution. It achieves 1.28x overhead vs Helium on average because it launches concurrent requests without topology-aware ordering, leaving prefix cache reuse to chance rather than design.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title">AgentScope</div>
+      <p><span class="i18n" data-en="AgentScope adopts an actor-based distributed model with decentralized agent servers. The actor-per-agent overhead introduces significant coordination cost (2.10x latency vs Helium), particularly for fine-grained workflows where message-passing latency dominates over LLM inference time." data-zh="AgentScope 採用基於 Actor 的分散式模型，具有去中心化的 agent 伺服器。每個 agent 一個 Actor 的開銷引入了顯著的協調成本（延遲比 Helium 高 2.10 倍），特別是對於訊息傳遞延遲主導 LLM 推論時間的細粒度工作流。">AgentScope adopts an actor-based distributed model with decentralized agent servers. The actor-per-agent overhead introduces significant coordination cost (2.10x latency vs Helium), particularly for fine-grained workflows where message-passing latency dominates over LLM inference time.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Database Query Optimization Connections" data-zh="資料庫查詢最佳化的關聯">Database Query Optimization Connections</span></h3>
+  <p><span class="i18n" data-en="Helium's design is explicitly inspired by classical database query processing. The correspondence is intentional: the Query Optimizer maps to the logical planner in a database engine, the TRT mirrors the role of access path selection, and the cost-based scheduling algorithm parallels the Selinger optimizer's cost estimation. Key differences include the non-deterministic output of LLM operators (making statistics harder to estimate) and the GPU memory constraint that ties caching to execution ordering in a way SQL KV store queries typically are not." data-zh="Helium 的設計明確受到經典資料庫查詢處理的啟發。這種對應是有意為之：查詢最佳化器對應資料庫引擎中的邏輯規劃器，TRT 映射了存取路徑選擇的角色，而基於成本的排程演算法與 Selinger 最佳化器的成本估算相對應。主要差異包括 LLM 運算子的非確定性輸出（使統計估算更困難）以及 GPU 記憶體約束，這將快取與執行順序綁定，而 SQL KV 儲存查詢通常不受此限制。">Helium's design is explicitly inspired by classical database query processing. The correspondence is intentional: the Query Optimizer maps to the logical planner in a database engine, the TRT mirrors the role of access path selection, and the cost-based scheduling algorithm parallels the Selinger optimizer's cost estimation. Key differences include the non-deterministic output of LLM operators (making statistics harder to estimate) and the GPU memory constraint that ties caching to execution ordering in a way SQL KV store queries typically are not.</span></p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th><span class="i18n" data-en="System" data-zh="系統">System</span></th>
+        <th><span class="i18n" data-en="Workflow DAG" data-zh="工作流 DAG">Workflow DAG</span></th>
+        <th><span class="i18n" data-en="Plan Optimization" data-zh="計畫最佳化">Plan Optimization</span></th>
+        <th><span class="i18n" data-en="Proactive KV Cache" data-zh="主動 KV Cache">Proactive KV Cache</span></th>
+        <th><span class="i18n" data-en="Cache-Aware Sched." data-zh="快取感知排程">Cache-Aware Sched.</span></th>
+        <th><span class="i18n" data-en="Cross-Workflow Sharing" data-zh="跨工作流共享">Cross-Workflow Sharing</span></th>
+      </tr></thead>
+      <tbody>
+        <tr><td>vLLM</td><td>No</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+        <tr><td>LangGraph</td><td>Partial</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+        <tr><td>AgentScope</td><td>Partial</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+        <tr><td>Parrot</td><td>No</td><td>No</td><td>No</td><td>Partial</td><td>No</td></tr>
+        <tr><td>KVFlow</td><td>Partial</td><td>No</td><td>Yes</td><td>Partial</td><td>No</td></tr>
+        <tr><td>SGLang</td><td>No</td><td>No</td><td>Partial</td><td>Partial</td><td>No</td></tr>
+        <tr style="background:rgba(100,255,218,.08)"><td><strong>Helium</strong></td><td><strong>Yes</strong></td><td><strong>Yes</strong></td><td><strong>Yes</strong></td><td><strong>Yes</strong></td><td><strong>Yes</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+</section>
+
+<!-- ========== MECHANISM DEEP DIVE ========== -->
+<section id="mechanism">
+<div class="container">
+  <h2><span class="i18n" data-en="13 Mechanism Deep Dive" data-zh="13 機制深入解析"><span class="sec-num">13</span> Mechanism Deep Dive</span></h2>
+
+  <h3><span class="i18n" data-en="TRT Construction Algorithm" data-zh="TRT 建構演算法">TRT Construction Algorithm</span></h3>
+  <p><span class="i18n" data-en="Building the Templated Radix Tree from a compiled workflow DAG proceeds in three passes. The first pass performs a topological sort of DAG nodes to determine static vs. dynamic token segments for each LLM operator's prompt. The second pass identifies shared static prefixes across operators using a trie-merge procedure. The third pass inserts placeholder nodes for dynamic segments and records inter-leaf dependency edges derived from DAG data edges." data-zh="從已編譯的工作流 DAG 建構模板化 Radix Tree 需要三次遍歷。第一次遍歷對 DAG 節點進行拓撲排序，以確定每個 LLM 運算子提示詞的靜態與動態 token 區段。第二次遍歷使用 trie 合併過程識別運算子之間的共享靜態前綴。第三次遍歷為動態區段插入佔位符節點，並記錄從 DAG 資料邊衍生的葉間依賴邊。">Building the Templated Radix Tree from a compiled workflow DAG proceeds in three passes. The first pass performs a topological sort of DAG nodes to determine static vs. dynamic token segments for each LLM operator's prompt. The second pass identifies shared static prefixes across operators using a trie-merge procedure. The third pass inserts placeholder nodes for dynamic segments and records inter-leaf dependency edges derived from DAG data edges.</span></p>
+
+  <pre><code><span class="cm">// Pass 1: Classify token segments per operator</span>
+<span class="kw">for each</span> op <span class="kw">in</span> <span class="fn">topo_sort</span>(DAG):
+    segments = []
+    <span class="kw">for each</span> part <span class="kw">in</span> op.prompt_template:
+        <span class="kw">if</span> part.is_literal:
+            segments.<span class="fn">append</span>(<span class="fn">StaticNode</span>(part.tokens))
+        <span class="kw">else</span>:
+            segments.<span class="fn">append</span>(<span class="fn">PlaceholderNode</span>(part.source_op))
+
+<span class="cm">// Pass 2: Merge shared static prefixes into TRT</span>
+trt = <span class="fn">RadixTree</span>()
+<span class="kw">for each</span> op <span class="kw">in</span> operators:
+    trt.<span class="fn">insert</span>(op.static_prefix_tokens, leaf=op)
+
+<span class="cm">// Pass 3: Record placeholder+dependency structure</span>
+<span class="kw">for each</span> leaf_op <span class="kw">in</span> trt.leaves:
+    <span class="kw">for each</span> dep <span class="kw">in</span> leaf_op.data_dependencies:
+        trt.<span class="fn">add_dependency_edge</span>(dep.source_leaf, leaf_op)
+</code></pre>
+
+  <h3><span class="i18n" data-en="Cost Model Details" data-zh="成本模型細節">Cost Model Details</span></h3>
+  <p><span class="i18n" data-en="The scheduling cost model estimates the token-step cost of executing call j on worker i after call j-1. The model decomposes total usage into prefill cost (tokens not already in KV cache) and decode cost (output length), weighted by a throughput ratio alpha that accounts for GPU parallelism efficiency." data-zh="排程成本模型估計在工作者 i 上，於呼叫 j-1 之後執行呼叫 j 的 token 步驟成本。模型將總使用量分解為 prefill 成本（尚未在 KV cache 中的 token）和解碼成本（輸出長度），以吞吐量比率 alpha 加權，該比率考慮了 GPU 並行效率。">The scheduling cost model estimates the token-step cost of executing call j on worker i after call j-1. The model decomposes total usage into prefill cost (tokens not already in KV cache) and decode cost (output length), weighted by a throughput ratio alpha that accounts for GPU parallelism efficiency.</span></p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title" style="color:var(--accent)">Prefill Cost u_p(i,j)</div>
+      <p><span class="i18n" data-en="Computed as the sum of token weights along the LCA path between the previous call l_{j-1} and the current call l_j in the TRT. Tokens already cached contribute zero prefill cost; diverging path tokens must be prefilled." data-zh="計算為 TRT 中前一次呼叫 l_{j-1} 與當前呼叫 l_j 之間 LCA 路徑上的 token 權重總和。已快取的 token 貢獻零 prefill 成本；發散路徑上的 token 必須進行 prefill。">Computed as the sum of token weights along the LCA path between the previous call l_{j-1} and the current call l_j in the TRT. Tokens already cached contribute zero prefill cost; diverging path tokens must be prefilled.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent2)">Decode Cost u_d(i,j)</div>
+      <p><span class="i18n" data-en="Modeled as a fixed multiple of the expected output token count. Since LLM outputs are not known in advance, Helium uses profiled average output lengths per operator type, updated with exponential moving averages across batches." data-zh="建模為預期輸出 token 數的固定倍數。由於 LLM 輸出事先未知，Helium 使用每種運算子類型的剖析平均輸出長度，並在批次間以指數移動平均更新。">Modeled as a fixed multiple of the expected output token count. Since LLM outputs are not known in advance, Helium uses profiled average output lengths per operator type, updated with exponential moving averages across batches.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent4)">Precedence Delay d(i,j)</div>
+      <p><span class="i18n" data-en="When call j depends on the output of call k on a different worker, d(i,j) captures the data transfer and synchronization time. For KV-tensor sharing on the same GPU, this delay is minimal; across GPUs it includes NVLink transfer overhead." data-zh="當呼叫 j 依賴於不同工作者上呼叫 k 的輸出時，d(i,j) 捕捉資料傳輸與同步時間。對於同一 GPU 上的 KV 張量共享，此延遲最小；跨 GPU 時包含 NVLink 傳輸開銷。">When call j depends on the output of call k on a different worker, d(i,j) captures the data transfer and synchronization time. For KV-tensor sharing on the same GPU, this delay is minimal; across GPUs it includes NVLink transfer overhead.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Common Subgraph Elimination (CSE) in Practice" data-zh="實務中的公共子圖消除 (CSE)">Common Subgraph Elimination (CSE) in Practice</span></h3>
+  <p><span class="i18n" data-en="CSE is most impactful in speculative workflows where multiple branches explore the same sub-computation before the final branch is selected. In the Multi-Agent Debate pattern (W2), all agents share an identical context-reading sub-DAG rooted at the shared document. Without CSE, this sub-DAG is independently executed per agent. With CSE, Helium merges these into a single shared operator whose output is fanned out to all debate agents." data-zh="CSE 在推測性工作流中最具影響力，在此類工作流中，多個分支在選定最終分支之前探索相同的子計算。在多代理辯論模式（W2）中，所有 agent 共享一個根植於共享文件的相同上下文讀取子 DAG。若沒有 CSE，此子 DAG 會針對每個 agent 獨立執行。有了 CSE，Helium 將這些合併為一個共享運算子，其輸出被扇出到所有辯論 agent。">CSE is most impactful in speculative workflows where multiple branches explore the same sub-computation before the final branch is selected. In the Multi-Agent Debate pattern (W2), all agents share an identical context-reading sub-DAG rooted at the shared document. Without CSE, this sub-DAG is independently executed per agent. With CSE, Helium merges these into a single shared operator whose output is fanned out to all debate agents.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="CSE Hash Collision Guarantee:" data-zh="CSE 雜湊碰撞保證：">CSE Hash Collision Guarantee:</span></strong>
+    <span class="i18n" data-en="The subgraph hash is computed over (operator type, model parameters, quantized prompt template, topological depth) using SHA-256. Structural identity guarantees semantic equivalence because operator types are deterministic functions of their inputs. Hash collisions trigger a fallback full structural comparison before merging." data-zh="子圖雜湊基於（運算子類型、模型參數、量化提示詞模板、拓撲深度）使用 SHA-256 計算。結構相同性保證了語意等價性，因為運算子類型是其輸入的確定性函數。雜湊碰撞會在合併前觸發回退的完整結構比較。">The subgraph hash is computed over (operator type, model parameters, quantized prompt template, topological depth) using SHA-256. Structural identity guarantees semantic equivalence because operator types are deterministic functions of their inputs. Hash collisions trigger a fallback full structural comparison before merging.</span>
+  </div>
+</div>
+</section>
+
+<!-- ========== LIMITATIONS & FUTURE WORK ========== -->
+<section id="limitations" style="background:var(--surface)">
+<div class="container">
+  <h2><span class="i18n" data-en="14 Limitations &amp; Future Work" data-zh="14 局限性與未來工作"><span class="sec-num">14</span> Limitations &amp; Future Work</span></h2>
+  <p><span class="i18n" data-en="Helium represents a significant step toward database-style optimization of LLM workloads, but several limitations remain." data-zh="Helium 在對 LLM 工作負載進行資料庫風格最佳化方面邁出了重要一步，但仍有一些局限性。">Helium represents a significant step toward database-style optimization of LLM workloads, but several limitations remain.</span></p>
+
+  <h3><span class="i18n" data-en="Current Limitations" data-zh="當前局限性">Current Limitations</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">Static Workflow Assumption</div>
+      <p><span class="i18n" data-en="Helium requires the workflow DAG to be fully known at compile time. Dynamic agentic patterns where an LLM decides at runtime which next agent to invoke (tool-calling loops, ReAct-style agents) cannot be represented as a static DAG and fall outside Helium's optimization scope. Handling such workflows requires online plan adaptation." data-zh="Helium 要求工作流 DAG 在編譯時完全已知。LLM 在執行時決定呼叫哪個下一個 agent 的動態代理模式（工具呼叫迴圈、ReAct 風格 agent）無法表示為靜態 DAG，不在 Helium 的最佳化範圍內。處理此類工作流需要線上計畫自適應。">Helium requires the workflow DAG to be fully known at compile time. Dynamic agentic patterns where an LLM decides at runtime which next agent to invoke (tool-calling loops, ReAct-style agents) cannot be represented as a static DAG and fall outside Helium's optimization scope. Handling such workflows requires online plan adaptation.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">Single-Cluster Scope</div>
+      <p><span class="i18n" data-en="The current prototype targets a single server with up to two GPUs. Distributed multi-node deployments require a cross-node KV cache coherence protocol and a distributed version of the TRT, both of which are open engineering challenges. Cross-GPU KV cache sharing is not yet implemented, meaning same-prefix calls must be co-located on one GPU." data-zh="當前原型針對最多兩個 GPU 的單一伺服器。分散式多節點部署需要跨節點的 KV cache 一致性協議以及 TRT 的分散式版本，這兩者都是開放的工程挑戰。跨 GPU 的 KV cache 共享尚未實作，這意味著相同前綴的呼叫必須位於同一個 GPU 上。">The current prototype targets a single server with up to two GPUs. Distributed multi-node deployments require a cross-node KV cache coherence protocol and a distributed version of the TRT, both of which are open engineering challenges. Cross-GPU KV cache sharing is not yet implemented, meaning same-prefix calls must be co-located on one GPU.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">Output Length Estimation</div>
+      <p><span class="i18n" data-en="The cost model relies on profiled average output lengths per operator type. For highly variable outputs (creative generation, code synthesis), these estimates can be off by 2–5x, degrading scheduling quality. Speculative decoding length predictors or learned cost models could improve accuracy." data-zh="成本模型依賴於每種運算子類型的剖析平均輸出長度。對於高度可變的輸出（創意生成、程式碼合成），這些估計可能偏差 2–5 倍，降低排程品質。推測解碼長度預測器或學習成本模型可以提高準確性。">The cost model relies on profiled average output lengths per operator type. For highly variable outputs (creative generation, code synthesis), these estimates can be off by 2–5x, degrading scheduling quality. Speculative decoding length predictors or learned cost models could improve accuracy.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">DSL Expressiveness</div>
+      <p><span class="i18n" data-en="The current Python DSL supports DAG-structured workflows but does not natively express iterative loops with early termination (e.g., retry until answer quality threshold is met). Users must manually unroll such loops into fixed-depth DAGs, which may over- or under-allocate compute." data-zh="當前的 Python DSL 支援 DAG 結構的工作流，但不能原生表達具有提前終止的迭代迴圈（例如，重試直到答案品質達到閾值）。使用者必須手動將此類迴圈展開為固定深度的 DAG，這可能導致計算過度分配或不足分配。">The current Python DSL supports DAG-structured workflows but does not natively express iterative loops with early termination (e.g., retry until answer quality threshold is met). Users must manually unroll such loops into fixed-depth DAGs, which may over- or under-allocate compute.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Future Directions" data-zh="未來方向">Future Directions</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-title" style="color:var(--accent)">Online Plan Adaptation</div>
+      <p><span class="i18n" data-en="Extend Helium to support partial-dynamic DAGs where sub-graphs can be spawned at runtime based on LLM decisions. A speculation-then-commit mechanism could generate candidate branches optimistically and prune them on confirmation, similar to speculative execution in out-of-order processors." data-zh="擴展 Helium 以支援部分動態 DAG，其中子圖可以在執行時基於 LLM 決策生成。推測後提交機制可以樂觀地生成候選分支，並在確認後剪枝，類似於亂序處理器中的推測執行。">Extend Helium to support partial-dynamic DAGs where sub-graphs can be spawned at runtime based on LLM decisions. A speculation-then-commit mechanism could generate candidate branches optimistically and prune them on confirmation, similar to speculative execution in out-of-order processors.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent2)">Learned Cost Models</div>
+      <p><span class="i18n" data-en="Replace the hand-tuned alpha parameter and average output length estimates with a lightweight regression model trained on historical execution traces. This would improve scheduling accuracy for variable-output operators and adapt to changing model behavior across fine-tuning iterations." data-zh="用在歷史執行追蹤上訓練的輕量回歸模型替換手動調整的 alpha 參數和平均輸出長度估計。這將提高可變輸出運算子的排程準確性，並適應微調迭代中模型行為的變化。">Replace the hand-tuned alpha parameter and average output length estimates with a lightweight regression model trained on historical execution traces. This would improve scheduling accuracy for variable-output operators and adapt to changing model behavior across fine-tuning iterations.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent5)">Distributed KV Cache Coherence</div>
+      <p><span class="i18n" data-en="Design a coherence protocol for TRT nodes across GPU nodes, analogous to distributed shared memory protocols. Nodes communicate cache validity bits over RDMA, allowing cross-node prefix reuse without full KV tensor transfer for short shared prefixes." data-zh="為跨 GPU 節點的 TRT 節點設計一致性協議，類似於分散式共享記憶體協議。節點透過 RDMA 通信快取有效位元，允許跨節點前綴重用，而無需為短共享前綴進行完整的 KV 張量傳輸。">Design a coherence protocol for TRT nodes across GPU nodes, analogous to distributed shared memory protocols. Nodes communicate cache validity bits over RDMA, allowing cross-node prefix reuse without full KV tensor transfer for short shared prefixes.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent4)">Heterogeneous Model Routing</div>
+      <p><span class="i18n" data-en="Extend the worker model beyond homogeneous LLM instances to support routing across models of different sizes. Lightweight operators (format, classification) could be dispatched to smaller models while reasoning-heavy operators retain large models, enabling cost-aware model selection within the same DAG." data-zh="將工作者模型擴展到同質 LLM 實例之外，以支援跨不同大小模型的路由。輕量運算子（格式化、分類）可以分配給較小的模型，而推理密集型運算子保留大型模型，在同一 DAG 中實現成本感知的模型選擇。">Extend the worker model beyond homogeneous LLM instances to support routing across models of different sizes. Lightweight operators (format, classification) could be dispatched to smaller models while reasoning-heavy operators retain large models, enabling cost-aware model selection within the same DAG.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--accent3)">Persistent Cross-Batch Prompt Cache</div>
+      <p><span class="i18n" data-en="The current prompt cache is maintained in-process and flushed between unrelated workflow executions. Persisting it across sessions (to disk or a shared KV store) would benefit workloads where the same workflow template is invoked repeatedly by different users, amortizing the static prefix prefill cost across thousands of requests." data-zh="當前的提示詞快取在進程內維護，並在不相關的工作流執行之間被清空。將其跨會話持久化（到磁碟或共享 KV 儲存）將使相同工作流模板被不同使用者重複呼叫的工作負載受益，將靜態前綴 prefill 成本分攤到數千個請求上。">The current prompt cache is maintained in-process and flushed between unrelated workflow executions. Persisting it across sessions (to disk or a shared KV store) would benefit workloads where the same workflow template is invoked repeatedly by different users, amortizing the static prefix prefill cost across thousands of requests.</span></p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Open Question:" data-zh="開放問題：">Open Question:</span></strong>
+    <span class="i18n" data-en="The database analogy suggests that as agentic workloads mature, a full query optimizer with statistics collection, histogram-based cardinality estimation for LLM output distributions, and adaptive re-optimization during execution may be warranted. Whether the overhead of such machinery is justified by gains depends on workload repetition rate and output predictability — both active research questions in the LLM serving community." data-zh="資料庫類比表明，隨著代理式工作負載的成熟，一個完整的查詢最佳化器，具有統計資料收集、基於直方圖的 LLM 輸出分佈基數估計，以及在執行期間的自適應重最佳化，可能是必要的。此類機制的開銷是否因收益而合理，取決於工作負載重複率和輸出可預測性 — 這兩者都是 LLM 服務社群中活躍的研究問題。">The database analogy suggests that as agentic workloads mature, a full query optimizer with statistics collection, histogram-based cardinality estimation for LLM output distributions, and adaptive re-optimization during execution may be warranted. Whether the overhead of such machinery is justified by gains depends on workload repetition rate and output predictability — both active research questions in the LLM serving community.</span>
   </div>
 </div>
 </section>

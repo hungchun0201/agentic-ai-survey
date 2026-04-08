@@ -713,6 +713,129 @@ output = <span class="fn">generate</span>(model, prompt, attn_mask)       <span 
 
 </div>
 
+<!-- DEPLOYMENT CONSIDERATIONS -->
+<div class="container">
+<section id="deployment">
+  <h2><span class="i18n" data-en="Deployment Considerations" data-zh="部署考量">Deployment Considerations</span></h2>
+  <p><span class="i18n" data-en="Integrating KVP into a production inference stack requires attention to several practical dimensions beyond raw accuracy. The following covers memory footprint, compatibility, and serving strategies." data-zh="將 KVP 整合進生產推論堆疊，除了原始準確率之外，還需考量幾個實務面向。以下涵蓋記憶體佔用、相容性及服務策略。">Integrating KVP into a production inference stack requires attention to several practical dimensions beyond raw accuracy. The following covers memory footprint, compatibility, and serving strategies.</span></p>
+  <p><span class="i18n" data-en="Because KVP agents are completely decoupled from the base LLM weights, they can be updated or swapped independently &mdash; for example, a domain-specific agent set can replace the general-purpose one without touching the LLM itself." data-zh="由於 KVP agent 與基礎 LLM 的權重完全解耦，它們可以獨立更新或替換 &mdash; 例如，特定領域的 agent 集合可以取代通用 agent，而無需更改 LLM 本身。">Because KVP agents are completely decoupled from the base LLM weights, they can be updated or swapped independently &mdash; for example, a domain-specific agent set can replace the general-purpose one without touching the LLM itself.</span>
+  <span class="i18n" data-en="This makes KVP compatible with continuous delivery workflows where model and compression policy are versioned separately." data-zh="這使 KVP 與持續交付工作流程相容，其中模型和壓縮策略分別進行版本控制。">This makes KVP compatible with continuous delivery workflows where model and compression policy are versioned separately.</span></p>
+
+  <h3><span class="i18n" data-en="Memory Footprint Breakdown" data-zh="記憶體佔用分析">Memory Footprint Breakdown</span></h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th>
+          <th><span class="i18n" data-en="Size" data-zh="大小">Size</span></th>
+          <th><span class="i18n" data-en="Notes" data-zh="備註">Notes</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="i18n" data-en="Single KVP agent (MLP)" data-zh="單一 KVP agent（MLP）">Single KVP agent (MLP)</span></td><td>~2.6 MB</td><td><span class="i18n" data-en="FP32; ~650K params" data-zh="FP32；約 650K 參數">FP32; ~650K params</span></td></tr>
+        <tr><td><span class="i18n" data-en="All 112 agents (Qwen2.5-7B)" data-zh="所有 112 個 agent（Qwen2.5-7B）">All 112 agents (Qwen2.5-7B)</span></td><td>~291 MB</td><td><span class="i18n" data-en="0.4% of base model size" data-zh="基礎模型大小的 0.4%">0.4% of base model size</span></td></tr>
+        <tr><td><span class="i18n" data-en="Qwen2.5-7B base model" data-zh="Qwen2.5-7B 基礎模型">Qwen2.5-7B base model</span></td><td>~14 GB</td><td>BF16</td></tr>
+        <tr><td><span class="i18n" data-en="KV cache (full, 4096 tokens)" data-zh="KV cache（完整，4096 個 token）">KV cache (full, 4096 tokens)</span></td><td>~2.0 GB</td><td><span class="i18n" data-en="BF16, 28 layers, 4 KV heads" data-zh="BF16，28 層，4 個 KV head">BF16, 28 layers, 4 KV heads</span></td></tr>
+        <tr><td><span class="i18n" data-en="KV cache (50% compression)" data-zh="KV cache（50% 壓縮）">KV cache (50% compression)</span></td><td>~1.0 GB</td><td><span class="i18n" data-en="With KVP eviction at budget=2048" data-zh="以 budget=2048 進行 KVP 驅逐">With KVP eviction at budget=2048</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-box"><div class="stat-num">72.8M</div><div class="stat-label"><span class="i18n" data-en="Total KVP params (112 agents)" data-zh="KVP 總參數量（112 個 agent）">Total KVP params (112 agents)</span></div></div>
+    <div class="stat-box"><div class="stat-num">0.4%</div><div class="stat-label"><span class="i18n" data-en="of base model size" data-zh="佔基礎模型大小比例">of base model size</span></div></div>
+    <div class="stat-box"><div class="stat-num">INT8</div><div class="stat-label"><span class="i18n" data-en="Agent quantization target" data-zh="Agent 量化目標">Agent quantization target</span></div></div>
+    <div class="stat-box"><div class="stat-num">&lt;75MB</div><div class="stat-label"><span class="i18n" data-en="All agents after quantization" data-zh="量化後所有 agent 大小">All agents after quantization</span></div></div>
+    <div class="stat-box"><div class="stat-num">5K–10K</div><div class="stat-label"><span class="i18n" data-en="Sequences needed to train new agents" data-zh="訓練新 agent 所需序列數">Sequences needed to train new agents</span></div></div>
+  </div>
+
+  <h3><span class="i18n" data-en="Framework Compatibility" data-zh="框架相容性">Framework Compatibility</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon" style="background:rgba(99,102,241,.15);color:var(--a1)">F</div>
+      <h4><span class="i18n" data-en="FlexAttention (PyTorch)" data-zh="FlexAttention（PyTorch）">FlexAttention (PyTorch)</span></h4>
+      <p><span class="i18n" data-en="KVP uses FlexAttention custom masks to emulate eviction without modifying the KV cache tensor itself. This avoids memory reallocation at inference time and enables zero-copy eviction." data-zh="KVP 使用 FlexAttention 的自訂 mask 來模擬驅逐，而不需要修改 KV cache 張量本身。這樣可以避免推論時的記憶體重新分配，並實現零拷貝驅逐。">KVP uses FlexAttention custom masks to emulate eviction without modifying the KV cache tensor itself. This avoids memory reallocation at inference time and enables zero-copy eviction.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(34,211,238,.15);color:var(--a4)">V</div>
+      <h4><span class="i18n" data-en="vLLM / SGLang Integration" data-zh="vLLM / SGLang 整合">vLLM / SGLang Integration</span></h4>
+      <p><span class="i18n" data-en="KVP's query-independent design is compatible with prefix caching and paged attention. The MLP scoring pass fits naturally into the prefill phase before block allocation, making integration with PagedAttention schedulers straightforward." data-zh="KVP 與 query 無關的設計與前綴快取及分頁 attention 相容。MLP 評分過程自然地嵌入區塊分配前的 prefill 階段，使其與 PagedAttention 排程器的整合變得直接。">KVP's query-independent design is compatible with prefix caching and paged attention. The MLP scoring pass fits naturally into the prefill phase before block allocation, making integration with PagedAttention schedulers straightforward.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(52,211,153,.15);color:var(--a5)">Q</div>
+      <h4><span class="i18n" data-en="Quantization Stack" data-zh="量化堆疊">Quantization Stack</span></h4>
+      <p><span class="i18n" data-en="KVP agents themselves can be quantized to INT8 with negligible accuracy loss, reducing the 291 MB agent overhead to under 75 MB. This is especially beneficial on edge devices with tight memory budgets." data-zh="KVP agent 本身可以量化為 INT8，準確率損失可忽略不計，將 291 MB 的 agent 開銷降低至 75 MB 以下。這對於記憶體預算有限的邊緣裝置尤其有益。">KVP agents themselves can be quantized to INT8 with negligible accuracy loss, reducing the 291 MB agent overhead to under 75 MB. This is especially beneficial on edge devices with tight memory budgets.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(244,114,182,.15);color:var(--a6)">B</div>
+      <h4><span class="i18n" data-en="Batched Inference" data-zh="批次推論">Batched Inference</span></h4>
+      <p><span class="i18n" data-en="Because all 112 MLP agents score tokens independently and in parallel, batched scoring adds negligible latency even at large batch sizes. The scoring overhead scales sub-linearly with batch size due to GPU parallelism." data-zh="因為所有 112 個 MLP agent 獨立且並行地對 token 進行評分，即使在較大的批次大小下，批次評分增加的延遲也可忽略不計。由於 GPU 並行性，評分開銷隨批次大小呈次線性增長。">Because all 112 MLP agents score tokens independently and in parallel, batched scoring adds negligible latency even at large batch sizes. The scoring overhead scales sub-linearly with batch size due to GPU parallelism.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Steps to Adapt KVP to a New LLM" data-zh="將 KVP 適配到新 LLM 的步驟">Steps to Adapt KVP to a New LLM</span></h3>
+  <ol>
+    <li><span class="i18n" data-en="Run the target LLM on a representative sample of sequences (e.g., 5K–10K examples from your deployment domain) and store Q, K, V tensors at every layer and head." data-zh="在代表性的序列樣本上執行目標 LLM（例如，來自部署領域的 5K–10K 個範例），並儲存每一層和每個 head 的 Q、K、V 張量。">Run the target LLM on a representative sample of sequences (e.g., 5K–10K examples from your deployment domain) and store Q, K, V tensors at every layer and head.</span></li>
+    <li><span class="i18n" data-en="Instantiate one 2-layer MLP per KV head, sized to match the model's head dimension (d_k, d_v). For GQA models, one agent serves multiple query heads sharing the same KV head." data-zh="為每個 KV head 實例化一個 2 層 MLP，大小與模型的 head 維度（d_k、d_v）相匹配。對於 GQA 模型，一個 agent 服務多個共享同一 KV head 的 query head。">Instantiate one 2-layer MLP per KV head, sized to match the model's head dimension (d_k, d_v). For GQA models, one agent serves multiple query heads sharing the same KV head.</span></li>
+    <li><span class="i18n" data-en="Run RL training with REINFORCE+RLOO using the holistic reward (sum over all budgets of negative future attention cost). Training takes under 30 minutes on 8xH100 for a 7B-scale model." data-zh="使用 REINFORCE+RLOO 進行 RL 訓練，採用整體獎勵（所有 budget 下負未來 attention 成本的總和）。對於 7B 規模的模型，在 8xH100 上訓練不到 30 分鐘。">Run RL training with REINFORCE+RLOO using the holistic reward (sum over all budgets of negative future attention cost). Training takes under 30 minutes on 8xH100 for a 7B-scale model.</span></li>
+    <li><span class="i18n" data-en="Validate on a held-out set covering your target tasks. Check cost curves per head to confirm all agents converge; heads with persistent high cost may need more training data or a wider MLP." data-zh="在涵蓋目標任務的保留集上進行驗證。檢查每個 head 的成本曲線，確認所有 agent 都已收斂；持續高成本的 head 可能需要更多訓練資料或更寬的 MLP。">Validate on a held-out set covering your target tasks. Check cost curves per head to confirm all agents converge; heads with persistent high cost may need more training data or a wider MLP.</span></li>
+    <li><span class="i18n" data-en="Integrate the scored rankings into your serving engine by replacing the standard attention mask with a FlexAttention mask that zeros out evicted token positions." data-zh="透過將標準 attention mask 替換為一個對被驅逐 token 位置進行置零的 FlexAttention mask，將評分排名整合到您的服務引擎中。">Integrate the scored rankings into your serving engine by replacing the standard attention mask with a FlexAttention mask that zeros out evicted token positions.</span></li>
+    <li><span class="i18n" data-en="Profile end-to-end latency at representative context lengths (e.g., 2K, 4K, 8K tokens) and cache budgets (25%, 50%, 75%) to confirm the &lt;1% prefill overhead claim holds for your hardware configuration." data-zh="在代表性的上下文長度（例如 2K、4K、8K token）和快取預算（25%、50%、75%）下分析端到端延遲，確認您的硬體配置符合 &lt;1% prefill 開銷的聲明。">Profile end-to-end latency at representative context lengths (e.g., 2K, 4K, 8K tokens) and cache budgets (25%, 50%, 75%) to confirm the &lt;1% prefill overhead claim holds for your hardware configuration.</span></li>
+  </ol>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Eviction Boundary Heuristic" data-zh="驅逐邊界啟發式">Eviction Boundary Heuristic</span></strong>
+    <p style="margin:.4rem 0 0"><span class="i18n" data-en="KVP always retains the first 4 tokens (system prompt tokens that anchor the model's behavior) and the last 16 tokens (the most recent context, which is universally important for coherent generation). Only the middle tokens are ranked and selectively evicted. This boundary heuristic is consistent with prior work showing attention sinks at position 0 and a recency bias in autoregressive generation." data-zh="KVP 始終保留前 4 個 token（錨定模型行為的系統提示 token）和最後 16 個 token（最近的上下文，對於連貫的生成普遍重要）。只有中間的 token 被排序並選擇性地驅逐。這一邊界啟發式與先前的研究一致，這些研究顯示位置 0 存在 attention sink，且自迴歸生成中存在近因偏差。">KVP always retains the first 4 tokens (system prompt tokens that anchor the model's behavior) and the last 16 tokens (the most recent context, which is universally important for coherent generation). Only the middle tokens are ranked and selectively evicted. This boundary heuristic is consistent with prior work showing attention sinks at position 0 and a recency bias in autoregressive generation.</span></p>
+  </div>
+</section>
+
+<!-- KEY TAKEAWAYS -->
+<section id="takeaways">
+  <h2><span class="i18n" data-en="Key Takeaways" data-zh="關鍵要點">Key Takeaways</span></h2>
+  <p><span class="i18n" data-en="KV Policy makes several contributions that collectively shift how we think about KV cache management in long-context LLMs and agentic systems. The six points below capture the most transferable insights for practitioners." data-zh="KV Policy 做出了幾項貢獻，共同改變了我們對長上下文 LLM 和 agentic 系統中 KV cache 管理的思考方式。以下六點為從業者歸納了最具遷移價值的洞見。">KV Policy makes several contributions that collectively shift how we think about KV cache management in long-context LLMs and agentic systems. The six points below capture the most transferable insights for practitioners.</span></p>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon" style="background:rgba(99,102,241,.15);color:var(--a1)">1</div>
+      <h4><span class="i18n" data-en="Eviction as Ranking" data-zh="驅逐即排序">Eviction as Ranking</span></h4>
+      <p><span class="i18n" data-en="The theoretical result (Proposition 1) that uniqueness and nestedness imply a total order is a clean reduction: the NP-hard subset selection collapses to a standard ranking problem solvable with existing learning-to-rank machinery." data-zh="唯一性和巢狀性蘊涵全序的理論結果（命題 1）是一個清晰的歸約：NP-hard 的子集選擇問題簡化為可用現有 learning-to-rank 方法解決的標準排序問題。">The theoretical result (Proposition 1) that uniqueness and nestedness imply a total order is a clean reduction: the NP-hard subset selection collapses to a standard ranking problem solvable with existing learning-to-rank machinery.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(34,211,238,.15);color:var(--a4)">2</div>
+      <h4><span class="i18n" data-en="RL over Supervised Learning" data-zh="RL 優於監督學習">RL over Supervised Learning</span></h4>
+      <p><span class="i18n" data-en="The sparsity of critical tokens makes differentiable surrogates fundamentally ill-suited. Policy gradient methods handle non-differentiable objectives natively, concentrating learning on the few tokens that decide outcome quality." data-zh="關鍵 token 的稀疏性使可微分替代方法從根本上不適合。策略梯度方法原生地處理不可微分目標，將學習集中在決定結果品質的少數 token 上。">The sparsity of critical tokens makes differentiable surrogates fundamentally ill-suited. Policy gradient methods handle non-differentiable objectives natively, concentrating learning on the few tokens that decide outcome quality.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(52,211,153,.15);color:var(--a5)">3</div>
+      <h4><span class="i18n" data-en="Per-Head Specialization Matters" data-zh="逐 Head 特化至關重要">Per-Head Specialization Matters</span></h4>
+      <p><span class="i18n" data-en="Global heuristics fail because different heads encode entirely different types of information. KVP's ablations show that a single policy across all heads degrades significantly; 112 specialized agents are necessary for strong performance." data-zh="全域啟發式方法失敗，因為不同的 head 編碼了完全不同類型的資訊。KVP 的消融實驗顯示，跨所有 head 的單一策略效能顯著下降；112 個特化 agent 對於強勁的表現是必要的。">Global heuristics fail because different heads encode entirely different types of information. KVP's ablations show that a single policy across all heads degrades significantly; 112 specialized agents are necessary for strong performance.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(250,204,21,.12);color:var(--a8)">4</div>
+      <h4><span class="i18n" data-en="Offline Training is Sufficient" data-zh="離線訓練已足夠">Offline Training is Sufficient</span></h4>
+      <p><span class="i18n" data-en="Precomputing KV traces once and training on stored tensors achieves parity with online methods, while cutting compute cost by orders of magnitude. This makes KVP practical to retrain whenever a new base model is deployed." data-zh="一次預先計算 KV trace 並在儲存的張量上訓練，即可達到與線上方法相當的效果，同時將計算成本降低數個數量級。這使得每當部署新的基礎模型時，重新訓練 KVP 變得實際可行。">Precomputing KV traces once and training on stored tensors achieves parity with online methods, while cutting compute cost by orders of magnitude. This makes KVP practical to retrain whenever a new base model is deployed.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(244,114,182,.12);color:var(--a6)">5</div>
+      <h4><span class="i18n" data-en="Zero-Shot Domain Transfer" data-zh="零樣本領域遷移">Zero-Shot Domain Transfer</span></h4>
+      <p><span class="i18n" data-en="KVP agents trained on RULER or OASST2 generalize to diverse out-of-distribution benchmarks (BoolQ, MMLU, HellaSwag, GovReport) with minimal accuracy loss, suggesting the learned ranking principles capture task-agnostic attention structure." data-zh="在 RULER 或 OASST2 上訓練的 KVP agent 能夠泛化到各種分布外的基準測試（BoolQ、MMLU、HellaSwag、GovReport），準確率損失極小，這表明學習到的排序原則捕捉了與任務無關的 attention 結構。">KVP agents trained on RULER or OASST2 generalize to diverse out-of-distribution benchmarks (BoolQ, MMLU, HellaSwag, GovReport) with minimal accuracy loss, suggesting the learned ranking principles capture task-agnostic attention structure.</span></p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(139,92,246,.15);color:var(--a2)">6</div>
+      <h4><span class="i18n" data-en="Composability with Other Techniques" data-zh="與其他技術的可組合性">Composability with Other Techniques</span></h4>
+      <p><span class="i18n" data-en="Because KVP outputs a clean priority ranking, it composes naturally with quantization, low-rank compression, and memory tiering. The ranking signal tells downstream techniques which entries deserve the highest fidelity, enabling compound compression pipelines." data-zh="由於 KVP 輸出乾淨的優先順序排名，它可以自然地與量化、低秩壓縮和記憶體分層組合。排名信號告訴下游技術哪些條目應獲得最高保真度，從而實現複合壓縮管線。">Because KVP outputs a clean priority ranking, it composes naturally with quantization, low-rank compression, and memory tiering. The ranking signal tells downstream techniques which entries deserve the highest fidelity, enabling compound compression pipelines.</span></p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Limitations to Keep in Mind" data-zh="需注意的局限性">Limitations to Keep in Mind</span></strong>
+    <p style="margin:.5rem 0 0"><span class="i18n" data-en="KVP requires retraining agents whenever the base LLM changes, since agent weights are tied to the specific key/value dimensionality and learned representations of a given model. Additionally, the current evaluation focuses on English-language benchmarks; performance on multilingual or code-heavy workloads remains an open question. Finally, the assumption of nestedness (S*_b ⊂ S*_{b+1}) holds empirically but is not theoretically guaranteed for all tasks." data-zh="每當基礎 LLM 更換時，KVP 需要重新訓練 agent，因為 agent 的權重與特定模型的 key/value 維度和學習到的表示緊密相連。此外，目前的評估側重於英語基準測試；在多語言或程式碼密集型工作負載上的表現仍是一個開放性問題。最後，巢狀性假設（S*_b ⊂ S*_{b+1}）在實驗上成立，但理論上並不保證對所有任務都成立。">KVP requires retraining agents whenever the base LLM changes, since agent weights are tied to the specific key/value dimensionality and learned representations of a given model. Additionally, the current evaluation focuses on English-language benchmarks; performance on multilingual or code-heavy workloads remains an open question. Finally, the assumption of nestedness (S*_b ⊂ S*_{b+1}) holds empirically but is not theoretically guaranteed for all tasks.</span></p>
+    <p style="margin:.5rem 0 0"><span class="i18n" data-en="Despite these caveats, KVP represents a meaningful step toward principled, adaptive KV cache management &mdash; and the offline RL training approach is practical enough to deploy alongside today's LLM serving stacks." data-zh="儘管存在這些注意事項，KVP 代表著朝向有原則、自適應的 KV cache 管理邁出的重要一步 &mdash; 且離線 RL 訓練方法足夠實用，可以與當今的 LLM 服務堆疊一起部署。">Despite these caveats, KVP represents a meaningful step toward principled, adaptive KV cache management &mdash; and the offline RL training approach is practical enough to deploy alongside today's LLM serving stacks.</span></p>
+  </div>
+</section>
+</div>
+
+
 <footer>
   <p>KV Policy (KVP) &mdash; Moschella, Manduchi, Sener &middot; Apple &middot; arXiv:2602.10238 &middot; Feb 2026</p>
   <p style="margin-top:.5rem"><span class="i18n" data-en="Survey page for Agentic AI Infrastructure" data-zh="Agentic AI 基礎設施調研頁面">Survey page for Agentic AI Infrastructure</span></p>

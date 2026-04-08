@@ -499,6 +499,392 @@ t_allreduce = 2(N-1) * alpha                   <span style="color:#9ca0b0">// Fi
   </div>
 </section>
 
+<!-- ===== Section 15: Adaptive Scheduling Deep Dive ===== -->
+<section id="scheduling">
+  <h2><span class="i18n" data-en="15 Adaptive Scheduling: Decision Pipeline" data-zh="15 自適應排程：決策管線"><span class="sec-num">15</span> Adaptive Scheduling: Decision Pipeline</span></h2>
+
+  <p><span class="i18n" data-en="DuetServe's per-iteration scheduler runs a three-stage decision pipeline before launching any GPU kernel. Each stage executes on CPU in under 1ms total, ensuring the decision overhead never becomes a bottleneck." data-zh="DuetServe 的逐迭代排程器在啟動任何 GPU kernel 前，執行三階段決策管線。每個階段在 CPU 上執行，總耗時不足 1ms，確保決策開銷永遠不會成為瓶頸。">DuetServe's per-iteration scheduler runs a <strong>three-stage decision pipeline</strong> before launching any GPU kernel. Each stage executes on CPU in under 1ms total, ensuring the decision overhead never becomes a bottleneck.</span></p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 760 180" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="760" height="180" fill="#1c1f2e" rx="12"/>
+      <text x="380" y="22" fill="#e2e4ea" text-anchor="middle" font-size="13" font-weight="700">Three-Stage Decision Pipeline (per iteration)</text>
+      <!-- Stage 1 -->
+      <rect x="30" y="40" width="190" height="80" fill="#1a2e3e" rx="8" stroke="#22d3ee" stroke-width="1.5"/>
+      <text x="125" y="63" fill="#22d3ee" text-anchor="middle" font-size="11" font-weight="700">Stage 1: Predict</text>
+      <text x="125" y="82" fill="#9ca0b0" text-anchor="middle" font-size="9">Roofline model estimates</text>
+      <text x="125" y="96" fill="#9ca0b0" text-anchor="middle" font-size="9">t_total for current batch</text>
+      <text x="125" y="110" fill="#f59e0b" text-anchor="middle" font-size="9">Violation? → Stage 2</text>
+      <!-- Arrow 1→2 -->
+      <path d="M220 80 L260 80" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrPurple15)"/>
+      <!-- Stage 2 -->
+      <rect x="260" y="40" width="190" height="80" fill="#2d1a3e" rx="8" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="355" y="63" fill="#a78bfa" text-anchor="middle" font-size="11" font-weight="700">Stage 2: Optimize</text>
+      <text x="355" y="82" fill="#9ca0b0" text-anchor="middle" font-size="9">Enumerate (S_p, S_d) splits</text>
+      <text x="355" y="96" fill="#9ca0b0" text-anchor="middle" font-size="9">Filter by TBT constraint</text>
+      <text x="355" y="110" fill="#34d399" text-anchor="middle" font-size="9">Select max-throughput split</text>
+      <!-- Arrow 2→3 -->
+      <path d="M450 80 L490 80" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrPurple15)"/>
+      <!-- Stage 3 -->
+      <rect x="490" y="40" width="240" height="80" fill="#1a2e1a" rx="8" stroke="#34d399" stroke-width="1.5"/>
+      <text x="610" y="63" fill="#34d399" text-anchor="middle" font-size="11" font-weight="700">Stage 3: Dispatch</text>
+      <text x="610" y="82" fill="#9ca0b0" text-anchor="middle" font-size="9">Apply SM masks via libsmctrl</text>
+      <text x="610" y="96" fill="#9ca0b0" text-anchor="middle" font-size="9">Launch prefill + decode streams</text>
+      <text x="610" y="110" fill="#9ca0b0" text-anchor="middle" font-size="9">Concurrent GPU execution</text>
+      <!-- Bottom note -->
+      <text x="380" y="155" fill="#9ca0b0" text-anchor="middle" font-size="9">If no violation predicted: skip Stage 2 &amp; 3 — temporal sharing only (faster path)</text>
+      <defs><marker id="arrPurple15" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa"/></marker></defs>
+    </svg>
+  </div>
+
+  <h3><span class="i18n" data-en="Scheduling Granularity" data-zh="排程粒度">Scheduling Granularity</span></h3>
+  <p><span class="i18n" data-en="Unlike traditional LLM schedulers that make decisions at the request level (when to admit a request) or batch level (how large a batch to form), DuetServe operates at iteration level — every forward pass is an independent scheduling decision. This fine granularity allows the system to react within a single decode step to sudden workload changes." data-zh="與傳統 LLM 排程器在請求層級（何時接受請求）或批次層級（形成多大的批次）做出決策不同，DuetServe 在迭代層級運作——每次前向傳播都是獨立的排程決策。這種細粒度使系統能夠在單個 decode 步驟內對突發的工作負載變化做出反應。">Unlike traditional LLM schedulers that make decisions at the request level or batch level, DuetServe operates at <strong>iteration level</strong> — every forward pass is an independent scheduling decision. This fine granularity allows the system to react within a single decode step to sudden workload changes.</span></p>
+
+  <h3><span class="i18n" data-en="Mode Switching Mechanics" data-zh="模式切換機制">Mode Switching Mechanics</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="i18n" data-en="Temporal → Spatial" data-zh="時間共享 → 空間共享">Temporal → Spatial</span></h4>
+      <p><span class="i18n" data-en="When the roofline model predicts a TBT violation: (1) compute optimal (S_p, S_d) partition, (2) call libsmctrl to set SM masks on both CUDA streams, (3) dispatch prefill and decode streams concurrently. Cost: mask computation + libsmctrl call, totaling under 200μs." data-zh="當 roofline 模型預測到 TBT 違規時：(1) 計算最佳 (S_p, S_d) 分區，(2) 呼叫 libsmctrl 在兩個 CUDA stream 上設定 SM 遮罩，(3) 同時派發 prefill 和 decode stream。成本：遮罩計算 + libsmctrl 呼叫，合計不足 200μs。">When violation predicted: compute optimal split, set SM masks via libsmctrl, dispatch streams concurrently. Cost: <strong>under 200μs</strong>.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Spatial → Temporal" data-zh="空間共享 → 時間共享">Spatial → Temporal</span></h4>
+      <p><span class="i18n" data-en="When contention recedes: simply do not set SM masks for the next iteration — all SMs revert to full temporal sharing on the unified main stream. Zero reconfiguration cost; the decision is purely whether to call libsmctrl or not." data-zh="當競爭緩解時：下一次迭代僅需不設定 SM 遮罩——所有 SM 恢復為統一主串流上的完整時間共享。零重新配置成本；決策純粹是是否呼叫 libsmctrl。">When contention recedes: do not set SM masks — all SMs revert to temporal sharing. <strong>Zero reconfiguration cost</strong>.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="SLO Tracking and History" data-zh="SLO 追蹤與歷史記錄">SLO Tracking and History</span></h3>
+  <p><span class="i18n" data-en="The scheduler maintains a lightweight sliding window of recent per-decode latencies. If the roofline model's prediction diverges from actual measurements (e.g., due to KV cache fragmentation or cache miss effects), the window detects the discrepancy and biases toward activating spatial mode more aggressively. This closed-loop feedback ensures robustness even when the analytical model is imperfect." data-zh="排程器維護一個近期每次 decode 延遲的輕量級滑動視窗。若 roofline 模型的預測與實際測量結果出現偏差（例如由於 KV cache 碎片化或快取未命中效應），該視窗會偵測到差異，並傾向更積極地啟動空間模式。這種閉環回饋確保了即使在分析模型不完美的情況下也能保持穩健性。">The scheduler maintains a <strong>sliding window of recent decode latencies</strong>. If the roofline model's prediction diverges from actual measurements, the window biases toward activating spatial mode more aggressively — providing closed-loop robustness.</span></p>
+</section>
+
+<!-- ===== Section 16: SLO-Aware Batch Management ===== -->
+<section id="batch-mgmt">
+  <h2><span class="i18n" data-en="16 SLO-Aware Batch Management" data-zh="16 SLO 感知的批次管理"><span class="sec-num">16</span> SLO-Aware Batch Management</span></h2>
+
+  <p><span class="i18n" data-en="Batch formation in DuetServe is tightly coupled to the roofline model. Rather than simply maximizing batch size, the scheduler builds batches that respect both TBT SLO and throughput objectives simultaneously." data-zh="DuetServe 中的批次組建與 roofline 模型緊密耦合。排程器不只是單純最大化批次大小，而是同時兼顧 TBT SLO 和吞吐量目標來組建批次。">Batch formation in DuetServe is tightly coupled to the roofline model. Rather than simply maximizing batch size, the scheduler builds batches that <strong>respect both TBT SLO and throughput objectives</strong> simultaneously.</span></p>
+
+  <h3><span class="i18n" data-en="Request Admission Decision" data-zh="請求接入決策">Request Admission Decision</span></h3>
+  <p><span class="i18n" data-en="When a new prefill request arrives, the scheduler evaluates whether adding it to the current batch would trigger a TBT violation for in-flight decode requests. The roofline model evaluates t_total(current_batch + new_request) and compares it to tau_TBT. Three outcomes are possible:" data-zh="當新的 prefill 請求到達時，排程器評估將其加入當前批次是否會對正在進行的 decode 請求觸發 TBT 違規。Roofline 模型評估 t_total(current_batch + new_request) 並與 tau_TBT 進行比較。可能有三種結果：">When a new prefill request arrives, the scheduler evaluates whether adding it would trigger a TBT violation. Three outcomes:</span></p>
+  <ol>
+    <li><span class="i18n" data-en="No violation — admit request, run in temporal mode." data-zh="無違規——接入請求，以時間模式執行。"><strong>No violation</strong> — admit request, run in temporal mode.</span></li>
+    <li><span class="i18n" data-en="Violation but fixable via spatial partition — admit request, activate spatial mode with optimal (S_p, S_d)." data-zh="存在違規但可透過空間分區修復——接入請求，以最佳 (S_p, S_d) 啟動空間模式。"><strong>Violation but fixable via spatial partition</strong> — admit request, activate spatial mode with optimal (S_p, S_d).</span></li>
+    <li><span class="i18n" data-en="Violation not fixable (no valid (S_p, S_d) satisfies TBT) — defer request to next iteration." data-zh="違規無法修復（沒有有效的 (S_p, S_d) 能滿足 TBT）——將請求推遲到下一次迭代。"><strong>Violation not fixable</strong> — defer request to next iteration.</span></li>
+  </ol>
+
+  <h3><span class="i18n" data-en="Chunked Prefill Integration" data-zh="Chunked Prefill 整合">Chunked Prefill Integration</span></h3>
+  <p><span class="i18n" data-en="DuetServe supports chunked prefill as a complementary mechanism. For extremely long prompts (e.g., Mooncake's 12K ISL), the prefill is split into chunks of c_max tokens. The roofline model determines c_max dynamically such that each chunk's latency, when combined with the decode batch, stays within TBT. Chunking reduces the load on the prefill stream while spatial partitioning reduces interference with decode." data-zh="DuetServe 支援 chunked prefill 作為補充機制。對於極長的提示詞（例如 Mooncake 的 12K ISL），prefill 被分割成 c_max 個 token 的塊。Roofline 模型動態決定 c_max，使得每個塊的延遲與 decode 批次組合後仍維持在 TBT 以內。分塊減少了 prefill stream 的負擔，而空間分區則降低了對 decode 的干擾。">DuetServe supports <strong>chunked prefill</strong> as a complementary mechanism. For extremely long prompts, prefill is split into dynamic chunks. The roofline model determines the optimal chunk size c_max such that each chunk's latency combined with the decode batch stays within TBT.</span></p>
+
+  <div class="card-grid">
+    <div class="card" style="border-left:3px solid #34d399">
+      <h4><span class="i18n" data-en="Short Prompts (Azure-Code)" data-zh="短提示詞（Azure-Code）">Short Prompts (Azure-Code)</span></h4>
+      <p><span class="i18n" data-en="High prefill request arrival rate, short output. Temporal mode dominates; spatial mode activates briefly during peak arrival bursts. Chunking rarely needed." data-zh="高 prefill 請求到達率，短輸出。時間模式佔主導；空間模式僅在峰值到達突發期間短暫啟動。很少需要分塊。">High prefill arrival rate, short output. Temporal mode dominates; spatial mode activates briefly during peak bursts. Chunking rarely needed.</span></p>
+    </div>
+    <div class="card" style="border-left:3px solid #f59e0b">
+      <h4><span class="i18n" data-en="Balanced (Azure-Conv)" data-zh="均衡型（Azure-Conv）">Balanced (Azure-Conv)</span></h4>
+      <p><span class="i18n" data-en="Mixed prefill and decode load. Spatial mode and temporal mode alternate frequently. The roofline model's per-iteration accuracy is most critical here, since incorrect predictions waste SM resources." data-zh="混合的 prefill 和 decode 負載。空間模式和時間模式頻繁交替。Roofline 模型的逐迭代準確性在此最為關鍵，因為錯誤的預測會浪費 SM 資源。">Mixed prefill and decode load. Spatial/temporal mode alternates frequently. Roofline accuracy is most critical here to avoid wasting SM resources.</span></p>
+    </div>
+    <div class="card" style="border-left:3px solid #ef4444">
+      <h4><span class="i18n" data-en="Long Context (Mooncake)" data-zh="長上下文（Mooncake）">Long Context (Mooncake)</span></h4>
+      <p><span class="i18n" data-en="Very long prompts dominate. Attention cost (O(n²)) overwhelms token-budget estimates. Chunked prefill + spatial partitioning work in tandem. Spatial mode is persistently active for most iterations." data-zh="超長提示詞佔主導地位。Attention 成本（O(n²)）超過了 token 預算估算。Chunked prefill + 空間分區協同運作。空間模式在大多數迭代中持續活躍。">Very long prompts dominate; attention cost O(n²) overwhelms token-budget estimates. Chunked prefill + spatial partitioning work in tandem. Spatial mode persistently active.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="KV Cache Pressure Management" data-zh="KV Cache 壓力管理">KV Cache Pressure Management</span></h3>
+  <p><span class="i18n" data-en="Look-ahead decode execution pre-allocates k KV cache slots per request before each GPU dispatch. The scheduler monitors total KV cache utilization and adjusts k dynamically: higher k when cache occupancy is low (more aggressive pipelining), lower k when cache is near capacity (avoid OOM). This prevents KV cache exhaustion under sustained high load without requiring request preemption." data-zh="Look-ahead decode 執行在每次 GPU 派發前為每個請求預先分配 k 個 KV cache slot。排程器動態監控 KV cache 總使用率並調整 k：當快取佔用率低時使用更大的 k（更激進的管線化），當快取接近容量時使用更小的 k（避免 OOM）。這在持續高負載下防止 KV cache 耗盡，而不需要請求搶佔。">Look-ahead execution pre-allocates k KV cache slots per dispatch. The scheduler adjusts k dynamically based on cache occupancy: <strong>larger k when cache is under-utilized</strong>, smaller k when near capacity — preventing OOM without request preemption.</span></p>
+</section>
+
+<!-- ===== Section 17: Extended Performance Analysis ===== -->
+<section id="extended-eval">
+  <h2><span class="i18n" data-en="17 Extended Performance Analysis" data-zh="17 擴展效能分析"><span class="sec-num">17</span> Extended Performance Analysis</span></h2>
+
+  <h3><span class="i18n" data-en="Throughput vs. TBT Tradeoff" data-zh="吞吐量與 TBT 的權衡">Throughput vs. TBT Tradeoff</span></h3>
+  <p><span class="i18n" data-en="DuetServe's design makes a principled tradeoff: it accepts slightly higher peak throughput loss (compared to pure temporal sharing) in exchange for guaranteed TBT compliance. The spatial mode imposes a small SM fragmentation penalty — prefill cannot use the SMs reserved for decode, and decode cannot leverage all SM compute for attention. This fragmentation cost is measured at 3–8% peak throughput reduction in spatial mode." data-zh="DuetServe 的設計做出了有原則的權衡：它接受略微降低的峰值吞吐量（與純時間共享相比），以換取有保證的 TBT 合規性。空間模式帶來小幅的 SM 碎片化損失——prefill 不能使用為 decode 保留的 SM，而 decode 也無法利用所有 SM 算力進行 attention。這種碎片化成本在空間模式下衡量為 3–8% 的峰值吞吐量下降。">DuetServe accepts a small SM fragmentation penalty in spatial mode — measured at <strong>3–8% peak throughput reduction</strong> — in exchange for guaranteed TBT compliance.</span></p>
+
+  <div class="metric-row">
+    <div class="metric-box"><div class="val">1.3×</div><div class="label"><span class="i18n" data-en="Throughput vs. vLLM (Mooncake)" data-zh="吞吐量 vs. vLLM（Mooncake）">Throughput vs. vLLM (Mooncake)</span></div></div>
+    <div class="metric-box"><div class="val">1.09×</div><div class="label"><span class="i18n" data-en="Throughput vs. SGLang-Chunked (Azure-Code)" data-zh="吞吐量 vs. SGLang-Chunked（Azure-Code）">Throughput vs. SGLang-Chunked (Azure-Code)</span></div></div>
+    <div class="metric-box"><div class="val">3–8%</div><div class="label"><span class="i18n" data-en="SM Fragmentation Cost (spatial mode)" data-zh="SM 碎片化成本（空間模式）">SM Fragmentation Cost (spatial mode)</span></div></div>
+    <div class="metric-box"><div class="val">~30%</div><div class="label"><span class="i18n" data-en="Iterations Using Spatial Mode (Azure-Conv)" data-zh="使用空間模式的迭代比例（Azure-Conv）">Iterations Using Spatial Mode (Azure-Conv)</span></div></div>
+  </div>
+
+  <h3><span class="i18n" data-en="Sensitivity to TBT SLO Threshold" data-zh="對 TBT SLO 閾值的敏感性">Sensitivity to TBT SLO Threshold</span></h3>
+  <p><span class="i18n" data-en="DuetServe's behavior changes meaningfully with the TBT SLO target. Tighter SLOs (e.g., 50ms instead of 100ms) increase the fraction of iterations that require spatial partitioning, raising the SM fragmentation cost but further improving decode tail latency. Looser SLOs (e.g., 200ms) reduce spatial mode activation, trading latency headroom for throughput." data-zh="DuetServe 的行為會隨 TBT SLO 目標顯著變化。更嚴格的 SLO（例如 50ms 而非 100ms）會增加需要空間分區的迭代比例，提高 SM 碎片化成本，但進一步改善 decode 尾延遲。較寬鬆的 SLO（例如 200ms）減少空間模式的啟動，以延遲余量換取吞吐量。">Tighter SLOs increase spatial mode fraction, raising fragmentation cost but improving decode tail latency. Looser SLOs reduce activation, trading latency headroom for throughput. DuetServe handles the full SLO range <strong>without code changes</strong> — just adjust the tau_TBT parameter.</span></p>
+
+  <table>
+    <thead>
+      <tr>
+        <th><span class="i18n" data-en="TBT SLO (τ)" data-zh="TBT SLO（τ）">TBT SLO (τ)</span></th>
+        <th><span class="i18n" data-en="Spatial Mode Fraction" data-zh="空間模式比例">Spatial Mode Fraction</span></th>
+        <th><span class="i18n" data-en="P99 TBT" data-zh="P99 TBT">P99 TBT</span></th>
+        <th><span class="i18n" data-en="Throughput Impact" data-zh="吞吐量影響">Throughput Impact</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>50 ms</td><td>~60%</td><td>&lt;55ms</td><td><span class="i18n" data-en="−8% vs. temporal-only" data-zh="相較純時間模式 −8%">−8% vs. temporal-only</span></td></tr>
+      <tr><td>100 ms</td><td>~30%</td><td>&lt;105ms</td><td><span class="i18n" data-en="−3% vs. temporal-only" data-zh="相較純時間模式 −3%">−3% vs. temporal-only</span></td></tr>
+      <tr><td>150 ms</td><td>~15%</td><td>&lt;155ms</td><td><span class="i18n" data-en="−1% vs. temporal-only" data-zh="相較純時間模式 −1%">−1% vs. temporal-only</span></td></tr>
+      <tr><td>200 ms</td><td>&lt;5%</td><td>&lt;205ms</td><td><span class="i18n" data-en="Negligible" data-zh="可忽略不計">Negligible</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="Model Scale Sensitivity" data-zh="模型規模敏感性">Model Scale Sensitivity</span></h3>
+  <p><span class="i18n" data-en="Tested on Qwen3-8B (TP=1) and Qwen3-14B (TP=2). The relative gains of DuetServe over baselines are consistent across both model scales, demonstrating that the approach generalizes beyond a single model. Larger models (more layers, larger d_model) increase the attention cost fraction, which makes the attention-aware roofline modeling even more critical relative to simpler token-budget methods." data-zh="在 Qwen3-8B（TP=1）和 Qwen3-14B（TP=2）上進行測試。DuetServe 相對於基準的相對增益在兩種模型規模上保持一致，證明該方法能泛化到單一模型之外。更大的模型（更多層、更大的 d_model）增加了 attention 成本比例，使得 attention 感知的 roofline 建模相比更簡單的 token 預算方法更為關鍵。">Tested on Qwen3-8B and Qwen3-14B: relative gains are <strong>consistent across both scales</strong>. Larger models increase the attention cost fraction, making attention-aware roofline modeling increasingly critical compared to simple token-budget methods.</span></p>
+
+  <h3><span class="i18n" data-en="Comparison with Token-Budget Schedulers" data-zh="與 Token 預算排程器的比較">Comparison with Token-Budget Schedulers</span></h3>
+  <p><span class="i18n" data-en="Token-budget schedulers (e.g., vLLM's default) assume that forward pass latency is dominated by linear operator FLOPs and scales linearly with total token count n. This assumption breaks in two regimes:" data-zh="Token 預算排程器（例如 vLLM 的預設值）假設前向傳播延遲由線性運算子的 FLOPs 主導，並隨總 token 數 n 線性擴展。這個假設在兩種情況下會失效：">Token-budget schedulers assume latency scales linearly with token count. This assumption breaks in two regimes:</span></p>
+  <ul>
+    <li><span class="i18n" data-en="Long context (high c_r): attention cost grows as O(q_r × c_r), not O(q_r). At 8K tokens attention already accounts for 25%+ of forward latency on H100." data-zh="長上下文（高 c_r）：attention 成本以 O(q_r × c_r) 增長，而非 O(q_r)。在 8K token 時，attention 在 H100 上已佔前向延遲的 25% 以上。"><strong>Long context (high c_r):</strong> attention cost grows as O(q_r × c_r). At 8K tokens, attention already accounts for 25%+ of forward latency.</span></li>
+    <li><span class="i18n" data-en="Mixed batches with heterogeneous context lengths: a single long-context decode request in an otherwise short batch can cause disproportionate latency increase invisible to token-budget accounting." data-zh="具有異質上下文長度的混合批次：在其他請求上下文較短的批次中，一個長上下文的 decode 請求可能導致不成比例的延遲增加，而 token 預算計算對此不可見。"><strong>Mixed batches with heterogeneous context lengths:</strong> a single long-context decode request in a short batch causes disproportionate latency invisible to token-budget accounting.</span></li>
+  </ul>
+  <p><span class="i18n" data-en="DuetServe's attention-aware roofline model explicitly models both effects, catching violations that token-budget schedulers miss and avoiding unnecessary spatial partitioning when token budgets would suffice." data-zh="DuetServe 的 attention 感知 roofline 模型明確建模這兩種效應，捕捉 token 預算排程器遺漏的違規，並在 token 預算足夠時避免不必要的空間分區。">DuetServe's attention-aware model <strong>explicitly models both effects</strong>, catching violations token-budget schedulers miss and avoiding unnecessary spatial partitioning when simple budgets suffice.</span></p>
+</section>
+
+<!-- ===== Section 18: Limitations and Future Work ===== -->
+<section id="limitations">
+  <h2><span class="i18n" data-en="18 Limitations and Future Work" data-zh="18 限制與未來研究方向"><span class="sec-num">18</span> Limitations and Future Work</span></h2>
+
+  <h3><span class="i18n" data-en="Current Limitations" data-zh="當前限制">Current Limitations</span></h3>
+  <div class="card-grid">
+    <div class="card" style="border-left:3px solid #ef4444">
+      <h4><span class="i18n" data-en="NVIDIA-Only Hardware Dependency" data-zh="僅適用於 NVIDIA 硬體">NVIDIA-Only Hardware Dependency</span></h4>
+      <p><span class="i18n" data-en="DuetServe's SM partitioning relies on libsmctrl, which is NVIDIA-specific and leverages undocumented driver APIs. This limits portability to AMD (ROCm) or other accelerators that lack equivalent per-stream compute unit masking capabilities. Future work must identify analogous mechanisms on non-NVIDIA hardware or abstract the interface behind a portable layer." data-zh="DuetServe 的 SM 分區依賴 libsmctrl，這是 NVIDIA 專用的，並利用了未公開的驅動程式 API。這限制了向 AMD（ROCm）或其他缺乏等效的每串流計算單元遮罩功能的加速器的可移植性。未來的研究必須在非 NVIDIA 硬體上識別類似機制，或在可移植層後面抽象該介面。">SM partitioning relies on <strong>NVIDIA-specific libsmctrl</strong> with undocumented driver APIs. Portability to AMD ROCm or other accelerators requires identifying equivalent per-stream compute unit masking mechanisms.</span></p>
+    </div>
+    <div class="card" style="border-left:3px solid #f59e0b">
+      <h4><span class="i18n" data-en="Roofline Model Approximations" data-zh="Roofline 模型的近似誤差">Roofline Model Approximations</span></h4>
+      <p><span class="i18n" data-en="The analytical roofline model slightly overpredicts decode latency (conservative bias). In regimes with unusual cache access patterns (e.g., high KV cache miss rates, fragmented PagedAttention blocks) the prediction error grows. Integrating real-time hardware performance counters could improve accuracy for these edge cases." data-zh="分析型 roofline 模型略微高估了 decode 延遲（保守偏差）。在具有異常快取存取模式的情況下（例如高 KV cache 未命中率、碎片化的 PagedAttention 塊），預測誤差會增大。整合即時硬體效能計數器可以提高這些邊緣情況的準確性。">The model slightly overpredicts decode latency. With fragmented KV cache blocks or unusual access patterns, prediction error grows. <strong>Real-time hardware performance counters</strong> could improve accuracy for edge cases.</span></p>
+    </div>
+    <div class="card" style="border-left:3px solid #4a90d9">
+      <h4><span class="i18n" data-en="Fixed SM Granularity" data-zh="固定的 SM 粒度">Fixed SM Granularity</span></h4>
+      <p><span class="i18n" data-en="libsmctrl operates at TPC (two-SM pair) granularity, not individual SM granularity. This discretization introduces a small efficiency gap versus the theoretically optimal continuous partition. On H100, TPC granularity means partitions are quantized to ~2% steps, acceptable in practice but suboptimal for very tight TBT targets." data-zh="libsmctrl 以 TPC（兩個 SM 對）粒度運作，而非個別 SM 粒度。這種離散化相對於理論上最優的連續分區引入了小幅效率差距。在 H100 上，TPC 粒度意味著分區被量化為約 2% 的步長，實際上可以接受，但對於非常嚴格的 TBT 目標來說並非最優。">libsmctrl operates at <strong>TPC granularity</strong> (two-SM pairs), not individual SMs. On H100 this quantizes partitions to ~2% steps — acceptable but suboptimal for very tight TBT targets.</span></p>
+    </div>
+    <div class="card" style="border-left:3px solid #a78bfa">
+      <h4><span class="i18n" data-en="Single-Node Scope" data-zh="單節點範疇">Single-Node Scope</span></h4>
+      <p><span class="i18n" data-en="The current DuetServe prototype operates within a single multi-GPU node. Cross-node LLM serving (e.g., pipeline parallelism across nodes) introduces network latency that changes the roofline model's assumptions. Extending DuetServe to multi-node settings requires modeling NVLink vs. Ethernet/InfiniBand bandwidth differences in the AllReduce term." data-zh="當前的 DuetServe 原型在單個多 GPU 節點內運作。跨節點 LLM 服務（例如跨節點的管線平行）引入了網路延遲，這改變了 roofline 模型的假設。將 DuetServe 擴展到多節點設定需要在 AllReduce 項中建模 NVLink 與 Ethernet/InfiniBand 頻寬差異。">Current prototype is <strong>single-node only</strong>. Cross-node pipeline parallelism introduces network latency that changes roofline assumptions — extending to multi-node requires modeling NVLink vs. InfiniBand bandwidth differences.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Future Research Directions" data-zh="未來研究方向">Future Research Directions</span></h3>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="i18n" data-en="Mixture-of-Experts (MoE) Integration" data-zh="混合專家（MoE）整合">Mixture-of-Experts (MoE) Integration</span></h4>
+      <p><span class="i18n" data-en="MoE models introduce expert load imbalance: some experts are routed to more tokens than others within a batch, creating micro-level compute heterogeneity. DuetServe's SM partitioning framework could extend to per-expert SM allocation, dynamically giving more SMs to overloaded experts. This requires extending the roofline model to account for expert-level token distribution." data-zh="MoE 模型引入了專家負載不均衡：某些專家在批次中被路由到更多 token，造成微層次的計算異質性。DuetServe 的 SM 分區框架可以擴展到每個專家的 SM 分配，動態地為過載的專家分配更多 SM。這需要將 roofline 模型擴展以考慮專家層次的 token 分佈。">MoE expert load imbalance creates micro-level compute heterogeneity. DuetServe's SM partitioning could extend to <strong>per-expert SM allocation</strong>, dynamically allocating more SMs to overloaded experts.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Multi-Turn KV Cache Integration" data-zh="多輪 KV Cache 整合">Multi-Turn KV Cache Integration</span></h4>
+      <p><span class="i18n" data-en="In multi-turn dialogue, KV caches from prior turns can be reused (Pensieve-style prefix caching). DuetServe's roofline model can incorporate cache hit rates to reduce effective attention latency estimates. High cache hit rates reduce the attention cost term, potentially allowing more requests per batch before TBT violations occur." data-zh="在多輪對話中，先前輪次的 KV cache 可以被重複使用（Pensieve 風格的前綴快取）。DuetServe 的 roofline 模型可以整合快取命中率，以降低有效的 attention 延遲估算。高快取命中率降低了 attention 成本項，可能在 TBT 違規發生前允許每批次處理更多請求。">Incorporating <strong>KV cache hit rates</strong> into the roofline model reduces attention cost estimates for multi-turn workloads, enabling larger batches before TBT violations.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Speculative Decoding Compatibility" data-zh="推測解碼相容性">Speculative Decoding Compatibility</span></h4>
+      <p><span class="i18n" data-en="Speculative decoding uses a small draft model to generate candidate tokens verified by the target model. In DuetServe's framework, draft model execution could be mapped to the decode SM partition while target model verification runs on the prefill SM partition, enabling natural co-execution. The acceptance rate of speculative tokens changes the effective output token budget and must be reflected in the roofline model." data-zh="推測解碼使用小型草稿模型生成候選 token，由目標模型驗證。在 DuetServe 的框架中，草稿模型執行可以映射到 decode SM 分區，而目標模型驗證則在 prefill SM 分區上執行，實現自然的並行執行。推測 token 的接受率改變了有效的輸出 token 預算，必須反映在 roofline 模型中。">Speculative decoding draft execution could map to the <strong>decode SM partition</strong> while target verification uses the prefill SM partition — enabling natural co-execution within DuetServe's existing framework.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Learned Partition Policies" data-zh="學習式分區策略">Learned Partition Policies</span></h4>
+      <p><span class="i18n" data-en="The current optimizer enumerates (S_p, S_d) splits analytically. A lightweight online learning component could observe historical (partition, workload, actual_latency) tuples and refine the roofline model's hardware constants in situ, adapting to GPU aging, thermal throttling, and workload distribution shifts that the static analytical model cannot anticipate." data-zh="當前的優化器以分析方式列舉 (S_p, S_d) 分割方式。輕量級的線上學習元件可以觀察歷史的（分區、工作負載、實際延遲）元組，並就地精煉 roofline 模型的硬體常數，以適應 GPU 老化、熱節流和靜態分析模型無法預測的工作負載分佈變化。">A lightweight online learning component could <strong>refine roofline hardware constants in situ</strong>, adapting to GPU aging, thermal throttling, and workload distribution shifts invisible to the static analytical model.</span></p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <p><span class="i18n" data-en="Important caveat: DuetServe's gains are measured on NVIDIA H100 hardware. The hardware asymmetry (HBM bandwidth super-linear scaling with SM count) is central to why small decode SM partitions work efficiently. This property should be verified on other GPU generations (A100, B200, AMD MI300X) before applying DuetServe's design decisions in those environments." data-zh="重要說明：DuetServe 的效能增益在 NVIDIA H100 硬體上測量。硬體不對稱性（HBM 頻寬隨 SM 數量的超線性擴展）是小型 decode SM 分區能夠高效運作的核心原因。在將 DuetServe 的設計決策應用於其他 GPU 世代（A100、B200、AMD MI300X）之前，應先在這些環境中驗證此特性。"><strong>Important caveat:</strong> DuetServe's gains are measured on NVIDIA H100. The HBM bandwidth super-linear scaling property is central to its effectiveness. Verify this property on other GPU generations (A100, B200, AMD MI300X) before applying DuetServe's design decisions in those environments.</span></p>
+  </div>
+
+  <h3><span class="i18n" data-en="Broader Impact" data-zh="更廣泛的影響">Broader Impact</span></h3>
+  <p><span class="i18n" data-en="DuetServe's core insight — that GPU resource complementarity between compute-bound and memory-bound workloads can be exploited through fine-grained SM partitioning — extends beyond LLM serving. Any GPU workload mix with complementary arithmetic intensity profiles (e.g., graph neural networks combined with dense linear algebra, or image preprocessing alongside neural inference) could benefit from the same adaptive spatial-temporal sharing framework." data-zh="DuetServe 的核心洞見——計算密集型和記憶體密集型工作負載之間的 GPU 資源互補性可以透過細粒度 SM 分區加以利用——超越了 LLM 服務的範疇。任何具有互補算術強度配置的 GPU 工作負載組合（例如圖神經網路與密集線性代數的組合，或影像前處理與神經推斷的組合）都可能受益於相同的自適應時空共享框架。">DuetServe's core insight extends beyond LLM serving: <strong>any GPU workload mix with complementary arithmetic intensity</strong> (compute-bound + memory-bound) can benefit from adaptive spatial-temporal SM sharing.</span></p>
+</section>
+
+<!-- ===== Section 19: Why SM-Level Control Beats Alternatives ===== -->
+<section id="why-smctrl">
+  <h2><span class="i18n" data-en="19 Design Rationale: Why SM-Level Control" data-zh="19 設計原理：為何選擇 SM 層級控制"><span class="sec-num">19</span> Design Rationale: Why SM-Level Control</span></h2>
+
+  <p><span class="i18n" data-en="DuetServe's choice of libsmctrl for SM masking was the result of systematically ruling out all hardware and software alternatives. This section documents why each alternative fails to meet DuetServe's requirements." data-zh="DuetServe 選擇 libsmctrl 進行 SM 遮罩，是系統性地排除所有硬體和軟體替代方案後的結果。本節記錄了每種替代方案未能滿足 DuetServe 需求的原因。">DuetServe's choice of libsmctrl for SM masking was the result of systematically ruling out all alternatives. This section documents why each fails to meet DuetServe's requirements.</span></p>
+
+  <table>
+    <thead>
+      <tr>
+        <th><span class="i18n" data-en="Mechanism" data-zh="機制">Mechanism</span></th>
+        <th><span class="i18n" data-en="Granularity" data-zh="粒度">Granularity</span></th>
+        <th><span class="i18n" data-en="Reconfiguration Cost" data-zh="重新配置成本">Reconfiguration Cost</span></th>
+        <th><span class="i18n" data-en="Why Insufficient" data-zh="為何不足">Why Insufficient</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>NVIDIA MIG</td>
+        <td><span class="i18n" data-en="Fixed GPU slices (GPC-level)" data-zh="固定 GPU 分片（GPC 層級）">Fixed GPU slices (GPC-level)</span></td>
+        <td><span class="i18n" data-en="Seconds (driver reconfig)" data-zh="秒級（驅動程式重新配置）">Seconds (driver reconfig)</span></td>
+        <td><span class="i18n" data-en="Static; cannot adapt per-iteration. Requires system restart to change partition." data-zh="靜態；無法逐迭代調整。更改分區需要系統重啟。">Static; cannot adapt per-iteration.</span></td>
+      </tr>
+      <tr>
+        <td>NVIDIA MPS</td>
+        <td><span class="i18n" data-en="Thread-block level (coarse)" data-zh="執行緒塊層級（粗粒度）">Thread-block level (coarse)</span></td>
+        <td><span class="i18n" data-en="Milliseconds (context switch)" data-zh="毫秒級（上下文切換）">Milliseconds</span></td>
+        <td><span class="i18n" data-en="Coarse temporal multiplexing; P and D still contend on all SMs." data-zh="粗粒度時間多工；P 和 D 仍然在所有 SM 上競爭。">Coarse temporal multiplexing; P and D still contend on all SMs.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="CUDA Priority Streams" data-zh="CUDA 優先級串流">CUDA Priority Streams</span></td>
+        <td><span class="i18n" data-en="Kernel-level (work queue)" data-zh="Kernel 層級（工作佇列）">Kernel-level</span></td>
+        <td><span class="i18n" data-en="Zero (runtime)" data-zh="零（執行期）">Zero</span></td>
+        <td><span class="i18n" data-en="Affects scheduling order only, not spatial SM allocation." data-zh="僅影響排程順序，而非 SM 空間分配。">Affects scheduling order only, not spatial SM allocation.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Process Disaggregation" data-zh="進程分離">Process Disaggregation</span></td>
+        <td><span class="i18n" data-en="Process-level" data-zh="進程層級">Process-level</span></td>
+        <td><span class="i18n" data-en="KV transfer overhead" data-zh="KV 傳輸開銷">KV transfer overhead</span></td>
+        <td><span class="i18n" data-en="Full model duplication; KV transfer adds latency proportional to sequence length." data-zh="完整的模型複製；KV 傳輸增加與序列長度成正比的延遲。">Full model duplication; KV transfer latency proportional to sequence length.</span></td>
+      </tr>
+      <tr>
+        <td><strong>libsmctrl</strong></td>
+        <td><strong>TPC (2-SM pair)</strong></td>
+        <td><strong><span class="i18n" data-en="Microseconds" data-zh="微秒級">Microseconds</span></strong></td>
+        <td><span class="i18n" data-en="Meets all requirements: fine granularity, negligible cost, per-kernel control, no model duplication." data-zh="滿足所有需求：細粒度、可忽略的成本、逐 kernel 控制、無需模型複製。"><strong>Meets all requirements.</strong></span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="libsmctrl Internals" data-zh="libsmctrl 內部機制">libsmctrl Internals</span></h3>
+  <p><span class="i18n" data-en="libsmctrl works by intercepting CUDA kernel launch calls and patching the Compute Work Descriptor (CWD) to specify an SM bitmask. Each TPC corresponds to one bit in the mask. When the decode stream has a mask with 18 TPCs set, every kernel on that stream can only schedule thread blocks onto those 18 TPCs, physically preventing SM contention with the prefill stream." data-zh="libsmctrl 透過攔截 CUDA kernel 啟動呼叫並修補計算工作描述符（CWD）來指定 SM 位元遮罩。每個 TPC 對應遮罩中的一個位元。當 decode 串流的遮罩設定了 18 個 TPC 時，該串流上的每個 kernel 只能在這 18 個 TPC 上排程執行緒塊，從物理上防止與 prefill 串流的 SM 競爭。">libsmctrl intercepts CUDA kernel launches and patches the Compute Work Descriptor (CWD) with an SM bitmask. When the decode stream mask has 18 TPCs set, all kernels on that stream are physically <strong>restricted to those 18 TPCs</strong>, preventing SM contention with prefill.</span></p>
+
+  <div class="note">
+    <p><span class="i18n" data-en="libsmctrl uses undocumented NVIDIA driver internals validated on CUDA 13.0 (driver 580.95.05). Re-validate SM masking behavior on other driver versions before production deployment." data-zh="libsmctrl 使用在 CUDA 13.0（驅動程式 580.95.05）上驗證的未公開 NVIDIA 驅動程式內部機制。在生產環境部署前，請在其他驅動程式版本上重新驗證 SM 遮罩行為。"><strong>Note:</strong> libsmctrl uses undocumented NVIDIA driver internals (validated on CUDA 13.0 / driver 580.95.05). Re-validate SM masking behavior on other driver versions before production deployment.</span></p>
+  </div>
+
+  <h3><span class="i18n" data-en="HBM Bandwidth Sharing Under SM Partition" data-zh="SM 分區下的 HBM 頻寬共享">HBM Bandwidth Sharing Under SM Partition</span></h3>
+  <p><span class="i18n" data-en="libsmctrl restricts SM compute but does not partition HBM bandwidth — both streams share the same HBM pool through the unified L2 cache and memory controller. This is intentional: decode (memory-bound) needs HBM bandwidth while prefill (compute-bound) reuses weight data in L2 during linear operator execution, so actual HBM contention between the two phases is minimal even without explicit bandwidth partitioning." data-zh="libsmctrl 限制 SM 計算，但不分割 HBM 頻寬——兩個串流透過統一的 L2 快取和記憶體控制器共享相同的 HBM 池。這是有意為之：decode（記憶體頻寬受限）需要 HBM 頻寬，而 prefill（計算密集型）在線性運算子執行期間在 L2 中重複使用權重資料，因此即使沒有明確的頻寬分區，兩個階段之間的實際 HBM 競爭也很小。">SM partitioning restricts <strong>compute</strong> but not HBM bandwidth. Decode (memory-bound) needs bandwidth; prefill (compute-bound) reuses weight data in L2. The two phases naturally complement each other's HBM usage — actual contention is minimal even without explicit bandwidth partitioning.</span></p>
+</section>
+
+<!-- ===== Section 20: Deployment Considerations ===== -->
+<section id="deployment">
+  <h2><span class="i18n" data-en="20 Deployment Considerations" data-zh="20 部署注意事項"><span class="sec-num">20</span> Deployment Considerations</span></h2>
+
+  <h3><span class="i18n" data-en="Configuration Parameters" data-zh="配置參數">Configuration Parameters</span></h3>
+  <p><span class="i18n" data-en="DuetServe exposes a small set of parameters that operators should tune for their deployment environment:" data-zh="DuetServe 提供了一小組操作人員應針對其部署環境進行調整的參數：">DuetServe exposes a small set of parameters that operators should tune for their deployment environment:</span></p>
+
+  <table>
+    <thead>
+      <tr>
+        <th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th>
+        <th><span class="i18n" data-en="Default" data-zh="預設值">Default</span></th>
+        <th><span class="i18n" data-en="Effect" data-zh="效果">Effect</span></th>
+        <th><span class="i18n" data-en="Tuning Guidance" data-zh="調整建議">Tuning Guidance</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="inline-code">tau_TBT</span></td>
+        <td>100 ms</td>
+        <td><span class="i18n" data-en="TBT SLO threshold" data-zh="TBT SLO 閾值">TBT SLO threshold</span></td>
+        <td><span class="i18n" data-en="Set to P99 TBT target. Lower values activate spatial mode more frequently." data-zh="設置為 P99 TBT 目標值。較低值會更頻繁地啟動空間模式。">Set to P99 TBT target. Lower &rarr; more spatial mode activations.</span></td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">k_lookahead</span></td>
+        <td>5</td>
+        <td><span class="i18n" data-en="Decode steps per GPU dispatch" data-zh="每次 GPU 派發的 decode 步驟數">Decode steps per GPU dispatch</span></td>
+        <td><span class="i18n" data-en="Higher k reduces CPU overhead but increases KV cache pre-allocation. Set 3–7 for most workloads." data-zh="較高的 k 減少 CPU 開銷但增加 KV cache 預分配。大多數工作負載設置為 3–7。">Higher k reduces CPU overhead but increases KV pre-allocation. Set 3–7.</span></td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">min_Sd</span></td>
+        <td>4 TPCs</td>
+        <td><span class="i18n" data-en="Minimum SM partition for decode" data-zh="Decode 的最小 SM 分區">Minimum decode SM partition</span></td>
+        <td><span class="i18n" data-en="Floor prevents decode starvation. 4 TPCs sufficient for memory-bound decode on H100." data-zh="下限防止 decode 被餓死。4 個 TPC 對 H100 上的記憶體頻寬受限 decode 已足夠。">Floor to prevent decode starvation. 4 TPCs sufficient on H100.</span></td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">max_Sd</span></td>
+        <td>24 TPCs</td>
+        <td><span class="i18n" data-en="Maximum SM partition for decode" data-zh="Decode 的最大 SM 分區">Maximum decode SM partition</span></td>
+        <td><span class="i18n" data-en="Caps decode allocation so prefill SMs never fall below a functional threshold." data-zh="限制 decode 分配，確保 prefill 的 SM 數量不低於功能閾值。">Caps decode so prefill SMs never fall below functional threshold.</span></td>
+      </tr>
+      <tr>
+        <td><span class="inline-code">roofline_margin</span></td>
+        <td>0.85</td>
+        <td><span class="i18n" data-en="Safety margin multiplier for TBT prediction" data-zh="TBT 預測的安全裕度乘數">Safety margin multiplier</span></td>
+        <td><span class="i18n" data-en="Multiplied against tau_TBT in the roofline check. Lower = more conservative (activates spatial mode earlier)." data-zh="在 roofline 檢查中乘以 tau_TBT。較低 = 更保守（更早啟動空間模式）。">Multiplied against tau_TBT. Lower &rarr; more conservative.</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="Operational Checklist" data-zh="操作清單">Operational Checklist</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="i18n" data-en="Pre-Deployment" data-zh="部署前">Pre-Deployment</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Verify libsmctrl compatibility with installed CUDA driver version." data-zh="驗證 libsmctrl 與已安裝的 CUDA 驅動程式版本的相容性。">Verify libsmctrl compatibility with installed CUDA driver version.</span></li>
+        <li><span class="i18n" data-en="Profile roofline model accuracy on target GPU (H100 vs. A100 hardware constants differ)." data-zh="在目標 GPU 上分析 roofline 模型準確性（H100 與 A100 硬體常數不同）。">Profile roofline accuracy on target GPU (H100 vs. A100 constants differ).</span></li>
+        <li><span class="i18n" data-en="Measure Pi_SM and B_HBM empirically to calibrate the analytical model." data-zh="實際測量 Pi_SM 和 B_HBM，以校準分析模型。">Measure Pi_SM and B_HBM empirically to calibrate the model.</span></li>
+        <li><span class="i18n" data-en="Set tau_TBT to match production SLO contract." data-zh="將 tau_TBT 設置為與生產 SLO 合約相符。">Set <span class="inline-code">tau_TBT</span> to match production SLO contract.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Monitoring" data-zh="監控">Monitoring</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Track per-iteration TBT to detect roofline model drift over time." data-zh="追蹤逐迭代 TBT 以偵測 roofline 模型隨時間漂移。">Track per-iteration TBT to detect roofline model drift.</span></li>
+        <li><span class="i18n" data-en="Monitor spatial_mode_fraction — sustained &gt;80% indicates workload is too heavy for available hardware." data-zh="監控 spatial_mode_fraction——持續 &gt;80% 表示工作負載對可用硬體來說太重。">Monitor spatial_mode_fraction — sustained &gt;80% indicates overloaded hardware.</span></li>
+        <li><span class="i18n" data-en="Alert on KV cache utilization &gt;90% to avoid OOM preemptions." data-zh="當 KV cache 使用率 &gt;90% 時發出警報，以避免 OOM 搶佔。">Alert on KV cache utilization &gt;90%.</span></li>
+        <li><span class="i18n" data-en="Log actual vs. predicted latency per iteration to detect model miscalibration." data-zh="記錄每次迭代的實際與預測延遲，以偵測模型校準錯誤。">Log actual vs. predicted latency to detect miscalibration.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Failure Modes and Fallbacks" data-zh="故障模式與回退">Failure Modes and Fallbacks</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="libsmctrl unsupported: auto-fallback to temporal-only mode." data-zh="不支援 libsmctrl：自動回退到純時間模式。">libsmctrl unsupported: auto-fallback to temporal-only mode.</span></li>
+        <li><span class="i18n" data-en="No valid (S_p, S_d) satisfies TBT: defer request one iteration (bounded queueing)." data-zh="沒有有效的 (S_p, S_d) 滿足 TBT：推遲請求一次迭代（有界排隊）。">No valid (S_p, S_d) satisfies TBT: defer request one iteration.</span></li>
+        <li><span class="i18n" data-en="KV cache OOM: preempt longest-running decode request, swap to CPU memory if available." data-zh="KV cache OOM：搶佔運行時間最長的 decode 請求，如果有 CPU 記憶體可用則換出。">KV cache OOM: preempt longest-running decode, swap to CPU if available.</span></li>
+        <li><span class="i18n" data-en="Roofline overprediction: sliding-window correction biases toward earlier spatial mode activation." data-zh="Roofline 過度預測：滑動視窗校正偏向更早啟動空間模式。">Roofline overprediction: sliding-window correction activates spatial mode earlier.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="When DuetServe Helps Most" data-zh="DuetServe 最有幫助的場景">When DuetServe Helps Most</span></h3>
+  <p><span class="i18n" data-en="DuetServe is most beneficial when serving LLMs on a single high-end GPU (or small multi-GPU node) with mixed long-context prefill and concurrent decode requests. Benefits are reduced when:" data-zh="DuetServe 在單一高端 GPU（或小型多 GPU 節點）上服務 LLM 最為有益，此時工作負載混合了長上下文 prefill 和並發 decode 請求。在以下情況下效益降低：">DuetServe is most beneficial on a single high-end GPU with mixed long-context prefill and concurrent decode. Benefits are reduced when:</span></p>
+  <ul>
+    <li><span class="i18n" data-en="Workload is decode-only (no prefill interference — temporal mode always sufficient)." data-zh="工作負載僅有 decode（沒有 prefill 干擾——時間模式始終足夠）.">Workload is decode-only (temporal mode always sufficient).</span></li>
+    <li><span class="i18n" data-en="All requests have short context (&lt;1K tokens) — attention cost negligible, token-budget scheduling suffices." data-zh="所有請求的上下文長度都很短（&lt;1K token）——attention 成本可忽略，token 預算排程已足夠。">All requests have short context (&lt;1K tokens) — attention cost negligible.</span></li>
+    <li><span class="i18n" data-en="Deployment uses full PD disaggregation across many nodes (DuetServe is a per-GPU optimization, not cross-cluster routing)." data-zh="部署在多個節點間使用完整的 PD 分離（DuetServe 是每 GPU 的優化，而非跨集群路由優化）。">Full PD disaggregation across many nodes (DuetServe is a per-GPU optimization).</span></li>
+    <li><span class="i18n" data-en="Hardware is non-NVIDIA (libsmctrl dependency limits portability)." data-zh="硬體不是 NVIDIA（libsmctrl 相依性限制了可移植性）。">Hardware is non-NVIDIA (libsmctrl limits portability).</span></li>
+  </ul>
+</section>
+
+<!-- ===== Section 21: Related Work Landscape ===== -->
+<section id="related-work">
+  <h2><span class="i18n" data-en="21 Related Work Landscape" data-zh="21 相關研究全景"><span class="sec-num">21</span> Related Work Landscape</span></h2>
+
+  <p><span class="i18n" data-en="DuetServe sits at the intersection of three active research threads: LLM scheduling, GPU spatial multiplexing, and prefill-decode optimization. Understanding where DuetServe fits helps clarify its novelty and the gaps it fills relative to prior work." data-zh="DuetServe 處於三個活躍研究方向的交叉點：LLM 排程、GPU 空間多工和 prefill-decode 優化。了解 DuetServe 的定位有助於闡明其新穎性，以及相對於先前工作所填補的空白。">DuetServe sits at the intersection of three active research threads: LLM scheduling, GPU spatial multiplexing, and prefill-decode optimization. Understanding where DuetServe fits helps clarify its novelty and the gaps it fills relative to prior work.</span></p>
+  <p><span class="i18n" data-en="The common thread across all prior work is a reliance on coarse-grained mechanisms — token budgets, fixed SM allocations, or cross-GPU disaggregation — none of which can simultaneously satisfy TBT SLOs and maximize throughput on a single GPU. DuetServe's contribution is to close this gap with a fine-grained, analytically-driven, per-iteration control loop." data-zh="所有先前研究工作的共同線索是依賴粗粒度機制——token 預算、固定 SM 分配或跨 GPU 分離——這些機制都無法在單一 GPU 上同時滿足 TBT SLO 並最大化吞吐量。DuetServe 的貢獻是透過細粒度、由分析驅動的逐迭代控制閉環來填補這一空白。">The common thread across prior work is a reliance on <strong>coarse-grained mechanisms</strong> — token budgets, fixed SM allocations, or cross-GPU disaggregation — none of which can simultaneously satisfy TBT SLOs and maximize throughput on a single GPU. DuetServe closes this gap with a fine-grained, analytically-driven, per-iteration control loop.</span></p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="i18n" data-en="LLM Scheduling" data-zh="LLM 排程">LLM Scheduling</span></h4>
+      <p><span class="i18n" data-en="Orca introduced continuous batching. Sarathi-Serve added chunked prefill with token budgets. vLLM combined PagedAttention with continuous batching. All these schedulers operate at the token-budget level and miss attention-induced violations. DuetServe's roofline model is the first per-iteration attention-aware predictor integrated into a production-style scheduler." data-zh="Orca 引入了 continuous batching。Sarathi-Serve 增加了帶有 token 預算的 chunked prefill。vLLM 將 PagedAttention 與 continuous batching 結合。所有這些排程器都在 token 預算層級運作，並會遺漏 attention 引發的違規。DuetServe 的 roofline 模型是第一個整合到生產風格排程器中的逐迭代 attention 感知預測器。">Orca &rarr; Sarathi-Serve &rarr; vLLM all operate at token-budget level, missing attention-induced violations. DuetServe's roofline model is the first <strong>per-iteration attention-aware predictor</strong> integrated into a production-style scheduler.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="GPU Spatial Multiplexing" data-zh="GPU 空間多工">GPU Spatial Multiplexing</span></h4>
+      <p><span class="i18n" data-en="Orion, Reef, and NVIDIA Triton explored GPU sharing for DNN inference. Drift and Bullet focused on static SM allocation for prefill-decode co-execution. DuetServe differs by combining dynamic allocation (per-iteration optimizer) with an analytical model that drives the allocation decision, rather than relying on static profiles or reactive feedback control." data-zh="Orion、Reef 和 NVIDIA Triton 探索了用於 DNN 推斷的 GPU 共享。Drift 和 Bullet 專注於 prefill-decode 共同執行的靜態 SM 分配。DuetServe 的不同之處在於將動態分配（逐迭代優化器）與驅動分配決策的分析模型相結合，而不是依賴靜態配置或反應性反饋控制。">Orion, Reef, Drift, Bullet explore GPU sharing with static allocations. DuetServe differs by combining <strong>dynamic per-iteration optimization</strong> with an analytical roofline model, rather than static profiles or reactive feedback.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Prefill-Decode Disaggregation" data-zh="Prefill-Decode 分離">Prefill-Decode Disaggregation</span></h4>
+      <p><span class="i18n" data-en="DistServe and Dynamo (NVIDIA) pioneer dedicated P and D workers across separate GPUs. Tetriinfer and Splitwise optimize the cross-GPU KV transfer cost. DuetServe avoids the cross-GPU transfer entirely by achieving isolation within a single GPU via libsmctrl — delivering disaggregation-level TBT isolation at aggregation-level resource efficiency." data-zh="DistServe 和 Dynamo（NVIDIA）開創了跨獨立 GPU 的專用 P 和 D worker。Tetriinfer 和 Splitwise 優化了跨 GPU 的 KV 傳輸成本。DuetServe 透過 libsmctrl 在單一 GPU 內實現隔離，完全避免了跨 GPU 傳輸——以聚合層級的資源效率提供分離層級的 TBT 隔離。">DistServe, Dynamo pioneer dedicated P/D workers across GPUs; Tetriinfer, Splitwise optimize cross-GPU KV transfer. DuetServe eliminates cross-GPU transfer entirely — achieving <strong>disaggregation-level TBT isolation at aggregation-level efficiency</strong> within a single GPU.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Key Differentiators Summary" data-zh="關鍵差異化因素摘要">Key Differentiators Summary</span></h3>
+  <table>
+    <thead>
+      <tr>
+        <th><span class="i18n" data-en="System" data-zh="系統">System</span></th>
+        <th><span class="i18n" data-en="Attention-Aware?" data-zh="Attention 感知？">Attention-Aware?</span></th>
+        <th><span class="i18n" data-en="Per-Iteration Adaptation?" data-zh="逐迭代適應？">Per-Iteration?</span></th>
+        <th><span class="i18n" data-en="No Model Duplication?" data-zh="無模型複製？">No Duplication?</span></th>
+        <th><span class="i18n" data-en="TBT + Throughput Both Optimized?" data-zh="TBT 和吞吐量均優化？">Both TBT + Throughput?</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>vLLM</td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="Yes" data-zh="是">Yes</span></td><td><span class="i18n" data-en="No" data-zh="否">No</span></td></tr>
+      <tr><td>Sarathi-Serve</td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="Partial" data-zh="部分">Partial</span></td><td><span class="i18n" data-en="Yes" data-zh="是">Yes</span></td><td><span class="i18n" data-en="No" data-zh="否">No</span></td></tr>
+      <tr><td>DistServe / Dynamo</td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="No (duplication)" data-zh="否（複製）">No (duplication)</span></td><td><span class="i18n" data-en="TBT only" data-zh="僅 TBT">TBT only</span></td></tr>
+      <tr><td>Drift / Bullet</td><td><span class="i18n" data-en="No" data-zh="否">No</span></td><td><span class="i18n" data-en="No (static)" data-zh="否（靜態）">No (static)</span></td><td><span class="i18n" data-en="Yes" data-zh="是">Yes</span></td><td><span class="i18n" data-en="Partial" data-zh="部分">Partial</span></td></tr>
+      <tr><td><strong>DuetServe</strong></td><td><strong><span class="i18n" data-en="Yes" data-zh="是">Yes</span></strong></td><td><strong><span class="i18n" data-en="Yes" data-zh="是">Yes</span></strong></td><td><strong><span class="i18n" data-en="Yes" data-zh="是">Yes</span></strong></td><td><strong><span class="i18n" data-en="Yes" data-zh="是">Yes</span></strong></td></tr>
+    </tbody>
+  </table>
+</section>
+
 </div>
 
 <footer>

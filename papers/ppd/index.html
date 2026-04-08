@@ -74,6 +74,9 @@ nav::-webkit-scrollbar,nav ul::-webkit-scrollbar,.nav-inner::-webkit-scrollbar{d
   <a href="#eval">Evaluation</a>
   <a href="#tradeoff">Trade-offs</a>
   <a href="#takeaways">Takeaways</a>
+  <a href="#mechanisms">Mechanisms</a>
+  <a href="#perf-results">Performance</a>
+  <a href="#limitations">Limitations</a>
 
 <div class="i18n-controls">
 <a class="back-link" href="../../index.html">&larr; Agentic Survey</a>
@@ -537,6 +540,365 @@ x* = argmax_x J(x; pi, phi)</code></pre>
   <p><span class="i18n" data-en="All experiments use a 4-GPU cluster of NVIDIA H100 80GB HBM3 GPUs connected via NVLink. Primary model: Llama-3.1-8B, with validation on Qwen2.5-14B and Qwen3-30B-A3B. Each configuration evaluated at 10 QPS levels (0.5, 1, 2, 4, 6, 8, 10, 12, 16, 20), yielding 17 x 18 x 10 = 3,060 data points." data-zh="所有實驗使用由 4 張 NVIDIA H100 80GB HBM3 GPU 組成的叢集，透過 NVLink 連接。主要模型：Llama-3.1-8B，並在 Qwen2.5-14B 與 Qwen3-30B-A3B 上進行驗證。每種配置在 10 個 QPS 層級（0.5、1、2、4、6、8、10、12、16、20）下評估，共產生 17 × 18 × 10 = 3,060 個資料點。">All experiments use a 4-GPU cluster of <strong>NVIDIA H100 80GB HBM3</strong> GPUs connected via NVLink. Primary model: Llama-3.1-8B, with validation on Qwen2.5-14B and Qwen3-30B-A3B. Each configuration evaluated at 10 QPS levels (0.5, 1, 2, 4, 6, 8, 10, 12, 16, 20), yielding 17 x 18 x 10 = <strong>3,060 data points</strong>.</span></p>
 </section>
 
+</div>
+
+<!-- ===== Section 14: Core Mechanisms ===== -->
+<div class="container">
+<section id="mechanisms">
+  <h2><span class="i18n" data-en="14 Core Mechanisms" data-zh="14 核心機制"><span class="sec-num">14</span> <span class="i18n" data-en="Core Mechanisms" data-zh="核心機制">Core Mechanisms</span></span></h2>
+  <p><span class="i18n" data-en="PPD's design rests on three tightly coupled mechanisms: (1) conversation-turn classification, (2) offline decision-table construction, and (3) an online routing proxy that steers each request in under 1 ms. Together they implement the routing objective max J(x; π, φ) without modifying vLLM's inference engine." data-zh="PPD 的設計依賴三個緊密耦合的機制：(1) 對話輪次分類、(2) 離線決策表建構，以及 (3) 在 1 毫秒內引導每個請求的線上路由代理。這三者共同實作了路由目標 max J(x; π, φ)，且無需修改 vLLM 的推理引擎。">PPD's design rests on three tightly coupled mechanisms: (1) conversation-turn classification, (2) offline decision-table construction, and (3) an online routing proxy that steers each request in under 1 ms. Together they implement the routing objective <span class="inline-code">max J(x; π, φ)</span> without modifying vLLM's inference engine.</span></p>
+
+  <h3><span class="i18n" data-en="Mechanism 1 — Turn Classification" data-zh="機制一：輪次分類">Mechanism 1 — Turn Classification</span></h3>
+  <p><span class="i18n" data-en="Every incoming request is first classified as either a Turn-1 (full-prefill) or Turn-2+ (append-prefill) request. Classification is based on the presence of a matching conversation-ID in the session table, which maps an MD5 hash of the initial user message to the assigned P/D pair. If no session entry exists, the request is treated as Turn 1 and unconditionally routed through the standard PD path — KV is computed on a P node and transferred to a D node. If a session entry is found, the request is an append-prefill candidate and proceeds to the decision lookup." data-zh="每個傳入請求首先被分類為第 1 輪（完整 prefill）或第 2 輪以後（追加 prefill）請求。分類依據是 session 表中是否存在匹配的對話 ID，該表將初始使用者訊息的 MD5 雜湊值映射至分配的 P/D 配對。若無 session 記錄，請求視為第 1 輪並無條件路由至標準 PD 路徑——KV 在 P 節點計算後傳輸至 D 節點。若找到 session 記錄，請求即為追加 prefill 候選，並進入決策查找流程。">Every incoming request is first classified as either a <strong>Turn-1 (full-prefill)</strong> or <strong>Turn-2+ (append-prefill)</strong> request. Classification is based on the presence of a matching conversation-ID in the session table, which maps an MD5 hash of the initial user message to the assigned P/D pair. If no session entry exists, the request is treated as Turn 1 and unconditionally routed through the standard PD path — KV is computed on a P node and transferred to a D node. If a session entry is found, the request is an append-prefill candidate and proceeds to the decision lookup.</span></p>
+
+  <!-- Flow diagram: Turn Classification -->
+  <div class="diagram">
+    <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="720" height="200" fill="#1c1f2e" rx="12"/>
+      <text x="360" y="24" fill="#e2e4ea" text-anchor="middle" font-size="12" font-weight="700">Turn Classification Flow</text>
+      <!-- Incoming Request -->
+      <rect x="20" y="75" width="110" height="44" rx="8" fill="#2a2d3e" stroke="#9ca0b0" stroke-width="1"/>
+      <text x="75" y="97" fill="#e2e4ea" text-anchor="middle" font-size="10" font-weight="600">Incoming</text>
+      <text x="75" y="111" fill="#9ca0b0" text-anchor="middle" font-size="9">Request</text>
+      <!-- Arrow -->
+      <line x1="130" y1="97" x2="162" y2="97" stroke="#9ca0b0" stroke-width="1.5" marker-end="url(#arr9ca)"/>
+      <!-- Decision diamond -->
+      <polygon points="185,97 225,70 265,97 225,124" fill="#2e2a1a" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="225" y="93" fill="#f59e0b" text-anchor="middle" font-size="9">Session</text>
+      <text x="225" y="106" fill="#f59e0b" text-anchor="middle" font-size="9">Match?</text>
+      <!-- No path → Turn 1 -->
+      <line x1="265" y1="97" x2="300" y2="97" stroke="#4a90d9" stroke-width="1.5" marker-end="url(#arrBlue2)"/>
+      <text x="282" y="90" fill="#9ca0b0" font-size="8" text-anchor="middle">No</text>
+      <rect x="305" y="75" width="110" height="44" rx="8" fill="#1a3a5c" stroke="#4a90d9" stroke-width="1.5"/>
+      <text x="360" y="97" fill="#4a90d9" text-anchor="middle" font-size="10" font-weight="600">Turn 1</text>
+      <text x="360" y="111" fill="#9ca0b0" text-anchor="middle" font-size="9">Full Prefill</text>
+      <!-- Arrow Turn 1 → P Node -->
+      <line x1="415" y1="97" x2="448" y2="97" stroke="#4a90d9" stroke-width="1.5" marker-end="url(#arrBlue2)"/>
+      <rect x="453" y="75" width="100" height="44" rx="8" fill="#1a3a5c" stroke="#4a90d9" stroke-width="1"/>
+      <text x="503" y="94" fill="#4a90d9" text-anchor="middle" font-size="10">P Node</text>
+      <text x="503" y="108" fill="#9ca0b0" text-anchor="middle" font-size="8">KV transfer → D</text>
+      <!-- Yes path → Turn 2+ -->
+      <line x1="225" y1="124" x2="225" y2="155" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrGreen2)"/>
+      <text x="240" y="145" fill="#9ca0b0" font-size="8">Yes</text>
+      <rect x="170" y="158" width="110" height="32" rx="8" fill="#22543d" stroke="#34d399" stroke-width="1.5"/>
+      <text x="225" y="172" fill="#34d399" text-anchor="middle" font-size="10" font-weight="600">Turn 2+</text>
+      <text x="225" y="184" fill="#9ca0b0" text-anchor="middle" font-size="8">→ Decision Lookup</text>
+      <defs>
+        <marker id="arr9ca" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#9ca0b0"/></marker>
+        <marker id="arrBlue2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#4a90d9"/></marker>
+        <marker id="arrGreen2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#34d399"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3><span class="i18n" data-en="Mechanism 2 — Offline Decision-Table Construction" data-zh="機制二：離線決策表建構">Mechanism 2 — Offline Decision-Table Construction</span></h3>
+  <p><span class="i18n" data-en="Before deployment, a benchmarking script sweeps the discretized workload space and records TTFT and TPOT for x=0 and x=1 at each operating point. The result is a lookup table keyed by (n_in_bin, n_out_bin, n_ctx_bin, qps_bin) that maps each cell to the Pareto-optimal routing choice for the operator's TTFT/TPOT weight vector." data-zh="在部署之前，基準測試腳本掃描離散化的工作負載空間，並在每個操作點記錄 x=0 和 x=1 時的 TTFT 和 TPOT。結果是一個以 (n_in_bin, n_out_bin, n_ctx_bin, qps_bin) 為鍵的查找表，將每個單元格映射至符合營運者 TTFT/TPOT 權重向量的 Pareto 最優路由選擇。">Before deployment, a benchmarking script sweeps the discretized workload space and records TTFT and TPOT for x=0 and x=1 at each operating point. The result is a lookup table keyed by <span class="inline-code">(n_in_bin, n_out_bin, n_ctx_bin, qps_bin)</span> that maps each cell to the Pareto-optimal routing choice for the operator's TTFT/TPOT weight vector.</span></p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3><span class="i18n" data-en="Discretization Strategy" data-zh="離散化策略">Discretization Strategy</span></h3>
+      <p><span class="i18n" data-en="Token counts and QPS values are bucketed into logarithmically-spaced bins. This keeps the table compact (a few thousand cells) while preserving enough resolution to capture workload-sensitive routing decisions. Interpolation between bins is not used — the nearest bin is selected to keep online latency under 1 ms." data-zh="Token 計數和 QPS 值被分入對數間隔的桶中。這樣可以使查找表保持緊湊（幾千個單元格），同時保留足夠的解析度來捕捉對工作負載敏感的路由決策。桶之間不使用插值——選取最近的桶以將線上延遲維持在 1 毫秒以下。">Token counts and QPS values are bucketed into <strong>logarithmically-spaced bins</strong>. This keeps the table compact (a few thousand cells) while preserving enough resolution to capture workload-sensitive routing decisions. Interpolation between bins is not used — the nearest bin is selected to keep online latency under 1 ms.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Weight Vector Semantics" data-zh="權重向量語意">Weight Vector Semantics</span></h3>
+      <p><span class="i18n" data-en="The operator-supplied weights (w_ttft, w_tpot) are normalized to sum to 1. When w_ttft = 1 the table aggressively favors D-local routing for every cell; when w_tpot = 1 it reverts to pure PD. Intermediate values produce a mixed table that exploits the low-load regime where append-prefill interference is genuinely negligible." data-zh="營運者提供的權重 (w_ttft, w_tpot) 被正規化為總和為 1。當 w_ttft = 1 時，查找表會積極地對每個單元格選擇 D 本地路由；當 w_tpot = 1 時，則回退至純 PD。中間值會產生混合查找表，利用追加 prefill 干擾確實可忽略的低負載範圍。">The operator-supplied weights <span class="inline-code">(w_ttft, w_tpot)</span> are normalized to sum to 1. When w_ttft = 1 the table aggressively favors D-local routing for every cell; when w_tpot = 1 it reverts to pure PD. Intermediate values produce a mixed table that exploits the low-load regime where append-prefill interference is genuinely negligible.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Mechanism 3 — Online Routing Proxy" data-zh="機制三：線上路由代理">Mechanism 3 — Online Routing Proxy</span></h3>
+  <p><span class="i18n" data-en="The routing proxy is an async HTTP gateway (Quart) sitting in front of the vLLM cluster. It performs five steps per request: parse, classify, lookup, forward, and record. The critical path — steps 2 through 4 — adds under 1 ms to end-to-end latency because the decision table is held in-process memory and accessed with a single dictionary lookup." data-zh="路由代理是一個非同步 HTTP 閘道（Quart），位於 vLLM 叢集之前。它對每個請求執行五個步驟：解析、分類、查找、轉發和記錄。關鍵路徑——第 2 至第 4 步——為端對端延遲增加不到 1 毫秒，因為決策表保存在進程內記憶體中，並以單次字典查找訪問。">The routing proxy is an async HTTP gateway (Quart) sitting in front of the vLLM cluster. It performs five steps per request: <strong>parse → classify → lookup → forward → record</strong>. The critical path — steps 2 through 4 — adds under <strong>1 ms</strong> to end-to-end latency because the decision table is held in-process memory and accessed with a single dictionary lookup.</span></p>
+
+  <!-- Flow diagram: Online Routing -->
+  <div class="diagram">
+    <svg viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="720" height="130" fill="#1c1f2e" rx="12"/>
+      <text x="360" y="22" fill="#e2e4ea" text-anchor="middle" font-size="12" font-weight="700">Online Routing Proxy — Per-Request Critical Path</text>
+      <!-- Step boxes -->
+      <rect x="18" y="48" width="100" height="42" rx="7" fill="#2a2d3e" stroke="#9ca0b0" stroke-width="1"/>
+      <text x="68" y="68" fill="#e2e4ea" text-anchor="middle" font-size="10" font-weight="600">1. Parse</text>
+      <text x="68" y="82" fill="#9ca0b0" text-anchor="middle" font-size="8">conv_id, turn #</text>
+      <line x1="118" y1="69" x2="140" y2="69" stroke="#9ca0b0" stroke-width="1.5" marker-end="url(#arr9ca2)"/>
+
+      <rect x="144" y="48" width="100" height="42" rx="7" fill="#2e2a1a" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="194" y="68" fill="#f59e0b" text-anchor="middle" font-size="10" font-weight="600">2. Classify</text>
+      <text x="194" y="82" fill="#9ca0b0" text-anchor="middle" font-size="8">session table hit?</text>
+      <line x1="244" y1="69" x2="266" y2="69" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrOrg2)"/>
+
+      <rect x="270" y="48" width="100" height="42" rx="7" fill="#22543d" stroke="#34d399" stroke-width="1.5"/>
+      <text x="320" y="68" fill="#34d399" text-anchor="middle" font-size="10" font-weight="600">3. Lookup</text>
+      <text x="320" y="82" fill="#9ca0b0" text-anchor="middle" font-size="8">table[ψ_bin] → x*</text>
+      <line x1="370" y1="69" x2="392" y2="69" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrGrn2)"/>
+
+      <rect x="396" y="48" width="100" height="42" rx="7" fill="#1a3a5c" stroke="#4a90d9" stroke-width="1.5"/>
+      <text x="446" y="68" fill="#4a90d9" text-anchor="middle" font-size="10" font-weight="600">4. Forward</text>
+      <text x="446" y="82" fill="#9ca0b0" text-anchor="middle" font-size="8">P node or D node</text>
+      <line x1="496" y1="69" x2="518" y2="69" stroke="#4a90d9" stroke-width="1.5" marker-end="url(#arrBlue3)"/>
+
+      <rect x="522" y="48" width="100" height="42" rx="7" fill="#2a2d3e" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="572" y="68" fill="#a78bfa" text-anchor="middle" font-size="10" font-weight="600">5. Record</text>
+      <text x="572" y="82" fill="#9ca0b0" text-anchor="middle" font-size="8">metrics + session</text>
+
+      <text x="360" y="118" fill="#9ca0b0" text-anchor="middle" font-size="9">Steps 2–4 add &lt;1 ms overhead — decision table is in-process memory</text>
+      <defs>
+        <marker id="arr9ca2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#9ca0b0"/></marker>
+        <marker id="arrOrg2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#f59e0b"/></marker>
+        <marker id="arrGrn2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#34d399"/></marker>
+        <marker id="arrBlue3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#4a90d9"/></marker>
+      </defs>
+    </svg>
+  </div>
+
+  <h3><span class="i18n" data-en="KV Cache Locality and Session Affinity" data-zh="KV Cache 局部性與 Session 親和性">KV Cache Locality and Session Affinity</span></h3>
+  <p><span class="i18n" data-en="Session affinity is a prerequisite for D-local append-prefill to work correctly. The session table pins each conversation to a specific (P, D) pair from Turn 1 onward. This guarantees that when a Turn-2+ request arrives and is routed to the D node (x=1), the full KV history of the conversation is already resident in that D node's prefix cache — no remote fetch is needed. Sessions expire after 60 minutes of inactivity, freeing D-node memory for new conversations." data-zh="Session 親和性是 D 本地追加 prefill 正確運作的前提。Session 表從第 1 輪起將每段對話固定到特定的 (P, D) 配對。這保證了當第 2 輪以後的請求到來並路由至 D 節點（x=1）時，對話的完整 KV 歷史已存在於該 D 節點的前綴快取中——無需遠端獲取。Session 在閒置 60 分鐘後過期，釋放 D 節點記憶體供新對話使用。">Session affinity is a prerequisite for D-local append-prefill to work correctly. The session table pins each conversation to a specific (P, D) pair from Turn 1 onward. This guarantees that when a Turn-2+ request arrives and is routed to the D node (x=1), the full KV history of the conversation is <strong>already resident</strong> in that D node's prefix cache — no remote fetch is needed. Sessions expire after <strong>60 minutes</strong> of inactivity, freeing D-node memory for new conversations.</span></p>
+
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th>
+      <th><span class="i18n" data-en="Technology" data-zh="技術">Technology</span></th>
+      <th><span class="i18n" data-en="Key Detail" data-zh="關鍵細節">Key Detail</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Routing proxy" data-zh="路由代理">Routing proxy</span></td><td>Quart (async Flask)</td><td><span class="i18n" data-en="Single-process, in-memory table" data-zh="單進程，記憶體內查找表">Single-process, in-memory table</span></td></tr>
+      <tr><td><span class="i18n" data-en="Service discovery" data-zh="服務發現">Service discovery</span></td><td>ZeroMQ heartbeats</td><td><span class="i18n" data-en="10s interval, 30s eviction" data-zh="10 秒間隔，30 秒驅逐">10 s interval, 30 s eviction</span></td></tr>
+      <tr><td><span class="i18n" data-en="KV transfer" data-zh="KV 傳輸">KV transfer</span></td><td>vLLM kv_producer/kv_consumer</td><td><span class="i18n" data-en="Turn 1 only; RDMA-capable" data-zh="僅第 1 輪；支援 RDMA">Turn 1 only; RDMA-capable</span></td></tr>
+      <tr><td><span class="i18n" data-en="Session storage" data-zh="Session 儲存">Session storage</span></td><td><span class="i18n" data-en="In-proxy dict" data-zh="代理內字典">In-proxy dict</span></td><td><span class="i18n" data-en="MD5(first_msg) → (P_addr, D_addr, turn)" data-zh="MD5(首訊息) → (P_addr, D_addr, turn)">MD5(first_msg) → (P_addr, D_addr, turn)</span></td></tr>
+      <tr><td><span class="i18n" data-en="Session TTL" data-zh="Session 存活時間">Session TTL</span></td><td><span class="i18n" data-en="60-minute timeout" data-zh="60 分鐘逾時">60-minute timeout</span></td><td><span class="i18n" data-en="Prevents stale KV from occupying D-node memory" data-zh="防止過期 KV 佔用 D 節點記憶體">Prevents stale KV from occupying D-node memory</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===== Section 15: Performance Results ===== -->
+<section id="perf-results">
+  <h2><span class="i18n" data-en="15 Performance Results" data-zh="15 效能結果"><span class="sec-num">15</span> <span class="i18n" data-en="Performance Results" data-zh="效能結果">Performance Results</span></span></h2>
+  <p><span class="i18n" data-en="This section consolidates the quantitative outcomes from the 3,060-configuration study and the real-world evaluation on ShareGPT and WildChat, highlighting where PPD (x=1) delivers the largest gains and where trade-offs with TPOT become non-trivial." data-zh="本節整合了 3,060 種配置研究以及在 ShareGPT 和 WildChat 上進行真實場景評估的量化結果，重點說明 PPD (x=1) 帶來最大收益的場景，以及與 TPOT 的權衡變得不可忽視的情況。">This section consolidates the quantitative outcomes from the 3,060-configuration study and the real-world evaluation on ShareGPT and WildChat, highlighting where PPD (x=1) delivers the largest gains and where trade-offs with TPOT become non-trivial.</span></p>
+
+  <h3><span class="i18n" data-en="Headline Numbers" data-zh="核心數字">Headline Numbers</span></h3>
+  <div class="metric-row">
+    <div class="metric-box">
+      <div class="val" style="color:#34d399">68%</div>
+      <div class="label"><span class="i18n" data-en="Max Turn 2+ TTFT reduction (1P_3D, high QPS)" data-zh="最大第 2 輪以後 TTFT 降低（1P_3D，高 QPS）">Max Turn 2+ TTFT reduction (1P_3D, high QPS)</span></div>
+    </div>
+    <div class="metric-box">
+      <div class="val" style="color:#4a90d9">75%</div>
+      <div class="label"><span class="i18n" data-en="Reduction in KV transfer volume (3.1 avg turns)" data-zh="KV 傳輸量減少（平均 3.1 輪）">Reduction in KV transfer volume (3.1 avg turns)</span></div>
+    </div>
+    <div class="metric-box">
+      <div class="val" style="color:#f59e0b">≤12%</div>
+      <div class="label"><span class="i18n" data-en="Max TPOT degradation at 95% D-local routing" data-zh="95% D 本地路由時的最大 TPOT 劣化">Max TPOT degradation at 95% D-local routing</span></div>
+    </div>
+    <div class="metric-box">
+      <div class="val" style="color:#a78bfa">27%</div>
+      <div class="label"><span class="i18n" data-en="Average win rate across TTFT + TPOT + throughput" data-zh="TTFT + TPOT + 吞吐量的平均勝率">Average win rate across TTFT + TPOT + throughput</span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="TTFT by P:D Ratio and QPS Band" data-zh="依 P:D 比例與 QPS 區段的 TTFT">TTFT by P:D Ratio and QPS Band</span></h3>
+  <p><span class="i18n" data-en="The benefit of x=1 over x=0 is strongest when the D-node count is high (1P_3D) and QPS is elevated, because that is precisely the regime where KV transfer bandwidth becomes the bottleneck under the baseline." data-zh="x=1 相對於 x=0 的效益在 D 節點數量多（1P_3D）且 QPS 較高時最為顯著，因為這正是基線下 KV 傳輸頻寬成為瓶頸的範圍。">The benefit of x=1 over x=0 is strongest when the D-node count is high (1P_3D) and QPS is elevated, because that is precisely the regime where KV transfer bandwidth becomes the bottleneck under the baseline.</span></p>
+
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="P:D Config" data-zh="P:D 配置">P:D Config</span></th>
+      <th><span class="i18n" data-en="Low QPS (0.5–2)" data-zh="低 QPS (0.5–2)">Low QPS (0.5–2)</span></th>
+      <th><span class="i18n" data-en="Medium QPS (4–8)" data-zh="中 QPS (4–8)">Medium QPS (4–8)</span></th>
+      <th><span class="i18n" data-en="High QPS (12–20)" data-zh="高 QPS (12–20)">High QPS (12–20)</span></th>
+      <th><span class="i18n" data-en="TPOT Impact" data-zh="TPOT 影響">TPOT Impact</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>1P_3D</strong></td>
+        <td style="color:#34d399">−57.8%</td>
+        <td style="color:#34d399">−65.2%</td>
+        <td style="color:#34d399"><strong>−73.3%</strong></td>
+        <td style="color:#f59e0b">+4–8%</td>
+      </tr>
+      <tr>
+        <td><strong>2P_2D</strong></td>
+        <td>−47.7%</td>
+        <td>−51.6%</td>
+        <td>−56.2%</td>
+        <td style="color:#f59e0b">+6–10%</td>
+      </tr>
+      <tr>
+        <td><strong>3P_1D</strong></td>
+        <td>−44.3%</td>
+        <td>−38.1%</td>
+        <td>−24.9%</td>
+        <td style="color:#ef4444">+10–15%</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><span class="i18n" data-en="Note: 3P_1D shows the smallest TTFT gain and highest TPOT cost because a single D node handles a disproportionately large decode batch when it also absorbs all append-prefill work." data-zh="注意：3P_1D 顯示最小的 TTFT 收益和最高的 TPOT 成本，因為當單個 D 節點同時吸收所有追加 prefill 工作時，其承擔的 decode batch 比例過大。">Note: 3P_1D shows the smallest TTFT gain and highest TPOT cost because a single D node handles a disproportionately large decode batch when it also absorbs all append-prefill work.</span></p>
+
+  <h3><span class="i18n" data-en="Throughput and Stability" data-zh="吞吐量與穩定性">Throughput and Stability</span></h3>
+  <div class="note">
+    <strong><span class="i18n" data-en="Key Reliability Result" data-zh="關鍵可靠性結果">Key Reliability Result</span></strong>
+    <p><span class="i18n" data-en="PPD (x=1) achieves 100% request success rate at all evaluated QPS levels on both ShareGPT and WildChat. The baseline (x=0) degrades at 9 out of 12 QPS levels for 2P_2D and at 7 out of 9 for 3P_1D — failures caused entirely by NVLink KV-transfer saturation." data-zh="PPD (x=1) 在 ShareGPT 和 WildChat 兩個資料集的所有評估 QPS 等級下均達到 100% 請求成功率。基線 (x=0) 在 2P_2D 配置的 12 個 QPS 等級中有 9 個劣化，在 3P_1D 配置的 9 個中有 7 個劣化——失敗完全由 NVLink KV 傳輸飽和引起。">PPD (x=1) achieves <strong>100% request success rate</strong> at all evaluated QPS levels on both ShareGPT and WildChat. The baseline (x=0) degrades at 9 out of 12 QPS levels for 2P_2D and at 7 out of 9 for 3P_1D — failures caused entirely by NVLink KV-transfer saturation.</span></p>
+  </div>
+
+  <p><span class="i18n" data-en="Throughput (requests completed per second before SLO violation) follows a similar pattern: x=1 extends the stable operating range to 38.3% more workload–QPS cells than any other single configuration, giving it the highest average win rate across the full configuration space." data-zh="吞吐量（在 SLO 違規之前每秒完成的請求數）遵循相似的模式：x=1 將穩定運行範圍擴展至比任何其他單一配置多出 38.3% 的工作負載–QPS 單元格，使其在整個配置空間的平均勝率最高。">Throughput (requests completed per second before SLO violation) follows a similar pattern: x=1 extends the stable operating range to <strong>38.3% more</strong> workload–QPS cells than any other single configuration, giving it the highest average win rate across the full configuration space.</span></p>
+
+  <h3><span class="i18n" data-en="Scaling Behaviour" data-zh="擴展行為">Scaling Behaviour</span></h3>
+
+  <!-- Bar-chart style comparison diagram -->
+  <div class="diagram">
+    <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="700" height="200" fill="#1c1f2e" rx="12"/>
+      <text x="350" y="22" fill="#e2e4ea" text-anchor="middle" font-size="12" font-weight="700">Turn 2+ TTFT Improvement (%) vs. Number of Conversation Turns</text>
+      <!-- Y axis -->
+      <line x1="70" y1="40" x2="70" y2="165" stroke="#2a2d3e" stroke-width="1"/>
+      <!-- X axis -->
+      <line x1="70" y1="165" x2="660" y2="165" stroke="#2a2d3e" stroke-width="1"/>
+      <!-- Y labels -->
+      <text x="62" y="168" fill="#9ca0b0" font-size="9" text-anchor="end">0%</text>
+      <text x="62" y="135" fill="#9ca0b0" font-size="9" text-anchor="end">25%</text>
+      <text x="62" y="102" fill="#9ca0b0" font-size="9" text-anchor="end">50%</text>
+      <text x="62" y="69" fill="#9ca0b0" font-size="9" text-anchor="end">75%</text>
+      <!-- Grid lines -->
+      <line x1="70" y1="135" x2="660" y2="135" stroke="#2a2d3e" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <line x1="70" y1="102" x2="660" y2="102" stroke="#2a2d3e" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <line x1="70" y1="69" x2="660" y2="69" stroke="#2a2d3e" stroke-width="0.5" stroke-dasharray="3,3"/>
+      <!-- Bars: turn 2 through 8 (x=1 vs x=0) — values ~55%, 61%, 65%, 67%, 68%, 69%, 70% -->
+      <!-- Turn 2 -->
+      <rect x="100" y="110" width="50" height="55" rx="4" fill="#34d399" opacity="0.8"/>
+      <text x="125" y="108" fill="#34d399" text-anchor="middle" font-size="9" font-weight="600">55%</text>
+      <text x="125" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T2</text>
+      <!-- Turn 3 -->
+      <rect x="178" y="100" width="50" height="65" rx="4" fill="#34d399" opacity="0.85"/>
+      <text x="203" y="98" fill="#34d399" text-anchor="middle" font-size="9" font-weight="600">61%</text>
+      <text x="203" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T3</text>
+      <!-- Turn 4 -->
+      <rect x="256" y="90" width="50" height="75" rx="4" fill="#34d399" opacity="0.88"/>
+      <text x="281" y="88" fill="#34d399" text-anchor="middle" font-size="9" font-weight="600">65%</text>
+      <text x="281" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T4</text>
+      <!-- Turn 5 -->
+      <rect x="334" y="83" width="50" height="82" rx="4" fill="#34d399" opacity="0.90"/>
+      <text x="359" y="81" fill="#34d399" text-anchor="middle" font-size="9" font-weight="600">67%</text>
+      <text x="359" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T5</text>
+      <!-- Turn 6 -->
+      <rect x="412" y="80" width="50" height="85" rx="4" fill="#34d399" opacity="0.92"/>
+      <text x="437" y="78" fill="#34d399" text-anchor="middle" font-size="9" font-weight="600">68%</text>
+      <text x="437" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T6</text>
+      <!-- Turn 8 -->
+      <rect x="490" y="75" width="50" height="90" rx="4" fill="#22d3ee" opacity="0.88"/>
+      <text x="515" y="73" fill="#22d3ee" text-anchor="middle" font-size="9" font-weight="600">69%</text>
+      <text x="515" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T8</text>
+      <!-- Turn 16 -->
+      <rect x="568" y="69" width="50" height="96" rx="4" fill="#4a90d9" opacity="0.9"/>
+      <text x="593" y="67" fill="#4a90d9" text-anchor="middle" font-size="9" font-weight="600">~70%</text>
+      <text x="593" y="180" fill="#9ca0b0" text-anchor="middle" font-size="9">T16</text>
+      <!-- Caption -->
+      <text x="350" y="195" fill="#9ca0b0" text-anchor="middle" font-size="8">TTFT improvement widens monotonically — accumulated context amplifies KV transfer savings (1P_3D, medium QPS)</text>
+    </svg>
+  </div>
+
+  <p><span class="i18n" data-en="The per-turn improvement is monotonically increasing because each additional conversation turn adds to the accumulated KV context, which in turn increases the cost of the KV transfer that x=1 avoids. By Turn 16 the improvement stabilizes near 70%, consistent across 8B and 30B models — confirming the gain is architectural rather than model-specific." data-zh="每輪的改善單調遞增，因為每個額外的對話輪次都增加了累積的 KV 上下文，進而增加了 x=1 所避免的 KV 傳輸成本。到第 16 輪時，改善穩定在約 70%，在 8B 和 30B 模型中保持一致——確認收益來自架構特性而非模型特定因素。">The per-turn improvement is monotonically increasing because each additional conversation turn adds to the accumulated KV context, which in turn increases the cost of the KV transfer that x=1 avoids. By Turn 16 the improvement stabilizes near <strong>70%</strong>, consistent across 8B and 30B models — confirming the gain is <strong>architectural rather than model-specific</strong>.</span></p>
+
+  <h3><span class="i18n" data-en="Comparison with Baseline Serving Modes" data-zh="與基線服務模式的比較">Comparison with Baseline Serving Modes</span></h3>
+  <p><span class="i18n" data-en="PPD is evaluated against three natural baselines: Replica (every GPU handles both prefill and decode), standard PD disaggregation (x=0), and Oracle (best possible routing per request given full knowledge of future load). The comparison uses the same 4-GPU H100 cluster and the ShareGPT workload at a medium QPS of 8." data-zh="PPD 與三種自然基線進行比較：Replica（每個 GPU 同時處理 prefill 和 decode）、標準 PD 分離（x=0），以及 Oracle（在已知未來負載的前提下，對每個請求進行最優路由）。比較使用相同的 4-GPU H100 叢集，以及在中等 QPS 8 下的 ShareGPT 工作負載。">PPD is evaluated against three natural baselines: <strong>Replica</strong> (every GPU handles both prefill and decode), <strong>standard PD disaggregation</strong> (x=0), and <strong>Oracle</strong> (best possible routing per request given full knowledge of future load). The comparison uses the same 4-GPU H100 cluster and the ShareGPT workload at a medium QPS of 8.</span></p>
+
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Mode" data-zh="模式">Mode</span></th>
+      <th><span class="i18n" data-en="Turn 1 TTFT" data-zh="第 1 輪 TTFT">Turn 1 TTFT</span></th>
+      <th><span class="i18n" data-en="Turn 2+ TTFT" data-zh="第 2 輪以後 TTFT">Turn 2+ TTFT</span></th>
+      <th><span class="i18n" data-en="TPOT" data-zh="TPOT">TPOT</span></th>
+      <th><span class="i18n" data-en="Failure Rate" data-zh="失敗率">Failure Rate</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>Replica (4R)</td>
+        <td><span class="i18n" data-en="Moderate (no P isolation)" data-zh="中等（無 P 隔離）">Moderate (no P isolation)</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best (local cache)" data-zh="最佳（本地快取）">Best (local cache)</span></td>
+        <td style="color:#ef4444"><span class="i18n" data-en="Worst (prefill disrupts decode)" data-zh="最差（prefill 干擾 decode）">Worst (prefill disrupts decode)</span></td>
+        <td>0%</td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="PD (x=0)" data-zh="PD (x=0)">PD (x=0)</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best (dedicated P nodes)" data-zh="最佳（專用 P 節點）">Best (dedicated P nodes)</span></td>
+        <td style="color:#ef4444"><span class="i18n" data-en="Worst (repeated KV transfer)" data-zh="最差（重複 KV 傳輸）">Worst (repeated KV transfer)</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best (no decode interference)" data-zh="最佳（無 decode 干擾）">Best (no decode interference)</span></td>
+        <td style="color:#ef4444"><span class="i18n" data-en="High at elevated QPS" data-zh="高 QPS 下偏高">High at elevated QPS</span></td>
+      </tr>
+      <tr>
+        <td><strong>PPD (x=1)</strong></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best (same as PD for Turn 1)" data-zh="最佳（第 1 輪與 PD 相同）">Best (same as PD for Turn 1)</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="−68% vs PD" data-zh="比 PD 低 68%">−68% vs PD</span></td>
+        <td><span class="i18n" data-en="+7–12% vs PD" data-zh="比 PD 高 7–12%">+7–12% vs PD</span></td>
+        <td style="color:#34d399"><strong>0%</strong></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Oracle (theoretical)" data-zh="Oracle（理論值）">Oracle (theoretical)</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best" data-zh="最佳">Best</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best" data-zh="最佳">Best</span></td>
+        <td style="color:#34d399"><span class="i18n" data-en="Best" data-zh="最佳">Best</span></td>
+        <td style="color:#34d399">0%</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p><span class="i18n" data-en="PPD closes roughly 90% of the gap between standard PD and the Oracle on Turn 2+ TTFT while paying only a 7–12% TPOT premium — a favorable trade-off for most interactive assistant workloads where users are most sensitive to response-start latency." data-zh="PPD 在第 2 輪以後的 TTFT 上大約彌合了標準 PD 與 Oracle 之間約 90% 的差距，同時僅付出 7–12% 的 TPOT 溢價——對於大多數用戶對回應開始延遲最為敏感的互動式助手工作負載而言，這是一個有利的權衡。">PPD closes roughly <strong>90% of the gap</strong> between standard PD and the Oracle on Turn 2+ TTFT while paying only a 7–12% TPOT premium — a favorable trade-off for most interactive assistant workloads where users are most sensitive to response-start latency.</span></p>
+
+  <h3><span class="i18n" data-en="Network Bandwidth Impact" data-zh="網路頻寬影響">Network Bandwidth Impact</span></h3>
+  <p><span class="i18n" data-en="The most operationally significant result from the evaluation is the elimination of KV-transfer-induced service outages. In a 4-node cluster with NVLink bandwidth shared among all active KV transfers, the baseline (x=0) saturates the P-to-D channel at moderate-to-high QPS. Routing Turn 2+ requests locally (x=1) reduces total KV transfer volume by a factor proportional to the mean conversation length, which is 3.1 on ShareGPT. The resulting bandwidth headroom allows PPD to absorb higher QPS bursts without degradation, as confirmed by the zero failure rate across all tested QPS levels." data-zh="評估中最具運營意義的結果是消除了由 KV 傳輸引起的服務中斷。在所有活躍 KV 傳輸共享 NVLink 頻寬的 4 節點叢集中，基線 (x=0) 在中高 QPS 下使 P 到 D 通道達到飽和。將第 2 輪以後的請求路由至本地（x=1）將 KV 傳輸總量減少了一個與平均對話長度成正比的倍數，ShareGPT 上為 3.1。由此產生的頻寬餘量使 PPD 能夠在不降級的情況下吸收更高的 QPS 峰值，這通過所有測試 QPS 等級的零失敗率得到了確認。">The most operationally significant result from the evaluation is the elimination of KV-transfer-induced service outages. In a 4-node cluster with NVLink bandwidth shared among all active KV transfers, the baseline (x=0) saturates the P-to-D channel at moderate-to-high QPS. Routing Turn 2+ requests locally (x=1) reduces total KV transfer volume by a factor proportional to the mean conversation length, which is <strong>3.1 on ShareGPT</strong>. The resulting bandwidth headroom allows PPD to absorb higher QPS bursts without degradation, as confirmed by the zero failure rate across all tested QPS levels.</span></p>
+</section>
+
+<!-- ===== Section 16: Limitations & Future Work ===== -->
+<section id="limitations">
+  <h2><span class="i18n" data-en="16 Limitations &amp; Future Work" data-zh="16 侷限性與未來工作"><span class="sec-num">16</span> <span class="i18n" data-en="Limitations &amp; Future Work" data-zh="侷限性與未來工作">Limitations &amp; Future Work</span></span></h2>
+  <p><span class="i18n" data-en="PPD represents a significant step toward multi-turn-aware LLM serving, but several constraints bound the current design. Understanding them is important both for practitioners deploying PPD today and for researchers extending it." data-zh="PPD 在多輪感知 LLM 服務方面邁出了重要一步，但目前設計存在若干限制。無論是今日部署 PPD 的從業者還是對其進行延伸研究的研究者，了解這些限制都非常重要。">PPD represents a significant step toward multi-turn-aware LLM serving, but several constraints bound the current design. Understanding them is important both for practitioners deploying PPD today and for researchers extending it.</span></p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3><span class="i18n" data-en="Binary Routing (x ∈ {0, 1})" data-zh="二元路由（x ∈ {0, 1}）">Binary Routing (x ∈ {0, 1})</span></h3>
+      <p><span class="i18n" data-en="Although the framework defines x as a continuous fraction, the production implementation uses a binary lookup (route to P or route to D). Fractional routing — splitting a workload stream with probability x — was explored in the configuration study but found to add coordination overhead without consistent benefit over x=1 in the evaluated settings. Future work could explore per-batch fractional routing where the proxy controls the mixing ratio adaptively at runtime." data-zh="雖然框架將 x 定義為連續分數，但生產實作使用二元查找（路由至 P 或路由至 D）。分數路由——以概率 x 分割工作負載流——在配置研究中有所探索，但在評估的設置中，相比 x=1 並未發現一致的效益，且增加了協調開銷。未來的工作可以探索逐批次分數路由，其中代理在運行時自適應地控制混合比例。">Although the framework defines x as a continuous fraction, the production implementation uses a <strong>binary lookup</strong> (route to P or route to D). Fractional routing — splitting a workload stream with probability x — was explored in the configuration study but found to add coordination overhead without consistent benefit over x=1 in the evaluated settings. Future work could explore per-batch fractional routing where the proxy controls the mixing ratio adaptively at runtime.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="D-Node Memory Pressure" data-zh="D 節點記憶體壓力">D-Node Memory Pressure</span></h3>
+      <p><span class="i18n" data-en="Routing append-prefill to D nodes increases the KV footprint on those nodes. Each active conversation occupies KV memory proportional to its accumulated context length. At high conversation counts or very long contexts (e.g., 64K tokens), D nodes may exhaust their HBM capacity before P nodes. The 60-minute TTL partially mitigates this, but a memory-aware routing variant that monitors D-node HBM utilization and falls back to x=0 when pressure exceeds a threshold remains an open design point." data-zh="將追加 prefill 路由至 D 節點會增加這些節點的 KV 記憶體佔用。每段活躍對話佔用的 KV 記憶體與其累積的上下文長度成正比。在對話數量多或上下文非常長（例如 64K token）的情況下，D 節點可能比 P 節點更早耗盡其 HBM 容量。60 分鐘的 TTL 可以部分緩解此問題，但一種記憶體感知的路由變體——監控 D 節點 HBM 使用率，並在壓力超過閾值時回退至 x=0——仍然是一個開放的設計點。">Routing append-prefill to D nodes increases the <strong>KV footprint</strong> on those nodes. Each active conversation occupies KV memory proportional to its accumulated context length. At high conversation counts or very long contexts (e.g., 64K tokens), D nodes may exhaust their HBM capacity before P nodes. The 60-minute TTL partially mitigates this, but a memory-aware routing variant that monitors D-node HBM utilization and falls back to x=0 when pressure exceeds a threshold remains an open design point.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Offline Table vs. Online Load" data-zh="離線查找表 vs. 線上負載">Offline Table vs. Online Load</span></h3>
+      <p><span class="i18n" data-en="The decision table is constructed under controlled benchmark conditions and may not perfectly reflect production traffic distributions. Sudden traffic spikes or workload shifts (e.g., a change in average output length due to a model update) can make the precomputed table suboptimal. An online adaptation mechanism that periodically re-evaluates a sample of routing decisions using shadow traffic and updates affected table cells could close this gap without the latency cost of full re-benchmarking." data-zh="決策表是在受控的基準測試條件下建構的，可能無法完美反映生產流量分佈。突然的流量激增或工作負載變化（例如，由於模型更新導致平均輸出長度改變）可能使預計算的查找表不再最優。一種線上自適應機制——定期使用影子流量重新評估部分路由決策並更新受影響的查找表單元格——可以彌合這一差距，而無需承擔完整重新基準測試的延遲成本。">The decision table is constructed under controlled benchmark conditions and may not perfectly reflect <strong>production traffic distributions</strong>. Sudden traffic spikes or workload shifts (e.g., a change in average output length due to a model update) can make the precomputed table suboptimal. An online adaptation mechanism that periodically re-evaluates a sample of routing decisions using shadow traffic and updates affected table cells could close this gap without the latency cost of full re-benchmarking.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Single-Proxy Single Point of Failure" data-zh="單代理單點故障">Single-Proxy Single Point of Failure</span></h3>
+      <p><span class="i18n" data-en="The current implementation uses a single routing proxy process. In production environments requiring five-nines availability this is a critical gap: proxy failure halts all request routing. A replicated proxy with a distributed session store (e.g., Redis) and leader-election would address this. The stateless decision-table lookup makes horizontal scaling straightforward — the session state is the only shared mutable component." data-zh="目前的實作使用單一路由代理進程。在需要五個九可用性的生產環境中，這是一個關鍵缺口：代理故障會中止所有請求路由。帶有分散式 session 存儲（例如 Redis）和領導者選舉的複製代理可以解決此問題。無狀態的決策查找查找使水平擴展變得簡單——session 狀態是唯一共享的可變元件。">The current implementation uses a <strong>single routing proxy process</strong>. In production environments requiring five-nines availability this is a critical gap: proxy failure halts all request routing. A replicated proxy with a distributed session store (e.g., Redis) and leader-election would address this. The stateless decision-table lookup makes horizontal scaling straightforward — the session state is the only shared mutable component.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Scope: Multi-GPU, Not Multi-Datacenter" data-zh="範圍：多 GPU，非跨資料中心">Scope: Multi-GPU, Not Multi-Datacenter</span></h3>
+      <p><span class="i18n" data-en="All experiments run on a 4-GPU node with NVLink interconnect (bandwidth ~600 GB/s). Real deployments often span multiple nodes connected by InfiniBand or Ethernet where KV transfer latency is far higher. The relative advantage of x=1 should be even larger in such environments because KV transfer cost is amplified, but the specific thresholds for D-node memory pressure and TPOT degradation may differ and would require re-profiling." data-zh="所有實驗均在帶有 NVLink 互連（頻寬約 600 GB/s）的 4-GPU 節點上運行。實際部署通常跨越多個通過 InfiniBand 或乙太網連接的節點，KV 傳輸延遲遠高於此。x=1 的相對優勢在此類環境中應更為顯著，因為 KV 傳輸成本被放大，但 D 節點記憶體壓力和 TPOT 劣化的具體閾值可能不同，需要重新分析。">All experiments run on a 4-GPU node with NVLink interconnect (bandwidth ~600 GB/s). Real deployments often span <strong>multiple nodes connected by InfiniBand or Ethernet</strong> where KV transfer latency is far higher. The relative advantage of x=1 should be even larger in such environments because KV transfer cost is amplified, but the specific thresholds for D-node memory pressure and TPOT degradation may differ and would require re-profiling.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Two-Turn Measurement Scope" data-zh="兩輪測量範圍">Two-Turn Measurement Scope</span></h3>
+      <p><span class="i18n" data-en="The configuration-space study measures TTFT and TPOT for Turn 1 and Turn 2 only. Turn-3+ behavior is inferred from the interference analysis and the scaling study but not exhaustively measured across all 17 node configurations and 18 workloads. A full multi-turn evaluation at scale would strengthen the empirical foundation, particularly for long-tail conversations with 10+ turns." data-zh="配置空間研究僅測量第 1 輪和第 2 輪的 TTFT 和 TPOT。第 3 輪以後的行為從干擾分析和擴展性研究中推斷，但未在所有 17 種節點配置和 18 種工作負載中進行詳盡測量。大規模的完整多輪評估將強化實證基礎，特別是對於擁有 10 輪以上的長尾對話。">The configuration-space study measures TTFT and TPOT for Turn 1 and Turn 2 only. Turn-3+ behavior is inferred from the interference analysis and the scaling study but <strong>not exhaustively measured</strong> across all 17 node configurations and 18 workloads. A full multi-turn evaluation at scale would strengthen the empirical foundation, particularly for long-tail conversations with 10+ turns.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Future Work Directions" data-zh="未來研究方向">Future Work Directions</span></h3>
+  <div class="card-grid">
+    <div class="card">
+      <h3><span class="i18n" data-en="Adaptive Table Updates" data-zh="自適應查找表更新">Adaptive Table Updates</span></h3>
+      <p><span class="i18n" data-en="Integrate a lightweight online learner that continuously refines the routing table from live traffic observations, enabling the system to self-tune as workload distributions shift over time without requiring a full offline benchmark re-run." data-zh="整合輕量級線上學習器，從實時流量觀測中持續完善路由查找表，使系統能夠隨著工作負載分佈的時間推移自我調整，而無需進行完整的離線基準測試重新運行。">Integrate a lightweight online learner that continuously refines the routing table from live traffic observations, enabling the system to self-tune as workload distributions shift over time without requiring a full offline benchmark re-run.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Memory-Aware Routing" data-zh="記憶體感知路由">Memory-Aware Routing</span></h3>
+      <p><span class="i18n" data-en="Extend the routing objective to include D-node HBM utilization as a constraint. When a D node's KV occupancy exceeds a configurable threshold, the proxy automatically increases the fraction of append-prefill routed to P nodes, trading some TTFT for memory safety." data-zh="擴展路由目標，將 D 節點 HBM 使用率作為約束條件。當 D 節點的 KV 佔用率超過可設定閾值時，代理自動增加路由至 P 節點的追加 prefill 比例，以換取記憶體安全性而犧牲部分 TTFT。">Extend the routing objective to include D-node HBM utilization as a constraint. When a D node's KV occupancy exceeds a configurable threshold, the proxy automatically increases the fraction of append-prefill routed to P nodes, trading some TTFT for memory safety.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Integration with Speculative Decoding" data-zh="與推測解碼的整合">Integration with Speculative Decoding</span></h3>
+      <p><span class="i18n" data-en="Speculative decoding introduces draft-model prefill during each decode step, a third type of prefill distinct from both full and append. Characterizing its interference profile and extending the routing framework to include a speculative-prefill path could yield further TPOT improvements on D nodes that run speculative models." data-zh="推測解碼在每個解碼步驟中引入草稿模型 prefill，這是第三種 prefill 類型，與完整 prefill 和追加 prefill 均不同。描述其干擾特性並擴展路由框架以包含推測 prefill 路徑，可能在運行推測模型的 D 節點上帶來進一步的 TPOT 改善。">Speculative decoding introduces draft-model prefill during each decode step, a third type of prefill distinct from both full and append. Characterizing its interference profile and extending the routing framework to include a speculative-prefill path could yield further TPOT improvements on D nodes that run speculative models.</span></p>
+    </div>
+    <div class="card">
+      <h3><span class="i18n" data-en="Multi-Node KV Disaggregation" data-zh="多節點 KV 分離">Multi-Node KV Disaggregation</span></h3>
+      <p><span class="i18n" data-en="Combining PPD's scheduling insight with a distributed KV cache layer (e.g., Mooncake over RDMA) could allow the session-affinity constraint to be relaxed: append-prefill could be routed to any D node that can fetch the required KV prefix from a shared store within the time budget, increasing load-balancing flexibility." data-zh="將 PPD 的排程洞察與分散式 KV 快取層（例如，基於 RDMA 的 Mooncake）相結合，可以放寬 session 親和性約束：追加 prefill 可以路由至任何能夠在時間預算內從共享存儲獲取所需 KV 前綴的 D 節點，從而提高負載均衡靈活性。">Combining PPD's scheduling insight with a distributed KV cache layer (e.g., Mooncake over RDMA) could allow the session-affinity constraint to be relaxed: append-prefill could be routed to <strong>any D node</strong> that can fetch the required KV prefix from a shared store within the time budget, increasing load-balancing flexibility.</span></p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Bottom Line" data-zh="總結">Bottom Line</span></strong>
+    <p><span class="i18n" data-en="PPD's core insight — that append-prefill interference is an order of magnitude smaller than full-prefill interference — is robust across GPU generations and model scales. The specific implementation choices (binary routing, single proxy, 60-minute TTL) are engineering decisions that can be relaxed as the system matures. The mathematical framework and the interference characterization provide a solid foundation for the future extensions described above." data-zh="PPD 的核心洞察——追加 prefill 干擾比完整 prefill 干擾小一個數量級——在不同 GPU 世代和模型規模下都具有穩健性。具體的實作選擇（二元路由、單代理、60 分鐘 TTL）是工程決策，隨著系統的成熟可以逐步放寬。數學框架和干擾特性描述為上述未來擴展提供了堅實的基礎。">PPD's core insight — that <strong>append-prefill interference is an order of magnitude smaller</strong> than full-prefill interference — is robust across GPU generations and model scales. The specific implementation choices (binary routing, single proxy, 60-minute TTL) are engineering decisions that can be relaxed as the system matures. The mathematical framework and the interference characterization provide a solid foundation for the future extensions described above.</span></p>
+  </div>
+</section>
 </div>
 
 <footer>
