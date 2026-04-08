@@ -264,6 +264,12 @@ tr:hover td{background:rgba(110,198,255,.03)}
 ul,ol{margin:8px 0 8px 22px}
 li{margin-bottom:5px}
 
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
 /* ===== COMPARISON INDICATORS ===== */
 .check{color:#2ecc71;font-weight:bold}
 .cross{color:#e94560;font-weight:bold}
