@@ -847,7 +847,139 @@ Instructions:
 - [ ] Deeper evaluation analysis
 - [ ] Significance or impact section
 
+### Hero (CRITICAL — most common failure point)
+- [ ] Paper title in `<h1>`, NEVER as a badge
+- [ ] `<div class="hero">` (NOT `<section>` or `<header>`)
+- [ ] Order: `<h1>` → `<p class="sub">` → `<div class="badges">` → authors `<p>` → affiliation `<p>`
+- [ ] `<div class="badges">` appears AFTER `<h1>`, never before
+- [ ] Only ONE `<div class="badges">` div (no duplicates)
+- [ ] badges contain: venue (e.g. "SOSP 2025"), arXiv (e.g. "arXiv:2311.00001"), keywords — NOT institution names or standalone years
+- [ ] Authors: `<p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">`
+- [ ] Affiliation: `<p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">` with `&middot;` separator
+- [ ] Institution names (University, Lab, etc.) go in affiliation `<p>`, NOT in badges
+- [ ] `text-align:center` on `.hero{}`, `.hero h1{}`, and any `.hero-inner`/`.hero-content` wrapper
+
+### Nav (CRITICAL)
+- [ ] `<nav><ul>` with `<li>` items — NOT flat `<a>` links, NOT div.logo + div.links
+- [ ] First `<li>`: `<a href="../../index.html">&larr; Agentic Survey</a>`
+- [ ] Last `<li>`: `<li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>`
+- [ ] `nav { display:flex }` MUST NOT be on the `nav` element itself — ONLY `nav ul { display:flex }` gets flex
+- [ ] `nav ul { display:flex; list-style:none; ... }` — includes both flex AND list-style:none
+- [ ] Nav background uses `var(--nav-bg)` not a hardcoded color
+- [ ] NO `.brand`, `.logo`, `.links`, `.nav-inner`, `.nav-brand`, `.i18n-controls`, `.back-link` elements or CSS
+
+### Accent Color System
+- [ ] Every page has `:root{--accent:#hex;--accent-rgb:r,g,b;--nav-bg:rgba(r,g,b,0.95)}`
+- [ ] Accent is NOT a near-white color (not `#e2e8f0`, `#e0e4f0` etc — those are TEXT colors)
+- [ ] nav-bg is a DARK version of the accent (opacity 0.95, darkened)
+- [ ] `.hero .badge` uses `background:rgba(var(--accent-rgb),0.18)` and `color:var(--accent)` and `text-transform:none`
+- [ ] All accent-driven CSS uses `var(--accent)` not hardcoded `#e94560`
+
+### CSS Anti-Patterns (things that WILL break the page)
+- [ ] NO malformed CSS selectors like `nav,nav ul,\n/* comment */\n.note{...}` — always close selector blocks properly
+- [ ] NO `nav::-webkit-scrollbar,...,{` with trailing comma before `{`
+- [ ] NO duplicate conflicting CSS rules for the same selector (especially `nav` and `nav ul`)
+- [ ] After any CSS rule removal, verify the remaining CSS is valid (no dangling selectors)
+
 ### Footer
 - [ ] Paper citation with arXiv ID
 - [ ] Generation date
 - [ ] All text bilingual
+
+---
+
+## 15. Hard Lessons Learned (Required Reading for Agents)
+
+These are real bugs that were introduced and later fixed. Do NOT repeat them.
+
+### Hero Reconstruction Rules
+
+**NEVER wrap `<h1>` inside `<div class="badges">`.**
+```html
+<!-- WRONG — h1 inside badges -->
+<div class="badges">
+  <span class="badge">SOSP 2025</span>
+  <h1>Paper Title</h1>   ← WRONG
+</div>
+
+<!-- CORRECT -->
+<div class="hero">
+  <h1>Paper Title</h1>
+  <div class="badges">
+    <span class="badge">SOSP 2025</span>
+  </div>
+</div>
+```
+
+**NEVER put institution names as badges:**
+```html
+<!-- WRONG -->
+<span class="badge">Columbia University &amp; Google</span>
+
+<!-- CORRECT -->
+<p style="color:#6a7a94;font-size:.85rem;...">Columbia University &middot; Google</p>
+```
+
+**NEVER put standalone years as badges:**
+```html
+<!-- WRONG -->
+<span class="badge">2025</span>
+
+<!-- CORRECT: include year in venue badge -->
+<span class="badge">SOSP 2025</span>
+```
+
+### Nav CSS Rules
+
+**NEVER add `display:flex` to `nav{}` directly when using `<ul><li>` structure:**
+```css
+/* WRONG — breaks ul/li nav into vertical list */
+nav { display:flex; align-items:center; gap:2rem; }
+
+/* CORRECT — flex goes on nav ul */
+nav ul { display:flex; list-style:none; max-width:1200px; margin:0 auto; ... }
+```
+
+**NEVER create malformed CSS selectors when removing old nav CSS:**
+```css
+/* WRONG — missing closing braces creates merged rule */
+nav,nav ul,
+nav::-webkit-scrollbar,nav ul::-webkit-scrollbar,
+
+/* Comment and next rule accidentally merged above */
+.note { border-left: 4px solid #ffb74d; }  ← nav gets this border!
+
+/* CORRECT */
+nav,nav ul { scrollbar-width:none; -ms-overflow-style:none }
+nav::-webkit-scrollbar,nav ul::-webkit-scrollbar { display:none }
+```
+
+### Accent Color Extraction
+
+**NEVER use text colors as accent colors:**
+- `#e2e8f0`, `#e0e4f0`, `#e6edf3`, `#d0d5e0` — these are TEXT colors, not accents
+- Look for: h1 gradient colors, named `--accent-*` variables, h3 color
+- Fallback by topic: cache management → rose `#e94560`, distributed → cyan `#29b6f6`, attention → indigo `#7e57c2`, agentic → teal `#26a69a`
+
+### Badge Styling
+
+**ALWAYS include `text-transform:none` in `.hero .badge`** to prevent pages with `text-transform:uppercase` in their original `.badge` CSS from making all badges uppercase.
+
+### Visual Verification (MANDATORY)
+
+**NEVER say a fix is complete without visual verification.**
+
+The correct workflow:
+1. Make the fix
+2. Run Chrome headless screenshot: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless --disable-gpu --screenshot=/tmp/check.png --window-size=1440,700 file:///path/to/page.html`
+3. Read the screenshot image
+4. Verify against continuum standard with your own eyes — do NOT use an agent sub-process for visual analysis
+5. Only then commit
+
+**Screenshot the LOCAL file** (`file:///...`) not the GitHub Pages URL to avoid CDN caching delays.
+
+### Agent Usage Rules
+
+- Use `model: "opus"` when spawning agents for any visual or complex task
+- Do NOT use agents for visual analysis of screenshots — they hallucinate about what they see
+- Agents ARE useful for: looking up paper authors via web search, writing content sections
