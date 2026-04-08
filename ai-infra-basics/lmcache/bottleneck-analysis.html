@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LMCache Bottleneck Analysis — wait_for_save Deep Dive</title>
+<title>LMCache Experiment Report — JPS Sweep, Per-Turn Analysis & Bottleneck Deep Dive</title>
 <style>
 :root {
   --bg-dark: #090d0a;
@@ -355,6 +355,69 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 .bar-value {
   min-width: 80px; font-size: 0.82rem; color: var(--text-secondary);
 }
+
+/* Heatmap table */
+.heatmap td { text-align: center; font-weight: 600; font-size: 0.82rem; }
+.heatmap .h1 { background: rgba(254,240,217,0.15); color: #fef0d9; }
+.heatmap .h2 { background: rgba(253,204,138,0.2); color: #fdcc8a; }
+.heatmap .h3 { background: rgba(252,141,89,0.25); color: #fc8d59; }
+.heatmap .h4 { background: rgba(227,74,51,0.3); color: #e34a33; }
+.heatmap .h5 { background: rgba(179,0,0,0.35); color: #ff6b6b; }
+
+/* Line chart (CSS only) */
+.line-chart-wrap { position: relative; margin: 1.5rem 0; }
+.line-chart {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 180px; padding: 0 0 24px 40px;
+  border-left: 2px solid var(--border-color);
+  border-bottom: 2px solid var(--border-color);
+  position: relative;
+}
+.line-chart .col {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 4px; position: relative;
+}
+.line-chart .col .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  position: absolute; bottom: 0;
+}
+.line-chart .col .x-label {
+  position: absolute; bottom: -22px;
+  font-size: 0.72rem; color: var(--text-muted);
+}
+.line-chart .y-axis {
+  position: absolute; left: 0; bottom: 24px; top: 0;
+  display: flex; flex-direction: column-reverse; justify-content: space-between;
+  font-size: 0.68rem; color: var(--text-muted); width: 36px; text-align: right; padding-right: 6px;
+}
+
+/* Stacked column chart */
+.col-chart {
+  display: flex; align-items: flex-end; gap: 8px;
+  height: 200px; padding-bottom: 24px;
+  margin: 1rem 0;
+}
+.col-chart .col-bar {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  position: relative;
+}
+.col-chart .col-bar .bar-seg {
+  width: 100%; max-width: 60px; border-radius: 4px 4px 0 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.72rem; font-weight: 600; color: #fff;
+}
+.col-chart .col-bar .col-label {
+  font-size: 0.72rem; color: var(--text-muted);
+  margin-top: 4px; text-align: center; white-space: nowrap;
+}
+
+/* Legend */
+.legend {
+  display: flex; gap: 1.5rem; margin: 0.5rem 0 1rem; font-size: 0.82rem;
+  flex-wrap: wrap;
+}
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -364,10 +427,11 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
   <ul>
     <li><a href="../index.html">&larr; AI Infra</a></li>
     <li><a href="index.html">LMCache</a></li>
-    <li><a href="#motivation">Motivation</a></li>
-    <li><a href="#hypothesis">Hypothesis</a></li>
-    <li><a href="#design">Design</a></li>
-    <li><a href="#results">Results</a></li>
+    <li><a href="#context">Context</a></li>
+    <li><a href="#jps-sweep">JPS Sweep</a></li>
+    <li><a href="#per-turn">Per-Turn</a></li>
+    <li><a href="#starvation">Starvation</a></li>
+    <li><a href="#motivation">Bottleneck</a></li>
     <li><a href="#findings">Findings</a></li>
     <li><a href="#model">Model</a></li>
     <li><a href="#future">Future</a></li>
@@ -381,12 +445,12 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Hero -->
 <header class="hero">
   <h1><span class="i18n"
-    data-en="LMCache Bottleneck Analysis"
-    data-zh="LMCache 瓶頸分析">LMCache Bottleneck Analysis</span></h1>
+    data-en="FCFS vs LMCache vs Continuum — Full Experiment Report"
+    data-zh="FCFS vs LMCache vs Continuum — 完整實驗報告">FCFS vs LMCache vs Continuum — Full Experiment Report</span></h1>
   <p class="subtitle">
     <span class="i18n"
-      data-en="Why LMCache is slower than FCFS on large-VRAM GPUs — a systematic ablation study falsifying the sync hypothesis and identifying wait_for_save as the true bottleneck"
-      data-zh="為什麼 LMCache 在大 VRAM GPU 上比 FCFS 更慢 — 一項系統化消融研究，否定了同步假說並確認 wait_for_save 為真正瓶頸">Why LMCache is slower than FCFS on large-VRAM GPUs — a systematic ablation study falsifying the sync hypothesis and identifying wait_for_save as the true bottleneck</span>
+      data-en="Three-way KV cache strategy comparison across 4 GPUs, per-turn latency analysis, cache starvation measurement, and a deep-dive bottleneck ablation identifying wait_for_save as LMCache's true overhead"
+      data-zh="跨 4 種 GPU 的三方 KV cache 策略對比、每輪延遲分析、快取飢餓測量，以及深度瓶頸消融研究確認 wait_for_save 為 LMCache 的真正開銷">Three-way KV cache strategy comparison across 4 GPUs, per-turn latency analysis, cache starvation measurement, and a deep-dive bottleneck ablation identifying wait_for_save as LMCache's true overhead</span>
   </p>
   <div class="hero-badges">
     <span class="hero-badge">Llama-3.1-8B-Instruct</span>
@@ -400,14 +464,499 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <div class="container">
 
 <!-- ================================================================== -->
-<!-- Section 1: Motivation -->
+<!-- Section 0: Experiment Context & KV Budget -->
 <!-- ================================================================== -->
-<section id="motivation">
-<h2><span class="sec-num">1</span> <span class="i18n" data-en="Motivation" data-zh="動機">Motivation</span></h2>
+<section id="context">
+<h2><span class="sec-num">1</span> <span class="i18n" data-en="Experiment Context" data-zh="實驗背景">Experiment Context</span></h2>
 
 <p><span class="i18n"
-  data-en="Prior controlled-sweep experiments established two key findings about multi-turn agent serving with the vllm-continuum system:"
-  data-zh="先前的控制掃描實驗對 vllm-continuum 系統的多輪 agent serving 建立了兩個關鍵發現：">Prior controlled-sweep experiments established two key findings about multi-turn agent serving with the vllm-continuum system:</span></p>
+  data-en="This report covers a series of controlled experiments comparing three KV cache management strategies for multi-turn LLM agent serving, conducted on the Georgia Tech PACE cluster and a local RTX 5090 lab."
+  data-zh="本報告涵蓋一系列控制實驗，比較三種 KV cache 管理策略用於多輪 LLM agent serving，在 Georgia Tech PACE 叢集和本地 RTX 5090 實驗室上進行。">This report covers a series of controlled experiments comparing three KV cache management strategies for multi-turn LLM agent serving, conducted on the Georgia Tech PACE cluster and a local RTX 5090 lab.</span></p>
+
+<h3><span class="i18n" data-en="Three Strategies" data-zh="三種策略">Three Strategies</span></h3>
+
+<div class="grid-3">
+  <div class="card" style="border-left:4px solid var(--accent-blue);text-align:center">
+    <h4 style="color:var(--accent-blue)">FCFS</h4>
+    <p style="font-size:0.82rem"><span class="i18n"
+      data-en="<strong>Recompute</strong> — baseline vLLM. Evicted KV blocks are recomputed from scratch on next request."
+      data-zh="<strong>重新計算</strong> — 基線 vLLM。被驅逐的 KV 區塊在下次請求時從頭重新計算。"><strong>Recompute</strong> — baseline vLLM. Evicted KV blocks are recomputed from scratch on next request.</span></p>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-green);text-align:center">
+    <h4 style="color:var(--accent-green)">LMCache</h4>
+    <p style="font-size:0.82rem"><span class="i18n"
+      data-en="<strong>DRAM Offload</strong> — evicted KV blocks are saved to CPU DRAM, reloaded on hit. (lmcache 0.3.7)"
+      data-zh="<strong>DRAM Offload</strong> — 被驅逐的 KV 區塊保存到 CPU DRAM，命中時重新載入。（lmcache 0.3.7）"><strong>DRAM Offload</strong> — evicted KV blocks are saved to CPU DRAM, reloaded on hit. (lmcache 0.3.7)</span></p>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-teal);text-align:center">
+    <h4 style="color:var(--accent-teal)">Continuum</h4>
+    <p style="font-size:0.82rem"><span class="i18n"
+      data-en="<strong>VRAM Pin</strong> — KV blocks for active agent jobs are pinned in GPU VRAM, never evicted during tool-call gaps."
+      data-zh="<strong>VRAM Pin</strong> — 活躍 agent 任務的 KV 區塊被釘在 GPU VRAM 中，工具呼叫間隔期間不被驅逐。"><strong>VRAM Pin</strong> — KV blocks for active agent jobs are pinned in GPU VRAM, never evicted during tool-call gaps.</span></p>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="KV Cache Budget by GPU" data-zh="各 GPU 的 KV Cache 預算">KV Cache Budget by GPU</span></h3>
+
+<p><span class="i18n"
+  data-en="Llama 3.1 8B (bf16): model weights ≈ 15 GB, block size = 2 MiB/block, 16 tokens/block."
+  data-zh="Llama 3.1 8B (bf16)：模型權重 ≈ 15 GB，區塊大小 = 2 MiB/block，16 tokens/block。">Llama 3.1 8B (bf16): model weights ≈ 15 GB, block size = 2 MiB/block, 16 tokens/block.</span></p>
+
+<table>
+  <tr>
+    <th>GPU</th>
+    <th>VRAM</th>
+    <th><span class="i18n" data-en="KV Blocks (est.)" data-zh="KV 區塊數（估計）">KV Blocks (est.)</span></th>
+    <th><span class="i18n" data-en="Token Capacity" data-zh="Token 容量">Token Capacity</span></th>
+    <th><span class="i18n" data-en="Target JPS" data-zh="目標 JPS">Target JPS</span></th>
+  </tr>
+  <tr><td>RTX 6000</td><td>24 GB</td><td>~3,000</td><td>~48K</td><td>8–12</td></tr>
+  <tr><td>RTX 5090</td><td>32 GB</td><td>~5,400</td><td>~86K</td><td>8–10</td></tr>
+  <tr><td>A100</td><td>40 GB</td><td>~9,000</td><td>~144K</td><td>25–40</td></tr>
+  <tr><td>L40S</td><td>48 GB</td><td>~13,000</td><td>~208K</td><td>15–25</td></tr>
+  <tr><td>H100</td><td>80 GB</td><td>~27,000</td><td>~434K</td><td>40–50</td></tr>
+  <tr><td>H200</td><td>141 GB</td><td>~54,000</td><td>~868K</td><td>80–100</td></tr>
+</table>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="When does Continuum help?" data-zh="Continuum 何時有幫助？">When does Continuum help?</span></div>
+  <p><span class="i18n"
+    data-en="KV cache must be >90% utilized for pin to matter. At lower utilization, vLLM's prefix caching (hash-based block reuse from the free queue) already provides most of the benefit. The target JPS column shows the load level needed to saturate each GPU."
+    data-zh="KV cache 使用率必須 >90% 才能讓 pin 發揮作用。在較低使用率下，vLLM 的 prefix caching（基於雜湊的空閒佇列區塊重用）已經提供大部分好處。目標 JPS 欄顯示飽和各 GPU 所需的負載水準。">KV cache must be >90% utilized for pin to matter. At lower utilization, vLLM's prefix caching (hash-based block reuse from the free queue) already provides most of the benefit. The target JPS column shows the load level needed to saturate each GPU.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="Benchmark Configuration" data-zh="基準測試配置">Benchmark Configuration</span></h3>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th>
+    <th><span class="i18n" data-en="Value" data-zh="值">Value</span></th>
+  </tr>
+  <tr><td><span class="i18n" data-en="Model" data-zh="模型">Model</span></td><td>Llama-3.1-8B-Instruct (bf16)</td></tr>
+  <tr><td><span class="i18n" data-en="Arrival process" data-zh="到達過程">Arrival process</span></td><td>Poisson</td></tr>
+  <tr><td><span class="i18n" data-en="Turns per job" data-zh="每任務輪數">Turns per job</span></td><td>8</td></tr>
+  <tr><td><span class="i18n" data-en="Tokens per job" data-zh="每任務 Tokens">Tokens per job</span></td><td>~2,915</td></tr>
+  <tr><td><span class="i18n" data-en="Tool execution time" data-zh="工具執行時間">Tool execution time</span></td><td><span class="i18n" data-en="0.5–1.0s variable" data-zh="0.5–1.0s 可變">0.5–1.0s variable</span></td></tr>
+  <tr><td><span class="i18n" data-en="Duration" data-zh="運行時長">Duration</span></td><td>90s</td></tr>
+  <tr><td><span class="i18n" data-en="Warmup" data-zh="預熱">Warmup</span></td><td><span class="i18n" data-en="3 dummy requests (FlexAttention JIT)" data-zh="3 個虛擬請求（FlexAttention JIT）">3 dummy requests (FlexAttention JIT)</span></td></tr>
+</table>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 2: Three-Way JPS Sweep -->
+<!-- ================================================================== -->
+<section id="jps-sweep">
+<h2><span class="sec-num">2</span> <span class="i18n" data-en="Three-Way JPS Sweep" data-zh="三方 JPS 掃描">Three-Way JPS Sweep</span></h2>
+
+<p><span class="i18n"
+  data-en="The core experiment: FCFS vs LMCache vs Continuum across three GPUs at increasing load (JPS = Jobs Per Second). Each cell shows average job completion time."
+  data-zh="核心實驗：在三種 GPU 上以遞增負載（JPS = 每秒任務數）比較 FCFS vs LMCache vs Continuum。每個單元格顯示平均任務完成時間。">The core experiment: FCFS vs LMCache vs Continuum across three GPUs at increasing load (JPS = Jobs Per Second). Each cell shows average job completion time.</span></p>
+
+<!-- RTX 6000 -->
+<h3>RTX 6000 (24 GB)</h3>
+
+<table>
+  <tr>
+    <th>JPS</th>
+    <th style="color:var(--accent-blue)">FCFS</th>
+    <th style="color:var(--accent-green)">LMCache</th>
+    <th style="color:var(--accent-teal)">Continuum</th>
+    <th><span class="i18n" data-en="Winner" data-zh="勝出">Winner</span></th>
+  </tr>
+  <tr><td>1.0</td><td>11.0s</td><td>10.3s</td><td style="color:var(--accent-teal);font-weight:700">8.7s (−16%)</td><td style="color:var(--accent-teal)">Continuum</td></tr>
+  <tr><td>2.0</td><td>10.3s</td><td>9.4s</td><td>11.4s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>5.0</td><td>42.8s</td><td style="color:var(--accent-green);font-weight:700">23.1s (−46%)</td><td>51.6s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>8.0</td><td>155.9s</td><td>116.2s</td><td>116.7s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>12.0</td><td>263.9s</td><td>233.5s</td><td style="color:var(--accent-teal);font-weight:700">188.3s (−19%)</td><td style="color:var(--accent-teal)">Continuum</td></tr>
+</table>
+
+<!-- A100 -->
+<h3>A100 (40 GB)</h3>
+
+<table>
+  <tr>
+    <th>JPS</th>
+    <th style="color:var(--accent-blue)">FCFS</th>
+    <th style="color:var(--accent-green)">LMCache</th>
+    <th style="color:var(--accent-teal)">Continuum</th>
+    <th><span class="i18n" data-en="Winner" data-zh="勝出">Winner</span></th>
+  </tr>
+  <tr><td>2.0</td><td>7.1s</td><td>7.1s</td><td>7.0s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>5.0</td><td>9.2s</td><td>9.2s</td><td>8.4s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>10.0</td><td>20.7s</td><td style="color:var(--accent-green);font-weight:700">9.8s (−51%)</td><td>19.9s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>15.0</td><td>47.7s</td><td style="color:var(--accent-green);font-weight:700">16.6s (−63%)</td><td>44.5s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>25.0</td><td>101.6s</td><td style="color:var(--accent-green);font-weight:700">49.4s (−46%)</td><td>90.7s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>40.0</td><td>176.4s</td><td style="color:var(--accent-green);font-weight:700">87.4s (−41%)</td><td>148.7s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+</table>
+
+<!-- L40S -->
+<h3>L40S (48 GB)</h3>
+
+<table>
+  <tr>
+    <th>JPS</th>
+    <th style="color:var(--accent-blue)">FCFS</th>
+    <th style="color:var(--accent-green)">LMCache</th>
+    <th style="color:var(--accent-teal)">Continuum</th>
+    <th><span class="i18n" data-en="Winner" data-zh="勝出">Winner</span></th>
+  </tr>
+  <tr><td>2.0</td><td>9.4s</td><td>9.2s</td><td>9.2s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>5.0</td><td>11.3s</td><td>10.9s</td><td>11.5s</td><td style="color:var(--text-muted)">Tie</td></tr>
+  <tr><td>10.0</td><td>22.6s</td><td style="color:var(--accent-green);font-weight:700">12.8s (−40%)</td><td>21.4s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>15.0</td><td>47.1s</td><td style="color:var(--accent-green);font-weight:700">18.9s (−55%)</td><td>42.2s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+  <tr><td>25.0</td><td>94.7s</td><td style="color:var(--accent-green);font-weight:700">46.0s (−46%)</td><td>85.9s</td><td style="color:var(--accent-green)">LMCache</td></tr>
+</table>
+
+<!-- Speedup visual summary -->
+<h3><span class="i18n" data-en="Speedup over FCFS — Visual Summary" data-zh="相對 FCFS 的加速 — 視覺摘要">Speedup over FCFS — Visual Summary</span></h3>
+
+<div class="legend">
+  <div class="item"><div class="swatch" style="background:var(--accent-green)"></div> LMCache</div>
+  <div class="item"><div class="swatch" style="background:var(--accent-teal)"></div> Continuum</div>
+</div>
+
+<h4>A100 — LMCache <span class="i18n" data-en="Improvement %" data-zh="改善 %">Improvement %</span></h4>
+<div class="bar-chart">
+  <div class="bar-row">
+    <div class="bar-label">JPS=10</div>
+    <div class="bar-track"><div class="bar-fill" style="width:51%;background:var(--accent-green)">−51%</div></div>
+    <div class="bar-value">9.8s vs 20.7s</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">JPS=15</div>
+    <div class="bar-track"><div class="bar-fill" style="width:63%;background:var(--accent-green)">−63%</div></div>
+    <div class="bar-value">16.6s vs 47.7s</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">JPS=25</div>
+    <div class="bar-track"><div class="bar-fill" style="width:46%;background:var(--accent-green)">−46%</div></div>
+    <div class="bar-value">49.4s vs 101.6s</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">JPS=40</div>
+    <div class="bar-track"><div class="bar-fill" style="width:41%;background:var(--accent-green)">−41%</div></div>
+    <div class="bar-value">87.4s vs 176.4s</div>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="Key Takeaways" data-zh="關鍵結論">Key Takeaways</span></h3>
+
+<div class="card" style="border-left:4px solid var(--accent-green)">
+  <div class="card-header" style="color:var(--accent-green)">
+    <span class="i18n" data-en="LMCache dominates on ≥40 GB GPUs under high load" data-zh="LMCache 在 ≥40 GB GPU 高負載下佔主導">LMCache dominates on ≥40 GB GPUs under high load</span>
+  </div>
+  <p><span class="i18n"
+    data-en="40–63% faster than FCFS at JPS≥10 on A100 and L40S. DRAM offload avoids recomputation entirely; the CPU-GPU transfer cost is much lower than recomputing prefill from scratch."
+    data-zh="在 A100 和 L40S 上 JPS≥10 時比 FCFS 快 40–63%。DRAM offload 完全避免重新計算；CPU-GPU 傳輸成本遠低於從頭重新計算 prefill。">40–63% faster than FCFS at JPS≥10 on A100 and L40S. DRAM offload avoids recomputation entirely; the CPU-GPU transfer cost is much lower than recomputing prefill from scratch.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-teal)">
+  <div class="card-header" style="color:var(--accent-teal)">
+    <span class="i18n" data-en="Continuum helps only on small GPUs at extreme load" data-zh="Continuum 僅在小型 GPU 極端負載下有幫助">Continuum helps only on small GPUs at extreme load</span>
+  </div>
+  <p><span class="i18n"
+    data-en="On RTX 6000 (24 GB): −16% at JPS=1, −19% at JPS=12. On A100/L40S: no benefit — with abundant KV cache, vLLM's prefix caching already handles reuse; pinning adds no value and may reduce scheduling flexibility."
+    data-zh="在 RTX 6000（24 GB）上：JPS=1 時 −16%、JPS=12 時 −19%。在 A100/L40S 上：無益 — KV cache 充足時，vLLM 的 prefix caching 已處理重用；釘住不增加價值且可能降低排程靈活性。">On RTX 6000 (24 GB): −16% at JPS=1, −19% at JPS=12. On A100/L40S: no benefit — with abundant KV cache, vLLM's prefix caching already handles reuse; pinning adds no value and may reduce scheduling flexibility.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-blue)">
+  <div class="card-header" style="color:var(--accent-blue)">
+    <span class="i18n" data-en="Low load (JPS≤5) shows no differentiation" data-zh="低負載（JPS≤5）無差異">Low load (JPS≤5) shows no differentiation</span>
+  </div>
+  <p><span class="i18n"
+    data-en="All three strategies perform similarly because KV cache pressure is below 50%. Few blocks get evicted, and prefix caching handles the rest."
+    data-zh="三種策略表現相似，因為 KV cache 壓力低於 50%。很少區塊被驅逐，prefix caching 處理其餘部分。">All three strategies perform similarly because KV cache pressure is below 50%. Few blocks get evicted, and prefix caching handles the rest.</span></p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 3: Per-Turn Latency Analysis -->
+<!-- ================================================================== -->
+<section id="per-turn">
+<h2><span class="sec-num">3</span> <span class="i18n" data-en="Per-Turn Latency Analysis" data-zh="每輪延遲分析">Per-Turn Latency Analysis</span></h2>
+
+<p><span class="i18n"
+  data-en="Breaking down latency by turn reveals where each strategy wins or loses. Turn 1 is particularly interesting — it shows new job admission delay (how long jobs wait before getting their first token)."
+  data-zh="按輪次分解延遲揭示每種策略在哪裡勝出或失敗。第 1 輪特別有趣 — 它顯示新任務准入延遲（任務在獲得第一個 token 之前等待多久）。">Breaking down latency by turn reveals where each strategy wins or loses. Turn 1 is particularly interesting — it shows new job admission delay (how long jobs wait before getting their first token).</span></p>
+
+<h3><span class="i18n" data-en="Per-Turn Latency Heatmap" data-zh="每輪延遲熱力圖">Per-Turn Latency Heatmap</span></h3>
+
+<p><span class="i18n"
+  data-en="Values in seconds. Darker red = slower. Note the Turn 1 explosion for Continuum at high JPS."
+  data-zh="值為秒。越深紅 = 越慢。注意 Continuum 在高 JPS 下的第 1 輪爆炸。">Values in seconds. Darker red = slower. Note the Turn 1 explosion for Continuum at high JPS.</span></p>
+
+<!-- A100 JPS=15 Heatmap -->
+<h4>A100 — JPS=15</h4>
+<table class="heatmap">
+  <tr><th></th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th><th>T6</th><th>T7</th><th>T8</th></tr>
+  <tr><td style="color:var(--accent-blue);font-weight:600">FCFS</td>
+    <td class="h1">4.3</td><td class="h1">3.7</td><td class="h1">3.2</td><td class="h1">4.2</td><td class="h1">3.8</td><td class="h1">3.5</td><td class="h2">11.8</td><td class="h1">4.9</td></tr>
+  <tr><td style="color:var(--accent-green);font-weight:600">LMCache</td>
+    <td class="h1">1.4</td><td class="h1">0.6</td><td class="h1">1.6</td><td class="h1">1.0</td><td class="h1">0.9</td><td class="h1">0.7</td><td class="h1">4.2</td><td class="h1">1.3</td></tr>
+  <tr><td style="color:var(--accent-teal);font-weight:600">Continuum</td>
+    <td class="h3">17.1</td><td class="h1">1.4</td><td class="h1">1.5</td><td class="h1">2.6</td><td class="h1">2.2</td><td class="h1">1.5</td><td class="h2">7.0</td><td class="h3">14.1</td></tr>
+</table>
+
+<!-- A100 JPS=40 Heatmap -->
+<h4>A100 — JPS=40</h4>
+<table class="heatmap">
+  <tr><th></th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th><th>T6</th><th>T7</th><th>T8</th></tr>
+  <tr><td style="color:var(--accent-blue);font-weight:600">FCFS</td>
+    <td class="h2">8.1</td><td class="h1">4.3</td><td class="h2">8.8</td><td class="h2">7.3</td><td class="h2">8.2</td><td class="h2">9.1</td><td class="h4">19.8</td><td class="h4">23.1</td></tr>
+  <tr><td style="color:var(--accent-green);font-weight:600">LMCache</td>
+    <td class="h1">1.4</td><td class="h1">0.6</td><td class="h1">1.3</td><td class="h1">0.9</td><td class="h1">1.4</td><td class="h1">1.1</td><td class="h2">5.6</td><td class="h1">1.9</td></tr>
+  <tr><td style="color:var(--accent-teal);font-weight:600">Continuum</td>
+    <td class="h5">115.0</td><td class="h1">1.7</td><td class="h1">1.2</td><td class="h1">2.5</td><td class="h1">0.6</td><td class="h1">1.4</td><td class="h2">9.4</td><td class="h1">3.8</td></tr>
+</table>
+
+<!-- L40S JPS=15 Heatmap -->
+<h4>L40S — JPS=15</h4>
+<table class="heatmap">
+  <tr><th></th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th><th>T6</th><th>T7</th><th>T8</th></tr>
+  <tr><td style="color:var(--accent-blue);font-weight:600">FCFS</td>
+    <td class="h1">4.7</td><td class="h1">3.4</td><td class="h1">3.5</td><td class="h1">4.2</td><td class="h1">3.6</td><td class="h1">3.5</td><td class="h2">12.3</td><td class="h1">5.1</td></tr>
+  <tr><td style="color:var(--accent-green);font-weight:600">LMCache</td>
+    <td class="h1">1.3</td><td class="h1">0.7</td><td class="h1">1.6</td><td class="h1">0.9</td><td class="h1">1.0</td><td class="h1">0.8</td><td class="h1">4.9</td><td class="h1">1.4</td></tr>
+  <tr><td style="color:var(--accent-teal);font-weight:600">Continuum</td>
+    <td class="h3">14.3</td><td class="h1">1.7</td><td class="h1">1.8</td><td class="h1">3.5</td><td class="h1">1.9</td><td class="h1">1.8</td><td class="h2">9.8</td><td class="h1">5.1</td></tr>
+</table>
+
+<div class="callout danger">
+  <div class="callout-title"><span class="i18n" data-en="Turn 1 Explosion: Continuum's Critical Weakness" data-zh="第 1 輪爆炸：Continuum 的關鍵弱點">Turn 1 Explosion: Continuum's Critical Weakness</span></div>
+  <p><span class="i18n"
+    data-en="At A100 JPS=40, Continuum's Turn 1 latency is <strong style='color:var(--accent-red)'>115.0 seconds</strong> — meaning new jobs wait nearly 2 minutes before starting. Pinned KV blocks for existing jobs starve new admissions. LMCache Turn 1 is only 1.4s because DRAM offload frees GPU blocks without losing data."
+    data-zh="在 A100 JPS=40 時，Continuum 的第 1 輪延遲為 <strong style='color:var(--accent-red)'>115.0 秒</strong> — 意味著新任務在開始前等待近 2 分鐘。現有任務的釘住 KV 區塊使新准入餓死。LMCache 第 1 輪僅 1.4 秒，因為 DRAM offload 在不丟失數據的情況下釋放 GPU 區塊。">At A100 JPS=40, Continuum's Turn 1 latency is <strong style="color:var(--accent-red)">115.0 seconds</strong> — meaning new jobs wait nearly 2 minutes before starting. Pinned KV blocks for existing jobs starve new admissions. LMCache Turn 1 is only 1.4s because DRAM offload frees GPU blocks without losing data.</span></p>
+</div>
+
+<!-- Turn 1 vs JPS bar chart -->
+<h3><span class="i18n" data-en="Turn 1 Admission Delay vs JPS (A100)" data-zh="第 1 輪准入延遲 vs JPS（A100）">Turn 1 Admission Delay vs JPS (A100)</span></h3>
+
+<div class="legend">
+  <div class="item"><div class="swatch" style="background:var(--accent-blue)"></div> FCFS</div>
+  <div class="item"><div class="swatch" style="background:var(--accent-green)"></div> LMCache</div>
+  <div class="item"><div class="swatch" style="background:var(--accent-teal)"></div> Continuum</div>
+</div>
+
+<div class="bar-chart">
+  <div class="bar-row">
+    <div class="bar-label">JPS=2</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width:3%;background:var(--accent-blue)"></div>
+    </div>
+    <div class="bar-value" style="font-size:0.75rem">FCFS 2.3s | LM 2.1s | Cont 2.4s</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">JPS=15</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width:15%;background:var(--accent-teal)">17.1s</div>
+    </div>
+    <div class="bar-value" style="font-size:0.75rem">FCFS 4.3s | LM 1.4s</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">JPS=40</div>
+    <div class="bar-track">
+      <div class="bar-fill" style="width:100%;background:var(--accent-red)">Continuum: 115.0s !!!</div>
+    </div>
+    <div class="bar-value" style="font-size:0.75rem">FCFS 8.1s | LM 1.4s</div>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="RTX 5090 Per-Turn Results (High Load, JPS=8)" data-zh="RTX 5090 每輪結果（高負載，JPS=8）">RTX 5090 Per-Turn Results (High Load, JPS=8)</span></h3>
+
+<p><span class="i18n"
+  data-en="On the small RTX 5090 (32 GB, ~5400 blocks), Continuum shows consistent improvement across all turns:"
+  data-zh="在小型 RTX 5090（32 GB，~5400 區塊）上，Continuum 在所有輪次上顯示一致的改善：">On the small RTX 5090 (32 GB, ~5400 blocks), Continuum shows consistent improvement across all turns:</span></p>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Turn" data-zh="輪次">Turn</span></th>
+    <th><span class="i18n" data-en="Prompt Tokens" data-zh="Prompt Tokens">Prompt Tokens</span></th>
+    <th style="color:var(--accent-blue)">FCFS</th>
+    <th style="color:var(--accent-teal)">Continuum</th>
+    <th><span class="i18n" data-en="Improvement" data-zh="改善">Improvement</span></th>
+  </tr>
+  <tr><td>1</td><td>92</td><td>1,263ms</td><td>1,051ms</td><td style="color:var(--accent-green)">−16.8%</td></tr>
+  <tr><td>2</td><td>469</td><td>735ms</td><td>519ms</td><td style="color:var(--accent-green);font-weight:700">−29.4%</td></tr>
+  <tr><td>3</td><td>811</td><td>574ms</td><td>479ms</td><td style="color:var(--accent-green)">−16.6%</td></tr>
+  <tr><td>4</td><td>1,343</td><td>1,005ms</td><td>841ms</td><td style="color:var(--accent-green)">−16.3%</td></tr>
+  <tr><td>5</td><td>1,655</td><td>749ms</td><td>652ms</td><td style="color:var(--accent-green)">−12.9%</td></tr>
+  <tr><td>6</td><td>2,241</td><td>641ms</td><td>539ms</td><td style="color:var(--accent-green)">−15.9%</td></tr>
+  <tr><td>7</td><td>2,665</td><td>3,732ms</td><td>3,212ms</td><td style="color:var(--accent-green)">−13.9%</td></tr>
+  <tr><td>8</td><td>2,915</td><td>1,236ms</td><td>1,034ms</td><td style="color:var(--accent-green)">−16.3%</td></tr>
+</table>
+
+<div class="callout success">
+  <div class="callout-title"><span class="i18n" data-en="Turn 2: Maximum Pin Benefit" data-zh="第 2 輪：最大 Pin 收益">Turn 2: Maximum Pin Benefit</span></div>
+  <p><span class="i18n"
+    data-en="Turn 2 shows the largest improvement (−29.4%) because it's the first turn that benefits from KV pin — the Turn 1 prefix is guaranteed to still be in VRAM. Under FCFS, it may have been evicted by another job during the tool-call gap."
+    data-zh="第 2 輪顯示最大改善（−29.4%），因為它是第一個受益於 KV pin 的輪次 — 第 1 輪的前綴保證仍在 VRAM 中。在 FCFS 下，它可能在工具呼叫間隔期間被其他任務驅逐。">Turn 2 shows the largest improvement (−29.4%) because it's the first turn that benefits from KV pin — the Turn 1 prefix is guaranteed to still be in VRAM. Under FCFS, it may have been evicted by another job during the tool-call gap.</span></p>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 4: Cache Starvation Analysis -->
+<!-- ================================================================== -->
+<section id="starvation">
+<h2><span class="sec-num">4</span> <span class="i18n" data-en="Cache Starvation Analysis" data-zh="快取飢餓分析">Cache Starvation Analysis</span></h2>
+
+<p><span class="i18n"
+  data-en="As KV cache fills up over a benchmark run, later-arriving jobs face longer wait times. The starvation ratio (late 20% avg / early 20% avg) measures how much performance degrades over time."
+  data-zh="隨著基準測試運行中 KV cache 被填滿，較晚到達的任務面臨更長的等待時間。飢餓比率（後 20% 平均 / 前 20% 平均）衡量效能隨時間退化的程度。">As KV cache fills up over a benchmark run, later-arriving jobs face longer wait times. The starvation ratio (late 20% avg / early 20% avg) measures how much performance degrades over time.</span></p>
+
+<h3><span class="i18n" data-en="Job Duration by Arrival Quintile — A100, JPS=40" data-zh="按到達五分位的任務持續時間 — A100, JPS=40">Job Duration by Arrival Quintile — A100, JPS=40</span></h3>
+
+<div class="grid-3">
+  <!-- FCFS quintiles -->
+  <div class="card" style="text-align:center">
+    <h4 style="color:var(--accent-blue)">FCFS</h4>
+    <div style="display:flex;align-items:flex-end;justify-content:center;gap:4px;height:140px;padding-bottom:24px">
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">71s</div>
+        <div style="width:32px;height:28px;background:var(--accent-blue);border-radius:3px 3px 0 0;opacity:0.5"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">0-20%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">149s</div>
+        <div style="width:32px;height:60px;background:var(--accent-blue);border-radius:3px 3px 0 0;opacity:0.65"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">20-40%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">185s</div>
+        <div style="width:32px;height:74px;background:var(--accent-blue);border-radius:3px 3px 0 0;opacity:0.8"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">40-60%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">203s</div>
+        <div style="width:32px;height:82px;background:var(--accent-blue);border-radius:3px 3px 0 0;opacity:0.9"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">60-80%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--accent-red);margin-bottom:2px;font-weight:700">250s</div>
+        <div style="width:32px;height:100px;background:var(--accent-blue);border-radius:3px 3px 0 0"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">80-100%</div>
+      </div>
+    </div>
+    <p style="font-size:0.75rem;color:var(--accent-red)">3.5× <span class="i18n" data-en="starvation" data-zh="飢餓">starvation</span></p>
+  </div>
+
+  <!-- LMCache quintiles -->
+  <div class="card" style="text-align:center">
+    <h4 style="color:var(--accent-green)">LMCache</h4>
+    <div style="display:flex;align-items:flex-end;justify-content:center;gap:4px;height:140px;padding-bottom:24px">
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">75s</div>
+        <div style="width:32px;height:38px;background:var(--accent-green);border-radius:3px 3px 0 0;opacity:0.5"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">0-20%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">75s</div>
+        <div style="width:32px;height:38px;background:var(--accent-green);border-radius:3px 3px 0 0;opacity:0.65"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">20-40%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">95s</div>
+        <div style="width:32px;height:48px;background:var(--accent-green);border-radius:3px 3px 0 0;opacity:0.8"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">40-60%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">103s</div>
+        <div style="width:32px;height:52px;background:var(--accent-green);border-radius:3px 3px 0 0;opacity:0.9"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">60-80%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">197s</div>
+        <div style="width:32px;height:100px;background:var(--accent-green);border-radius:3px 3px 0 0"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">80-100%</div>
+      </div>
+    </div>
+    <p style="font-size:0.75rem;color:var(--accent-orange)">2.6× <span class="i18n" data-en="starvation" data-zh="飢餓">starvation</span></p>
+  </div>
+
+  <!-- Continuum quintiles -->
+  <div class="card" style="text-align:center">
+    <h4 style="color:var(--accent-teal)">Continuum</h4>
+    <div style="display:flex;align-items:flex-end;justify-content:center;gap:4px;height:140px;padding-bottom:24px">
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">41s</div>
+        <div style="width:32px;height:16px;background:var(--accent-teal);border-radius:3px 3px 0 0;opacity:0.5"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">0-20%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">98s</div>
+        <div style="width:32px;height:39px;background:var(--accent-teal);border-radius:3px 3px 0 0;opacity:0.65"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">20-40%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">150s</div>
+        <div style="width:32px;height:60px;background:var(--accent-teal);border-radius:3px 3px 0 0;opacity:0.8"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">40-60%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--text-muted);margin-bottom:2px">201s</div>
+        <div style="width:32px;height:80px;background:var(--accent-teal);border-radius:3px 3px 0 0;opacity:0.9"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">60-80%</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="font-size:0.65rem;color:var(--accent-red);margin-bottom:2px;font-weight:700">250s</div>
+        <div style="width:32px;height:100px;background:var(--accent-teal);border-radius:3px 3px 0 0"></div>
+        <div style="font-size:0.6rem;color:var(--text-muted);margin-top:2px">80-100%</div>
+      </div>
+    </div>
+    <p style="font-size:0.75rem;color:var(--accent-red)">6.1× <span class="i18n" data-en="starvation" data-zh="飢餓">starvation</span></p>
+  </div>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title"><span class="i18n" data-en="Starvation Ratio Comparison" data-zh="飢餓比率比較">Starvation Ratio Comparison</span></div>
+  <p><span class="i18n"
+    data-en="FCFS: 3.5× — later jobs are 3.5× slower than early jobs. LMCache: 2.6× — most stable, DRAM offload keeps admission fast. Continuum: 6.1× — worst starvation; pinning blocks for existing jobs means new jobs can't start. Continuum's early jobs are fastest (41s) but late jobs suffer the most."
+    data-zh="FCFS：3.5× — 後到的任務比早到的慢 3.5 倍。LMCache：2.6× — 最穩定，DRAM offload 保持快速准入。Continuum：6.1× — 最嚴重的飢餓；為現有任務釘住區塊意味著新任務無法開始。Continuum 的早期任務最快（41s）但晚期任務受影響最大。">FCFS: 3.5× — later jobs are 3.5× slower than early jobs. LMCache: 2.6× — most stable, DRAM offload keeps admission fast. Continuum: 6.1× — worst starvation; pinning blocks for existing jobs means new jobs can't start. Continuum's early jobs are fastest (41s) but late jobs suffer the most.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="Job Duration Over Time — A100, JPS=40" data-zh="任務持續時間隨時間變化 — A100, JPS=40">Job Duration Over Time — A100, JPS=40</span></h3>
+
+<p><span class="i18n"
+  data-en="This timeline shows how job duration evolves as the benchmark progresses (by arrival order). Rising lines indicate cache starvation."
+  data-zh="此時間線顯示基準測試進行時（按到達順序）任務持續時間如何演變。上升的線條表示快取飢餓。">This timeline shows how job duration evolves as the benchmark progresses (by arrival order). Rising lines indicate cache starvation.</span></p>
+
+<div class="card">
+  <div class="card-header"><span class="i18n" data-en="Duration Timeline (schematic from actual data)" data-zh="持續時間時間線（基於實際數據的示意圖）">Duration Timeline (schematic from actual data)</span></div>
+
+  <!-- Schematic timeline using CSS -->
+  <div style="position:relative;height:180px;margin:1rem 0;border-left:2px solid var(--border-color);border-bottom:2px solid var(--border-color);padding:0 0 0 50px">
+    <!-- Y axis labels -->
+    <div style="position:absolute;left:0;top:0;font-size:0.68rem;color:var(--text-muted)">250s</div>
+    <div style="position:absolute;left:0;top:50%;font-size:0.68rem;color:var(--text-muted)">125s</div>
+    <div style="position:absolute;left:0;bottom:0;font-size:0.68rem;color:var(--text-muted)">0s</div>
+    <!-- X axis -->
+    <div style="position:absolute;bottom:-18px;left:50px;font-size:0.68rem;color:var(--text-muted)"><span class="i18n" data-en="Early jobs" data-zh="早期任務">Early jobs</span></div>
+    <div style="position:absolute;bottom:-18px;right:0;font-size:0.68rem;color:var(--text-muted)"><span class="i18n" data-en="Late jobs" data-zh="晚期任務">Late jobs</span></div>
+
+    <!-- FCFS line (rises steeply) -->
+    <svg style="position:absolute;top:0;left:50px;right:0;height:100%;overflow:visible" viewBox="0 0 400 160" preserveAspectRatio="none">
+      <polyline points="0,120 80,100 160,72 240,48 320,24 400,0" fill="none" stroke="#3b82f6" stroke-width="3" opacity="0.8"/>
+      <polyline points="0,130 80,130 160,100 240,80 320,50 400,30" fill="none" stroke="#00e68a" stroke-width="3" opacity="0.8"/>
+      <polyline points="0,140 80,110 160,60 240,32 320,10 400,0" fill="none" stroke="#00ccb4" stroke-width="3" opacity="0.8"/>
+    </svg>
+  </div>
+
+  <div class="legend" style="margin-top:1.5rem">
+    <div class="item"><div class="swatch" style="background:var(--accent-blue)"></div> FCFS (avg 163.5s)</div>
+    <div class="item"><div class="swatch" style="background:var(--accent-green)"></div> LMCache (avg 83.3s) — <span class="i18n" data-en="flattest curve" data-zh="最平坦曲線">flattest curve</span></div>
+    <div class="item"><div class="swatch" style="background:var(--accent-teal)"></div> Continuum (avg 148.6s) — <span class="i18n" data-en="steepest rise" data-zh="最陡峭上升">steepest rise</span></div>
+  </div>
+</div>
+</section>
+
+<!-- ================================================================== -->
+<!-- Section 5: LMCache Bottleneck Deep Dive (original content, renumbered) -->
+<!-- ================================================================== -->
+<section id="motivation">
+<h2><span class="sec-num">5</span> <span class="i18n" data-en="LMCache Bottleneck Deep Dive (H200)" data-zh="LMCache 瓶頸深入分析（H200）">LMCache Bottleneck Deep Dive (H200)</span></h2>
+
+<p><span class="i18n"
+  data-en="Despite LMCache's strong performance on A100/L40S (Section 2), a separate controlled experiment on H200 (141 GB) showed LMCache was <strong>slower</strong> than FCFS. Initial nsys profiling deepened the mystery:"
+  data-zh="儘管 LMCache 在 A100/L40S 上表現強勁（第 2 節），但在 H200（141 GB）上的單獨控制實驗顯示 LMCache 比 FCFS <strong>更慢</strong>。初始 nsys 分析加深了謎團：">Despite LMCache's strong performance on A100/L40S (Section 2), a separate controlled experiment on H200 (141 GB) showed LMCache was <strong>slower</strong> than FCFS. Initial nsys profiling deepened the mystery:</span></p>
 
 <div class="grid-2">
   <div class="card" style="border-left: 4px solid var(--accent-green);">
@@ -493,7 +1042,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 2: Hypothesis -->
 <!-- ================================================================== -->
 <section id="hypothesis">
-<h2><span class="sec-num">2</span> <span class="i18n" data-en="Initial Hypothesis" data-zh="初始假說">Initial Hypothesis</span></h2>
+<h2><span class="sec-num">6</span> <span class="i18n" data-en="Initial Hypothesis" data-zh="初始假說">Initial Hypothesis</span></h2>
 
 <h3>H0: <span class="i18n" data-en="CPU-side scheduling bottleneck from torch.cuda.synchronize()" data-zh="torch.cuda.synchronize() 造成的 CPU 端排程瓶頸">CPU-side scheduling bottleneck from <code class="inline-code">torch.cuda.synchronize()</code></span></h3>
 
@@ -538,7 +1087,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 3: Experimental Design -->
 <!-- ================================================================== -->
 <section id="design">
-<h2><span class="sec-num">3</span> <span class="i18n" data-en="Experimental Design" data-zh="實驗設計">Experimental Design</span></h2>
+<h2><span class="sec-num">7</span> <span class="i18n" data-en="Ablation Experimental Design" data-zh="消融實驗設計">Ablation Experimental Design</span></h2>
 
 <h3><span class="i18n" data-en="3.1 Instrumentation" data-zh="3.1 儀器化">3.1 Instrumentation</span></h3>
 
@@ -655,7 +1204,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 4: Results -->
 <!-- ================================================================== -->
 <section id="results">
-<h2><span class="sec-num">4</span> <span class="i18n" data-en="Results" data-zh="結果">Results</span></h2>
+<h2><span class="sec-num">8</span> <span class="i18n" data-en="Ablation Results" data-zh="消融結果">Ablation Results</span></h2>
 
 <h3><span class="i18n" data-en="4.1 Wall-Clock Performance (H200)" data-zh="4.1 掛鐘效能（H200）">4.1 Wall-Clock Performance (H200)</span></h3>
 
@@ -856,7 +1405,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 5: Key Findings -->
 <!-- ================================================================== -->
 <section id="findings">
-<h2><span class="sec-num">5</span> <span class="i18n" data-en="Key Findings" data-zh="關鍵發現">Key Findings</span></h2>
+<h2><span class="sec-num">9</span> <span class="i18n" data-en="Key Findings" data-zh="關鍵發現">Key Findings</span></h2>
 
 <div class="card" style="border-left:4px solid var(--accent-red)">
   <div class="card-header" style="color:var(--accent-red)">
@@ -910,7 +1459,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 6: Revised Bottleneck Model -->
 <!-- ================================================================== -->
 <section id="model">
-<h2><span class="sec-num">6</span> <span class="i18n" data-en="Revised Bottleneck Model" data-zh="修訂後的瓶頸模型">Revised Bottleneck Model</span></h2>
+<h2><span class="sec-num">10</span> <span class="i18n" data-en="Revised Bottleneck Model" data-zh="修訂後的瓶頸模型">Revised Bottleneck Model</span></h2>
 
 <h3><span class="i18n" data-en="Original Hypothesis (FALSIFIED)" data-zh="原始假說（已否定）">Original Hypothesis (FALSIFIED)</span></h3>
 
@@ -978,7 +1527,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Section 7: Future Directions -->
 <!-- ================================================================== -->
 <section id="future">
-<h2><span class="sec-num">7</span> <span class="i18n" data-en="Future Directions" data-zh="未來方向">Future Directions</span></h2>
+<h2><span class="sec-num">11</span> <span class="i18n" data-en="Future Directions" data-zh="未來方向">Future Directions</span></h2>
 
 <div class="card" style="border-left:4px solid var(--accent-red)">
   <div class="card-header">
@@ -1035,7 +1584,7 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Code Files Reference -->
 <!-- ================================================================== -->
 <section id="files">
-<h2><span class="sec-num">8</span> <span class="i18n" data-en="Code & Data Files" data-zh="程式碼與資料檔案">Code & Data Files</span></h2>
+<h2><span class="sec-num">12</span> <span class="i18n" data-en="Code & Data Files" data-zh="程式碼與資料檔案">Code & Data Files</span></h2>
 
 <h3><span class="i18n" data-en="Code Changes" data-zh="程式碼變更">Code Changes</span></h3>
 <table>
@@ -1091,8 +1640,8 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <!-- Footer -->
 <div style="text-align:center; padding: 3rem 0 2rem; color: var(--text-muted); font-size: 0.85rem; border-top: 1px solid var(--border-color);">
   <p><span class="i18n"
-    data-en="LMCache Bottleneck Analysis | Based on BOTTLENECK_REPORT.md from vllm-continuum"
-    data-zh="LMCache 瓶頸分析 | 基於 vllm-continuum 的 BOTTLENECK_REPORT.md">LMCache Bottleneck Analysis | Based on BOTTLENECK_REPORT.md from vllm-continuum</span></p>
+    data-en="FCFS vs LMCache vs Continuum — Full Experiment Report | Based on experiments.md &amp; BOTTLENECK_REPORT.md from vllm-continuum"
+    data-zh="FCFS vs LMCache vs Continuum — 完整實驗報告 | 基於 vllm-continuum 的 experiments.md 和 BOTTLENECK_REPORT.md">FCFS vs LMCache vs Continuum — Full Experiment Report | Based on experiments.md &amp; BOTTLENECK_REPORT.md from vllm-continuum</span></p>
   <p style="margin-top: 0.3rem"><span class="i18n"
     data-en="Authors: hlin464 (Georgia Tech) | Cluster: Georgia Tech PACE"
     data-zh="作者：hlin464（Georgia Tech）| 叢集：Georgia Tech PACE">Authors: hlin464 (Georgia Tech) | Cluster: Georgia Tech PACE</span></p>
