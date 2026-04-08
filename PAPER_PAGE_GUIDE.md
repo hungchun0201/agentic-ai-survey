@@ -980,6 +980,63 @@ The correct workflow:
 
 ### Agent Usage Rules
 
-- Use `model: "opus"` when spawning agents for any visual or complex task
-- Do NOT use agents for visual analysis of screenshots — they hallucinate about what they see
-- Agents ARE useful for: looking up paper authors via web search, writing content sections
+- Use `model: "opus"` when spawning agents
+- Agents MUST have both screenshot capability AND HTML editing capability
+- Do NOT use agents for pure visual analysis — they hallucinate about what they see
+- Agents ARE useful for: looking up paper authors via web search, writing content, fixing a specific page with self-verification
+
+---
+
+## 16. Agent Self-Verification Workflow (MANDATORY for fix agents)
+
+Every agent that makes HTML changes MUST follow this workflow:
+
+### Step 1: Screenshot Before
+```bash
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+"$CHROME" --headless --disable-gpu --screenshot=/tmp/before_SLUG.png \
+  --window-size=1440,600 "file:///path/to/papers/SLUG/index.html" 2>/dev/null
+```
+Read the screenshot. Note every visual issue.
+
+### Step 2: Visual QA Checklist (check against screenshot)
+Look for these specific problems:
+- [ ] **Nav**: Is it a vertical bullet list? → `nav ul { display:flex }` missing
+- [ ] **Nav**: Is there a brand name (e.g. "Helix", "DeepSeek MLA") before "← Agentic Survey"? → Remove `.navbar` wrapper
+- [ ] **Nav**: Is "← Agentic Survey" the FIRST item?
+- [ ] **Hero background**: Is it dark purple gradient, or black/white/flat? → Check `.hero {}` CSS selector isn't scoped to `nav .hero`
+- [ ] **Title**: Is h1 visible and centered? If invisible → gradient clip-text issue, replace with `color:#fff`
+- [ ] **Title**: Is h1 appearing as a badge/pill? → Extract from badge, put in `<h1>`
+- [ ] **Badges**: More than one row? → Merge duplicate `.badges` divs
+- [ ] **Badges**: Contain institution names? → Move to affiliation `<p>`
+- [ ] **Badges**: Uppercase text? → Add `text-transform:none` to `.hero .badge`
+- [ ] **Authors**: Is there a muted-color line of author names below badges?
+- [ ] **Affiliation**: Is there an institution line below authors?
+- [ ] **Subtitle**: Is `<p class="sub">` visible below h1 and above badges?
+
+### Step 3: Fix Each Issue
+Make targeted HTML/CSS edits for each problem identified.
+
+### Step 4: Screenshot After
+Take a new screenshot of the fixed page. Read it. Confirm each issue is resolved.
+
+### Step 5: Report Back
+Return:
+- What issues were found in the before screenshot
+- What changes were made  
+- Confirmation that after screenshot shows correct result
+- The after screenshot path (so the caller can verify)
+
+### What Constitutes Correct (reference: continuum page)
+- Dark purple gradient hero background
+- White centered h1 title
+- Gray subtitle below h1
+- Row of accent-colored badges (centered)
+- Muted-color author names line
+- Darker muted affiliation line
+- Horizontal sticky nav with dark maroon background
+- "← Agentic Survey" first item, EN/ZH last
+
+### Hook: Verify Agent Took Screenshots
+The caller should check that `/tmp/before_SLUG.png` and `/tmp/after_SLUG.png` exist
+and are non-empty before accepting the agent's report as complete.
