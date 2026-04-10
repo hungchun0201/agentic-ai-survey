@@ -104,7 +104,7 @@ footer a{color:#6ec6ff}
 <nav>
   <ul>
     <li><a href="index.html">&larr; Continuum</a></li>
-    <li><a href="#motivation">Motivation</a></li>
+    <li><a href="#motivation">Background</a></li>
     <li><a href="#protocol">Protocol</a></li>
     <li><a href="#binary">Binary Effect</a></li>
     <li><a href="#per-gpu">Per-GPU</a></li>
@@ -137,28 +137,119 @@ footer a{color:#6ec6ff}
 
 <!-- ===== 1. MOTIVATION ===== -->
 <section id="motivation">
-<h2><span class="i18n" data-en="1. Motivation" data-zh="1. 動機">1. Motivation</span></h2>
+<h2><span class="i18n" data-en="1. Background & Motivation" data-zh="1. 背景與動機">1. Background & Motivation</span></h2>
+
+<h3><span class="i18n" data-en="1.1 From Static Batching to Continuous Batching" data-zh="1.1 從靜態批次到連續批次">1.1 From Static Batching to Continuous Batching</span></h3>
 
 <p><span class="i18n"
-  data-en="Continuous batching (Orca, OSDI 2022) allows mixing prefill and decode requests in the same GPU iteration. This dramatically improves throughput — but creates an interference problem that is poorly understood."
-  data-zh="連續批次處理（Orca, OSDI 2022）允許在同一 GPU 迭代中混合 prefill 和 decode 請求。這大幅提升吞吐量 — 但造成一個理解不足的干擾問題。">Continuous batching (Orca, OSDI 2022) allows mixing prefill and decode requests in the same GPU iteration. This dramatically improves throughput — but creates an interference problem that is poorly understood.</span></p>
+  data-en="A modern LLM server receives hundreds of concurrent requests whose prompt lengths and output lengths vary by orders of magnitude. How should it pack them onto a single GPU without wasting compute?"
+  data-zh="一個現代的 LLM 伺服器會同時收到上百個並發請求，其 prompt 長度和輸出長度差異達數個數量級。如何在不浪費運算資源的前提下把它們打包到同一張 GPU 上？">A modern LLM server receives hundreds of concurrent requests whose prompt lengths and output lengths vary by orders of magnitude. How should it pack them onto a single GPU without wasting compute?</span></p>
 
 <div class="grid-2">
-  <div class="card hl">
-    <h4><span class="i18n" data-en="Prefill = Compute-bound" data-zh="Prefill = 計算密集">Prefill = Compute-bound</span></h4>
-    <p><span class="i18n" data-en="Self-attention scales O(L²) with sequence length L. High arithmetic intensity. Dominates GPU compute units." data-zh="自注意力隨序列長度 L 呈 O(L²) 增長。高算術強度。佔據 GPU 計算單元。">Self-attention scales O(L²) with sequence length L. High arithmetic intensity. Dominates GPU compute units.</span></p>
+  <div class="card" style="border-left:4px solid #6c7086">
+    <h4 style="color:#8fa4c0"><span class="i18n" data-en="Static batching (the old way)" data-zh="靜態批次（舊方法）">Static batching (the old way)</span></h4>
+    <p><span class="i18n"
+      data-en="Collect N requests, pad them to the length of the longest one, run them through the model together, and return all N responses only when the slowest has finished. The GPU sits idle while short requests wait on long ones. For typical chat workloads, utilization drops below 20%."
+      data-zh="收集 N 個請求，把它們 padding 到最長那個的長度，一起送進模型，然後等最慢的跑完才一起回應。GPU 在短請求等長請求時完全閒置。在一般的 chat 流量下，使用率會掉到 20% 以下。">Collect N requests, pad them to the length of the longest one, run them through the model together, and return all N responses only when the slowest has finished. The GPU sits idle while short requests wait on long ones. For typical chat workloads, utilization drops below 20%.</span></p>
   </div>
-  <div class="card hl">
-    <h4><span class="i18n" data-en="Decode = Memory-bound" data-zh="Decode = 記憶體密集">Decode = Memory-bound</span></h4>
-    <p><span class="i18n" data-en="Each token loads the full KV cache but performs minimal computation. Low arithmetic intensity. Bottlenecked by memory bandwidth." data-zh="每個 token 載入完整 KV cache 但執行極少計算。低算術強度。受記憶體頻寬瓶頸。">Each token loads the full KV cache but performs minimal computation. Low arithmetic intensity. Bottlenecked by memory bandwidth.</span></p>
+  <div class="card" style="border-left:4px solid #2ecc71">
+    <h4 style="color:#2ecc71"><span class="i18n" data-en="Continuous batching (Orca, OSDI 2022)" data-zh="連續批次（Orca, OSDI 2022）">Continuous batching (Orca, OSDI 2022)</span></h4>
+    <p><span class="i18n"
+      data-en="Re-schedule the batch <em>at every single iteration</em> — i.e., every time the model takes one forward pass to produce the next token. Finished requests leave the batch immediately; newly-arrived requests can join the batch at the very next iteration. No padding, no stragglers. This iteration-level scheduling is the foundation of vLLM, TGI, SGLang, TensorRT-LLM, and every modern LLM serving engine."
+      data-zh="<em>在每一次迭代（iteration）</em>都重新排程整個 batch — 也就是模型每做一次 forward pass 產生下一個 token 時，都重新決定誰在 batch 裡。剛完成的請求立刻離開 batch；剛抵達的新請求可以在下一次迭代就加入 batch。沒有 padding、沒有 straggler。這種 iteration-level 排程是 vLLM、TGI、SGLang、TensorRT-LLM 以及所有現代 LLM serving engine 的基礎。">Re-schedule the batch <em>at every single iteration</em> — i.e., every time the model takes one forward pass to produce the next token. Finished requests leave the batch immediately; newly-arrived requests can join the batch at the very next iteration. No padding, no stragglers. This iteration-level scheduling is the foundation of vLLM, TGI, SGLang, TensorRT-LLM, and every modern LLM serving engine.</span></p>
   </div>
 </div>
 
-<div class="warn">
-  <strong><span class="i18n" data-en="The core question:" data-zh="核心問題：">The core question:</span></strong>
+<p><span class="i18n"
+  data-en="Why it matters: continuous batching is the reason a single H100 can serve hundreds of concurrent chat users. Compared to static batching, it delivers roughly <strong>10–20× higher throughput</strong> on realistic workloads. Every production LLM endpoint you've ever hit — ChatGPT, Claude, Gemini, open-source endpoints — uses some form of it."
+  data-zh="為什麼重要：continuous batching 是單張 H100 能同時服務數百個 chat 用戶的原因。相較於 static batching，在真實工作負載上它能帶來大約 <strong>10–20× 的吞吐量提升</strong>。你用過的每一個 production LLM endpoint — ChatGPT、Claude、Gemini、各種 open-source endpoint — 背後都是某種形式的 continuous batching。">Why it matters: continuous batching is the reason a single H100 can serve hundreds of concurrent chat users. Compared to static batching, it delivers roughly <strong>10–20× higher throughput</strong> on realistic workloads. Every production LLM endpoint you've ever hit — ChatGPT, Claude, Gemini, open-source endpoints — uses some form of it.</span></p>
+
+<h3><span class="i18n" data-en="1.2 Prefill vs Decode: Two Very Different Workloads" data-zh="1.2 Prefill vs Decode：兩種截然不同的工作負載">1.2 Prefill vs Decode: Two Very Different Workloads</span></h3>
+
+<p><span class="i18n"
+  data-en="Every LLM request has two phases that live inside the same model weights but behave completely differently on GPU hardware:"
+  data-zh="每個 LLM 請求都有兩個階段，它們共用同一組模型權重，但在 GPU 硬體上的行為完全不同：">Every LLM request has two phases that live inside the same model weights but behave completely differently on GPU hardware:</span></p>
+
+<div class="grid-2">
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Prefill — ingesting the prompt" data-zh="Prefill — 吸收 prompt">Prefill — ingesting the prompt</span></h4>
+    <p><span class="i18n"
+      data-en="The model ingests the entire prompt (say, 2048 tokens) in <strong>one</strong> forward pass. All 2048 positions flow through every layer simultaneously, and self-attention is an O(L²) matrix multiply. This is dense arithmetic — a prefill of a few thousand tokens completely saturates the tensor cores. <strong>Compute-bound.</strong>"
+      data-zh="模型在<strong>一次</strong>前向傳播中吸收整個 prompt（比方說 2048 個 token）。所有 2048 個位置同時流過每一層，self-attention 是 O(L²) 的矩陣乘法。這是密集算術 — 幾千個 token 的 prefill 就能讓 tensor core 完全飽和。<strong>計算密集（compute-bound）。</strong>">The model ingests the entire prompt (say, 2048 tokens) in <strong>one</strong> forward pass. All 2048 positions flow through every layer simultaneously, and self-attention is an O(L²) matrix multiply. This is dense arithmetic — a prefill of a few thousand tokens completely saturates the tensor cores. <strong>Compute-bound.</strong></span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Decode — generating output tokens" data-zh="Decode — 產生輸出 token">Decode — generating output tokens</span></h4>
+    <p><span class="i18n"
+      data-en="After prefill, the model generates the reply <strong>one token at a time</strong>. Each step only contributes 1 query row, but that query must attend over the entire past KV cache. The FLOPs are trivial, yet the KV cache is huge (hundreds of MB per sequence), so the GPU spends most of its time waiting on HBM reads. <strong>Memory-bandwidth-bound.</strong>"
+      data-zh="Prefill 之後，模型<strong>一次產生一個 token</strong>的回應。每一步只貢獻 1 個 query row，但這個 query 必須對整個過去的 KV cache 做 attention。算術運算量微不足道，但 KV cache 非常龐大（每條序列數百 MB），所以 GPU 大部分時間都在等 HBM 讀取。<strong>記憶體頻寬密集。</strong>">After prefill, the model generates the reply <strong>one token at a time</strong>. Each step only contributes 1 query row, but that query must attend over the entire past KV cache. The FLOPs are trivial, yet the KV cache is huge (hundreds of MB per sequence), so the GPU spends most of its time waiting on HBM reads. <strong>Memory-bandwidth-bound.</strong></span></p>
+  </div>
+</div>
+
+<div class="note">
+  <strong><span class="i18n" data-en="The opportunity continuous batching tries to exploit:" data-zh="Continuous batching 想利用的機會：">The opportunity continuous batching tries to exploit:</span></strong>
   <span class="i18n"
-    data-en="When both workloads share the same iteration, how much does prefill slow down decode? Is the interference gradual or threshold-based? Does decode recover immediately after prefill completes?"
-    data-zh="當兩種工作負載共享同一迭代時，prefill 會使 decode 慢多少？干擾是漸進的還是閾值式的？Prefill 完成後 decode 是否立即恢復？">When both workloads share the same iteration, how much does prefill slow down decode? Is the interference gradual or threshold-based? Does decode recover immediately after prefill completes?</span>
+    data-en="Prefill saturates compute but barely touches memory bandwidth. Decode saturates memory bandwidth but barely touches compute. In principle, if you run them <em>in the same iteration</em> they use orthogonal resources — you get prefill work done 'for free' while the GPU would otherwise sit idle waiting on decode's memory loads. That is the core promise. Whether it actually holds up in practice is what this page measures."
+    data-zh="Prefill 讓運算飽和但幾乎不碰記憶體頻寬。Decode 讓記憶體頻寬飽和但幾乎不碰運算。理論上，如果把它們放進<em>同一次迭代</em>裡跑，它們使用的是正交的資源 — GPU 原本在等 decode 的記憶體讀取時閒著，現在可以『順便』把 prefill 做掉。這就是核心承諾。實際跑起來是不是這回事，就是這一頁要量測的。">Prefill saturates compute but barely touches memory bandwidth. Decode saturates memory bandwidth but barely touches compute. In principle, if you run them <em>in the same iteration</em> they use orthogonal resources — you get prefill work done "for free" while the GPU would otherwise sit idle waiting on decode's memory loads. That is the core promise. Whether it actually holds up in practice is what this page measures.</span>
+</div>
+
+<h3><span class="i18n" data-en="1.3 How Prefill and Decode Share a Single Iteration" data-zh="1.3 Prefill 與 Decode 如何共享單一迭代">1.3 How Prefill and Decode Share a Single Iteration</span></h3>
+
+<p><span class="i18n"
+  data-en="To answer the question directly: <strong>yes</strong>, there is a fixed per-step token budget, and the scheduler fills it with a mix of prefill and decode work every iteration. Here is exactly what vLLM v1 does on each scheduling step:"
+  data-zh="直接回答那個問題：<strong>是的</strong>，確實有一個固定的每步 token 預算，排程器每次迭代都用 prefill 和 decode 的組合去填滿它。vLLM v1 每個排程步實際做的事如下：">To answer the question directly: <strong>yes</strong>, there is a fixed per-step token budget, and the scheduler fills it with a mix of prefill and decode work every iteration. Here is exactly what vLLM v1 does on each scheduling step:</span></p>
+
+<div class="vflow">
+  <div class="box gray">
+    <h4><span class="i18n" data-en="① The token budget is fixed at server start" data-zh="① Token 預算在伺服器啟動時就固定了">① The token budget is fixed at server start</span></h4>
+    <p><span class="i18n"
+      data-en="When vLLM launches you set <code>--max-num-batched-tokens</code>; call this budget B. Typical values: B = 2048 on small GPUs, B = 4096–8192 on H100. Every iteration is allowed to process at most B tokens through the model, total, across all requests combined."
+      data-zh="當 vLLM 啟動時你設定 <code>--max-num-batched-tokens</code>，把這個預算叫做 B。典型值：小 GPU 上 B = 2048，H100 上 B = 4096–8192。每次迭代最多只能送 B 個 token 進模型，這是所有請求加總的上限。">When vLLM launches you set <code>--max-num-batched-tokens</code>; call this budget B. Typical values: B = 2048 on small GPUs, B = 4096–8192 on H100. Every iteration is allowed to process at most B tokens through the model, total, across all requests combined.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box blue">
+    <h4><span class="i18n" data-en="② Each iteration, the scheduler fills the budget" data-zh="② 每次迭代，排程器依序填滿預算">② Each iteration, the scheduler fills the budget</span></h4>
+    <ul>
+      <li><span class="i18n"
+        data-en="Walk the running queue. For each decoding request, reserve <strong>exactly 1 token</strong> (the next token to be generated). If 128 decodes are running, that's 128 tokens out of B."
+        data-zh="掃過 running queue。為每個 decoding 請求預留<strong>恰好 1 個 token</strong>（即將要產生的下一個 token）。如果有 128 個 decode 在跑，就用掉 B 裡的 128 個。">Walk the running queue. For each decoding request, reserve <strong>exactly 1 token</strong> (the next token to be generated). If 128 decodes are running, that's 128 tokens out of B.</span></li>
+      <li><span class="i18n"
+        data-en="Walk the waiting queue. For each pending prefill request, assign up to <code>min(remaining_prompt, B − already_used)</code> tokens from its prompt. If the remaining budget is smaller than the prompt, the prompt gets <strong>chunked</strong> and the rest is processed in later iterations — this is <strong>chunked prefill</strong>, always-on in vLLM v1."
+        data-zh="掃過 waiting queue。為每個待處理的 prefill 請求分配 <code>min(剩餘 prompt, B − 已用)</code> 個 token。如果剩餘預算小於 prompt，這個 prompt 會被 <strong>chunked</strong>，剩下的留到後續迭代處理 — 這就是 <strong>chunked prefill</strong>，vLLM v1 永遠開著。">Walk the waiting queue. For each pending prefill request, assign up to <code>min(remaining_prompt, B − already_used)</code> tokens from its prompt. If the remaining budget is smaller than the prompt, the prompt gets <strong>chunked</strong> and the rest is processed in later iterations — this is <strong>chunked prefill</strong>, always-on in vLLM v1.</span></li>
+      <li><span class="i18n"
+        data-en="Stop when the budget is exhausted or both queues are empty."
+        data-zh="預算用完或兩個佇列都空掉時停止。">Stop when the budget is exhausted or both queues are empty.</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4><span class="i18n" data-en="③ Flatten everything into a single tensor" data-zh="③ 把所有東西壓平成一個 tensor">③ Flatten everything into a single tensor</span></h4>
+    <p><span class="i18n"
+      data-en="The selected tokens — however many come from decode plus however many come from prefill — are concatenated into one flat 1D sequence of length ≤ B. A side array <code>cu_seqlens</code> records where each request's tokens start and end, so the attention kernel (FlashAttention / FlashInfer) knows not to let request A's tokens attend to request B's KV cache. From the model's point of view, it's just one big forward pass over a sequence of length B."
+      data-zh="被選中的 token — 不管有多少來自 decode、多少來自 prefill — 被串接成一個長度 ≤ B 的扁平 1D 序列。旁邊一個陣列 <code>cu_seqlens</code> 記錄每個請求的 token 起訖位置，這樣 attention kernel（FlashAttention / FlashInfer）才知道不要讓請求 A 的 token 去 attend 請求 B 的 KV cache。從模型的角度看，這就只是一次長度 B 的 forward pass。">The selected tokens — however many come from decode plus however many come from prefill — are concatenated into one flat 1D sequence of length ≤ B. A side array <code>cu_seqlens</code> records where each request's tokens start and end, so the attention kernel (FlashAttention / FlashInfer) knows not to let request A's tokens attend to request B's KV cache. From the model's point of view, it's just one big forward pass over a sequence of length B.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box green">
+    <h4><span class="i18n" data-en="④ One forward pass handles all of it" data-zh="④ 一次 forward pass 處理全部">④ One forward pass handles all of it</span></h4>
+    <p><span class="i18n"
+      data-en="The whole flat batch goes through every transformer layer exactly once. Every decode request emits its 1 new token. Every prefill request advances by however many of its tokens were allocated this step (the whole prompt, or just a chunk). The loop repeats. <strong>This is why prefill and decode can coexist in one iteration — they're just different rows of the same flattened batch.</strong>"
+      data-zh="整個扁平 batch 剛好通過每一層 transformer 一次。每個 decode 請求吐出 1 個新 token。每個 prefill 請求前進該步被分配到的 token 數（可能是整個 prompt，也可能只是一個 chunk）。然後迴圈重複。<strong>這就是為什麼 prefill 和 decode 能共存於一次迭代 — 它們只是同一個被壓平的 batch 裡的不同 row。</strong>">The whole flat batch goes through every transformer layer exactly once. Every decode request emits its 1 new token. Every prefill request advances by however many of its tokens were allocated this step (the whole prompt, or just a chunk). The loop repeats. <strong>This is why prefill and decode can coexist in one iteration — they're just different rows of the same flattened batch.</strong></span></p>
+  </div>
+</div>
+
+<h4><span class="i18n" data-en="Concrete example" data-zh="具體範例">Concrete example</span></h4>
+<p><span class="i18n"
+  data-en="H100, B = 8192. 32 decode requests are running, so 32 tokens are already reserved. A user sends a new request with a 2048-token prompt. Remaining budget = 8192 − 32 = 8160 ≥ 2048, so the <em>entire</em> prompt fits into this single iteration. The flat batch has shape [2080, hidden_dim] (2048 prefill rows stacked on top of 32 decode rows), one forward pass handles everything, and both the new user's first output token <em>and</em> every existing decode user's next token come out together. Total cost ≈ a prefill-dominated iteration — still small, because 2080 tokens is well below what the H100 can chew in one shot."
+  data-zh="H100，B = 8192。有 32 個 decode 請求在跑，已經用掉 32 個 token。一個新用戶送來一個 2048-token 的 prompt。剩餘預算 = 8192 − 32 = 8160 ≥ 2048，所以這個 prompt <em>整個</em>能塞進這一次迭代。扁平 batch 的形狀是 [2080, hidden_dim]（2048 個 prefill row 堆在 32 個 decode row 上面），一次 forward pass 處理全部，新用戶的第一個輸出 token 和<em>所有</em>既有 decode 用戶的下一個 token 同時出來。總成本 ≈ 一次以 prefill 為主的迭代 — 還是不大，因為 2080 個 token 對 H100 來說還是一口就能吞的量。">H100, B = 8192. 32 decode requests are running, so 32 tokens are already reserved. A user sends a new request with a 2048-token prompt. Remaining budget = 8192 − 32 = 8160 ≥ 2048, so the <em>entire</em> prompt fits into this single iteration. The flat batch has shape [2080, hidden_dim] (2048 prefill rows stacked on top of 32 decode rows), one forward pass handles everything, and both the new user's first output token <em>and</em> every existing decode user's next token come out together. Total cost ≈ a prefill-dominated iteration — still small, because 2080 tokens is well below what the H100 can chew in one shot.</span></p>
+
+<p><span class="i18n"
+  data-en="Now imagine a burst: 16 users each send a 4096-token prompt at the same moment. Total prefill demand = 65,536 tokens, but B is only 8192. The scheduler chunks it — iteration 1 takes ~8160 prefill tokens, iteration 2 takes 8160 more, and so on for roughly 8 iterations. During those 8 iterations, every decode user is stuck behind a wall of prefill compute and their per-token latency blows up. <strong>That cost — how badly decode latency spikes during a prefill burst, and how it depends on B, the GPU, and the burst size — is exactly what Sections 3–5 measure.</strong>"
+  data-zh="現在想像一個突發流量：16 個用戶同時送來 4096-token 的 prompt。Prefill 總需求 = 65,536 個 token，但 B 只有 8192。排程器把它切塊 — 第 1 次迭代拿 ~8160 個 prefill token，第 2 次再拿 8160 個，以此類推，大約要 8 次迭代才能清完。在那 8 次迭代中，每個 decode 用戶都被一堵 prefill 運算牆擋住，他們的 per-token 延遲會爆炸。<strong>這個代價 — decode 延遲在 prefill 突發下會被拉爆到什麼程度，以及它如何隨 B、GPU、突發大小變化 — 正是 Section 3–5 要量測的東西。</strong>">Now imagine a burst: 16 users each send a 4096-token prompt at the same moment. Total prefill demand = 65,536 tokens, but B is only 8192. The scheduler chunks it — iteration 1 takes ~8160 prefill tokens, iteration 2 takes 8160 more, and so on for roughly 8 iterations. During those 8 iterations, every decode user is stuck behind a wall of prefill compute and their per-token latency blows up. <strong>That cost — how badly decode latency spikes during a prefill burst, and how it depends on B, the GPU, and the burst size — is exactly what Sections 3–5 measure.</strong></span></p>
+
+<div class="warn">
+  <strong><span class="i18n" data-en="The core question this page answers:" data-zh="這頁要回答的核心問題：">The core question this page answers:</span></strong>
+  <span class="i18n"
+    data-en="When both workloads share the same iteration, how much does prefill slow down decode? Is the interference gradual (smoothly worse as prefill grows) or threshold-based (fine until some cliff, then catastrophic)? Does decode recover immediately after the prefill burst ends, or does it stay degraded?"
+    data-zh="當兩種工作負載共享同一次迭代時，prefill 到底會把 decode 拖慢多少？這個干擾是漸進的（prefill 越多越慢，平滑地變差）還是閾值式的（到某個臨界點之前都沒事，過了就災難）？Prefill 突發結束後 decode 是立刻恢復，還是會持續變慢？">When both workloads share the same iteration, how much does prefill slow down decode? Is the interference gradual (smoothly worse as prefill grows) or threshold-based (fine until some cliff, then catastrophic)? Does decode recover immediately after the prefill burst ends, or does it stay degraded?</span>
 </div>
 </section>
 
@@ -277,14 +368,28 @@ footer a{color:#6ec6ff}
   data-zh="基線 decode：~8-19ms。閾值在 ~8K 總 prefill tokens。可吸收 4×2048 僅 5% 開銷。">Baseline decode: ~8-19ms. Threshold at ~8K total prefill tokens. Can absorb 4×2048 with only 5% overhead.</span></p>
 
 <h4><span class="i18n" data-en="Interference Heatmap — H100, num_decode=32" data-zh="干擾熱力圖 — H100, num_decode=32">Interference Heatmap — H100, num_decode=32</span></h4>
+
+<p style="font-size:.88rem;color:#a0aec0"><span class="i18n"
+  data-en="<strong>How to read this table.</strong> 32 decode streams are running in the background. We then inject a burst of <code>num_prefill</code> concurrent prefill requests, each with a prompt of <code>prefill_len</code> tokens. Each cell shows how much the decode iteration time jumps (<code>Δ%</code>) relative to the pure-decode baseline (~11 ms on H100). Rows = how many prefill requests arrive at once; columns = how long each prefill prompt is. Total prefill tokens per burst = row × column. Green ≈ harmless, red ≈ catastrophic."
+  data-zh="<strong>如何讀這張表。</strong>背景有 32 條 decode 串流在跑。我們接著注入一個突發流量：<code>num_prefill</code> 個並發 prefill 請求，每個 prompt 長度是 <code>prefill_len</code> 個 token。每一格是 decode 迭代時間相對於純 decode 基線（H100 約 11 ms）的增幅（<code>Δ%</code>）。列 = 同時到達的 prefill 請求數量；欄 = 每個 prefill prompt 的 token 長度。一次突發的總 prefill token 數 = 列 × 欄。綠 ≈ 無害，紅 ≈ 災難。"><strong>How to read this table.</strong> 32 decode streams are running in the background. We then inject a burst of <code>num_prefill</code> concurrent prefill requests, each with a prompt of <code>prefill_len</code> tokens. Each cell shows how much the decode iteration time jumps (<code>Δ%</code>) relative to the pure-decode baseline (~11 ms on H100). Rows = how many prefill requests arrive at once; columns = how long each prefill prompt is. Total prefill tokens per burst = row × column. Green ≈ harmless, red ≈ catastrophic.</span></p>
+
 <table class="hm">
-  <tr><th></th><th>128</th><th>512</th><th>1024</th><th>2048</th><th>4096</th></tr>
-  <tr><td style="color:#ffb74d;font-weight:600">1×</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">~7%</td><td class="g1">~40%</td></tr>
-  <tr><td style="color:#ffb74d;font-weight:600">2×</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">~8%</td><td class="g1">~50%</td><td class="g3">~250%</td></tr>
-  <tr><td style="color:#ffb74d;font-weight:600">4×</td><td class="g0">&lt;5%</td><td class="g0">~5%</td><td class="g1">~30%</td><td class="g3">349%</td><td class="g4">710%</td></tr>
-  <tr><td style="color:#ffb74d;font-weight:600">8×</td><td class="g0">&lt;5%</td><td class="g1">~20%</td><td class="g2">~90%</td><td class="g4">580%</td><td class="g5">835%</td></tr>
-  <tr><td style="color:#ffb74d;font-weight:600">16×</td><td class="g0">~5%</td><td class="g2">~70%</td><td class="g3">~200%</td><td class="g5">660%</td><td class="g5">836%</td></tr>
+  <tr>
+    <th style="text-align:right;font-size:.72rem;color:#8fa4c0;background:rgba(var(--accent-rgb),0.05);white-space:nowrap">
+      <span class="i18n" data-en="num_prefill ↓ &nbsp; prefill_len →" data-zh="num_prefill ↓ &nbsp; prefill_len →">num_prefill ↓ &nbsp; prefill_len →</span>
+    </th>
+    <th>128</th><th>512</th><th>1024</th><th>2048</th><th>4096</th>
+  </tr>
+  <tr><td style="color:#ffb74d;font-weight:600;text-align:right">1 req</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">~7%</td><td class="g1">~40%</td></tr>
+  <tr><td style="color:#ffb74d;font-weight:600;text-align:right">2 req</td><td class="g0">&lt;5%</td><td class="g0">&lt;5%</td><td class="g0">~8%</td><td class="g1">~50%</td><td class="g3">~250%</td></tr>
+  <tr><td style="color:#ffb74d;font-weight:600;text-align:right">4 req</td><td class="g0">&lt;5%</td><td class="g0">~5%</td><td class="g1">~30%</td><td class="g3">349%</td><td class="g4">710%</td></tr>
+  <tr><td style="color:#ffb74d;font-weight:600;text-align:right">8 req</td><td class="g0">&lt;5%</td><td class="g1">~20%</td><td class="g2">~90%</td><td class="g4">580%</td><td class="g5">835%</td></tr>
+  <tr><td style="color:#ffb74d;font-weight:600;text-align:right">16 req</td><td class="g0">~5%</td><td class="g2">~70%</td><td class="g3">~200%</td><td class="g5">660%</td><td class="g5">836%</td></tr>
 </table>
+
+<p style="font-size:.85rem;color:#a0aec0;margin-top:.6rem"><span class="i18n"
+  data-en="Reading the diagonal: <code>1 req × 2048</code> = 2K total prefill tokens → +7% (negligible). <code>4 req × 2048</code> = 8K total → jumps to +349%. <code>16 req × 4096</code> = 65K total → +836%. The transition is sharp: once total prefill tokens exceed the H100's ~8K per-step budget, chunked prefill can no longer hide the work behind a single iteration, and decode latency jumps by 3–10×."
+  data-zh="看對角線：<code>1 req × 2048</code> = 2K 總 prefill token → +7%（幾乎無感）。<code>4 req × 2048</code> = 8K 總量 → 跳到 +349%。<code>16 req × 4096</code> = 65K 總量 → +836%。這個轉折很銳利：一旦總 prefill token 超過 H100 約 8K 的每步預算，chunked prefill 就沒辦法把工作藏在一次迭代裡，decode 延遲會跳 3–10 倍。">Reading the diagonal: <code>1 req × 2048</code> = 2K total prefill tokens → +7% (negligible). <code>4 req × 2048</code> = 8K total → jumps to +349%. <code>16 req × 4096</code> = 65K total → +836%. The transition is sharp: once total prefill tokens exceed the H100's ~8K per-step budget, chunked prefill can no longer hide the work behind a single iteration, and decode latency jumps by 3–10×.</span></p>
 
 <h3>4.2 H200 (Hopper+, 141 GB, 989 TFLOPS, 4267 GB/s)</h3>
 <p><span class="i18n"
