@@ -1954,6 +1954,15 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
     <td>17,764 ms ÷ 3,744</td>
     <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
   </tr>
+  <tr style="background:rgba(251,191,36,0.06)">
+    <td colspan="4" style="font-size:0.82rem;color:var(--text-secondary);padding:0.5rem 0.75rem">
+      <span class="i18n"
+        data-en="⚠ <strong>4.74 ms is a misleading weighted average</strong> of two populations: per-chunk syncs (2,962 calls × 0.59 ms = 1,742 ms, 9.5% of wfs) and per-request syncs (391 calls × 40.97 ms = 16,021 ms, 87% of wfs). The per-request syncs — one per request, outside all NVTX ranges, likely from <code>batched_from_gpu()</code> or <code>StorageManager.batched_put()</code> — dominate the total cost."
+        data-zh="⚠ <strong>4.74 ms 是兩個族群的誤導性加權平均</strong>：逐 chunk sync（2,962 次 × 0.59 ms = 1,742 ms，佔 wfs 的 9.5%）與逐請求 sync（391 次 × 40.97 ms = 16,021 ms，佔 wfs 的 87%）。逐請求 sync——每個請求一次，在所有 NVTX range 之外，可能來自 <code>batched_from_gpu()</code> 或 <code>StorageManager.batched_put()</code>——主導了總成本。">
+        ⚠ <strong>4.74 ms is a misleading weighted average</strong> of two populations: per-chunk syncs (2,962 calls × 0.59 ms = 1,742 ms, 9.5% of wfs) and per-request syncs (391 calls × 40.97 ms = 16,021 ms, 87% of wfs). The per-request syncs — one per request, outside all NVTX ranges, likely from <code>batched_from_gpu()</code> or <code>StorageManager.batched_put()</code> — dominate the total cost.
+      </span>
+    </td>
+  </tr>
   <tr style="background:rgba(239,68,68,0.08)">
     <td><strong><span class="i18n" data-en="Predicted wait_for_save (prefill)" data-zh="預測的 wait_for_save（prefill）">Predicted <code >wait_for_save</code> (prefill)</span></strong></td>
     <td style="text-align:right"><strong style="color:var(--accent-red)">113.8 ms</strong></td>
@@ -1978,9 +1987,9 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 
 <div class="warn" style="margin:1rem 0">
   <span class="i18n"
-    data-en="<strong>Mechanism summary:</strong> LMCache issues one <code >cudaMemcpyAsync</code> per KV chunk and then immediately calls <code >cudaStreamSynchronize</code> to confirm completion before proceeding to the next chunk. With ~19 chunks per prefill step, this produces ~24 round-trip kernel-mode waits (some steps have additional overhead from metadata syncs). Each wait incurs ~4.74 ms of fixed overhead regardless of how fast the GPU DMA completes — causing the CPU thread to be idle ~85% of the time inside each sync call."
-    data-zh="<strong>機制摘要：</strong>LMCache 對每個 KV chunk 發出一次 <code >cudaMemcpyAsync</code>，然後立即呼叫 <code >cudaStreamSynchronize</code> 以確認完成，再繼續處理下一個 chunk。每個 prefill step 約有 19 個 chunk，由此產生約 24 次核心態往返等待（部分 step 因 metadata sync 而有額外開銷）。每次等待產生約 4.74 ms 的固定開銷，與 GPU DMA 完成速度無關——導致 CPU 執行緒在每次 sync 呼叫期間約 85% 的時間處於閒置。">
-    <strong>Mechanism summary:</strong> LMCache issues one <code >cudaMemcpyAsync</code> per KV chunk and then immediately calls <code >cudaStreamSynchronize</code> to confirm completion before proceeding to the next chunk. With ~19 chunks per prefill step, this produces ~24 round-trip kernel-mode waits (some steps have additional overhead from metadata syncs). Each wait incurs ~4.74 ms of fixed overhead regardless of how fast the GPU DMA completes — causing the CPU thread to be idle ~85% of the time inside each sync call.
+    data-en="<strong>Root cause (definitive — previous attribution was wrong):</strong> 87% of prefill-step <code>wait_for_save</code> time (16,019 ms / 18,397 ms total) is ONE <code>cudaStreamSynchronize</code> call per prefill step that fires <em>before any KV save work begins</em>. Key facts: (1) <strong>Position:</strong> 159 expensive syncs (100.75 ms avg each), ALL occurring BEFORE the first <code>LMCacheEngine.store()</code> NVTX range in each prefill-step window. (2) <strong>Target stream:</strong> stream 7 (vLLM default/forward pass stream), NOT stream 13 (store_stream). (3) <strong>GPU activity during sync:</strong> stream 13 (store_stream) is 100% idle; stream 7 has 99.17% kernel overlap (FlashAttention + GEMM). (4) <strong>Code location:</strong> <code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — a CPU→GPU tensor allocation inside the hot loop. (5) <strong>Mechanism:</strong> PyTorch CUDA caching allocator triggers <code>cudaStreamSynchronize(default_stream)</code> during garbage collection to reclaim GPU memory, waiting for all pending forward pass kernels. (6) <strong>Evidence:</strong> the code has a TODO comment: <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>. (7) <strong>Fix:</strong> pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop. Per-chunk <code>store_stream</code> syncs (2,962 × 0.59 ms = 1,742 ms) are cheap and account for only 9.5% of wfs — they are NOT the bottleneck. The 4.74 ms weighted average quoted in the table above mixes these two populations and is misleading."
+    data-zh="<strong>根因（最終確認——先前歸因有誤）：</strong>prefill-step <code>wait_for_save</code> 時間的 87%（16,019 ms / 18,397 ms 總計）來自每個 prefill step ONE 次 <code>cudaStreamSynchronize</code> 呼叫，且此 sync 在<em>任何 KV save 工作開始前</em>就已觸發。關鍵事實：(1) <strong>位置：</strong>159 次昂貴 sync（平均每次 100.75 ms），全部發生在每個 prefill-step 視窗的第一個 <code>LMCacheEngine.store()</code> NVTX range 之前。(2) <strong>目標 stream：</strong>stream 7（vLLM 預設/forward pass stream），而非 stream 13（store_stream）。(3) <strong>sync 期間的 GPU 活動：</strong>stream 13（store_stream）100% 閒置；stream 7 的核心重疊率為 99.17%（FlashAttention + GEMM）。(4) <strong>程式碼位置：</strong><code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — 在熱路徑迴圈內的 CPU→GPU tensor 分配。(5) <strong>機制：</strong>PyTorch CUDA caching allocator 在垃圾收集以回收 GPU 記憶體時觸發 <code>cudaStreamSynchronize(default_stream)</code>，等待 default stream 上所有待處理的 forward pass 核心完成。(6) <strong>證據：</strong>程式碼中有 TODO 注釋：<code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>。(7) <strong>修復方法：</strong>在熱路徑迴圈外預先分配 <code>slot_mapping</code> GPU 緩衝區。逐 chunk store_stream sync（2,962 × 0.59 ms = 1,742 ms）成本低廉，僅佔 wfs 的 9.5%——它們不是瓶頸。上表中引用的 4.74 ms 加權平均混合了這兩個族群，具有誤導性。">
+    <strong>Root cause (definitive — previous attribution was wrong):</strong> 87% of prefill-step <code>wait_for_save</code> time (16,019 ms / 18,397 ms total) is ONE <code>cudaStreamSynchronize</code> call per prefill step that fires <em>before any KV save work begins</em>. Key facts: (1) <strong>Position:</strong> 159 expensive syncs (100.75 ms avg each), ALL occurring BEFORE the first <code>LMCacheEngine.store()</code> NVTX range in each prefill-step window. (2) <strong>Target stream:</strong> stream 7 (vLLM default/forward pass stream), NOT stream 13 (store_stream). (3) <strong>GPU activity during sync:</strong> stream 13 (store_stream) is 100% idle; stream 7 has 99.17% kernel overlap (FlashAttention + GEMM). (4) <strong>Code location:</strong> <code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — a CPU→GPU tensor allocation inside the hot loop. (5) <strong>Mechanism:</strong> PyTorch CUDA caching allocator triggers <code>cudaStreamSynchronize(default_stream)</code> during garbage collection to reclaim GPU memory, waiting for all pending forward pass kernels. (6) <strong>Evidence:</strong> the code has a TODO comment: <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>. (7) <strong>Fix:</strong> pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop. Per-chunk <code>store_stream</code> syncs (2,962 × 0.59 ms = 1,742 ms) are cheap and account for only 9.5% of wfs — they are NOT the bottleneck. The 4.74 ms weighted average quoted in the table above mixes these two populations and is misleading.
   </span>
 </div>
 
@@ -2307,11 +2316,67 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 </table>
 </div>
 
+<!-- Exp F results table -->
+<h4 style="margin:1.4rem 0 0.5rem;color:var(--text-primary)"><span class="i18n"
+  data-en="Exp F — stream.query() Guard (Negative Result)"
+  data-zh="Exp F — stream.query() 守衛（負面結果）">Exp F — <code>stream.query()</code> Guard (Negative Result)</span></h4>
+
+<p style="color:var(--text-secondary);margin-bottom:0.8rem;max-width:860px;font-size:0.9rem"><span class="i18n"
+  data-en="Following Exp D, Exp F tested adding a <code>store_stream.query()</code> guard before each <code>store_stream.synchronize()</code> in <code>gpu_connector.py</code>, so the sync is skipped when the stream is already idle. This targeted store_stream syncs (9.5% of wfs). Results were also negative: JPS=1 latency increased on both GPUs tested."
+  data-zh="繼 Exp D 之後，Exp F 測試在 <code>gpu_connector.py</code> 中每次 <code>store_stream.synchronize()</code> 之前加入 <code>store_stream.query()</code> 守衛，若 stream 已閒置則跳過 sync。此方法針對 store_stream sync（佔 wfs 9.5%）。結果同樣為負面：兩個受測 GPU 的 JPS=1 延遲皆有所增加。">Following Exp D, Exp F tested adding a <code>store_stream.query()</code> guard before each <code>store_stream.synchronize()</code> in <code>gpu_connector.py</code>, so the sync is skipped when the stream is already idle. This targeted store_stream syncs (9.5% of wfs). Results were also negative: JPS=1 latency increased on both GPUs tested.</span></p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th>GPU</th>
+    <th><span class="i18n" data-en="Config" data-zh="配置">Config</span></th>
+    <th style="text-align:right">JPS=1 avg</th>
+    <th style="text-align:right"><span class="i18n" data-en="Change" data-zh="變化">Change</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td rowspan="2"><strong>H200</strong></td>
+    <td><span class="i18n" data-en="control" data-zh="control">control</span></td>
+    <td style="text-align:right"><strong>6.86 s</strong></td>
+    <td style="text-align:right">—</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp F</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><code>stream.query()</code> guard</td>
+    <td style="text-align:right;color:var(--accent-red)">8.29 s</td>
+    <td style="text-align:right;color:var(--accent-red)"><strong>+21%</strong></td>
+  </tr>
+  <tr>
+    <td rowspan="2"><strong>A100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>27.88 s</strong></td>
+    <td style="text-align:right">—</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp F</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><code>stream.query()</code> guard</td>
+    <td style="text-align:right;color:var(--accent-red)">34.85 s</td>
+    <td style="text-align:right;color:var(--accent-red)"><strong>+25%</strong></td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="5" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Negative result: skipping store_stream syncs when idle did NOT reduce per-job latency — consistent with store_stream syncs being only 9.5% of wfs wallclock."
+      data-zh="負面結果：當 store_stream 閒置時跳過 sync 並未降低 per-job latency——與 store_stream sync 僅佔 wfs wallclock 9.5% 的事實一致。">Negative result: skipping <code>store_stream</code> syncs when idle did NOT reduce per-job latency — consistent with <code>store_stream</code> syncs being only 9.5% of wfs wallclock.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
+
 <div class="callout warn" style="margin:1rem 0">
-  <div class="callout-title"><span class="i18n" data-en="Why the simple patch failed" data-zh="為何簡單 patch 失敗">Why the simple patch failed</span></div>
+  <div class="callout-title"><span class="i18n" data-en="Why both patches (Exp D and Exp F) failed" data-zh="為何兩個 patch（Exp D 和 Exp F）都失敗">Why both patches (Exp D and Exp F) failed</span></div>
   <p style="font-size:0.9rem"><span class="i18n"
-    data-en="The <code>gpu_connector.from_gpu()</code> sync is only one of multiple synchronization points in the save chain. <code>StorageManager.batched_put()</code> (storage_manager.py:99) contains a separate <code>stream.synchronize()</code> that still fires per chunk. Removing one sync without the other creates a pipeline imbalance: the CPU races ahead through the connector layer but still blocks in the storage layer, producing no net latency reduction while adding scheduling overhead from the faster-spinning loop. <strong>Effective coalescing requires patching the entire save chain (connector + storage manager + cache engine), not just the GPU connector.</strong>"
-    data-zh="<code>gpu_connector.from_gpu()</code> 的 sync 只是 save chain 中多個同步點之一。<code>StorageManager.batched_put()</code>（storage_manager.py:99）包含另一個 <code>stream.synchronize()</code>，仍然逐 chunk 觸發。只移除其中一個 sync 而不處理另一個，會造成 pipeline 失衡：CPU 在 connector 層快速通過但仍在 storage 層阻塞，不產生淨延遲降低，反而因更快旋轉的 loop 增加排程開銷。<strong>有效的聚合需要 patch 整個 save chain（connector + storage manager + cache engine），而非僅 GPU connector。</strong>">The <code>gpu_connector.from_gpu()</code> sync is only one of multiple synchronization points in the save chain. <code>StorageManager.batched_put()</code> (<code>storage_manager.py:99</code>) contains a separate <code>stream.synchronize()</code> that still fires per chunk. Removing one sync without the other creates a pipeline imbalance: the CPU races ahead through the connector layer but still blocks in the storage layer, producing no net latency reduction while adding scheduling overhead from the faster-spinning loop. <strong>Effective coalescing requires patching the entire save chain (connector + storage manager + cache engine), not just the GPU connector.</strong></span></p>
+    data-en="Both Exp D (coalesce store_stream sync) and Exp F (stream.query() guard) targeted <code>store_stream</code> syncs — the WRONG bottleneck. store_stream syncs account for only <strong>9.5% of wfs wallclock</strong> (2,962 calls × 0.59 ms = 1,742 ms). The actual bottleneck is <strong>87% of wfs wallclock</strong> (159 calls × 100.75 ms = 16,019 ms): ONE <code>cudaStreamSynchronize</code> on the DEFAULT STREAM (stream 7) per prefill step, firing BEFORE any KV save work begins. This sync is triggered not by LMCache save logic, but by <strong>PyTorch CUDA caching allocator GC</strong> during <code>slot_mapping = slot_mapping.cuda()</code> at <code>vllm_v1_adapter.py:1055</code>. Because the GPU's forward pass kernels (FlashAttention + GEMM) are still running on stream 7 at that point, the allocator stalls for ~100 ms waiting for them to finish before it can reclaim memory. Patching store_stream sync paths has no effect on this default-stream stall. The correct fix is to pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop (as flagged by the existing <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code> comment), eliminating the per-request GPU memory allocation that triggers the allocator GC."
+    data-zh="Exp D（聚合 store_stream sync）和 Exp F（stream.query() 守衛）都針對 <code>store_stream</code> sync——這是錯誤的瓶頸。store_stream sync 僅佔 wfs wallclock 的 <strong>9.5%</strong>（2,962 次 × 0.59 ms = 1,742 ms）。實際瓶頸是 wfs wallclock 的 <strong>87%</strong>（159 次 × 100.75 ms = 16,019 ms）：每個 prefill step 在<strong>預設 stream（stream 7）</strong>上ONE 次 <code>cudaStreamSynchronize</code>，且在任何 KV save 工作開始前就已觸發。此 sync 並非由 LMCache save 邏輯觸發，而是由 <code>vllm_v1_adapter.py:1055</code> 的 <code>slot_mapping = slot_mapping.cuda()</code> 期間 <strong>PyTorch CUDA caching allocator GC</strong> 所觸發。由於 GPU 的 forward pass 核心（FlashAttention + GEMM）此時仍在 stream 7 上執行，allocator 等待約 100 ms 讓其完成後才能回收記憶體。修補 store_stream sync 路徑對此預設 stream 的停頓毫無影響。正確的修復方法是在熱路徑迴圈外預先分配 <code>slot_mapping</code> GPU 緩衝區（現有的 <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code> 注釋已指出此點），消除觸發 allocator GC 的逐請求 GPU 記憶體分配。">Both Exp D (coalesce <code>store_stream</code> sync) and Exp F (<code>stream.query()</code> guard) targeted <code>store_stream</code> syncs — the WRONG bottleneck. <code>store_stream</code> syncs account for only <strong>9.5% of wfs wallclock</strong> (2,962 calls × 0.59 ms = 1,742 ms). The actual bottleneck is <strong>87% of wfs wallclock</strong> (159 calls × 100.75 ms = 16,019 ms): ONE <code>cudaStreamSynchronize</code> on the <strong>default stream (stream 7)</strong> per prefill step, firing BEFORE any KV save work begins. This sync is triggered not by LMCache save logic, but by <strong>PyTorch CUDA caching allocator GC</strong> during <code>slot_mapping = slot_mapping.cuda()</code> at <code>vllm_v1_adapter.py:1055</code>. Because the GPU's forward pass kernels (FlashAttention + GEMM) are still running on stream 7 at that point, the allocator stalls for ~100 ms waiting for them to finish before it can reclaim memory. Patching <code>store_stream</code> sync paths has no effect on this default-stream stall. The correct fix is to pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop (as flagged by the existing <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code> comment), eliminating the per-request GPU memory allocation that triggers the allocator GC.</span></p>
 </div>
 
 <!-- ===================================================================
