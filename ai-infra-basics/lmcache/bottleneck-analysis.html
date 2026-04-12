@@ -2179,9 +2179,9 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 
 <p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
   <span class="i18n"
-    data-en="The fix is mechanical: replace the per-chunk synchronization pattern (issue async copy → synchronize → issue async copy → synchronize → …) with a coalesced pattern (issue all async copies → synchronize once). This reduces sync count from ~24 to 1 per prefill step while keeping the GPU busy continuously."
-    data-zh="修正方式是機械性的：將逐 chunk 同步模式（發出非同步複製 → 同步 → 發出非同步複製 → 同步 → ……）替換為聚合模式（發出所有非同步複製 → 同步一次）。這將每個 prefill step 的 sync 次數從約 24 次降至 1 次，同時讓 GPU 持續保持忙碌。">
-    The fix is mechanical: replace the per-chunk synchronization pattern (issue async copy → synchronize → issue async copy → synchronize → …) with a coalesced pattern (issue all async copies → synchronize once). This reduces sync count from ~24 to 1 per prefill step while keeping the GPU busy continuously.
+    data-en="The analysis above suggests coalescing ~24 per-chunk syncs into 1 per step should recover most of wait_for_save. To validate, a patch was applied to <code>gpu_connector.py:from_gpu()</code> removing the per-chunk <code>store_stream.synchronize()</code> while retaining the single sync at the end of <code>batched_from_gpu()</code>. The patch was tested on H200, H100, and A100 (Exp D: same workload as Exp A, LMCache only, JPS=1 and JPS=6, control vs patched on the same node sequentially)."
+    data-zh="上述分析顯示，將 ~24 次逐 chunk sync 合併為每 step 1 次應能回收大部分 wait_for_save。為驗證此假設，在 <code>gpu_connector.py:from_gpu()</code> 中移除逐 chunk 的 <code>store_stream.synchronize()</code>，同時保留 <code>batched_from_gpu()</code> 末尾的單次 sync。此 patch 在 H200、H100 和 A100 上測試（Exp D：與 Exp A 相同的工作負載，僅 LMCache，JPS=1 和 JPS=6，control 與 patched 在同一節點上依序執行）。">
+    The analysis above suggests coalescing ~24 per-chunk syncs into 1 per step should recover most of <code>wait_for_save</code>. To validate, a patch was applied to <code>gpu_connector.py:from_gpu()</code> removing the per-chunk <code>store_stream.synchronize()</code> while retaining the single sync at the end of <code>batched_from_gpu()</code>. The patch was tested on H200, H100, and A100.
   </span>
 </p>
 
@@ -2189,65 +2189,80 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <table>
   <thead>
   <tr>
-    <th><span class="i18n" data-en="Configuration" data-zh="配置">Configuration</span></th>
-    <th style="text-align:right"><span class="i18n" data-en="Syncs / prefill step" data-zh="每 prefill step 的 sync 次數">Syncs / prefill step</span></th>
-    <th style="text-align:right"><span class="i18n" data-en="Predicted wait_for_save (prefill)" data-zh="預測的 wait_for_save（prefill）">Predicted <code >wait_for_save</code> (prefill)</span></th>
-    <th style="text-align:right"><span class="i18n" data-en="Saving vs current" data-zh="相對現況的節省">Saving vs current</span></th>
-    <th><span class="i18n" data-en="Basis" data-zh="依據">Basis</span></th>
+    <th>GPU</th>
+    <th><span class="i18n" data-en="Config" data-zh="配置">Config</span></th>
+    <th style="text-align:right">JPS=1 avg</th>
+    <th style="text-align:right">JPS=1 jobs</th>
+    <th style="text-align:right">JPS=6 avg</th>
+    <th style="text-align:right">JPS=6 jobs</th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
   </tr>
   </thead>
   <tbody>
-  <tr style="background:rgba(239,68,68,0.06)">
-    <td><span class="i18n" data-en="Current (per-chunk sync)" data-zh="現況（逐 chunk 同步）">Current (per-chunk sync)</span></td>
-    <td style="text-align:right">~24</td>
-    <td style="text-align:right">115.71 ms</td>
-    <td style="text-align:right">—</td>
-    <td style="font-size:0.8rem;color:var(--text-muted)">measured, H200, JPS=1, Exp C</td>
+  <tr>
+    <td rowspan="2"><strong>H200</strong></td>
+    <td><span class="i18n" data-en="control (per-chunk)" data-zh="control（逐 chunk）">control</span></td>
+    <td style="text-align:right"><strong>9.03 s</strong></td>
+    <td style="text-align:right">48</td>
+    <td style="text-align:right"><strong>236.0 s</strong></td>
+    <td style="text-align:right">263</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
   </tr>
-  <tr style="background:rgba(0,230,138,0.07)">
-    <td><strong><span class="i18n" data-en="Coalesced (1 sync per step)" data-zh="聚合（每 step 1 次 sync）">Coalesced (1 sync per step)</span></strong></td>
-    <td style="text-align:right">1</td>
-    <td style="text-align:right"><strong style="color:var(--accent-green)">5.41 ms</strong></td>
-    <td style="text-align:right"><strong style="color:var(--accent-green)">−110.3 ms (−95%)</strong></td>
-    <td style="font-size:0.8rem;color:var(--text-muted)">1 × 4.74 ms + 0.674 ms DMA</td>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><span class="i18n" data-en="coalesced" data-zh="聚合">coalesced</span></td>
+    <td style="text-align:right;color:var(--accent-red)">12.40 s <strong>(+37%)</strong></td>
+    <td style="text-align:right">66</td>
+    <td style="text-align:right;color:var(--accent-red)">262.2 s (+11%)</td>
+    <td style="text-align:right">283</td>
   </tr>
   <tr>
-    <td><span class="i18n" data-en="Expected benchmark delta (H200, JPS=1)" data-zh="預期基準測試差距（H200、JPS=1）">Expected benchmark delta (H200, JPS=1)</span></td>
-    <td colspan="2" style="text-align:center">
-      <span class="i18n"
-        data-en="+2.73 s → &lt; 0.2 s per job"
-        data-zh="+2.73 s → &lt; 0.2 s 每 job">+2.73 s → &lt; 0.2 s per job</span>
-    </td>
-    <td style="text-align:right"><strong style="color:var(--accent-green)">−93%</strong></td>
-    <td style="font-size:0.8rem;color:var(--text-muted)">
-      <span class="i18n" data-en="extrapolated from step-level savings" data-zh="由 step 層級節省外推">extrapolated from step-level savings</span>
-    </td>
+    <td rowspan="2"><strong>H100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>8.92 s</strong></td>
+    <td style="text-align:right">47</td>
+    <td style="text-align:right"><strong>276.0 s</strong></td>
+    <td style="text-align:right">257</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td>coalesced</td>
+    <td style="text-align:right;color:var(--accent-red)">10.48 s <strong>(+17%)</strong></td>
+    <td style="text-align:right">55</td>
+    <td style="text-align:right;color:var(--accent-red)">283.7 s (+3%)</td>
+    <td style="text-align:right">272</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><strong>A100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>69.36 s</strong></td>
+    <td style="text-align:right">46</td>
+    <td style="text-align:right"><strong>1294.7 s</strong></td>
+    <td style="text-align:right">270</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td>coalesced</td>
+    <td style="text-align:right;color:var(--accent-red)">90.28 s <strong>(+30%)</strong></td>
+    <td style="text-align:right">48</td>
+    <td style="text-align:right;color:var(--accent-orange)">1249.0 s (−4%)</td>
+    <td style="text-align:right">264</td>
   </tr>
   </tbody>
+  <tfoot>
+  <tr><td colspan="7" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Negative result: removing per-chunk sync in gpu_connector.from_gpu() alone did NOT reduce per-job latency. At JPS=1, latency increased +17–37% across all GPUs. Total job throughput increased slightly (more jobs completed in 45s), but individual job completion time worsened."
+      data-zh="負面結果：僅移除 gpu_connector.from_gpu() 中的逐 chunk sync 並未降低 per-job latency。JPS=1 時延遲增加 +17–37%（三個 GPU 一致）。總 job 吞吐量略有提升（45s 內完成更多 job），但單一 job 的完成時間反而變長。">Negative result: removing per-chunk sync in <code>gpu_connector.from_gpu()</code> alone did NOT reduce per-job latency. At JPS=1, latency increased +17–37% across all GPUs.</span>
+  </td></tr>
+  </tfoot>
 </table>
 </div>
 
-<div class="card-grid" style="margin-top:1.5rem">
-  <div class="card">
-    <h4><span class="i18n" data-en="Why coalescing is safe" data-zh="為何聚合是安全的">Why coalescing is safe</span></h4>
-    <p style="color:var(--text-secondary);font-size:0.9rem">
-      <span class="i18n"
-        data-en="All KV chunks for a single prefill step target independent GPU memory regions. Issuing all <code >cudaMemcpyAsync</code> calls before any synchronization does not introduce data races; CUDA guarantees in-order execution within a stream. A single barrier at the end of the loop is semantically equivalent to N per-chunk barriers."
-        data-zh="單個 prefill step 的所有 KV chunk 以獨立的 GPU 記憶體區域為目標。在任何同步之前發出所有 <code >cudaMemcpyAsync</code> 呼叫不會引入資料競爭；CUDA 保證 stream 內的有序執行。迴圈末尾的單一 barrier 在語義上等同於 N 次逐 chunk barrier。">
-        All KV chunks for a single prefill step target independent GPU memory regions. Issuing all <code >cudaMemcpyAsync</code> calls before any synchronization does not introduce data races; CUDA guarantees in-order execution within a stream. A single barrier at the end of the loop is semantically equivalent to N per-chunk barriers.
-      </span>
-    </p>
-  </div>
-  <div class="card">
-    <h4><span class="i18n" data-en="Scope of the fix" data-zh="修正範圍">Scope of the fix</span></h4>
-    <p style="color:var(--text-secondary);font-size:0.9rem">
-      <span class="i18n"
-        data-en="The relevant loop is located in LMCache's GPU-to-CPU offload path (triggered by <code >wait_for_save</code> during prefill). The change is local to approximately 5–10 lines of Python; no architectural change to the vLLM KV Connector API is required. The optimization applies equally to all four GPU families tested (H200, H100, A100, L40S)."
-        data-zh="相關迴圈位於 LMCache 的 GPU 到 CPU offload 路徑（在 prefill 期間由 <code >wait_for_save</code> 觸發）。此變更僅涉及約 5–10 行 Python 程式碼，無需對 vLLM KV Connector API 進行架構性變更。優化同樣適用於所測試的四種 GPU 型號（H200、H100、A100、L40S）。">
-        The relevant loop is located in LMCache's GPU-to-CPU offload path (triggered by <code >wait_for_save</code> during prefill). The change is local to approximately 5–10 lines of Python; no architectural change to the vLLM KV Connector API is required. The optimization applies equally to all four GPU families tested (H200, H100, A100, L40S).
-      </span>
-    </p>
-  </div>
+<div class="callout warn" style="margin:1rem 0">
+  <div class="callout-title"><span class="i18n" data-en="Why the simple patch failed" data-zh="為何簡單 patch 失敗">Why the simple patch failed</span></div>
+  <p style="font-size:0.9rem"><span class="i18n"
+    data-en="The <code>gpu_connector.from_gpu()</code> sync is only one of multiple synchronization points in the save chain. <code>StorageManager.batched_put()</code> (storage_manager.py:99) contains a separate <code>stream.synchronize()</code> that still fires per chunk. Removing one sync without the other creates a pipeline imbalance: the CPU races ahead through the connector layer but still blocks in the storage layer, producing no net latency reduction while adding scheduling overhead from the faster-spinning loop. <strong>Effective coalescing requires patching the entire save chain (connector + storage manager + cache engine), not just the GPU connector.</strong>"
+    data-zh="<code>gpu_connector.from_gpu()</code> 的 sync 只是 save chain 中多個同步點之一。<code>StorageManager.batched_put()</code>（storage_manager.py:99）包含另一個 <code>stream.synchronize()</code>，仍然逐 chunk 觸發。只移除其中一個 sync 而不處理另一個，會造成 pipeline 失衡：CPU 在 connector 層快速通過但仍在 storage 層阻塞，不產生淨延遲降低，反而因更快旋轉的 loop 增加排程開銷。<strong>有效的聚合需要 patch 整個 save chain（connector + storage manager + cache engine），而非僅 GPU connector。</strong>">The <code>gpu_connector.from_gpu()</code> sync is only one of multiple synchronization points in the save chain. <code>StorageManager.batched_put()</code> (<code>storage_manager.py:99</code>) contains a separate <code>stream.synchronize()</code> that still fires per chunk. Removing one sync without the other creates a pipeline imbalance: the CPU races ahead through the connector layer but still blocks in the storage layer, producing no net latency reduction while adding scheduling overhead from the faster-spinning loop. <strong>Effective coalescing requires patching the entire save chain (connector + storage manager + cache engine), not just the GPU connector.</strong></span></p>
 </div>
 
 <!-- ===================================================================
