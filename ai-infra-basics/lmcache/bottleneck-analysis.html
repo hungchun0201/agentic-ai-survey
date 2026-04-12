@@ -1985,12 +1985,153 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 </table>
 </div>
 
-<div class="warn" style="margin:1rem 0">
-  <span class="i18n"
-    data-en="<strong>Root cause (definitive — previous attribution was wrong):</strong> 87% of prefill-step <code>wait_for_save</code> time (16,019 ms / 18,397 ms total) is ONE <code>cudaStreamSynchronize</code> call per prefill step that fires <em>before any KV save work begins</em>. Key facts: (1) <strong>Position:</strong> 159 expensive syncs (100.75 ms avg each), ALL occurring BEFORE the first <code>LMCacheEngine.store()</code> NVTX range in each prefill-step window. (2) <strong>Target stream:</strong> stream 7 (vLLM default/forward pass stream), NOT stream 13 (store_stream). (3) <strong>GPU activity during sync:</strong> stream 13 (store_stream) is 100% idle; stream 7 has 99.17% kernel overlap (FlashAttention + GEMM). (4) <strong>Code location:</strong> <code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — a CPU→GPU tensor allocation inside the hot loop. (5) <strong>Mechanism:</strong> PyTorch CUDA caching allocator triggers <code>cudaStreamSynchronize(default_stream)</code> during garbage collection to reclaim GPU memory, waiting for all pending forward pass kernels. (6) <strong>Evidence:</strong> the code has a TODO comment: <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>. (7) <strong>Fix:</strong> pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop. Per-chunk <code>store_stream</code> syncs (2,962 × 0.59 ms = 1,742 ms) are cheap and account for only 9.5% of wfs — they are NOT the bottleneck. The 4.74 ms weighted average quoted in the table above mixes these two populations and is misleading."
-    data-zh="<strong>根因（最終確認——先前歸因有誤）：</strong>prefill-step <code>wait_for_save</code> 時間的 87%（16,019 ms / 18,397 ms 總計）來自每個 prefill step ONE 次 <code>cudaStreamSynchronize</code> 呼叫，且此 sync 在<em>任何 KV save 工作開始前</em>就已觸發。關鍵事實：(1) <strong>位置：</strong>159 次昂貴 sync（平均每次 100.75 ms），全部發生在每個 prefill-step 視窗的第一個 <code>LMCacheEngine.store()</code> NVTX range 之前。(2) <strong>目標 stream：</strong>stream 7（vLLM 預設/forward pass stream），而非 stream 13（store_stream）。(3) <strong>sync 期間的 GPU 活動：</strong>stream 13（store_stream）100% 閒置；stream 7 的核心重疊率為 99.17%（FlashAttention + GEMM）。(4) <strong>程式碼位置：</strong><code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — 在熱路徑迴圈內的 CPU→GPU tensor 分配。(5) <strong>機制：</strong>PyTorch CUDA caching allocator 在垃圾收集以回收 GPU 記憶體時觸發 <code>cudaStreamSynchronize(default_stream)</code>，等待 default stream 上所有待處理的 forward pass 核心完成。(6) <strong>證據：</strong>程式碼中有 TODO 注釋：<code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>。(7) <strong>修復方法：</strong>在熱路徑迴圈外預先分配 <code>slot_mapping</code> GPU 緩衝區。逐 chunk store_stream sync（2,962 × 0.59 ms = 1,742 ms）成本低廉，僅佔 wfs 的 9.5%——它們不是瓶頸。上表中引用的 4.74 ms 加權平均混合了這兩個族群，具有誤導性。">
-    <strong>Root cause (definitive — previous attribution was wrong):</strong> 87% of prefill-step <code>wait_for_save</code> time (16,019 ms / 18,397 ms total) is ONE <code>cudaStreamSynchronize</code> call per prefill step that fires <em>before any KV save work begins</em>. Key facts: (1) <strong>Position:</strong> 159 expensive syncs (100.75 ms avg each), ALL occurring BEFORE the first <code>LMCacheEngine.store()</code> NVTX range in each prefill-step window. (2) <strong>Target stream:</strong> stream 7 (vLLM default/forward pass stream), NOT stream 13 (store_stream). (3) <strong>GPU activity during sync:</strong> stream 13 (store_stream) is 100% idle; stream 7 has 99.17% kernel overlap (FlashAttention + GEMM). (4) <strong>Code location:</strong> <code>vllm_v1_adapter.py:1055</code> — <code>slot_mapping = slot_mapping.cuda()</code> — a CPU→GPU tensor allocation inside the hot loop. (5) <strong>Mechanism:</strong> PyTorch CUDA caching allocator triggers <code>cudaStreamSynchronize(default_stream)</code> during garbage collection to reclaim GPU memory, waiting for all pending forward pass kernels. (6) <strong>Evidence:</strong> the code has a TODO comment: <code># TODO: have a pre-allocated buffer to hold the slot_mappings</code>. (7) <strong>Fix:</strong> pre-allocate <code>slot_mapping</code> GPU buffers outside the hot loop. Per-chunk <code>store_stream</code> syncs (2,962 × 0.59 ms = 1,742 ms) are cheap and account for only 9.5% of wfs — they are NOT the bottleneck. The 4.74 ms weighted average quoted in the table above mixes these two populations and is misleading.
-  </span>
+<h4 style="color:var(--accent-red);margin-top:1.5rem"><span class="i18n"
+  data-en="Root Cause (definitive)"
+  data-zh="根因（定論）">Root Cause (definitive)</span></h4>
+
+<h5><span class="i18n" data-en="CUDA Stream Definitions" data-zh="CUDA Stream 定義">CUDA Stream Definitions</span></h5>
+
+<div style="overflow-x:auto;margin:0.5rem 0 1rem;">
+<table style="font-size:0.85rem">
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Stream" data-zh="Stream">Stream</span></th>
+    <th><span class="i18n" data-en="Created at" data-zh="建立位置">Created at</span></th>
+    <th><span class="i18n" data-en="Role" data-zh="角色">Role</span></th>
+    <th><span class="i18n" data-en="GPU Activity (Exp C)" data-zh="GPU 活動（Exp C）">GPU Activity (Exp C)</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(139,92,246,0.08)">
+    <td><strong>Default</strong></td>
+    <td><code>torch.cuda.current_stream()</code></td>
+    <td><span class="i18n" data-en="vLLM forward pass" data-zh="vLLM forward pass">vLLM forward pass</span></td>
+    <td>249,655 kernels (FlashAttn, GEMM, Triton)</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><strong>Store</strong></td>
+    <td><code>gpu_connector.py:165</code></td>
+    <td><span class="i18n" data-en="LMCache KV offload (GPU→CPU)" data-zh="LMCache KV offload（GPU→CPU）">LMCache KV offload</span></td>
+    <td>2,961 <code>lmc::load_and_reshape</code> + 2,604 D2H memcpy</td>
+  </tr>
+  <tr>
+    <td><strong>Load</strong></td>
+    <td><code>gpu_connector.py:166</code></td>
+    <td><span class="i18n" data-en="LMCache KV onload (CPU→GPU)" data-zh="LMCache KV onload（CPU→GPU）">LMCache KV onload</span></td>
+    <td>50 kernels</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<h5><span class="i18n" data-en="Call Chain (color-coded by stream)" data-zh="Call Chain（依 stream 著色）">Call Chain (color-coded by stream)</span></h5>
+
+<svg viewBox="0 0 800 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:860px;height:auto;display:block;margin:0.8rem auto">
+<rect width="800" height="340" fill="#0f1218" rx="6"/>
+<!-- Legend -->
+<rect x="20" y="8" width="12" height="12" rx="2" fill="#8b5cf6"/>
+<text x="36" y="18" fill="#94a3b8" font-size="9" font-family="system-ui">Default stream (forward pass)</text>
+<rect x="250" y="8" width="12" height="12" rx="2" fill="#ef4444"/>
+<text x="266" y="18" fill="#94a3b8" font-size="9" font-family="system-ui">Store stream (KV offload)</text>
+<rect x="470" y="8" width="12" height="12" rx="2" fill="#f97316"/>
+<text x="486" y="18" fill="#94a3b8" font-size="9" font-family="system-ui">Bottleneck (87.1%)</text>
+
+<!-- Box 1: wait_for_save entry -->
+<rect x="20" y="30" width="760" height="42" rx="4" fill="rgba(100,116,139,0.15)" stroke="#475569" stroke-width="1"/>
+<text x="30" y="48" fill="#e2e8f0" font-size="10" font-weight="600" font-family="system-ui">wait_for_save()</text>
+<text x="30" y="62" fill="#94a3b8" font-size="8" font-family="system-ui">vllm_v1_adapter.py:1019</text>
+
+<!-- Box 2: slot_mapping.cuda() — THE BOTTLENECK -->
+<rect x="40" y="82" width="740" height="50" rx="4" fill="rgba(249,115,22,0.15)" stroke="#f97316" stroke-width="2"/>
+<text x="50" y="100" fill="#f97316" font-size="11" font-weight="700" font-family="system-ui">slot_mapping = slot_mapping.cuda()</text>
+<text x="50" y="115" fill="#fb923c" font-size="9" font-family="system-ui">vllm_v1_adapter.py:1055 — # TODO: have a pre-allocated buffer to hold the slot_mappings</text>
+<text x="50" y="127" fill="#fed7aa" font-size="8" font-family="system-ui">→ PyTorch allocator GC → cudaStreamSynchronize(default stream) → waits for forward-pass kernels: 100.75 ms × 159 = 87.1%</text>
+
+<!-- Arrow -->
+<line x1="400" y1="132" x2="400" y2="142" stroke="#475569" stroke-width="1.5"/>
+<polygon points="396,142 404,142 400,148" fill="#475569"/>
+
+<!-- Box 3: LMCacheEngine.store() -->
+<rect x="40" y="150" width="740" height="35" rx="4" fill="rgba(100,116,139,0.1)" stroke="#475569" stroke-width="1"/>
+<text x="50" y="168" fill="#e2e8f0" font-size="10" font-weight="600" font-family="system-ui">LMCacheEngine.store(token_ids, kvcaches, slot_mapping, ...)</text>
+<text x="500" y="168" fill="#94a3b8" font-size="8" font-family="system-ui">cache_engine.py:277</text>
+
+<!-- Arrow -->
+<line x1="400" y1="185" x2="400" y2="195" stroke="#475569" stroke-width="1.5"/>
+<polygon points="396,195 404,195 400,201" fill="#475569"/>
+
+<!-- Box 4: batched_from_gpu -->
+<rect x="60" y="203" width="350" height="55" rx="4" fill="rgba(239,68,68,0.08)" stroke="#ef4444" stroke-width="1"/>
+<text x="70" y="220" fill="#ef4444" font-size="10" font-weight="600" font-family="system-ui">batched_from_gpu()</text>
+<text x="70" y="233" fill="#fca5a5" font-size="8" font-family="system-ui">gpu_connector.py:339</text>
+<text x="70" y="248" fill="#94a3b8" font-size="8" font-family="system-ui">for chunk: from_gpu() → store_stream sync (0.59 ms × ~19)</text>
+
+<!-- Box 5: storage_manager.batched_put -->
+<rect x="430" y="203" width="350" height="55" rx="4" fill="rgba(100,116,139,0.08)" stroke="#475569" stroke-width="1"/>
+<text x="440" y="220" fill="#e2e8f0" font-size="10" font-weight="600" font-family="system-ui">storage_manager.batched_put()</text>
+<text x="440" y="233" fill="#94a3b8" font-size="8" font-family="system-ui">cache_engine.py:283</text>
+<text x="440" y="248" fill="#94a3b8" font-size="8" font-family="system-ui">CPU-side hash + allocate + submit to backend</text>
+
+<!-- Box 6: from_gpu detail -->
+<rect x="80" y="270" width="310" height="55" rx="4" fill="rgba(239,68,68,0.06)" stroke="#ef4444" stroke-width="0.5"/>
+<text x="90" y="287" fill="#ef4444" font-size="9" font-weight="600" font-family="system-ui">from_gpu() — gpu_connector.py:279</text>
+<text x="90" y="300" fill="#94a3b8" font-size="8" font-family="system-ui">with torch.cuda.stream(store_stream):</text>
+<text x="100" y="312" fill="#94a3b8" font-size="8" font-family="system-ui">lmc::load_and_reshape (0.054 ms) + D2H memcpy (0.626 ms)</text>
+<text x="90" y="325" fill="#94a3b8" font-size="8" font-family="system-ui">store_stream.synchronize() → 0.59 ms (9.5% of wfs)</text>
+</svg>
+
+<h5><span class="i18n" data-en="Time Decomposition (115.71 ms per prefill step)" data-zh="時間拆分（每 prefill step 115.71 ms）">Time Decomposition (115.71 ms per prefill step)</span></h5>
+
+<div style="overflow-x:auto;margin:0.5rem 0 1rem;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Component" data-zh="組成">Component</span></th>
+    <th><span class="i18n" data-en="Code Location" data-zh="程式碼位置">Code Location</span></th>
+    <th><span class="i18n" data-en="Target Stream" data-zh="同步目標">Target Stream</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Count" data-zh="次數">Count</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Avg" data-zh="平均">Avg</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Total" data-zh="總計">Total</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="% of wfs" data-zh="佔 wfs">% of wfs</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(249,115,22,0.12)">
+    <td><strong><span class="i18n" data-en="Allocator GC sync" data-zh="Allocator GC sync">Allocator GC sync</span></strong></td>
+    <td><code>vllm_v1_adapter.py:1055</code></td>
+    <td><strong>Default</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(forward pass)</span></td>
+    <td style="text-align:right">159</td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">100.75 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">16,019 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">87.1%</strong></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Per-chunk DMA sync" data-zh="Per-chunk DMA sync">Per-chunk DMA sync</span></td>
+    <td><code>gpu_connector.py:309</code></td>
+    <td>Store <span style="font-size:0.75rem;color:var(--text-muted)">(KV offload)</span></td>
+    <td style="text-align:right">2,962</td>
+    <td style="text-align:right">0.59 ms</td>
+    <td style="text-align:right">1,742 ms</td>
+    <td style="text-align:right">9.5%</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Other (store, allocate)" data-zh="其他（store、allocate）">Other</span></td>
+    <td></td>
+    <td></td>
+    <td style="text-align:right">623</td>
+    <td style="text-align:right">~1 ms</td>
+    <td style="text-align:right">636 ms</td>
+    <td style="text-align:right">3.4%</td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="7" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Source: H200 JPS=1, Exp C. The overall 4.74 ms/call average in earlier tables is a weighted mean of 0.59 ms (per-chunk) and 100.75 ms (allocator GC) — it should not be interpreted as the per-chunk cost."
+      data-zh="來源：H200 JPS=1，Exp C。先前表格中的 4.74 ms/call 整體平均值是 0.59 ms（per-chunk）和 100.75 ms（allocator GC）的加權平均——不應將其解讀為 per-chunk 成本。">Source: H200 JPS=1, Exp C. The 4.74 ms/call overall average is a weighted mean of 0.59 ms (per-chunk) and 100.75 ms (allocator GC).</span>
+  </td></tr>
+  </tfoot>
+</table>
 </div>
 
 <!-- Per-step timeline visualization -->
@@ -2013,66 +2154,61 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
     <text x="454" y="40" fill="#fecaca" font-size="10" text-anchor="middle" font-family="system-ui">115.71 ms mean (§9.2.1 Finding 2, prefill-step bucket)</text>
   </svg>
 
-  <div class="card-header" style="margin-top:1rem"><span class="i18n" data-en="Level 2 — Inside wait_for_save (§9.2.1 Finding 4, CUDA Runtime)" data-zh="Level 2 — wait_for_save 內部（§9.2.1 Finding 4，CUDA Runtime）">Level 2 — Inside <code class="inline-code">wait_for_save</code> (§9.2.1 Finding 4, CUDA Runtime)</span></div>
+  <div class="card-header" style="margin-top:1rem"><span class="i18n" data-en="Level 2 — Inside wait_for_save: two sync populations" data-zh="Level 2 — wait_for_save 內部：兩個 sync 族群">Level 2 — Inside <code class="inline-code">wait_for_save</code>: two sync populations</span></div>
   <svg viewBox="0 0 800 60" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:860px;height:auto;display:block;margin:0.8rem auto">
     <rect x="0" y="0" width="800" height="55" rx="5" fill="#0f1218"/>
-    <!-- cudaStreamSynchronize 111.7 ms / 115.71 = 96.5% → 772 px -->
-    <rect x="2" y="5" width="772" height="45" rx="3" fill="#dc2626"/>
-    <text x="388" y="25" fill="#fff" font-size="11" text-anchor="middle" font-family="system-ui" font-weight="700">cudaStreamSynchronize × 24 calls</text>
-    <text x="388" y="40" fill="#fecaca" font-size="9" text-anchor="middle" font-family="system-ui">111.7 ms (96.6% of wfs wallclock) — 4.74 ms avg per sync call</text>
-    <!-- residual ~4 ms → ~28 px -->
-    <rect x="776" y="5" width="20" height="45" rx="3" fill="#f97316"/>
-    <text x="786" y="32" fill="#fff" font-size="6" text-anchor="middle" font-family="system-ui">4ms</text>
+    <!-- Allocator GC sync: 100.75 ms / 115.71 = 87.1% → 694 px -->
+    <rect x="2" y="5" width="694" height="45" rx="3" fill="#dc2626"/>
+    <text x="350" y="22" fill="#fff" font-size="10" text-anchor="middle" font-family="system-ui" font-weight="700">Allocator GC sync (default stream)</text>
+    <text x="350" y="37" fill="#fecaca" font-size="9" text-anchor="middle" font-family="system-ui">100.75 ms × 1/step = 87.1% — waits for forward-pass kernels</text>
+    <!-- Per-chunk store_stream syncs: 10.96 ms / 115.71 = 9.5% → 76 px -->
+    <rect x="698" y="5" width="76" height="45" rx="3" fill="#f97316"/>
+    <text x="736" y="22" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui" font-weight="600">Per-chunk</text>
+    <text x="736" y="34" fill="#fed7aa" font-size="7" text-anchor="middle" font-family="system-ui">0.59 ms × ~19</text>
+    <text x="736" y="45" fill="#fed7aa" font-size="7" text-anchor="middle" font-family="system-ui">= 9.5%</text>
+    <!-- residual 3.4% → 26 px -->
+    <rect x="776" y="5" width="20" height="45" rx="3" fill="#475569"/>
+    <text x="786" y="32" fill="#94a3b8" font-size="6" text-anchor="middle" font-family="system-ui">3.4%</text>
   </svg>
 
-  <div class="card-header" style="margin-top:1rem"><span class="i18n" data-en="Level 3 — Per-Chunk Pattern (CPU vs GPU timeline)" data-zh="Level 3 — Per-Chunk 模式（CPU vs GPU 時間線）">Level 3 — Per-Chunk Pattern (CPU vs GPU timeline)</span></div>
+  <div class="card-header" style="margin-top:1rem"><span class="i18n" data-en="Level 3 — Allocator GC Sync: what the CPU waits for" data-zh="Level 3 — Allocator GC Sync：CPU 在等什麼">Level 3 — Allocator GC Sync: what the CPU waits for</span></div>
   <svg viewBox="0 0 800 110" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:860px;height:auto;display:block;margin:0.8rem auto">
     <rect x="0" y="0" width="800" height="110" rx="5" fill="#0f1218"/>
-    <!-- Labels -->
+    <!-- Timeline labels -->
     <text x="8" y="33" fill="#94a3b8" font-size="10" font-family="system-ui" font-weight="600">CPU</text>
     <text x="8" y="78" fill="#94a3b8" font-size="10" font-family="system-ui" font-weight="600">GPU</text>
-    <!-- Iteration markers -->
-    <text x="400" y="105" fill="#64748b" font-size="8" text-anchor="middle" font-family="system-ui">× ~24 iterations per prefill step (one per KV chunk)</text>
-    <!-- CPU row: [memcpy launch 8μs][sync wait 4.74ms] × 3 shown -->
-    <!-- chunk 1 -->
-    <rect x="40" y="18" width="4" height="25" fill="#3b82f6" rx="1"/>
-    <rect x="46" y="18" width="200" height="25" fill="#dc2626" rx="2"/>
-    <text x="146" y="35" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">cudaStreamSync 4.74 ms</text>
-    <!-- chunk 2 -->
-    <rect x="250" y="18" width="4" height="25" fill="#3b82f6" rx="1"/>
-    <rect x="256" y="18" width="200" height="25" fill="#dc2626" rx="2"/>
-    <text x="356" y="35" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">cudaStreamSync 4.74 ms</text>
-    <!-- chunk 3 -->
-    <rect x="460" y="18" width="4" height="25" fill="#3b82f6" rx="1"/>
-    <rect x="466" y="18" width="200" height="25" fill="#dc2626" rx="2"/>
-    <text x="566" y="35" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">cudaStreamSync 4.74 ms</text>
-    <!-- ... indicator -->
-    <text x="690" y="35" fill="#64748b" font-size="14" text-anchor="middle" font-family="system-ui">···</text>
-    <!-- GPU row: [DMA 0.67ms][idle] × 3 -->
-    <!-- chunk 1 -->
-    <rect x="42" y="63" width="28" height="25" fill="#22c55e" rx="2"/>
-    <text x="56" y="79" fill="#fff" font-size="6.5" text-anchor="middle" font-family="system-ui">DMA</text>
-    <rect x="72" y="63" width="174" height="25" fill="#1e293b" rx="2" stroke="#334155" stroke-width="0.5"/>
-    <text x="159" y="79" fill="#475569" font-size="7" text-anchor="middle" font-family="system-ui">GPU idle (~4 ms)</text>
-    <!-- chunk 2 -->
-    <rect x="252" y="63" width="28" height="25" fill="#22c55e" rx="2"/>
-    <text x="266" y="79" fill="#fff" font-size="6.5" text-anchor="middle" font-family="system-ui">DMA</text>
-    <rect x="282" y="63" width="174" height="25" fill="#1e293b" rx="2" stroke="#334155" stroke-width="0.5"/>
-    <text x="369" y="79" fill="#475569" font-size="7" text-anchor="middle" font-family="system-ui">GPU idle (~4 ms)</text>
-    <!-- chunk 3 -->
-    <rect x="462" y="63" width="28" height="25" fill="#22c55e" rx="2"/>
-    <text x="476" y="79" fill="#fff" font-size="6.5" text-anchor="middle" font-family="system-ui">DMA</text>
-    <rect x="492" y="63" width="174" height="25" fill="#1e293b" rx="2" stroke="#334155" stroke-width="0.5"/>
-    <text x="579" y="79" fill="#475569" font-size="7" text-anchor="middle" font-family="system-ui">GPU idle (~4 ms)</text>
+    <text x="400" y="105" fill="#64748b" font-size="8" text-anchor="middle" font-family="system-ui"><tspan class="i18n" data-en="One per prefill step. GPU runs forward-pass kernels; CPU blocks waiting." data-zh="每 prefill step 一次。GPU 跑 forward-pass kernel，CPU 阻塞等待。">One per prefill step. GPU runs forward-pass kernels; CPU blocks waiting.</tspan></text>
+    <!-- CPU row: slot_mapping.cuda() triggers allocator GC → sync blocks ~100ms -->
+    <rect x="40" y="18" width="60" height="25" fill="#3b82f6" rx="2"/>
+    <text x="70" y="33" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">.cuda()</text>
+    <rect x="102" y="18" width="580" height="25" fill="#dc2626" rx="2"/>
+    <text x="392" y="28" fill="#fff" font-size="9" text-anchor="middle" font-family="system-ui" font-weight="700">cudaStreamSynchronize(default_stream) — allocator GC</text>
+    <text x="392" y="40" fill="#fecaca" font-size="8" text-anchor="middle" font-family="system-ui">100.75 ms: PyTorch needs GPU memory → GC → sync → wait for forward pass to drain</text>
+    <!-- GPU default stream row: forward pass kernels running -->
+    <rect x="40" y="63" width="100" height="25" fill="#8b5cf6" rx="2"/>
+    <text x="90" y="79" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">FlashAttn</text>
+    <rect x="142" y="63" width="80" height="25" fill="#6366f1" rx="2"/>
+    <text x="182" y="79" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">GEMM</text>
+    <rect x="224" y="63" width="60" height="25" fill="#8b5cf6" rx="2"/>
+    <text x="254" y="79" fill="#fff" font-size="6" text-anchor="middle" font-family="system-ui">FlashAttn</text>
+    <rect x="286" y="63" width="80" height="25" fill="#6366f1" rx="2"/>
+    <text x="326" y="79" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">GEMM</text>
+    <rect x="368" y="63" width="60" height="25" fill="#a78bfa" rx="2"/>
+    <text x="398" y="79" fill="#fff" font-size="6" text-anchor="middle" font-family="system-ui">Triton</text>
+    <rect x="430" y="63" width="100" height="25" fill="#8b5cf6" rx="2"/>
+    <text x="480" y="79" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">FlashAttn</text>
+    <rect x="532" y="63" width="80" height="25" fill="#6366f1" rx="2"/>
+    <text x="572" y="79" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">GEMM</text>
+    <text x="640" y="79" fill="#64748b" font-size="14" font-family="system-ui">···</text>
     <!-- legend -->
-    <rect x="710" y="18" width="10" height="8" fill="#3b82f6" rx="1"/>
-    <text x="724" y="25" fill="#94a3b8" font-size="7" font-family="system-ui">memcpyAsync (8 μs)</text>
-    <rect x="710" y="30" width="10" height="8" fill="#dc2626" rx="1"/>
-    <text x="724" y="37" fill="#94a3b8" font-size="7" font-family="system-ui">cudaStreamSync (4.74 ms)</text>
-    <rect x="710" y="42" width="10" height="8" fill="#22c55e" rx="1"/>
-    <text x="724" y="49" fill="#94a3b8" font-size="7" font-family="system-ui">GPU DMA (0.67 ms)</text>
-    <rect x="710" y="54" width="10" height="8" fill="#1e293b" rx="1" stroke="#334155" stroke-width="0.5"/>
-    <text x="724" y="61" fill="#94a3b8" font-size="7" font-family="system-ui">GPU idle (wasted)</text>
+    <rect x="680" y="18" width="10" height="8" fill="#dc2626" rx="1"/>
+    <text x="694" y="25" fill="#94a3b8" font-size="7" font-family="system-ui">CPU blocked in sync</text>
+    <rect x="680" y="30" width="10" height="8" fill="#8b5cf6" rx="1"/>
+    <text x="694" y="37" fill="#94a3b8" font-size="7" font-family="system-ui">FlashAttention (1 ms)</text>
+    <rect x="680" y="42" width="10" height="8" fill="#6366f1" rx="1"/>
+    <text x="694" y="49" fill="#94a3b8" font-size="7" font-family="system-ui">GEMM (0.7–2 ms)</text>
+    <rect x="680" y="54" width="10" height="8" fill="#a78bfa" rx="1"/>
+    <text x="694" y="61" fill="#94a3b8" font-size="7" font-family="system-ui">Triton activation</text>
   </svg>
 
   <p style="font-size:0.82rem"><span class="i18n"
