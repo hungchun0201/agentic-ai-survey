@@ -2805,28 +2805,81 @@ self._sync_event.synchronize()</code></pre>
 
 <h4><span class="i18n" data-en="The actual mechanism: step-rate throttling from wait_for_save + chunked prefill" data-zh="真正的機制：wait_for_save + chunked prefill 造成的 step-rate throttling">The actual mechanism: step-rate throttling from wait_for_save + chunked prefill</span></h4>
 
-<p><span class="i18n"
-  data-en="Two configuration facts combine to produce the L40S penalty:"
-  data-zh="兩個設定一起產生 L40S 的懲罰：">Two configuration facts combine to produce the L40S penalty:</span></p>
-
-<ol>
-  <li><span class="i18n"
-    data-en="<strong>L40S's <code class='inline-code'>max_num_batched_tokens = 2048</code></strong>, auto-tuned by vLLM based on available VRAM. H200's is <strong>8,192</strong> — 4× larger. This means each step on L40S can process at most 2048 tokens total (prefill chunks + decode tokens combined). A 13K-token prompt under chunked prefill therefore needs at least <strong>7 prefill chunks</strong> (13,193 / 2,048 ≈ 6.4) to finish its prefill — 7 separate steps just for one request's prefill."
-    data-zh="<strong>L40S 的 <code class='inline-code'>max_num_batched_tokens = 2048</code></strong>，vLLM 根據可用 VRAM 自動調的。H200 是 <strong>8,192</strong>，4 倍大。這代表 L40S 每個 step 最多處理 2048 個 token（prefill chunks + decode tokens 合計）。chunked prefill 下一個 13K token 的 prompt 因此至少需要 <strong>7 個 prefill chunk</strong>（13,193 / 2,048 ≈ 6.4）才能跑完 prefill — 一個 request 的 prefill 就要 7 個獨立 step。"><strong>L40S's <code class="inline-code">max_num_batched_tokens = 2048</code></strong>, auto-tuned by vLLM based on available VRAM. H200's is <strong>8,192</strong> — 4× larger. This means each step on L40S can process at most 2048 tokens total (prefill chunks + decode tokens combined). A 13K-token prompt under chunked prefill therefore needs at least <strong>7 prefill chunks</strong> (13,193 / 2,048 ≈ 6.4) to finish its prefill — 7 separate steps just for one request's prefill.</span></li>
-  <li><span class="i18n"
-    data-en="<strong>LMCache adds <code class='inline-code'>wait_for_save</code> stall per prefill step.</strong> On L40S: 187 ms/step (Exp B, all-steps mean). On H200: 115.7 ms/prefill-step (Exp C NVTX, §5.1). FCFS has no such stall. The Exp B and Exp C values differ because Exp B reports the per-step mean across all JPS values while Exp C isolates prefill-step calls at JPS=1; the mechanism is the same."
-    data-zh="<strong>LMCache 在每個 prefill step 增加 <code class='inline-code'>wait_for_save</code> stall。</strong>L40S：187 ms/step（Exp B，all-steps mean）。H200：115.7 ms/prefill-step（Exp C NVTX，§5.1）。FCFS 無此 stall。Exp B 和 Exp C 的數值不同，因為 Exp B 是跨所有 JPS 的 per-step mean，而 Exp C 是在 JPS=1 下分離 prefill-step 呼叫；機制相同。"><strong>LMCache adds <code class="inline-code">wait_for_save</code> stall per prefill step.</strong> L40S: 187 ms/step (Exp B). H200: 115.7 ms/prefill-step (Exp C, §5.1). FCFS has no such stall.</span></li>
-</ol>
-
-<p><span class="i18n"
-  data-en="Multiply these together. Under LMCache on L40S, one 13K-token prefill takes <strong>7 chunks × 187 ms ≈ 1.3 s of pure wait_for_save idle</strong>, on top of the actual prefill compute. Under FCFS on L40S, the same prompt takes 7 chunks × 0 ms = 0 extra idle. The engine-loop cycle time is dominated by the 187 ms stall, so L40S LMCache can run roughly <strong>5 steps/sec</strong> (1000 ms / 187 ms), while L40S FCFS runs ~20+ steps/sec. Fewer steps per second means fewer opportunities for the scheduler to promote waiting requests into the running state — and that is exactly what the telemetry shows: running count stuck at 6–16 for LMCache, but 23–48 for FCFS."
-  data-zh="把這兩件事相乘。LMCache on L40S，一個 13K-token prefill 要 <strong>7 chunks × 187 ms ≈ 1.3 秒純 wait_for_save 閒置</strong>，這是在實際 prefill 計算之上。FCFS on L40S 的同一個 prompt 只需要 7 chunks × 0 ms = 0 額外閒置。Engine-loop cycle time 被 187 ms stall 主宰，所以 L40S LMCache 大約跑 <strong>5 steps/sec</strong>（1000 ms / 187 ms），而 L40S FCFS 跑 ~20+ steps/sec。每秒 step 數少 = scheduler 把 waiting request 提升到 running 的機會也少 — 這正是遙測顯示的：LMCache running 卡在 6–16，FCFS 有 23–48。">Multiply these together. Under LMCache on L40S, one 13K-token prefill takes <strong>7 chunks × 187 ms ≈ 1.3 s of pure wait_for_save idle</strong>, on top of the actual prefill compute. Under FCFS on L40S, the same prompt takes 7 chunks × 0 ms = 0 extra idle. The engine-loop cycle time is dominated by the 187 ms stall, so L40S LMCache can run roughly <strong>5 steps/sec</strong> (1000 ms / 187 ms), while L40S FCFS runs ~20+ steps/sec. Fewer steps per second means fewer opportunities for the scheduler to promote waiting requests into the running state — and that is exactly what the telemetry shows: running count stuck at 6–16 for LMCache, but 23–48 for FCFS.</span></p>
-
-<h4><span class="i18n" data-en="Why H200 escapes this penalty" data-zh="為什麼 H200 逃過了這個懲罰">Why H200 escapes this penalty</span></h4>
-
-<p><span class="i18n"
-  data-en="On H200 the math flips in LMCache's favor: <code class='inline-code'>max_num_batched_tokens = 8,192</code> means a 13K-token prompt finishes in only <strong>2 chunks</strong> (13,193 / 8,192 ≈ 1.6). Only 2 prefill chunks → only 2 wait_for_save stalls per job → ~231 ms total stall (2 × 115.7 ms, §5.1) vs L40S's ~1.3 s. And H200's base compute is faster, so the ~115.7 ms stall (§5.1) is a smaller fraction of each step's wall-clock time. Result: step rate barely drops, running count barely drops, and average batch size stays near FCFS (17.6 vs 16.6). <strong>The L40S penalty is not about VRAM pressure — it is about <code class='inline-code'>max_num_batched_tokens</code> being too small for the prompt length, forcing many prefill chunks and therefore many wait_for_save stalls.</strong>"
-  data-zh="H200 上數學翻過來對 LMCache 有利：<code class='inline-code'>max_num_batched_tokens = 8,192</code> 意味著 13K token prompt 只需要 <strong>2 個 chunk</strong>（13,193 / 8,192 ≈ 1.6）。只有 2 個 prefill chunk → 每 job 只有 2 次 wait_for_save stall → 總 stall ~231 ms（2 × 115.7 ms，§5.1），相對於 L40S 的 ~1.3 s。而且 H200 基礎算力更快，115.7 ms stall（§5.1）佔每 step wall-clock 時間的比例更小。結果：step rate 幾乎不降、running 幾乎不降、平均 batch size 維持在 FCFS 附近（17.6 vs 16.6）。<strong>L40S 的懲罰不是 VRAM 壓力 — 是 <code class='inline-code'>max_num_batched_tokens</code> 對 prompt 長度來說太小，迫使很多 prefill chunks、因此很多 wait_for_save stall。</strong>">On H200 the math flips in LMCache's favor: <code class="inline-code">max_num_batched_tokens = 8,192</code> means a 13K-token prompt finishes in only <strong>2 chunks</strong> (13,193 / 8,192 ≈ 1.6). Only 2 prefill chunks → only 2 wait_for_save stalls per job → ~231 ms total stall (2 × 115.7 ms, §5.1) vs L40S's ~1.3 s. And H200's base compute is faster, so the ~115.7 ms stall (§5.1) is a smaller fraction of each step's wall-clock time. Result: step rate barely drops, running count barely drops, and average batch size stays near FCFS (17.6 vs 16.6). <strong>The L40S penalty is not about VRAM pressure — it is about <code class="inline-code">max_num_batched_tokens</code> being too small for the prompt length, forcing many prefill chunks and therefore many wait_for_save stalls.</strong></span></p>
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th></th>
+    <th style="text-align:center"><strong>L40S</strong> (48 GB)</th>
+    <th style="text-align:center"><strong>H200</strong> (141 GB)</th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><code class="inline-code">max_num_batched_tokens</code></td>
+    <td style="text-align:center">2,048</td>
+    <td style="text-align:center">8,192</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="vLLM auto-tuner" data-zh="vLLM auto-tuner">vLLM auto-tuner</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Prefill chunks per 13K-token request" data-zh="13K-token request 的 prefill chunk 數">Prefill chunks / 13K request</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">7</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(13,193 ÷ 2,048)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">2</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(13,193 ÷ 8,192)</span></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="arithmetic" data-zh="算術">arithmetic</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">wait_for_save</code> <span class="i18n" data-en="per prefill step" data-zh="per prefill step">per prefill step</span></td>
+    <td style="text-align:center">187 ms</td>
+    <td style="text-align:center">115.7 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">L40S: Exp B; H200: Exp C §5.1</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Total wfs stall per prefill job" data-zh="每個 prefill job 的總 wfs stall">Total wfs stall / prefill job</span></strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">1,309 ms</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(7 × 187)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">231 ms</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(2 × 115.7)</span></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="derived" data-zh="推導">derived</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Effective step rate (LMCache)" data-zh="有效 step rate（LMCache）">Effective step rate (LMCache)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">~5 steps/s</strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">~20+ steps/s</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">1000 ÷ wfs_ms</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Running count (LMCache)" data-zh="Running count（LMCache）">Running count (LMCache)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">6–16</strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">~17</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp B telemetry</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Avg batch size (LMCache)" data-zh="平均 batch size（LMCache）">Avg batch size (LMCache)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">8.0</strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">17.6</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp B</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Avg batch size (FCFS)" data-zh="平均 batch size（FCFS）">Avg batch size (FCFS)</span></td>
+    <td style="text-align:center">26.7</td>
+    <td style="text-align:center">16.6</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp B</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><strong><span class="i18n" data-en="Batch size penalty (LMCache / FCFS)" data-zh="Batch size 懲罰（LMCache / FCFS）">Batch size penalty</span></strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">3.3× <span class="i18n" data-en="reduction" data-zh="縮減">reduction</span></strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">1.06× <span class="i18n" data-en="(no penalty)" data-zh="（無懲罰）">(no penalty)</span></strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="derived" data-zh="推導">derived</span></td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="4" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Root cause: L40S's smaller VRAM → auto-tuner sets max_num_batched_tokens = 2048 → 13K prompt needs 7 chunked prefill steps → 7× wait_for_save stalls → step rate collapses → batch size collapses. H200's 8,192 token budget = only 2 chunks = tolerable stall."
+      data-zh="根因：L40S 較小 VRAM → auto-tuner 設 max_num_batched_tokens = 2048 → 13K prompt 需要 7 個 chunked prefill step → 7× wait_for_save stall → step rate 崩潰 → batch size 崩潰。H200 的 8,192 token budget = 只要 2 chunk = 可容忍的 stall。">Root cause: L40S's smaller VRAM → auto-tuner sets <code>max_num_batched_tokens</code> = 2048 → 13K prompt needs 7 chunked prefill steps → 7× <code>wait_for_save</code> stalls → step rate collapses → batch size collapses. H200's 8,192 token budget = only 2 chunks = tolerable stall.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
 
 <div class="callout success">
   <div class="callout-title"><span class="i18n" data-en="Testable prediction" data-zh="可驗證的預測">Testable prediction</span></div>
