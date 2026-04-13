@@ -16,5 +16,6 @@ GitHub Pages site for agentic AI survey. Deployed at `https://hungchun0201.githu
 - Use `<code style="background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);color:#e94560;padding:2px 8px;border-radius:4px">` for paper-modified file paths (red)
 - Use `<code style="background:rgba(166,227,161,.1);border:1px solid rgba(166,227,161,.3);color:#a6e3a1;padding:2px 8px;border-radius:4px">` for external file paths (green)
 - No ASCII art — use HTML elements (`.vflow`, `.flow`, `.tbar`, `.diagram`, `.cards`)
+- **Paper figures & LaTeX**: Use skill `embed-paper-figures` (`.claude/skills/embed-paper-figures/SKILL.md`) when embedding original paper figures or converting math to KaTeX. Key rules: white `background:#fff` on all images, `fig-sm` for oversized figures, KaTeX CDN for LaTeX.
 - File path references: always use full paths (e.g., `vllm/v1/core/sched/scheduler.py` not `scheduler.py`)
 
