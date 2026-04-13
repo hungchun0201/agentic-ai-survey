@@ -608,3 +608,33 @@ Reason: `setLang()` uses `innerHTML`, which interprets `\\` → `\`.
 - [ ] Expanded architecture (multiple diagrams)
 - [ ] Math formulations / pseudocode
 - [ ] Deeper evaluation analysis
+
+---
+
+## 13. Commit & Push (MANDATORY final step)
+
+After completing all changes and passing the checklist, **always** commit and push:
+
+1. `git add papers/<slug>/index.html` (and any other changed files)
+2. Commit with a descriptive message:
+   ```bash
+   git commit -m "$(cat <<'EOF'
+   <slug>: <short description of what was done>
+
+   Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+   EOF
+   )"
+   ```
+3. `git push`
+
+### Commit message conventions
+
+| Action | Prefix example |
+|--------|---------------|
+| New page | `<slug>: add paper analysis page` |
+| Add figures | `<slug>: embed paper figures (Fig 1-N) from arXiv` |
+| Add LaTeX | `<slug>: convert math to KaTeX LaTeX` |
+| Fix styling | `<slug>: fix hero/nav/accent styling` |
+| Mixed | `<slug>: add figures and convert math to LaTeX` |
+
+**Do NOT** forget to push — the site is deployed via GitHub Pages on every push to `master`.
