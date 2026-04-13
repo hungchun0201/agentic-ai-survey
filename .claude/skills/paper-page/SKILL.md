@@ -407,12 +407,15 @@ File path inline code:
 
 ### 8.1 Sourcing from arXiv
 
-Use the arXiv HTML version: `https://arxiv.org/html/{arxiv_id}v1/figures/{filename}.png`
+**There is NO fixed URL template.** arXiv HTML image paths vary across papers — some use `figures/{name}.png`, others use `extracted/{hash}/figures/`, others use bare `x1.png` at root. **NEVER** guess or construct URLs from a template.
 
-**Workflow:**
-1. `WebFetch` the arXiv HTML page → extract all `<img>` `src` URLs and captions
-2. Select important figures: system architecture, key results, novel mechanisms
-3. Skip trivial figures (simple notation tables, redundant diagrams)
+**Mandatory workflow:**
+1. `WebFetch` `https://arxiv.org/html/{arxiv_id}v1` → extract **every** `<img>` tag's actual `src` attribute and its associated figure caption
+2. Construct absolute URLs: prepend `https://arxiv.org/html/{arxiv_id}v1/` to relative paths
+3. **Validate each URL** with `curl -sI <url>` — confirm HTTP 200 and `content-length` is reasonable. Drop any URL that 404s.
+4. **Skip legend images:** In multi-subfigure groups, the first `<img>` is often a standalone legend (color bar / line-style key), typically < 20 KB. Check `content-length` — skip images under ~20 KB unless visually confirmed as real content.
+5. Select important figures: system architecture, key results, novel mechanisms
+6. Skip trivial figures (simple notation tables, redundant diagrams, standalone legends)
 
 ### 8.2 CRITICAL: White Background
 
@@ -432,7 +435,7 @@ All paper figure images **MUST** have `background:#fff; padding:12px`. Original 
 
 ```html
 <div class="paper-fig fig-sm">
-  <img src="https://arxiv.org/html/{id}v1/figures/{file}.png"
+  <img src="<actual URL extracted from arXiv HTML — NEVER guess>"
        alt="Figure N: description">
   <div class="fig-cap"><strong>Figure N (from paper):</strong>
     <span class="i18n" data-en="Caption EN" data-zh="Caption ZH">Caption EN</span>
@@ -461,6 +464,19 @@ All paper figure images **MUST** have `background:#fff; padding:12px`. Original 
 - Result figures → Results section, before corresponding subsection
 - Place **immediately before** the text that discusses the figure
 - Thematically related figures go in the same `paper-fig-row`
+
+### 8.7 Figure Verification (MANDATORY)
+
+After embedding figures, verify **each image individually**:
+
+1. Open the page locally (`file:///...`) or take a Chrome headless screenshot
+2. For each embedded figure, confirm:
+   - The image **loads** (not a broken image icon / 404)
+   - The image shows the **expected chart/diagram** (not a legend, not blank, not a wrong subfigure)
+   - The caption matches the figure content
+3. If a figure shows only a legend (color bars / line-style keys with no data), replace it with the correct subfigure URL
+
+**Do NOT** rely on "the page has images" as proof — visually inspect each one.
 
 ---
 
@@ -582,6 +598,11 @@ Reason: `setLang()` uses `innerHTML`, which interprets `\\` → `\`.
 - **NEVER** use text colors (`#e2e8f0`, `#d0d5e0`) as accents
 - Fallback by topic: cache→rose, distributed→cyan, attention→indigo, agent→teal
 
+### Paper Figures
+- **NEVER** guess arXiv image URLs from a template — paths vary per paper (`figures/`, `extracted/{hash}/`, bare `x1.png`). Always extract actual `src` from HTML.
+- **NEVER** trust the first `<img>` in a multi-subfigure group — it is often a standalone legend (< 20 KB). Validate with `curl -sI` or visual inspection.
+- **NEVER** skip per-image verification — "images appear on page" is not enough; each image must show the expected chart, not a legend or wrong subfigure.
+
 ### Visual Verification (MANDATORY)
 1. Make changes
 2. Screenshot with Chrome headless:
@@ -591,7 +612,8 @@ Reason: `setLang()` uses `innerHTML`, which interprets `\\` → `\`.
      --window-size=1440,700 "file:///path/to/page.html" 2>/dev/null
    ```
 3. Read screenshot, verify against continuum standard
-4. Only then commit
+4. **Verify each embedded figure individually** — correct content, not legend, not 404
+5. Only then commit
 
 ---
 
