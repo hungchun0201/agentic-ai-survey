@@ -1900,6 +1900,48 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
   </div>
 </div>
 
+<h4><span class="i18n" data-en="Cache hit detection — two-tier lookup" data-zh="Cache hit 偵測 — 兩層查找">Cache hit detection — two-tier lookup</span></h4>
+
+<p><span class="i18n"
+  data-en="When a new request enters <code class='inline-code'>schedule()</code>, the scheduler performs a two-tier cache lookup to determine how many tokens can be skipped (reused from cache instead of recomputed). This lookup happens only once per request, when <code class='inline-code'>request.num_computed_tokens == 0</code>."
+  data-zh="當新 request 進入 <code class='inline-code'>schedule()</code> 時，scheduler 進行兩層 cache 查找，決定有多少 token 可以跳過（從 cache 重用而非 recompute）。此查找僅在 <code class='inline-code'>request.num_computed_tokens == 0</code> 時執行一次。">When a new request enters schedule(), the scheduler performs a two-tier cache lookup to determine how many tokens can be skipped.</span></p>
+
+<div class="card" style="border-left:4px solid var(--accent-purple)">
+<div class="card-header" style="color:var(--accent-purple)"><span class="i18n" data-en="Tier 1: VRAM prefix cache (local)" data-zh="第一層：VRAM prefix cache（本地）">Tier 1: VRAM prefix cache (local)</span></div>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="Called via <code class='inline-code'>kv_cache_manager.get_computed_blocks(request)</code> → <code class='inline-code'>coordinator.find_longest_cache_hit(request.block_hashes, max_length)</code>."
+  data-zh="透過 <code class='inline-code'>kv_cache_manager.get_computed_blocks(request)</code> → <code class='inline-code'>coordinator.find_longest_cache_hit(request.block_hashes, max_length)</code> 呼叫。">Called via <code class="inline-code">kv_cache_manager.get_computed_blocks(request)</code>.</span></p>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="<strong>Mechanism:</strong> Each block of 16 tokens is hashed using a chain hash: <code class='inline-code'>hash(parent_block_hash, token_ids_tuple, extra_keys)</code>. The hash chain means a block's hash depends on ALL preceding blocks — if any token differs in the prefix, all subsequent block hashes change. The scheduler iterates through the request's block hashes and checks each against the block pool's <code class='inline-code'>cached_block_hash_to_id</code> map. It stops at the first miss — this is the <strong>longest prefix match</strong>."
+  data-zh="<strong>機制：</strong>每 16 token 的 block 使用 chain hash 計算：<code class='inline-code'>hash(parent_block_hash, token_ids_tuple, extra_keys)</code>。Hash chain 意味著每個 block 的 hash 取決於所有前序 block — 若 prefix 中任何 token 不同，後續所有 block hash 都會改變。Scheduler 逐一遍歷 request 的 block hash，在 block pool 的 <code class='inline-code'>cached_block_hash_to_id</code> map 中查找。在第一個 miss 處停止 — 這就是<strong>最長 prefix match</strong>。"><strong>Mechanism:</strong> Chain-hashed blocks checked against block pool's cached map. Stops at first miss = longest prefix match.</span></p>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="<strong>What can hit:</strong> Blocks from ANY completed request that had the same token prefix. This includes: same-job prior turns (if blocks survived eviction), other jobs with identical system prompt, or any request that shared the same token sequence."
+  data-zh="<strong>可命中的內容：</strong>來自任何已完成 request 且有相同 token prefix 的 blocks。包括：同一 job 先前 turns（若 blocks 未被 evict）、有相同 system prompt 的其他 jobs、或任何共享相同 token 序列的 request。"><strong>What can hit:</strong> Any completed request's blocks with matching token prefix (same-job prior turns, shared system prompt, etc.).</span></p>
+<p style="font-size:0.82rem;color:var(--text-muted)"><span class="i18n"
+  data-en="Returns: <code class='inline-code'>num_new_local_computed_tokens</code> = number of blocks × 16. Max hit = prompt_length − 1 (must recompute at least 1 token for logits)."
+  data-zh="回傳：<code class='inline-code'>num_new_local_computed_tokens</code> = block 數 × 16。最大命中 = prompt_length − 1（至少需 recompute 1 token 以取得 logits）。">Returns: <code class="inline-code">num_new_local_computed_tokens</code> = blocks × 16. Max = prompt − 1.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-teal)">
+<div class="card-header" style="color:var(--accent-teal)"><span class="i18n" data-en="Tier 2: External KV store (LMCache DRAM)" data-zh="第二層：外部 KV store（LMCache DRAM）">Tier 2: External KV store (LMCache DRAM)</span></div>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="Called only if a KV connector is configured: <code class='inline-code'>connector.get_num_new_matched_tokens(request, num_local_computed)</code>. For LMCache, this delegates to <code class='inline-code'>LMCacheConnectorV1 → lmcache_engine.get_num_new_matched_tokens()</code>."
+  data-zh="僅在配置了 KV connector 時呼叫：<code class='inline-code'>connector.get_num_new_matched_tokens(request, num_local_computed)</code>。LMCache 的情況下委派給 <code class='inline-code'>LMCacheConnectorV1 → lmcache_engine.get_num_new_matched_tokens()</code>。">Called only if KV connector configured. LMCache delegates to its engine.</span></p>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="<strong>Mechanism:</strong> LMCache checks its CPU DRAM tier for KV blocks beyond what VRAM prefix cache already found. If Tier 1 found 1,840 cached tokens but LMCache DRAM has 3,440 tokens for this prefix, the external match adds 1,600 more tokens. These will be loaded from DRAM to GPU during the forward pass."
+  data-zh="<strong>機制：</strong>LMCache 在其 CPU DRAM tier 中查找超出 VRAM prefix cache 已找到的 KV blocks。若第一層找到 1,840 cached tokens 但 LMCache DRAM 有此 prefix 的 3,440 tokens，外部 match 額外加 1,600 tokens。這些將在 forward pass 期間從 DRAM load 到 GPU。"><strong>Mechanism:</strong> LMCache checks DRAM for blocks beyond what VRAM found. The difference is loaded from DRAM to GPU during forward pass.</span></p>
+<p style="font-size:0.82rem;color:var(--text-muted)"><span class="i18n"
+  data-en="Returns: <code class='inline-code'>num_external_computed_tokens</code>. For FCFS/Continuum (no connector): always 0. Total computed = local + external."
+  data-zh="回傳：<code class='inline-code'>num_external_computed_tokens</code>。FCFS/Continuum（無 connector）：永遠為 0。Total computed = local + external。">Returns: <code class="inline-code">num_external_computed_tokens</code>. FCFS/Continuum: always 0.</span></p>
+</div>
+
+<div class="callout">
+<div class="callout-title"><span class="i18n" data-en="Tokens to compute = prompt − (local hit + external hit)" data-zh="需計算的 tokens = prompt − (local hit + external hit)">Tokens to compute = prompt − (local hit + external hit)</span></div>
+<p style="font-size:0.85rem"><span class="i18n"
+  data-en="Example from §6.1 job_0020 Turn 5 (prompt=7,512 tokens): Tier 1 found 6,080 tokens in VRAM prefix cache (380 blocks). Tier 2 (LMCache DRAM) found 0 additional. Tokens to compute: 7,512 − 6,080 = 1,432. Without cache: would need to recompute all 7,512 tokens."
+  data-zh="§6.1 job_0020 Turn 5 的範例（prompt=7,512 tokens）：第一層在 VRAM prefix cache 找到 6,080 tokens（380 blocks）。第二層（LMCache DRAM）找到 0 個額外的。需計算：7,512 − 6,080 = 1,432。無 cache 時：需 recompute 全部 7,512 tokens。">Example: Turn 5 (7,512 tokens). Tier 1 found 6,080 in VRAM. Tier 2: 0. Compute: 7,512 − 6,080 = 1,432 tokens (vs 7,512 without cache).</span></p>
+</div>
+
 <h4><span class="i18n" data-en="During schedule() — block allocation" data-zh="schedule() 階段 — block 分配">During schedule() — block allocation</span></h4>
 
 <table>
