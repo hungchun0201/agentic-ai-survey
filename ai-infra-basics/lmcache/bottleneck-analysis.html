@@ -1871,7 +1871,158 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
     data-zh="在 vLLM v1 中，<code class='inline-code'>action=free</code> 釋放 block reservation（從「allocated」降為「cached」）。KV 資料仍留在 VRAM 的 prefix cache 中，如果相同 prefix 在 block 被 evict 前出現就能直接 reuse。這與 Continuum 的 <code class='inline-code'>action=pin</code> 不同 — pin 讓 block 保持「allocated」（不可 evict）跨越 tool-call 間隔。三種狀態：<strong>allocated</strong>（使用中，不可 evict）→ <strong>cached</strong>（已釋放但 KV 資料留存，壓力下可被 evict）→ <strong>empty</strong>（無 KV 資料）。">In vLLM v1, <code class="inline-code">action=free</code> releases the block reservation. The KV data remains in VRAM's prefix cache until evicted. This is distinct from Continuum's <code class="inline-code">action=pin</code>, which keeps blocks unevictable across tool-call gaps. Three states: <strong>allocated</strong> (in use, unevictable) → <strong>cached</strong> (free but KV retained, evictable) → <strong>empty</strong> (no KV).</span></p>
 </div>
 
-<h3><span class="i18n" data-en="6.3 Technical Details" data-zh="6.3 技術細節">6.3 Technical Details</span></h3>
+<h3><span class="i18n" data-en="6.3 KV Cache Operations per Scheduler Step" data-zh="6.3 每步 Scheduler 的 KV Cache 操作">6.3 KV Cache Operations per Scheduler Step</span></h3>
+
+<p><span class="i18n"
+  data-en="Each vLLM scheduler step processes a batch of requests. The KV cache operations differ by request phase and scheduling policy. The following diagram and table describe the complete decision tree derived from <code class='inline-code'>vllm/v1/core/sched/scheduler.py</code>."
+  data-zh="每個 vLLM scheduler step 處理一批 request。KV cache 操作因 request 階段和 scheduling policy 不同而異。以下流程圖和表格描述了從 <code class='inline-code'>vllm/v1/core/sched/scheduler.py</code> 推導的完整決策樹。">Each vLLM scheduler step processes a batch of requests. The KV cache operations differ by request phase and scheduling policy.</span></p>
+
+<h4><span class="i18n" data-en="Block states" data-zh="Block 狀態">Block states</span></h4>
+
+<div class="grid-3">
+  <div class="card" style="border-top:3px solid var(--accent-blue);padding:0.8rem">
+    <h4 style="color:var(--accent-blue);margin:0 0 0.3rem"><span class="i18n" data-en="Allocated" data-zh="Allocated">Allocated</span></h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n"
+      data-en="Owned by an active request. Cannot be evicted. KV data is in VRAM and being used for inference."
+      data-zh="被 active request 持有。不可 evict。KV 資料在 VRAM 中，正用於 inference。">Owned by an active request. Cannot be evicted.</span></p>
+  </div>
+  <div class="card" style="border-top:3px solid var(--accent-orange);padding:0.8rem">
+    <h4 style="color:var(--accent-orange);margin:0 0 0.3rem"><span class="i18n" data-en="Cached" data-zh="Cached">Cached</span></h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n"
+      data-en="Released by a completed request. KV data still in VRAM (prefix cache). Reusable if same prefix appears, but evictable under VRAM pressure."
+      data-zh="被已完成的 request 釋放。KV 資料仍在 VRAM（prefix cache）中。若相同 prefix 出現可重用，但在 VRAM 壓力下可被 evict。">Released but KV data still in VRAM. Reusable but evictable.</span></p>
+  </div>
+  <div class="card" style="border-top:3px solid var(--text-muted);padding:0.8rem">
+    <h4 style="color:var(--text-muted);margin:0 0 0.3rem"><span class="i18n" data-en="Empty" data-zh="Empty">Empty</span></h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n"
+      data-en="No KV data. Available for allocation to new requests."
+      data-zh="無 KV 資料。可分配給新 request。">No KV data. Available for allocation.</span></p>
+  </div>
+</div>
+
+<h4><span class="i18n" data-en="During schedule() — block allocation" data-zh="schedule() 階段 — block 分配">During schedule() — block allocation</span></h4>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Request Phase" data-zh="Request 階段">Request Phase</span></th>
+    <th><span class="i18n" data-en="Operation" data-zh="操作">Operation</span></th>
+    <th><span class="i18n" data-en="Details" data-zh="細節">Details</span></th>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="New request (first prefill)" data-zh="新 request（首次 prefill）">New request (first prefill)</span></td>
+    <td><code class="inline-code">allocate_slots</code> + <code class="inline-code">prefix_cache_hit</code></td>
+    <td><span class="i18n"
+      data-en="Check VRAM prefix cache + LMCache DRAM for reusable blocks. Allocate remaining blocks. If insufficient free blocks → preempt lowest-priority running request."
+      data-zh="檢查 VRAM prefix cache + LMCache DRAM 是否有可重用 block。分配剩餘 block。若 free block 不足 → preempt 最低優先 running request。">Check prefix cache + DRAM, allocate remaining, preempt if needed.</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Running decode (generating tokens)" data-zh="Running decode（生成 token 中）">Running decode</span></td>
+    <td><code class="inline-code">allocate_slots</code></td>
+    <td><span class="i18n"
+      data-en="May need 1 new block every 16 tokens (block size). Usually succeeds since decode adds 1 token/step."
+      data-zh="每 16 token 可能需要 1 個新 block（block size）。通常成功因為 decode 每步只加 1 token。">May need 1 new block per 16 tokens.</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Preempted request" data-zh="被 preempt 的 request">Preempted request</span></td>
+    <td><code class="inline-code">free</code></td>
+    <td><span class="i18n"
+      data-en="All blocks released. Request returns to waiting queue. On reschedule: must recompute from scratch (or reload from LMCache DRAM if available)."
+      data-zh="所有 block 釋放。Request 回到 waiting queue。重新排程時：需從頭 recompute（或從 LMCache DRAM reload，若有）。">All blocks freed. Must recompute on reschedule.</span></td>
+  </tr>
+</table>
+
+<h4><span class="i18n" data-en="After forward pass — request completion" data-zh="Forward pass 後 — request 完成">After forward pass — request completion</span></h4>
+
+<p><span class="i18n"
+  data-en="When a request finishes generating (EOS or max_tokens), the scheduler calls <code class='inline-code'>_free_request()</code> which dispatches based on the scheduling policy:"
+  data-zh="當 request 完成生成（EOS 或 max_tokens）時，scheduler 呼叫 <code class='inline-code'>_free_request()</code>，根據 scheduling policy 分流：">When a request finishes, <code class="inline-code">_free_request()</code> dispatches based on policy:</span></p>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Condition" data-zh="條件">Condition</span></th>
+    <th>FCFS</th>
+    <th>LMCache</th>
+    <th>Continuum</th>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Mid-job turn (not last turn)" data-zh="Job 中間輪（非最後一輪）">Mid-job turn</span></td>
+    <td>
+      <code class="inline-code">action=free</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n"
+        data-en="Blocks: allocated → cached. KV stays in VRAM prefix cache until evicted by pressure."
+        data-zh="Blocks: allocated → cached。KV 留在 VRAM prefix cache 直到被壓力 evict。">allocated → cached (evictable)</span></span>
+    </td>
+    <td>
+      <code class="inline-code">wait_for_save</code> → <code class="inline-code">action=free</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n"
+        data-en="First: offload KV to CPU DRAM via PCIe (gpu_to_cpu transfer). Then: blocks freed to prefix cache. Double backup: VRAM cache + DRAM copy."
+        data-zh="先：透過 PCIe offload KV 到 CPU DRAM（gpu_to_cpu transfer）。然後：block 釋放到 prefix cache。雙重備份：VRAM cache + DRAM 副本。">offload to DRAM, then allocated → cached</span></span>
+    </td>
+    <td>
+      <code class="inline-code">action=pin</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n"
+        data-en="Blocks stay allocated (unevictable) for pin_ttl seconds. No transfer, no eviction. When the same job returns, KV is 100% in VRAM."
+        data-zh="Blocks 保持 allocated（不可 evict）持續 pin_ttl 秒。無傳輸、無 eviction。同一 job 回來時 KV 100% 在 VRAM。">stays allocated (unevictable) for TTL</span></span>
+    </td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Last turn of job (is_last_step=True)" data-zh="Job 最後一輪（is_last_step=True）">Last turn (is_last_step)</span></td>
+    <td>
+      <code class="inline-code">action=free</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n" data-en="Same as mid-job" data-zh="同 mid-job">Same as mid-job</span></span>
+    </td>
+    <td>
+      <code class="inline-code">wait_for_save</code> → <code class="inline-code">action=free</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n" data-en="Same as mid-job (offload even though job is done — populates DRAM for future prefix match)" data-zh="同 mid-job（即使 job 結束也 offload — 為未來 prefix match 填充 DRAM）">Same (offloads for future reuse)</span></span>
+    </td>
+    <td>
+      <code class="inline-code">action=free</code><br>
+      <span style="font-size:0.78rem;color:var(--text-muted)"><span class="i18n" data-en="No pin — job is done, blocks freed immediately" data-zh="不 pin — job 結束，block 立即釋放">No pin — freed immediately</span></span>
+    </td>
+  </tr>
+</table>
+
+<h4><span class="i18n" data-en="During tool-call gap (0.5 s between turns)" data-zh="Tool-call 間隔中（turns 之間 0.5 秒）">During tool-call gap</span></h4>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
+    <th><span class="i18n" data-en="What happens to this job's KV" data-zh="此 job 的 KV 發生什麼事">What happens to this job's KV</span></th>
+    <th><span class="i18n" data-en="Next turn cache hit" data-zh="下一輪 cache hit">Next turn hit</span></th>
+  </tr>
+  <tr>
+    <td>FCFS</td>
+    <td><span class="i18n"
+      data-en="Cached blocks may be evicted by other jobs' prefill allocations. No DRAM backup."
+      data-zh="Cached blocks 可能被其他 job 的 prefill 分配 evict。無 DRAM 備份。">May be evicted. No backup.</span></td>
+    <td><span class="i18n" data-en="Depends on VRAM prefix cache survival" data-zh="取決於 VRAM prefix cache 是否存活">Depends on prefix cache survival</span></td>
+  </tr>
+  <tr>
+    <td>LMCache</td>
+    <td><span class="i18n"
+      data-en="Cached blocks may be evicted (same as FCFS), but DRAM copy exists. However, DRAM entries are also subject to LRU eviction by other jobs' offload traffic."
+      data-zh="Cached blocks 可能被 evict（同 FCFS），但有 DRAM 副本。然而 DRAM entries 也會被其他 job 的 offload 流量 LRU evict。">VRAM evictable + DRAM copy (also LRU evictable)</span></td>
+    <td><span class="i18n"
+      data-en="Hit if DRAM entry survives LRU. At JPS=6 H100: Turn 3–5 hit ~55–81%, Turn 6–8 collapse to 1% (see §6.1)"
+      data-zh="若 DRAM entry 在 LRU 中存活則命中。H100 JPS=6：Turn 3–5 命中 ~55–81%、Turn 6–8 崩塌至 1%（見 §6.1）">Hit if DRAM survives LRU (§6.1)</span></td>
+  </tr>
+  <tr>
+    <td style="color:var(--accent-teal);font-weight:600">Continuum</td>
+    <td><span class="i18n"
+      data-en="Blocks stay allocated (pinned). No other job can use them. Guaranteed preservation across gap."
+      data-zh="Blocks 保持 allocated（pinned）。其他 job 無法使用。跨 gap 保證保留。">Pinned. No eviction possible.</span></td>
+    <td style="color:var(--accent-green);font-weight:600"><span class="i18n" data-en="~100% (unless TTL expires)" data-zh="~100%（除非 TTL 到期）">~100%</span></td>
+  </tr>
+</table>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="Source code reference" data-zh="原始碼參考">Source code reference</span></div>
+  <p style="font-size:0.82rem"><span class="i18n"
+    data-en="The dispatch logic is in <code class='inline-code'>vllm/v1/core/sched/scheduler.py:_free_blocks()</code> (lines 1514–1589). The three code paths: FCFS falls through to <code class='inline-code'>kv_cache_manager.free(request)</code>; LMCache triggers <code class='inline-code'>_connector_finished() → wait_for_save</code> before free; Continuum calls <code class='inline-code'>pin_request(request, pin_ttl)</code> which appends to <code class='inline-code'>self.pinned_requests</code>."
+    data-zh="分流邏輯在 <code class='inline-code'>vllm/v1/core/sched/scheduler.py:_free_blocks()</code>（lines 1514–1589）。三條路徑：FCFS 直接落到 <code class='inline-code'>kv_cache_manager.free(request)</code>；LMCache 先觸發 <code class='inline-code'>_connector_finished() → wait_for_save</code> 再 free；Continuum 呼叫 <code class='inline-code'>pin_request(request, pin_ttl)</code> 加入 <code class='inline-code'>self.pinned_requests</code>。">Dispatch in <code class="inline-code">scheduler.py:_free_blocks()</code>. FCFS → free; LMCache → wait_for_save + free; Continuum → pin.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="6.4 Technical Details" data-zh="6.4 技術細節">6.4 Technical Details</span></h3>
 <div class="callout" style="border-left-color: var(--accent-teal);">
   <div class="callout-title"><span class="i18n" data-en="Full root cause analysis in dedicated page" data-zh="完整根因分析在專頁中">Full root cause analysis in dedicated page</span></div>
   <p><span class="i18n"
