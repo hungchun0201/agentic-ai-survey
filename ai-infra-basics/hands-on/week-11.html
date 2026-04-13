@@ -667,6 +667,74 @@ grep -E <span class="st">"acceptance|Throughput"</span> results_ngram_k5_bs1.txt
     </ol>
   </div>
 
+  <div class="card highlight-orange">
+    <h4><span class="i18n" data-en="Implementation Differences — SpecDecode-Bench Source Code Analysis" data-zh="實作差異 — SpecDecode-Bench 原始碼分析">Implementation Differences — SpecDecode-Bench Source Code Analysis</span></h4>
+    <p><span class="i18n"
+      data-en="We examined the <a href='https://github.com/SpecDecode-Bench'>SpecDecode-Bench</a> open-source repository (simulator + profiling-patched vLLM fork) to identify concrete implementation differences that could explain the gap between our results and theirs."
+      data-zh="我們檢視了 <a href='https://github.com/SpecDecode-Bench'>SpecDecode-Bench</a> 開源倉庫（模擬器 + profiling-patched vLLM fork），以找出能解釋我們結果差異的具體實作差異。">We examined the <a href='https://github.com/SpecDecode-Bench'>SpecDecode-Bench</a> open-source repository (simulator + profiling-patched vLLM fork) to identify concrete implementation differences that could explain the gap between our results and theirs.</span></p>
+    <div style="overflow-x:auto">
+    <table>
+      <tr>
+        <th><span class="i18n" data-en="Aspect" data-zh="面向">Aspect</span></th>
+        <th>Liu et al. (SpecDecode-Bench)</th>
+        <th><span class="i18n" data-en="Our Setup" data-zh="我們的設定">Our Setup</span></th>
+        <th><span class="i18n" data-en="Impact" data-zh="影響">Impact</span></th>
+      </tr>
+      <tr>
+        <td><strong>vLLM</strong></td>
+        <td>v0.10.1.1 (<code>perf/e2e-v0.10.1.1</code> branch)</td>
+        <td>v0.19.0 (vllm-pace)</td>
+        <td><span class="i18n" data-en="9 minor versions apart. EAGLE integration path differs — v0.10 uses V0 engine spec_decode_worker; v0.19 uses V1 engine with new core_client architecture." data-zh="相差 9 個 minor 版本。EAGLE 整合路徑不同 — v0.10 使用 V0 engine spec_decode_worker；v0.19 使用 V1 engine 及新的 core_client 架構。">9 minor versions apart. EAGLE integration path differs — v0.10 uses V0 engine spec_decode_worker; v0.19 uses V1 engine with new core_client architecture.</span></td>
+      </tr>
+      <tr>
+        <td><strong><span class="i18n" data-en="Benchmark mode" data-zh="基準測試模式">Benchmark mode</span></strong></td>
+        <td><code>bench_latency.py</code> — <span class="i18n" data-en="offline <code>llm.generate()</code>, controlled batch sizes (1, 16, 64, 128)" data-zh="離線 <code>llm.generate()</code>，控制 batch size (1, 16, 64, 128)">offline <code>llm.generate()</code>, controlled batch sizes (1, 16, 64, 128)</span></td>
+        <td><code>vllm bench serve</code> — <span class="i18n" data-en="online serving (rr=2), effective batch determined by scheduler" data-zh="線上服務（rr=2），有效 batch 由排程器決定">online serving (rr=2), effective batch determined by scheduler</span></td>
+        <td><span class="i18n" data-en="<strong>Critical.</strong> Offline batch=1 is the ideal scenario for spec decode. Serving adds scheduling, tokenization, and streaming overhead that dilute any spec decode gains." data-zh="<strong>關鍵。</strong>離線 batch=1 是推測解碼的理想場景。Serving 增加了排程、token 化和串流開銷，稀釋了推測解碼的收益。"><strong>Critical.</strong> Offline batch=1 is the ideal scenario for spec decode. Serving adds scheduling, tokenization, and streaming overhead that dilute any spec decode gains.</span></td>
+      </tr>
+      <tr>
+        <td><strong><span class="i18n" data-en="Sampling" data-zh="取樣">Sampling</span></strong></td>
+        <td><code>temperature=0.0</code> (<span class="i18n" data-en="greedy, deterministic" data-zh="貪婪，確定性">greedy, deterministic</span>)</td>
+        <td><span class="i18n" data-en="Server default (non-greedy in v0.19.0)" data-zh="Server 預設（v0.19.0 中非貪婪）">Server default (non-greedy in v0.19.0)</span></td>
+        <td><span class="i18n" data-en="Non-greedy sampling lowers acceptance rate since draft and target may sample different tokens from similar distributions. Our greedy control (temp=0) showed only marginal improvement (21.6% → 24.1%)." data-zh="非貪婪取樣降低接受率，因為 draft 和 target 可能從相似分佈中取樣到不同 token。我們的 greedy 對照（temp=0）只顯示微小改善（21.6% → 24.1%）。">Non-greedy sampling lowers acceptance rate since draft and target may sample different tokens from similar distributions. Our greedy control (temp=0) showed only marginal improvement (21.6% → 24.1%).</span></td>
+      </tr>
+      <tr>
+        <td><strong>k</strong></td>
+        <td>k=3 (<span class="i18n" data-en="all methods" data-zh="所有方法">all methods</span>)</td>
+        <td>k=5 (<span class="i18n" data-en="primary runs" data-zh="主要實驗">primary runs</span>)</td>
+        <td><span class="i18n" data-en="k=5 adds 2 extra positions with very low acceptance (position 3: 6.2%, position 4: 3.0%), increasing wasted verification compute." data-zh="k=5 多了 2 個接受率極低的位置（位置 3：6.2%，位置 4：3.0%），增加了浪費的驗證計算。">k=5 adds 2 extra positions with very low acceptance (position 3: 6.2%, position 4: 3.0%), increasing wasted verification compute.</span></td>
+      </tr>
+      <tr>
+        <td><strong><span class="i18n" data-en="8B Draft model" data-zh="8B Draft model">8B Draft model</span></strong></td>
+        <td>Qwen3-0.6B → Qwen3-8B (<span class="i18n" data-en="same family, 0.6B" data-zh="同系列，0.6B">same family, 0.6B</span>)</td>
+        <td>Llama-3.2-1B → Llama-3.1-8B (<span class="i18n" data-en="cross-generation, 1B" data-zh="跨世代，1B">cross-generation, 1B</span>)</td>
+        <td><span class="i18n" data-en="Qwen3-0.6B is half the size (faster proposing) and trained within the same Qwen3 family (higher alignment). Our Llama-3.2-1B is larger and cross-generation, likely causing the lower acceptance (28% vs their ~60%+)." data-zh="Qwen3-0.6B 只有一半大（更快提議）且在同一 Qwen3 系列內訓練（更高對齊）。我們的 Llama-3.2-1B 更大且跨世代，可能是較低接受率的原因（28% vs 他們的 ~60%+）。">Qwen3-0.6B is half the size (faster proposing) and trained within the same Qwen3 family (higher alignment). Our Llama-3.2-1B is larger and cross-generation, likely causing the lower acceptance (28% vs their ~60%+).</span></td>
+      </tr>
+      <tr>
+        <td><strong><span class="i18n" data-en="Draft model config" data-zh="Draft model 設定">Draft model config</span></strong></td>
+        <td><code>disable_padded_drafter_batch: True</code></td>
+        <td><span class="i18n" data-en="Default (padded batching enabled)" data-zh="預設（啟用填充批次）">Default (padded batching enabled)</span></td>
+        <td><span class="i18n" data-en="Padded batching wastes compute on padding tokens during draft generation. Liu et al. explicitly disable it." data-zh="填充批次在 draft 生成時浪費計算在填充 token 上。Liu et al. 明確停用。">Padded batching wastes compute on padding tokens during draft generation. Liu et al. explicitly disable it.</span></td>
+      </tr>
+      <tr>
+        <td><strong>CUDA Graphs</strong></td>
+        <td><span class="i18n" data-en="Enabled (vLLM v0.10 default)" data-zh="啟用（vLLM v0.10 預設）">Enabled (vLLM v0.10 default)</span></td>
+        <td><span class="i18n" data-en="Issues on H200 (hang at 84% capture); H100 works" data-zh="H200 有問題（在 84% capture 時 hang）；H100 正常">Issues on H200 (hang at 84% capture); H100 works</span></td>
+        <td><span class="i18n" data-en="CUDA graphs reduce kernel launch overhead. Our H200 runs required <code>--enforce-eager</code>, adding ~10-15% overhead per decode step." data-zh="CUDA graphs 減少 kernel 啟動開銷。我們的 H200 需要 <code>--enforce-eager</code>，每個 decode step 增加約 10-15% 開銷。">CUDA graphs reduce kernel launch overhead. Our H200 runs required <code>--enforce-eager</code>, adding ~10-15% overhead per decode step.</span></td>
+      </tr>
+      <tr>
+        <td><strong><span class="i18n" data-en="Metrics source" data-zh="指標來源">Metrics source</span></strong></td>
+        <td><code>time.perf_counter()</code> <span class="i18n" data-en="around <code>llm.generate()</code>" data-zh="包圍 <code>llm.generate()</code>">around <code>llm.generate()</code></span></td>
+        <td><code>vllm bench serve</code> <span class="i18n" data-en="(server-side streaming metrics)" data-zh="（server-side 串流指標）">(server-side streaming metrics)</span></td>
+        <td><span class="i18n" data-en="Different measurement granularity — offline measures pure generation latency; serving measures include HTTP/scheduling overhead." data-zh="不同的測量粒度 — 離線測量純生成延遲；serving 測量包含 HTTP/排程開銷。">Different measurement granularity — offline measures pure generation latency; serving measures include HTTP/scheduling overhead.</span></td>
+      </tr>
+    </table>
+    </div>
+    <p><span class="i18n"
+      data-en="<strong>Bottom line:</strong> The two most impactful differences are (1) <strong>offline batch=1 vs online serving</strong> — this alone can account for most of the speedup gap, and (2) <strong>EAGLE acceptance rate anomaly</strong> (21% vs 85%+) — likely a vLLM version compatibility issue between the EAGLE head and v0.19.0's hidden-state passing. The draft model results are closer to comparable once you account for the different model pairing (Qwen3-0.6B vs Llama-3.2-1B)."
+      data-zh="<strong>結論：</strong>兩個最具影響力的差異是 (1) <strong>離線 batch=1 vs 線上 serving</strong> — 僅此就可解釋大部分加速差距，以及 (2) <strong>EAGLE 接受率異常</strong>（21% vs 85%+）— 可能是 EAGLE head 與 v0.19.0 隱藏狀態傳遞之間的版本相容性問題。考慮到不同的模型配對（Qwen3-0.6B vs Llama-3.2-1B），draft model 結果更具可比性。"><strong>Bottom line:</strong> The two most impactful differences are (1) <strong>offline batch=1 vs online serving</strong> — this alone can account for most of the speedup gap, and (2) <strong>EAGLE acceptance rate anomaly</strong> (21% vs 85%+) — likely a vLLM version compatibility issue between the EAGLE head and v0.19.0's hidden-state passing. The draft model results are closer to comparable once you account for the different model pairing (Qwen3-0.6B vs Llama-3.2-1B).</span></p>
+  </div>
+
   <div class="card highlight-green">
     <h4><span class="i18n" data-en="Shared Conclusions" data-zh="共同結論">Shared Conclusions</span></h4>
     <ul>
