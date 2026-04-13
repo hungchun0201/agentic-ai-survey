@@ -2064,12 +2064,207 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
     data-zh="分流邏輯在 <code class='inline-code'>vllm/v1/core/sched/scheduler.py:_free_blocks()</code>（lines 1514–1589）。三條路徑：FCFS 直接落到 <code class='inline-code'>kv_cache_manager.free(request)</code>；LMCache 先觸發 <code class='inline-code'>_connector_finished() → wait_for_save</code> 再 free；Continuum 呼叫 <code class='inline-code'>pin_request(request, pin_ttl)</code> 加入 <code class='inline-code'>self.pinned_requests</code>。">Dispatch in <code class="inline-code">scheduler.py:_free_blocks()</code>. FCFS → free; LMCache → wait_for_save + free; Continuum → pin.</span></p>
 </div>
 
-<h3><span class="i18n" data-en="6.4 Technical Details" data-zh="6.4 技術細節">6.4 Technical Details</span></h3>
+<h3><span class="i18n" data-en="6.4 GPU Hardware: Why Async Offload Should Work (But Doesn't)" data-zh="6.4 GPU 硬體：為什麼異步 Offload 應該可行（但沒有）">6.4 GPU Hardware: Why Async Offload Should Work (But Doesn't)</span></h3>
+
+<p><span class="i18n"
+  data-en="KV cache offload/onload uses PCIe DMA transfers, NOT GPU compute kernels. The GPU has dedicated Copy Engines (CE) that operate independently from Streaming Multiprocessors (SM). In theory, DMA and forward pass can run simultaneously with zero interference."
+  data-zh="KV cache offload/onload 使用 PCIe DMA 傳輸，不是 GPU compute kernel。GPU 有專用的 Copy Engine（CE）獨立於 Streaming Multiprocessor（SM）運作。理論上 DMA 和 forward pass 可以零干擾同時執行。">KV offload/onload uses PCIe DMA (Copy Engine), not GPU compute (SM). They can theoretically run with zero interference.</span></p>
+
+<div class="grid-3">
+  <div class="card" style="border-top:3px solid var(--accent-purple);padding:0.8rem">
+    <h4 style="color:var(--accent-purple);margin:0 0 0.3rem">SM (Compute)</h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n" data-en="132 units (H100). Runs forward pass kernels: FlashAttention, GEMM, LayerNorm." data-zh="132 個（H100）。執行 forward pass kernel：FlashAttention、GEMM、LayerNorm。">132 units (H100). Forward pass kernels.</span></p>
+  </div>
+  <div class="card" style="border-top:3px solid var(--accent-orange);padding:0.8rem">
+    <h4 style="color:var(--accent-orange);margin:0 0 0.3rem">CE (Copy Engine)</h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n" data-en="2–3 units. Handles PCIe DMA: GPU↔CPU memory transfers. Independent hardware." data-zh="2–3 個。處理 PCIe DMA：GPU↔CPU 記憶體傳輸。獨立硬體。">2–3 units. PCIe DMA transfers. Independent.</span></p>
+  </div>
+  <div class="card" style="border-top:3px solid var(--accent-teal);padding:0.8rem">
+    <h4 style="color:var(--accent-teal);margin:0 0 0.3rem">NVLink Engine</h4>
+    <p style="font-size:0.82rem;margin:0"><span class="i18n" data-en="18 units (H100). GPU↔GPU transfers for TP all-reduce. Also independent." data-zh="18 個（H100）。GPU↔GPU 傳輸用於 TP all-reduce。同樣獨立。">18 units (H100). GPU↔GPU for TP.</span></p>
+  </div>
+</div>
+
+<h4><span class="i18n" data-en="Current execution timeline (with blocking)" data-zh="目前的執行時間線（含阻塞）">Current timeline (blocking)</span></h4>
+
+<svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:950px;height:auto;display:block;margin:1rem auto">
+<rect width="900" height="280" fill="#0f1218" rx="6"/>
+<text x="450" y="22" fill="#e2e8f0" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui"><tspan class="i18n" data-en="Current: wait_for_save blocks CPU → GPU idle between steps" data-zh="目前：wait_for_save 阻塞 CPU → GPU 在 step 間閒置">Current: wait_for_save blocks CPU → GPU idle between steps</tspan></text>
+
+<!-- Labels -->
+<text x="15" y="60" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">CPU</text>
+<text x="15" y="110" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">SM</text>
+<text x="15" y="110" fill="#64748b" font-size="8" font-family="system-ui" dy="10">(compute)</text>
+<text x="15" y="160" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">CE</text>
+<text x="15" y="160" fill="#64748b" font-size="8" font-family="system-ui" dy="10">(DMA)</text>
+
+<!-- Step N -->
+<text x="200" y="38" fill="#64748b" font-size="9" text-anchor="middle" font-family="system-ui">Step N</text>
+<line x1="60" y1="42" x2="60" y2="175" stroke="#334155" stroke-width="0.5" stroke-dasharray="3,3"/>
+
+<!-- CPU: launch forward -->
+<rect x="60" y="48" width="40" height="22" rx="3" fill="#8b5cf6"/>
+<text x="80" y="63" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">launch</text>
+
+<!-- CPU: blocked by wait_for_save -->
+<rect x="100" y="48" width="260" height="22" rx="3" fill="#dc2626" opacity="0.8"/>
+<text x="230" y="57" fill="#fff" font-size="9" text-anchor="middle" font-weight="600" font-family="system-ui">CPU blocked: wait_for_save()</text>
+<text x="230" y="67" fill="#fecaca" font-size="7" text-anchor="middle" font-family="system-ui">slot_mapping.cuda() + store_stream.synchronize()</text>
+
+<!-- CPU: launch next -->
+<rect x="365" y="48" width="40" height="22" rx="3" fill="#3b82f6"/>
+<text x="385" y="63" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">sched</text>
+<rect x="408" y="48" width="40" height="22" rx="3" fill="#8b5cf6"/>
+<text x="428" y="63" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">launch</text>
+
+<!-- SM: forward pass -->
+<rect x="60" y="98" width="180" height="22" rx="3" fill="#8b5cf6"/>
+<text x="150" y="113" fill="#fff" font-size="9" text-anchor="middle" font-weight="600" font-family="system-ui">Forward Pass (SM kernels)</text>
+
+<!-- SM: IDLE -->
+<rect x="240" y="98" width="210" height="22" rx="2" fill="#1e293b" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,3"/>
+<text x="345" y="113" fill="#ef4444" font-size="9" text-anchor="middle" font-weight="600" font-family="system-ui">GPU IDLE — no kernels launched</text>
+
+<!-- SM: next forward -->
+<rect x="453" y="98" width="100" height="22" rx="3" fill="#8b5cf6"/>
+<text x="503" y="113" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">Next Forward</text>
+
+<!-- CE: offload -->
+<rect x="60" y="148" width="40" height="22" rx="2" fill="#1e293b" stroke="#334155" stroke-width="0.5"/>
+<rect x="240" y="148" width="120" height="22" rx="3" fill="#f59e0b"/>
+<text x="300" y="163" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">Offload KV (DMA)</text>
+
+<!-- Annotation -->
+<path d="M 240 130 L 240 138 L 450 138 L 450 130" fill="none" stroke="#ef4444" stroke-width="1"/>
+<text x="345" y="137" fill="#ef4444" font-size="7" text-anchor="middle" font-family="system-ui">SM idle while CE offloads + CPU waits</text>
+
+<!-- Ideal timeline -->
+<text x="450" y="198" fill="#22c55e" font-size="12" font-weight="600" text-anchor="middle" font-family="system-ui"><tspan class="i18n" data-en="Ideal: offload overlaps with next step (PR #37160)" data-zh="理想：offload 與下一步重疊（PR #37160）">Ideal: offload overlaps with next step</tspan></text>
+
+<text x="15" y="228" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">CPU</text>
+<text x="15" y="258" fill="#94a3b8" font-size="10" font-weight="600" font-family="system-ui">SM+CE</text>
+
+<!-- Ideal CPU -->
+<rect x="60" y="216" width="40" height="22" rx="3" fill="#8b5cf6"/>
+<text x="80" y="231" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">launch</text>
+<rect x="100" y="216" width="10" height="22" rx="2" fill="#22c55e"/>
+<rect x="115" y="216" width="40" height="22" rx="3" fill="#3b82f6"/>
+<text x="135" y="231" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">sched</text>
+<rect x="158" y="216" width="40" height="22" rx="3" fill="#8b5cf6"/>
+<text x="178" y="231" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">launch</text>
+
+<!-- Ideal SM+CE -->
+<rect x="60" y="246" width="180" height="22" rx="3" fill="#8b5cf6"/>
+<text x="150" y="261" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">Forward N (SM)</text>
+<rect x="180" y="246" width="80" height="22" rx="3" fill="#f59e0b" opacity="0.7"/>
+<text x="220" y="261" fill="#fff" font-size="7" text-anchor="middle" font-family="system-ui">Offload (CE)</text>
+<rect x="243" y="246" width="140" height="22" rx="3" fill="#8b5cf6"/>
+<text x="313" y="261" fill="#fff" font-size="8" text-anchor="middle" font-family="system-ui">Forward N+1 (SM)</text>
+
+<text x="220" y="243" fill="#22c55e" font-size="7" text-anchor="middle" font-family="system-ui">overlap!</text>
+</svg>
+
+<h4><span class="i18n" data-en="Full call chain with source locations" data-zh="完整呼叫鏈及原始碼位置">Full call chain with source locations</span></h4>
+
+<div class="card" style="background:var(--bg-code);font-family:'SF Mono','Fira Code',monospace;font-size:0.78rem;line-height:1.8;overflow-x:auto">
+<pre style="margin:0;background:transparent;border:none;padding:0"><code><span class="cmt">// vLLM Step Loop</span>
+│
+├── <span class="fn">schedule()</span>                               <span class="cmt">// scheduler.py:280</span>
+│   ├── <span class="typ">Tier 1</span>: <span class="fn">kv_cache_manager.get_computed_blocks</span>(req)  <span class="cmt">// kv_cache_manager.py:153</span>
+│   │   └── <span class="fn">coordinator.find_longest_cache_hit</span>(block_hashes)
+│   │       └── <span class="fn">block_pool.get_cached_block</span>(hash)        <span class="cmt">// single_type_kv_cache_manager.py:252</span>
+│   │           <span class="str">chain hash: hash(parent_hash, token_ids, extra_keys)</span>  <span class="cmt">// kv_cache_utils.py:539</span>
+│   │
+│   ├── <span class="typ">Tier 2</span> <span class="cmt">(LMCache only)</span>:
+│   │   └── <span class="fn">connector.get_num_new_matched_tokens</span>()      <span class="cmt">// lmcache_connector.py:158</span>
+│   │       └── <span class="fn">lmcache_engine.get_num_new_matched_tokens</span>  <span class="cmt">// vllm_v1_adapter.py:1123</span>
+│   │
+│   ├── <span class="fn">allocate_slots</span>()                              <span class="cmt">// kv_cache_manager.py:196</span>
+│   └── <span class="fn">_free_request</span>() → <span class="fn">_connector_finished</span>()       <span class="cmt">// scheduler.py:1481, 1657</span>
+│       └── <span class="fn">_free_blocks</span>()                             <span class="cmt">// scheduler.py:1514</span>
+│           ├── FCFS:      <span class="fn">kv_cache_manager.free</span>(req)
+│           ├── LMCache:   <span class="fn">connector.request_finished</span>() + free
+│           └── Continuum: <span class="fn">pin_request</span>(req, ttl)         <span class="cmt">// scheduler.py:240</span>
+│
+├── <span class="fn">execute_model()</span>                             <span class="cmt">// gpu_model_runner.py:2000</span>
+│   └── <span class="kw">with</span> <span class="fn">maybe_get_kv_connector_output</span>():    <span class="cmt">// kv_connector_model_runner_mixin.py:97</span>
+│       │
+│       ├── <span class="typ">ENTER</span>: <span class="fn">start_load_kv</span>()                <span class="cmt">// onload from DRAM (async, load_stream)</span>
+│       │
+│       ├── <span class="fn">model</span>(input_ids, positions, ...)     <span class="cmt">// forward pass (default stream, SM)</span>
+│       │   <span class="str">GPU simultaneously: SM=forward, CE=onload DMA</span>
+│       │
+│       └── <span class="typ">EXIT</span>: <span class="fn">wait_for_save</span>()  <span class="dec">⚠ CPU BLOCKS HERE</span>
+│           └── <span class="fn">lmcache_connector.wait_for_save</span>()    <span class="cmt">// lmcache_connector.py:111</span>
+│               └── <span class="fn">vllm_v1_adapter.wait_for_save</span>()  <span class="cmt">// vllm_v1_adapter.py:1019</span>
+│                   │
+│                   ├── <span class="dec">slot_mapping.cuda()</span>          <span class="cmt">// vllm_v1_adapter.py:1055</span>
+│                   │   <span class="dec">→ PyTorch allocator GC → cudaStreamSynchronize(default)</span>
+│                   │   <span class="str">Sync #1: waits for forward pass to finish</span>
+│                   │
+│                   ├── <span class="fn">lmcache_engine.store</span>()       <span class="cmt">// cache_engine.py:277</span>
+│                   │   └── <span class="fn">gpu_connector.batched_from_gpu</span>()  <span class="cmt">// gpu_connector.py:339</span>
+│                   │       ├── <span class="kw">with</span> torch.cuda.stream(<span class="cls">store_stream</span>):
+│                   │       │   <span class="fn">lmc_ops.multi_layer_kv_transfer</span>()  <span class="cmt">// gpu_connector.py:279</span>
+│                   │       │   <span class="str">GPU→CPU DMA on Copy Engine</span>
+│                   │       │
+│                   │       └── <span class="dec">store_stream.synchronize()</span>  <span class="cmt">// gpu_connector.py:348</span>
+│                   │           <span class="str">Sync #2: waits for DMA to complete</span>
+│                   │
+│                   └── <span class="dec">CPU blocked → cannot launch next step</span>
+│
+└── <span class="cmt">// back to step loop → next schedule() + execute_model()</span></code></pre>
+</div>
+
+<h4><span class="i18n" data-en="Three synchronization points" data-zh="三個同步阻塞點">Three synchronization points</span></h4>
+
+<table>
+  <tr>
+    <th>#</th>
+    <th><span class="i18n" data-en="Location" data-zh="位置">Location</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="原始碼">Source</span></th>
+    <th><span class="i18n" data-en="What it blocks" data-zh="阻塞什麼">What it blocks</span></th>
+  </tr>
+  <tr>
+    <td style="color:var(--accent-red);font-weight:700">1</td>
+    <td><code class="inline-code">slot_mapping.cuda()</code></td>
+    <td style="font-size:0.78rem"><code class="inline-code">vllm_v1_adapter.py:1055</code></td>
+    <td><span class="i18n" data-en="PyTorch allocator GC → cudaStreamSynchronize(default_stream). Waits for entire forward pass to complete before allocating GPU memory for the slot mapping tensor." data-zh="PyTorch allocator GC → cudaStreamSynchronize(default_stream)。在為 slot mapping tensor 分配 GPU 記憶體前，等待整個 forward pass 完成。">Allocator GC syncs default stream — waits for forward pass</span></td>
+  </tr>
+  <tr>
+    <td style="color:var(--accent-red);font-weight:700">2</td>
+    <td><code class="inline-code">store_stream.synchronize()</code></td>
+    <td style="font-size:0.78rem"><code class="inline-code">gpu_connector.py:348</code></td>
+    <td><span class="i18n" data-en="Waits for all DMA copies on store_stream to complete. This is the actual PCIe transfer time (~15 ms per prefill step)." data-zh="等待 store_stream 上所有 DMA copy 完成。這是實際的 PCIe 傳輸時間（每個 prefill step ~15 ms）。">Waits for DMA copies on store_stream (~15 ms real transfer)</span></td>
+  </tr>
+  <tr>
+    <td style="color:var(--accent-orange)">3</td>
+    <td><code class="inline-code">store_stream.synchronize()</code></td>
+    <td style="font-size:0.78rem"><code class="inline-code">gpu_connector.py:309</code></td>
+    <td><span class="i18n" data-en="Per-chunk sync when target buffer is not on CUDA device (i.e., CPU DRAM). Always triggers for LMCache CPU offload." data-zh="當 target buffer 不在 CUDA device 時（即 CPU DRAM）的 per-chunk sync。LMCache CPU offload 總是觸發。">Per-chunk sync for non-CUDA target (always for CPU offload)</span></td>
+  </tr>
+</table>
+
+<h4><span class="i18n" data-en="Why async overlap fails" data-zh="為什麼異步 overlap 失敗">Why async overlap fails</span></h4>
+
+<div class="callout danger">
+  <div class="callout-title"><span class="i18n" data-en="The problem is CPU-side, not GPU-side" data-zh="問題在 CPU 端，不在 GPU 端">The problem is CPU-side, not GPU-side</span></div>
+  <p><span class="i18n"
+    data-en="The GPU CAN run forward pass (SM) and DMA offload (CE) simultaneously — they use different hardware. But <code class='inline-code'>wait_for_save()</code> is called inside the <code class='inline-code'>execute_model()</code> context manager's <code class='inline-code'>finally</code> block (<code class='inline-code'>kv_connector_model_runner_mixin.py:117</code>). The CPU thread blocks here and cannot return to the step loop to launch the next <code class='inline-code'>schedule()</code> + <code class='inline-code'>execute_model()</code>. Result: GPU finishes forward pass → sits idle waiting for CPU to unblock from offload sync → next forward pass starts late."
+    data-zh="GPU 可以同時跑 forward pass（SM）和 DMA offload（CE）— 用不同硬體。但 <code class='inline-code'>wait_for_save()</code> 在 <code class='inline-code'>execute_model()</code> context manager 的 <code class='inline-code'>finally</code> block 中被呼叫（<code class='inline-code'>kv_connector_model_runner_mixin.py:117</code>）。CPU thread 在此阻塞，無法返回 step loop 啟動下一個 <code class='inline-code'>schedule()</code> + <code class='inline-code'>execute_model()</code>。結果：GPU forward pass 完成 → 閒置等 CPU 從 offload sync 解除 → 下一個 forward pass 延遲啟動。">GPU can overlap SM+CE, but CPU blocks in <code class="inline-code">finally: wait_for_save()</code> and can't launch next step. GPU idles.</span></p>
+</div>
+
+<h4><span class="i18n" data-en="The fix: defer synchronization (upstream PR #37160)" data-zh="修復方案：延遲同步（upstream PR #37160）">The fix: defer synchronization</span></h4>
+
+<p><span class="i18n"
+  data-en="Pass <code class='inline-code'>wait_for_save=False</code> to the context manager (<code class='inline-code'>kv_connector_model_runner_mixin.py:97</code>), allowing <code class='inline-code'>execute_model()</code> to return immediately. Move the sync to <code class='inline-code'>get_finished()</code>, which runs after the next <code class='inline-code'>schedule()</code> has already launched. This creates the overlap shown in the ideal timeline above."
+  data-zh="傳 <code class='inline-code'>wait_for_save=False</code> 給 context manager（<code class='inline-code'>kv_connector_model_runner_mixin.py:97</code>），讓 <code class='inline-code'>execute_model()</code> 立即返回。將 sync 移到 <code class='inline-code'>get_finished()</code>，在下一個 <code class='inline-code'>schedule()</code> 已經 launch 後才執行。這就產生了上面理想時間線中的 overlap。">Pass <code class="inline-code">wait_for_save=False</code> so execute_model returns immediately. Sync in <code class="inline-code">get_finished()</code> after next schedule. See <a href="https://github.com/vllm-project/vllm/pull/37160">upstream PR #37160</a>.</span></p>
+
 <div class="callout" style="border-left-color: var(--accent-teal);">
   <div class="callout-title"><span class="i18n" data-en="Full root cause analysis in dedicated page" data-zh="完整根因分析在專頁中">Full root cause analysis in dedicated page</span></div>
   <p><span class="i18n"
-    data-en="The root cause analysis (<code class='inline-code'>slot_mapping.cuda()</code>, <code class='inline-code'>cudaStreamSynchronize</code>, nsys profiling, ablation experiments, per-step overhead breakdown) is in:"
-    data-zh="根因分析（<code class='inline-code'>slot_mapping.cuda()</code>、<code class='inline-code'>cudaStreamSynchronize</code>、nsys profiling、消融實驗、每步開銷分解）在：">The root cause analysis is in:</span>
+    data-en="Detailed nsys profiling, ablation experiments, and per-step overhead breakdown are in:"
+    data-zh="詳細的 nsys profiling、消融實驗、每步開銷分解在：">Detailed nsys profiling and ablation experiments are in:</span>
     <a href="lmcache-kv-transfer.html">LMCache KV Transfer Pipeline — Internal Architecture</a></p>
 </div>
 </section>
