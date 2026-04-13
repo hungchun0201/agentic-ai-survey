@@ -1,0 +1,2025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LMCache KV Transfer Pipeline — Internal Architecture &amp; Bottleneck Analysis</title>
+<style>
+:root {
+  --bg-dark: #090d0a;
+  --bg-card: #1a1d2e;
+  --bg-code: #141622;
+  --accent-green: #00e68a;
+  --accent-teal: #00ccb4;
+  --accent-blue: #3b82f6;
+  --accent-purple: #8b5cf6;
+  --accent-orange: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-pink: #ec4899;
+  --accent-cyan: #22d3ee;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --border-color: #2d3148;
+  --hero-gradient: linear-gradient(135deg, #0f1710 0%, #0a2818 50%, #0f1a10 100%);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { overflow-x: hidden; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg-dark);
+  color: var(--text-primary);
+  line-height: 1.7;
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+a { color: var(--accent-teal); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Sticky Navigation */
+nav{position:sticky;top:0;z-index:1000;background:rgba(10,28,15,0.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(63,185,80,0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#8fb8a0;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid #3fb950}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* Hero */
+.hero {
+  background: var(--hero-gradient);
+  padding: 4rem 2rem 3rem;
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+.hero h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent-red), var(--accent-orange), var(--accent-teal));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.8rem;
+}
+.hero .subtitle {
+  font-size: 1.15rem;
+  color: var(--text-secondary);
+  max-width: 800px;
+  margin: 0 auto 1.5rem;
+}
+.hero-badges {
+  display: flex; gap: 0.8rem;
+  justify-content: center; flex-wrap: wrap;
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  background: rgba(63,185,80,0.15);
+  border: 1px solid rgba(63,185,80,0.3);
+  border-radius: 999px;
+  padding: 0.3rem 0.9rem;
+  font-size: 0.82rem;
+  color: #3fb950;
+}
+.hero-badge.warn {
+  background: rgba(239,68,68,0.15);
+  border-color: rgba(239,68,68,0.3);
+  color: var(--accent-red);
+}
+
+/* Container */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+  overflow-x: hidden;
+}
+
+/* Sections */
+section {
+  margin-bottom: 3rem;
+  overflow-x: hidden;
+}
+section h2 {
+  font-size: 1.7rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid rgba(63,185,80,0.3);
+}
+h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.6rem;
+  color: var(--accent-teal);
+}
+h4 {
+  font-size: 1rem;
+  color: var(--accent-orange);
+  margin: 1rem 0 0.4rem;
+}
+p, li { color: var(--text-secondary); }
+p { margin-bottom: 0.8rem; }
+ul, ol { margin-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  transition: border-color 0.3s;
+  overflow-x: auto;
+}
+.card:hover { border-color: rgba(63,185,80,0.3); }
+.card-header {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.8rem;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.card-header .file-badge {
+  font-size: 0.72rem;
+  background: rgba(139,92,246,0.15);
+  color: var(--accent-purple);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+/* Code Blocks */
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85em;
+}
+.inline-code {
+  background: rgba(63,185,80,0.08);
+  color: #70d080;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+  word-break: break-all;
+}
+.kw { color: #c792ea; }
+.fn { color: #82aaff; }
+.str { color: #c3e88d; }
+.cmt { color: #546e7a; }
+.cls { color: #ffcb6b; }
+.num { color: #f78c6c; }
+.dec { color: #f07178; }
+.op { color: #89ddff; }
+.typ { color: #00e68a; }
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+th, td {
+  padding: 0.7rem 1rem;
+  text-align: left;
+  border: 1px solid var(--border-color);
+}
+th {
+  background: rgba(63,185,80,0.1);
+  color: #3fb950;
+  font-weight: 600;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+td { color: var(--text-secondary); }
+tr:nth-child(even) { background: rgba(26,29,46,0.5); }
+
+/* Grids */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 1.8rem; }
+  .hero { padding: 2.5rem 1rem 2rem; }
+  .hero .subtitle { font-size: 1rem; }
+  .container { padding: 1rem; }
+  section h2 { font-size: 1.3rem; }
+  /* Bar chart: stack label above track on narrow screens */
+  .bar-row { flex-wrap: wrap; }
+  .bar-label { min-width: unset; width: 100%; text-align: left; margin-bottom: 2px; }
+  .bar-value { min-width: unset; }
+  /* Cards */
+  .card { padding: 1rem; }
+  /* Code blocks */
+  pre { font-size: 0.75rem; padding: 0.8rem; }
+  /* Horizontal flow */
+  .hflow .step { min-width: 120px; }
+  /* Vertical flow branches */
+  .vflow .branch { flex-direction: column; }
+  .vflow .branch .box { min-width: unset; }
+  /* Column charts */
+  .col-chart { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* SVG diagrams */
+  svg { max-width: 100%; height: auto; }
+  /* Table cells: tighter padding */
+  th, td { padding: 0.5rem 0.6rem; font-size: 0.8rem; }
+}
+
+/* Callouts */
+.callout {
+  border-left: 4px solid rgba(63,185,80,0.4);
+  background: rgba(63,185,80,0.06);
+  padding: 1rem 1.2rem;
+  border-radius: 0 8px 8px 0;
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+.callout.warn {
+  border-left-color: var(--accent-orange);
+  background: rgba(245,158,11,0.06);
+}
+.callout.danger {
+  border-left-color: var(--accent-red);
+  background: rgba(239,68,68,0.06);
+}
+.callout.success {
+  border-left-color: var(--accent-green);
+  background: rgba(0,230,138,0.06);
+}
+.callout-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.3rem;
+}
+
+/* Vertical Flow Diagram */
+.vflow {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: center;
+  margin: 1.5rem 0;
+}
+.vflow .box {
+  width: 100%;
+  max-width: 700px;
+  padding: 1rem 1.2rem;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+.vflow .box.blue { background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.35); }
+.vflow .box.red { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); }
+.vflow .box.green { background: rgba(0,230,138,0.1); border: 1px solid rgba(0,230,138,0.35); }
+.vflow .box.orange { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); }
+.vflow .box.gray { background: rgba(45,45,68,0.7); border: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); }
+.vflow .box.purple { background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.35); }
+.vflow .box h4 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.vflow .box ul { margin: 4px 0 0 16px; font-size: 0.82rem; }
+.vflow .box li { margin-bottom: 2px; }
+.vflow .arrow { color: var(--text-muted); font-size: 1.3rem; line-height: 1; padding: 2px 0; }
+.vflow .branch { display: flex; gap: 12px; width: 100%; max-width: 700px; flex-wrap: wrap; }
+.vflow .branch .box { flex: 1; min-width: 200px; }
+
+/* Horizontal Flow */
+.hflow {
+  display: flex;
+  gap: 0;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.hflow .step {
+  flex: 1;
+  min-width: 150px;
+  text-align: center;
+  position: relative;
+}
+.hflow .step .c {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 8px;
+  font-weight: 700; font-size: 1rem; color: #fff;
+}
+.hflow .step:nth-child(1) .c { background: var(--accent-blue); }
+.hflow .step:nth-child(2) .c { background: var(--accent-red); }
+.hflow .step:nth-child(3) .c { background: var(--accent-orange); }
+.hflow .step:nth-child(4) .c { background: var(--accent-green); }
+.hflow .step:nth-child(5) .c { background: var(--accent-purple); }
+.hflow .step .lbl { font-weight: 600; font-size: 0.9rem; color: var(--text-primary); }
+.hflow .step .desc { font-size: 0.8rem; color: var(--text-secondary); margin-top: 3px; }
+.hflow .step::after {
+  content: '→'; position: absolute; top: 14px; right: -6px;
+  color: var(--text-muted); font-size: 1.2rem;
+}
+.hflow .step:last-child::after { display: none; }
+
+/* Timeline Bar */
+.tbar {
+  display: flex; align-items: center; gap: 0; margin: 1rem 0 1.8rem;
+  flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+}
+.tbar .seg {
+  height: 56px; display: flex; align-items: center; justify-content: center;
+  font-size: 0.82rem; font-weight: 500; white-space: nowrap; padding: 0 16px;
+  position: relative;
+}
+
+/* Comparison indicators */
+.yes { color: var(--accent-green); font-weight: 700; }
+.no { color: var(--accent-red); font-weight: 700; }
+.partial { color: var(--accent-orange); font-weight: 700; }
+.up { color: var(--accent-red); }
+.down { color: var(--accent-green); }
+
+/* Bar charts (CSS only) */
+.bar-chart { margin: 1rem 0; }
+.bar-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 6px; font-size: 0.82rem;
+}
+.bar-label {
+  min-width: 140px; text-align: right; color: var(--text-secondary);
+  font-weight: 500;
+}
+.bar-track {
+  flex: 1; height: 28px; background: rgba(45,45,68,0.5);
+  border-radius: 4px; position: relative; overflow: hidden;
+}
+.bar-fill {
+  height: 100%; border-radius: 4px;
+  display: flex; align-items: center; padding-left: 8px;
+  font-size: 0.75rem; font-weight: 600; color: #fff;
+  white-space: nowrap;
+}
+.bar-value {
+  min-width: 80px; font-size: 0.82rem; color: var(--text-secondary);
+}
+
+/* Heatmap table */
+.heatmap td { text-align: center; font-weight: 600; font-size: 0.82rem; }
+.heatmap .h1 { background: rgba(254,240,217,0.15); color: #fef0d9; }
+.heatmap .h2 { background: rgba(253,204,138,0.2); color: #fdcc8a; }
+.heatmap .h3 { background: rgba(252,141,89,0.25); color: #fc8d59; }
+.heatmap .h4 { background: rgba(227,74,51,0.3); color: #e34a33; }
+.heatmap .h5 { background: rgba(179,0,0,0.35); color: #ff6b6b; }
+
+/* Line chart (CSS only) */
+.line-chart-wrap { position: relative; margin: 1.5rem 0; }
+.line-chart {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 180px; padding: 0 0 24px 40px;
+  border-left: 2px solid var(--border-color);
+  border-bottom: 2px solid var(--border-color);
+  position: relative;
+}
+.line-chart .col {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 4px; position: relative;
+}
+.line-chart .col .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  position: absolute; bottom: 0;
+}
+.line-chart .col .x-label {
+  position: absolute; bottom: -22px;
+  font-size: 0.72rem; color: var(--text-muted);
+}
+.line-chart .y-axis {
+  position: absolute; left: 0; bottom: 24px; top: 0;
+  display: flex; flex-direction: column-reverse; justify-content: space-between;
+  font-size: 0.68rem; color: var(--text-muted); width: 36px; text-align: right; padding-right: 6px;
+}
+
+/* Stacked column chart */
+.col-chart {
+  display: flex; align-items: flex-end; gap: 8px;
+  height: 200px; padding-bottom: 24px;
+  margin: 1rem 0;
+}
+.col-chart .col-bar {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  position: relative;
+}
+.col-chart .col-bar .bar-seg {
+  width: 100%; max-width: 60px; border-radius: 4px 4px 0 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.72rem; font-weight: 600; color: #fff;
+}
+.col-chart .col-bar .col-label {
+  font-size: 0.72rem; color: var(--text-muted);
+  margin-top: 4px; text-align: center; white-space: nowrap;
+}
+
+/* Legend */
+.legend {
+  display: flex; gap: 1.5rem; margin: 0.5rem 0 1rem; font-size: 0.82rem;
+  flex-wrap: wrap;
+}
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 14px; height: 14px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="index.html">&larr; LMCache</a></li>
+    <li><a href="bottleneck-analysis.html">&larr; Exp G Results</a></li>
+    <li><a href="#root-cause">Root Cause</a></li>
+    <li><a href="#design">Ablation</a></li>
+    <li><a href="#results">Results</a></li>
+    <li><a href="#deep-dive">Pipeline</a></li>
+    <li><a href="#findings">Findings</a></li>
+    <li><a href="#future">Future</a></li>
+    <li><a href="#files">Files</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<header class="hero">
+  <h1><span class="i18n"
+    data-en="LMCache KV Transfer Pipeline — Internal Architecture"
+    data-zh="LMCache KV 傳輸管線 — 內部架構分析">LMCache KV Transfer Pipeline — Internal Architecture</span></h1>
+  <p class="subtitle">
+    <span class="i18n"
+      data-en="Technical deep dive: slot_mapping.cuda(), CUDA stream synchronization, nsys profiling, and wait_for_save bottleneck analysis. Historical analysis from Exp C (H200 JPS=1, nsys traces)."
+      data-zh="技術深潛：slot_mapping.cuda()、CUDA stream 同步、nsys profiling、wait_for_save 瓶頸分析。基於 Exp C（H200 JPS=1、nsys traces）的歷史分析。">Technical deep dive: slot_mapping.cuda(), CUDA stream synchronization, nsys profiling, and wait_for_save bottleneck analysis.</span>
+  </p>
+  <div class="hero-badges">
+    <span class="hero-badge">Exp C — nsys profiling</span>
+    <span class="hero-badge warn">wait_for_save: 115.7 ms mean / prefill step</span>
+    <span class="hero-badge">cudaStreamSynchronize: 96.6%</span>
+    <span class="hero-badge">vLLM v1 + LMCache v0.3.7</span>
+  </div>
+</header>
+
+<div class="container">
+
+<div class="callout" style="border-left-color: var(--accent-teal);">
+  <div class="callout-title"><span class="i18n" data-en="Note" data-zh="注意">Note</span></div>
+  <p><span class="i18n"
+    data-en="This page covers the technical internals of LMCache's KV transfer mechanism. For the latest Exp G results comparing FCFS/LMCache/Continuum performance across GPUs with large DRAM, see"
+    data-zh="本頁介紹 LMCache KV 傳輸機制的技術細節。如需查看最新 Exp G 實驗結果（大 DRAM 下跨 GPU 的 FCFS/LMCache/Continuum 效能比較），請參閱">This page covers the technical internals of LMCache's KV transfer mechanism. For the latest Exp G results, see</span>
+    <a href="bottleneck-analysis.html">bottleneck-analysis.html</a>.</p>
+</div>
+
+<!-- Section 1: Root Cause (was §5) -->
+<section id="root-cause">
+<h2><span class="i18n"
+  data-en="1. Root Cause: Why LMCache Is Slower"
+  data-zh="1. 根本原因：LMCache 為何較慢">1. Root Cause: Why LMCache Is Slower</span></h2>
+
+<p style="color:var(--text-secondary);margin-bottom:1.5rem;max-width:860px">
+  <span class="i18n"
+    data-en="Section §2 established that LMCache adds +2.73 s per job relative to FCFS under the benchmark conditions (H200, JPS=1, Exp C). This section traces that overhead to a single, quantifiable mechanism: excessive CUDA stream synchronization inside <code >wait_for_save</code>, which blocks the vLLM scheduler main loop on every prefill step."
+    data-zh="第 §2 節確立，在基準測試條件下（H200、JPS=1、Exp C），LMCache 相對 FCFS 每個 job 多出 +2.73 秒。本節將這項開銷追溯至單一可量化機制：<code >wait_for_save</code> 內部過多的 CUDA stream synchronization，此操作在每個 prefill step 都會阻塞 vLLM scheduler 主迴圈。">
+    Section §2 established that LMCache adds +2.73 s per job relative to FCFS under the benchmark conditions (H200, JPS=1, Exp C). This section traces that overhead to a single, quantifiable mechanism: excessive CUDA stream synchronization inside <code >wait_for_save</code>, which blocks the vLLM scheduler main loop on every prefill step.
+  </span>
+</p>
+
+<h3 id="s5-1"><span class="i18n"
+  data-en="1.1 The Cost: wait_for_save Blocks the Scheduler"
+  data-zh="1.1 代價：wait_for_save 阻塞排程器">1.1 The Cost: <code >wait_for_save</code> Blocks the Scheduler</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="vLLM's KV Connector API requires the scheduler to call <code >wait_for_save</code> before dispatching each step. NVTX profiling of 51 completed jobs (H200, JPS=1, Exp C) captured 1,769 invocations. The distribution is strongly bimodal: a small minority of prefill-step calls account for almost all wallclock time."
+    data-zh="vLLM 的 KV Connector API 要求排程器在每個 step 分派前呼叫 <code >wait_for_save</code>。對 51 個已完成 job 的 NVTX 剖析（H200、JPS=1、Exp C）擷取了 1,769 次呼叫。其分布呈強烈雙峰：少數 prefill-step 呼叫佔了幾乎全部的 wallclock 時間。">
+    vLLM's KV Connector API requires the scheduler to call <code >wait_for_save</code> before dispatching each step. NVTX profiling of 51 completed jobs (H200, JPS=1, Exp C) captured 1,769 invocations. The distribution is strongly bimodal: a small minority of prefill-step calls account for almost all wallclock time.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Call Type" data-zh="呼叫類型">Call Type</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Count" data-zh="次數">Count</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="% of Calls" data-zh="佔比">% of Calls</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Mean" data-zh="平均">Mean</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Median" data-zh="中位數">Median</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="p95" data-zh="p95">p95</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Syncs/call" data-zh="Sync/call">Syncs/call</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Memcpy/call" data-zh="Memcpy/call">Memcpy/call</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><strong><span class="i18n" data-en="Prefill-step" data-zh="Prefill-step">Prefill-step</span></strong></td>
+    <td style="text-align:right">159</td>
+    <td style="text-align:right">9%</td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">115.71 ms</strong></td>
+    <td style="text-align:right">73.00 ms</td>
+    <td style="text-align:right">253 ms</td>
+    <td style="text-align:right"><strong>~24</strong></td>
+    <td style="text-align:right"><strong>~19</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Decode-only" data-zh="Decode-only">Decode-only</span></td>
+    <td style="text-align:right">1,610</td>
+    <td style="text-align:right">91%</td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">0.01 ms</strong></td>
+    <td style="text-align:right">0.01 ms</td>
+    <td style="text-align:right">0.02 ms</td>
+    <td style="text-align:right">0</td>
+    <td style="text-align:right">0</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.04)">
+    <td><strong><span class="i18n" data-en="Total" data-zh="合計">Total</span></strong></td>
+    <td style="text-align:right"><strong>1,769</strong></td>
+    <td style="text-align:right">100%</td>
+    <td colspan="3"></td>
+    <td style="text-align:right"><strong>3,744</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(159×24)</span></td>
+    <td style="text-align:right"><strong>2,996</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(159×19)</span></td>
+    <td></td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="9" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="19 memcpy/call = one cudaMemcpyAsync per KV chunk (new tokens since last turn ÷ chunk_size). 24 syncs/call > 19 memcpy/call because ~5 additional cudaStreamSynchronize calls per step originate from metadata operations (token hash computation, buffer allocation, store entry/exit bookkeeping) that do not involve DMA."
+      data-zh="19 memcpy/call = 每個 KV chunk 一次 cudaMemcpyAsync（自上輪以來的新 token 數 ÷ chunk_size）。24 syncs/call > 19 memcpy/call 是因為每 step 約有 5 次額外的 cudaStreamSynchronize 來自 metadata 操作（token hash 計算、buffer 分配、store entry/exit bookkeeping），這些操作不涉及 DMA。">19 memcpy/call = one <code>cudaMemcpyAsync</code> per KV chunk (new tokens since last turn ÷ chunk_size). 24 syncs/call &gt; 19 memcpy/call because ~5 additional <code>cudaStreamSynchronize</code> per step originate from metadata operations (token hash, buffer allocation, store bookkeeping) that do not involve DMA.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
+
+<div class="note" style="margin:1rem 0">
+  <span class="i18n"
+    data-en="<strong>Key insight:</strong> Decode-only calls complete in ~0.01 ms — essentially zero cost. All measurable overhead is concentrated in the 9% of calls that coincide with a prefill step. The question is why prefill-step calls take ~115 ms."
+    data-zh="<strong>關鍵洞察：</strong>Decode-only 呼叫在約 0.01 ms 內完成——成本可忽略不計。所有可量測的開銷都集中在與 prefill step 同步發生的 9% 呼叫上。問題在於：為何 prefill-step 呼叫需要約 115 ms。">
+    <strong>Key insight:</strong> Decode-only calls complete in ~0.01 ms — essentially zero cost. All measurable overhead is concentrated in the 9% of calls that coincide with a prefill step. The question is why prefill-step calls take ~115 ms.
+  </span>
+</div>
+
+<h3 id="s5-2"><span class="i18n"
+  data-en="1.2 Inside wait_for_save: cudaStreamSynchronize"
+  data-zh="1.2 wait_for_save 內部：cudaStreamSynchronize">1.2 Inside <code >wait_for_save</code>: <code >cudaStreamSynchronize</code></span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="<code >cudaStreamSynchronize(stream)</code> is a CUDA Runtime API call that blocks the calling CPU thread until every operation previously queued on the given stream has completed on the GPU. Internally the call performs a user-to-kernel transition (via <code >ioctl</code> to the NVIDIA kernel driver), checks stream completion status, sleeps if the GPU is still working (using futex or driver poll), and resumes on GPU interrupt. Even when the GPU finishes its DMA in 0.67 ms (measured via NVTX <code >from_gpu</code> range, see §1.3), the round-trip through the kernel — transition + interrupt latency + wakeup — adds ~3–4 ms of fixed overhead per call on PACE nodes."
+    data-zh="<code >cudaStreamSynchronize(stream)</code> 是 CUDA Runtime API 呼叫，會阻塞呼叫方的 CPU 執行緒，直到該 stream 上先前排隊的所有操作在 GPU 上完成為止。在內部，此呼叫執行使用者到核心的轉換（透過 <code >ioctl</code> 至 NVIDIA kernel driver）、檢查 stream 完成狀態，若 GPU 仍在工作則進入睡眠（使用 futex 或 driver poll），並在 GPU 中斷時恢復執行。即使 GPU 在 0.67 ms 內完成 DMA，核心往返的固定開銷——轉換 + 中斷延遲 + 喚醒——在 PACE 節點上每次呼叫仍需額外約 3–4 ms。">
+    <code >cudaStreamSynchronize(stream)</code> is a CUDA Runtime API call that blocks the calling CPU thread until every operation previously queued on the given stream has completed on the GPU. Internally the call performs a user-to-kernel transition (via <code >ioctl</code> to the NVIDIA kernel driver), checks stream completion status, sleeps if the GPU is still working (using futex or driver poll), and resumes on GPU interrupt. Even when the GPU finishes its DMA in 0.67 ms (measured via NVTX <code >from_gpu</code> range, see §1.3), the round-trip through the kernel — transition + interrupt latency + wakeup — adds ~3–4 ms of fixed overhead per call on PACE nodes.
+  </span>
+</p>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px;font-size:0.85rem">
+  <span class="i18n"
+    data-en="The Syncs/call and Memcpy/call columns above link directly to the CUDA Runtime totals in the table below (3,744 = 159 × ~24; 2,996 = 159 × ~19). Both tables share the same 159 prefill-step time windows as the filtering basis."
+    data-zh="上表的 Syncs/call 和 Memcpy/call 欄位直接對應下表的 CUDA Runtime 總數（3,744 = 159 × ~24；2,996 = 159 × ~19）。兩表以同一批 159 個 prefill-step 時間窗口作為過濾基礎。">
+    The Syncs/call and Memcpy/call columns above link directly to the CUDA Runtime totals in the table below (3,744 = 159 × ~24; 2,996 = 159 × ~19).
+  </span>
+</p>
+
+<!-- CUDA Runtime Attribution Table -->
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="CUDA Runtime API" data-zh="CUDA Runtime API">CUDA Runtime API</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Call Count" data-zh="呼叫次數">Call Count</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Total Time" data-zh="總時間">Total Time</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Per-Call Mean" data-zh="每次呼叫平均">Per-Call Mean</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="% of Wallclock" data-zh="佔 Wallclock %">% of Wallclock</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><code >cudaStreamSynchronize</code></td>
+    <td style="text-align:right">3,744</td>
+    <td style="text-align:right">17,764 ms</td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">96.6%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><code >cudaMemcpyAsync</code> <span style="font-size:0.75rem;color:var(--text-muted)">(launch)</span></td>
+    <td style="text-align:right">2,996</td>
+    <td style="text-align:right">24.5 ms</td>
+    <td style="text-align:right">8.2 μs</td>
+    <td style="text-align:right">0.1%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><code >cudaLaunchKernel</code></td>
+    <td style="text-align:right">2,961</td>
+    <td style="text-align:right">22.2 ms</td>
+    <td style="text-align:right">7.5 μs</td>
+    <td style="text-align:right">0.1%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="All other CUDA Runtime" data-zh="其他所有 CUDA Runtime">All other CUDA Runtime</span></td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">3.2%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<p style="color:var(--text-secondary);margin:1rem 0 0.6rem;max-width:860px">
+  <span class="i18n"
+    data-en="The derivation table below shows that the measured 115.71 ms per prefill step is almost entirely explained by 24 sync calls × 4.74 ms each, leaving less than 2% unexplained residual."
+    data-zh="下方推導表顯示，每個 prefill step 量測到的 115.71 ms，幾乎完全可由 24 次 sync 呼叫 × 每次 4.74 ms 解釋，未解釋的殘差不足 2%。">
+    The derivation table below shows that the measured 115.71 ms per prefill step is almost entirely explained by 24 sync calls × 4.74 ms each, leaving less than 2% unexplained residual.
+  </span>
+</p>
+
+<!-- Derivation Table -->
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Quantity" data-zh="量">Quantity</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Value" data-zh="數值">Value</span></th>
+    <th><span class="i18n" data-en="Derivation" data-zh="推導">Derivation</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><span class="i18n" data-en="Total sync calls in 159 prefill windows" data-zh="159 個 prefill 時間窗口中的總 sync 呼叫次數">Total sync calls in 159 prefill windows</span></td>
+    <td style="text-align:right">3,744</td>
+    <td>measured</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Syncs per prefill step" data-zh="每個 prefill step 的 sync 次數">Syncs per prefill step</span></td>
+    <td style="text-align:right">~23.5 ≈ <strong>24</strong></td>
+    <td>3,744 ÷ 159</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Mean cost per sync call" data-zh="每次 sync 呼叫的平均成本">Mean cost per sync call</span></td>
+    <td style="text-align:right"><strong>4.74 ms</strong></td>
+    <td>17,764 ms ÷ 3,744</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr style="background:rgba(251,191,36,0.06)">
+    <td colspan="4" style="font-size:0.82rem;color:var(--text-secondary);padding:0.5rem 0.75rem">
+      <span class="i18n"
+        data-en="⚠ <strong>4.74 ms is a misleading weighted average</strong> of two populations: per-chunk syncs (2,962 calls × 0.59 ms = 1,742 ms, 9.5% of wfs) and per-request syncs (391 calls × 40.97 ms = 16,021 ms, 87% of wfs). The per-request syncs — one per request, outside all NVTX ranges, likely from <code>batched_from_gpu()</code> or <code>StorageManager.batched_put()</code> — dominate the total cost."
+        data-zh="⚠ <strong>4.74 ms 是兩個族群的誤導性加權平均</strong>：逐 chunk sync（2,962 次 × 0.59 ms = 1,742 ms，佔 wfs 的 9.5%）與逐請求 sync（391 次 × 40.97 ms = 16,021 ms，佔 wfs 的 87%）。逐請求 sync——每個請求一次，在所有 NVTX range 之外，可能來自 <code>batched_from_gpu()</code> 或 <code>StorageManager.batched_put()</code>——主導了總成本。">
+        ⚠ <strong>4.74 ms is a misleading weighted average</strong> of two populations: per-chunk syncs (2,962 calls × 0.59 ms = 1,742 ms, 9.5% of wfs) and per-request syncs (391 calls × 40.97 ms = 16,021 ms, 87% of wfs). The per-request syncs — one per request, outside all NVTX ranges, likely from <code>batched_from_gpu()</code> or <code>StorageManager.batched_put()</code> — dominate the total cost.
+      </span>
+    </td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Predicted wait_for_save (prefill)" data-zh="預測的 wait_for_save（prefill）">Predicted <code >wait_for_save</code> (prefill)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">113.8 ms</strong></td>
+    <td>24 × 4.74 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.04)">
+    <td><strong><span class="i18n" data-en="Measured wait_for_save (prefill mean)" data-zh="量測的 wait_for_save（prefill 平均）">Measured <code >wait_for_save</code> (prefill mean)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">115.71 ms</strong></td>
+    <td>NVTX direct measurement</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Residual (unexplained)" data-zh="殘差（未解釋）">Residual (unexplained)</span></td>
+    <td style="text-align:right">+1.91 ms (1.6%)</td>
+    <td>115.71 − 113.8</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<h4 style="color:var(--accent-green);margin-top:1.5rem"><span class="i18n"
+  data-en="Root Cause (corrected)"
+  data-zh="根因（更正）">Root Cause (corrected)</span></h4>
+
+<h5><span class="i18n" data-en="CUDA Stream Definitions" data-zh="CUDA Stream 定義">CUDA Stream Definitions</span></h5>
+
+<div style="overflow-x:auto;margin:0.5rem 0 1rem;">
+<table style="font-size:0.85rem">
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Stream" data-zh="Stream">Stream</span></th>
+    <th><span class="i18n" data-en="Created at" data-zh="建立位置">Created at</span></th>
+    <th><span class="i18n" data-en="Role" data-zh="角色">Role</span></th>
+    <th><span class="i18n" data-en="GPU Activity (Exp C)" data-zh="GPU 活動（Exp C）">GPU Activity (Exp C)</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(139,92,246,0.08)">
+    <td><strong>Default</strong></td>
+    <td><code>torch.cuda.current_stream()</code></td>
+    <td><span class="i18n" data-en="vLLM forward pass" data-zh="vLLM forward pass">vLLM forward pass</span></td>
+    <td>249,655 kernels (FlashAttn, GEMM, Triton)</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><strong>Store</strong></td>
+    <td><code>gpu_connector.py:165</code></td>
+    <td><span class="i18n" data-en="LMCache KV offload (GPU→CPU)" data-zh="LMCache KV offload（GPU→CPU）">LMCache KV offload</span></td>
+    <td>2,961 <code>lmc::load_and_reshape</code> + 2,604 D2H memcpy</td>
+  </tr>
+  <tr>
+    <td><strong>Load</strong></td>
+    <td><code>gpu_connector.py:166</code></td>
+    <td><span class="i18n" data-en="LMCache KV onload (CPU→GPU)" data-zh="LMCache KV onload（CPU→GPU）">LMCache KV onload</span></td>
+    <td>50 kernels</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<h5><span class="i18n" data-en="Overhead Decomposition (115.71 ms per prefill step)" data-zh="Overhead 拆分（每 prefill step 115.71 ms）">Overhead Decomposition (115.71 ms per prefill step)</span></h5>
+
+<div class="callout warn" style="margin:0.5rem 0 1rem">
+  <div class="callout-title"><span class="i18n" data-en="Key insight: ~100 ms is unavoidable forward-pass time, not extra overhead" data-zh="關鍵洞察：~100 ms 是不可避免的 forward pass 時間，並非額外 overhead">Key insight: ~100 ms is unavoidable forward-pass time, not extra overhead</span></div>
+  <p style="font-size:0.9rem"><span class="i18n"
+    data-en="wait_for_save() is called at the start of the next prefill step, while the previous step's forward pass is still running. The 100.75 ms GC sync simply waits for GPU compute that would run anyway. It is NOT a GPU idle gap — the GPU is fully busy with forward-pass kernels throughout. The real overhead is the ~15 ms of actual offload work (lmc::load_and_reshape + D2H DMA + store_stream syncs + Python bookkeeping) that runs inside wait_for_save() after the forward pass completes."
+    data-zh="wait_for_save() 在下一個 prefill step 開始時被呼叫，此時前一個 step 的 forward pass 仍在執行。100.75 ms 的 GC sync 只是等待本來就會執行的 GPU 計算。這並非 GPU 閒置間隙——GPU 全程忙於 forward-pass kernel。真正的 overhead 是在 forward pass 完成後，wait_for_save() 內部執行的 ~15 ms 實際 offload 工作（lmc::load_and_reshape + D2H DMA + store_stream sync + Python bookkeeping）。">
+    <code>wait_for_save()</code> is called at the start of the next prefill step, while the previous step's forward pass is still running. The 100.75 ms GC sync simply waits for GPU compute that would run anyway. It is NOT a GPU idle gap — the GPU is fully busy with forward-pass kernels throughout. The real overhead is the ~15 ms of actual offload work (<code>lmc::load_and_reshape</code> + D2H DMA + <code>store_stream</code> syncs + Python bookkeeping) that runs inside <code>wait_for_save()</code> after the forward pass completes.
+  </span></p>
+</div>
+
+<div style="overflow-x:auto;margin:0.5rem 0 1rem;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Component" data-zh="組成">Component</span></th>
+    <th><span class="i18n" data-en="Code Location" data-zh="程式碼位置">Code Location</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="~Count/step" data-zh="~次數/step">~Count/step</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Avg" data-zh="平均">Avg</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="ms/step" data-zh="ms/step">ms/step</span></th>
+    <th><span class="i18n" data-en="Nature" data-zh="性質">Nature</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(100,116,139,0.10)">
+    <td><span class="i18n" data-en="Wait for forward pass (GC sync)" data-zh="等待 forward pass（GC sync）">Wait for forward pass (GC sync)</span></td>
+    <td><code>vllm_v1_adapter.py:1055</code></td>
+    <td style="text-align:right">1</td>
+    <td style="text-align:right">100.75 ms</td>
+    <td style="text-align:right"><strong>100.75</strong></td>
+    <td><span class="i18n" data-en="Unavoidable — GPU is running forward pass; not LMCache overhead" data-zh="不可避免——GPU 正在執行 forward pass；非 LMCache overhead">Unavoidable — GPU busy with forward pass</span></td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><code>lmc::load_and_reshape</code> kernel</td>
+    <td><code>gpu_connector.py:279</code></td>
+    <td style="text-align:right">~19</td>
+    <td style="text-align:right">0.054 ms</td>
+    <td style="text-align:right"><strong>~1.0</strong></td>
+    <td rowspan="4" style="color:var(--accent-red)"><strong><span class="i18n" data-en="Real offload work (~15 ms total) — this IS the overhead" data-zh="真正的 offload 工作（合計 ~15 ms）——這才是 overhead">Real offload work (~15 ms total)</span></strong></td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><span class="i18n" data-en="D2H DMA (MEMCPY D2H)" data-zh="D2H DMA（MEMCPY D2H）">D2H DMA (MEMCPY D2H)</span></td>
+    <td><code>gpu_connector.py:279</code></td>
+    <td style="text-align:right">~19</td>
+    <td style="text-align:right">0.626 ms</td>
+    <td style="text-align:right"><strong>~11.9</strong></td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><code>store_stream.synchronize()</code></td>
+    <td><code>gpu_connector.py:309</code></td>
+    <td style="text-align:right">~19</td>
+    <td style="text-align:right">0.59 ms</td>
+    <td style="text-align:right"><strong>~11.2</strong></td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.04)">
+    <td><span class="i18n" data-en="Python bookkeeping (hash, alloc, metadata)" data-zh="Python bookkeeping（hash、alloc、metadata）">Python bookkeeping (hash, alloc, metadata)</span></td>
+    <td><code>cache_engine.py, storage_manager.py</code></td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right"><strong>~4.0</strong></td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.06)">
+    <td colspan="4"><strong><span class="i18n" data-en="Measured wait_for_save mean (Exp C, H200 JPS=1)" data-zh="量測的 wait_for_save 平均（Exp C，H200 JPS=1）">Measured <code>wait_for_save</code> mean (Exp C, H200 JPS=1)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">115.71 ms</strong></td>
+    <td></td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="6" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Real overhead = ~15 ms/step × 159 steps ≈ 2,385 ms ≈ measured 2.73 s/job overhead. The 100.75 ms forward-pass wait is not overhead — it would have been paid regardless of LMCache."
+      data-zh="真正的 overhead = ~15 ms/step × 159 steps ≈ 2,385 ms ≈ 量測到的 2.73 s/job overhead。100.75 ms 的 forward pass 等待並非 overhead——即使沒有 LMCache 也必須支付。">Real overhead = ~15 ms/step × 159 steps ≈ 2,385 ms ≈ measured 2.73 s/job overhead. The 100.75 ms forward-pass wait is not overhead — it would have been paid regardless of LMCache.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
+
+<div class="callout info" style="margin:0.5rem 0 1rem">
+  <div class="callout-title"><span class="i18n" data-en="Upstream fix: vLLM #37160" data-zh="Upstream 修復：vLLM #37160">Upstream fix: vLLM #37160</span></div>
+  <p style="font-size:0.9rem"><span class="i18n"
+    data-en="The upstream PR #37160 makes wait_for_save() a no-op by deferring all offload work to get_finished(), which runs after model execution. This hides the ~15 ms real offload work behind GPU compute, eliminating the serial overhead entirely. See §1.4 for experimental confirmation that sync-pattern patches alone cannot fix this."
+    data-zh="Upstream PR #37160 將 wait_for_save() 變為空操作，把所有 offload 工作延遲到 get_finished() 執行（在模型執行之後）。這樣可以將 ~15 ms 的實際 offload 工作隱藏在 GPU 計算後面，完全消除串行 overhead。詳見 §1.4，其中有實驗確認：單純修改 sync 模式無法解決此問題。">Upstream PR #37160 makes <code>wait_for_save()</code> a no-op by deferring all offload work to <code>get_finished()</code>, which runs after model execution. This hides the ~15 ms real offload work behind GPU compute, eliminating the serial overhead entirely. See §1.4 for experimental confirmation that sync-pattern patches alone cannot fix this.</span></p>
+</div>
+
+<h3 id="s5-3"><span class="i18n"
+  data-en="1.3 The Hardware Floor: DMA Is Not the Bottleneck"
+  data-zh="1.3 硬體下限：DMA 並非瓶頸">1.3 The Hardware Floor: DMA Is Not the Bottleneck</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="The GPU-side DMA transfer (MEMCPY D2H) was measured separately via Nsight Systems GPU-activity records across 4 GPU families and 3 JPS values (12 measurements, Exp C). These measurements establish the minimum achievable time for the actual data movement, independent of CPU-side synchronization overhead."
+    data-zh="GPU 端 DMA 傳輸（MEMCPY D2H）透過 Nsight Systems GPU-activity records 在 4 種 GPU 型號和 3 個 JPS 值中分別量測（12 次量測，Exp C）。這些量測確立了實際資料搬移的最小可達時間，獨立於 CPU 端的同步開銷之外。">
+    The GPU-side DMA transfer (MEMCPY D2H) was measured separately via Nsight Systems GPU-activity records across 4 GPU families and 3 JPS values (12 measurements, Exp C). These measurements establish the minimum achievable time for the actual data movement, independent of CPU-side synchronization overhead.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="GPU" data-zh="GPU">GPU</span></th>
+    <th><span class="i18n" data-en="PCIe Gen" data-zh="PCIe 世代">PCIe Gen</span></th>
+    <th style="text-align:right">JPS=1</th>
+    <th style="text-align:right">JPS=6</th>
+    <th style="text-align:right">JPS=10</th>
+    <th style="text-align:right"><span class="i18n" data-en="Mean ± CV" data-zh="平均 ± 變異係數">Mean ± CV</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><strong>H200</strong></td>
+    <td>Gen 5</td>
+    <td style="text-align:right">0.670 ms</td>
+    <td style="text-align:right">0.673 ms</td>
+    <td style="text-align:right">0.675 ms</td>
+    <td style="text-align:right"><strong>0.674 ms ± 0.3%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr>
+    <td><strong>H100</strong></td>
+    <td>Gen 5</td>
+    <td style="text-align:right">0.662 ms</td>
+    <td style="text-align:right">0.683 ms</td>
+    <td style="text-align:right">0.679 ms</td>
+    <td style="text-align:right"><strong>0.675 ms ± 0.3%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr style="background:rgba(245,158,11,0.05)">
+    <td><strong>A100</strong></td>
+    <td>Gen 4</td>
+    <td style="text-align:right">1.420 ms</td>
+    <td style="text-align:right">1.425 ms</td>
+    <td style="text-align:right">1.415 ms</td>
+    <td style="text-align:right"><strong>1.420 ms ± 3.6%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr style="background:rgba(245,158,11,0.05)">
+    <td><strong>L40S</strong></td>
+    <td>Gen 4</td>
+    <td style="text-align:right">1.358 ms</td>
+    <td style="text-align:right">1.408 ms</td>
+    <td style="text-align:right">1.343 ms</td>
+    <td style="text-align:right"><strong>1.370 ms ± 3.5%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr style="background:rgba(0,204,180,0.06)">
+    <td colspan="2"><strong><span class="i18n" data-en="Gen5 : Gen4 ratio" data-zh="Gen5 : Gen4 比值">Gen5 : Gen4 ratio</span></strong></td>
+    <td colspan="3" style="text-align:center">
+      <strong>2.07×</strong>
+      <span style="color:var(--text-muted);font-size:0.82rem">
+        <span class="i18n"
+          data-en="(matches PCIe Gen5 : Gen4 spec bandwidth ratio)"
+          data-zh="（符合 PCIe Gen5 : Gen4 規格頻寬比）">(matches PCIe Gen5 : Gen4 spec bandwidth ratio)</span>
+      </span>
+    </td>
+    <td></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">4 GPUs, Exp C</td>
+  </tr>
+  </tfoot>
+</table>
+</div>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="On the H200, GPU-side DMA completes in 0.674 ms. The per-call <code >cudaStreamSynchronize</code> cost is 4.74 ms. Therefore the DMA itself accounts for only 0.674 ÷ 4.74 = <strong>14.2%</strong> of each sync call; the remaining <strong>85.8%</strong> is fixed kernel-mode overhead. The table below itemises this split."
+    data-zh="在 H200 上，GPU 端 DMA 在 0.674 ms 內完成。每次 <code >cudaStreamSynchronize</code> 呼叫成本為 4.74 ms。因此，DMA 本身僅佔每次 sync 呼叫的 0.674 ÷ 4.74 = <strong>14.2%</strong>；其餘 <strong>85.8%</strong> 為固定核心態開銷。下表列出此拆分。">
+    On the H200, GPU-side DMA completes in 0.674 ms. The per-call <code >cudaStreamSynchronize</code> cost is 4.74 ms. Therefore the DMA itself accounts for only 0.674 ÷ 4.74 = <strong>14.2%</strong> of each sync call; the remaining <strong>85.8%</strong> is fixed kernel-mode overhead. The table below itemises this split.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th></th>
+    <th style="text-align:right">H200</th>
+    <th style="text-align:right">H100</th>
+    <th><span class="i18n" data-en="Interpretation" data-zh="解讀">Interpretation</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><span class="i18n" data-en="GPU DMA duration (hardware)" data-zh="GPU DMA 持續時間（硬體）">GPU DMA duration (hardware)</span></td>
+    <td style="text-align:right">0.674 ms</td>
+    <td style="text-align:right">0.674 ms</td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="PCIe bandwidth floor" data-zh="PCIe 頻寬下限">PCIe bandwidth floor</span>
+    </td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><code >cudaStreamSynchronize</code> <span class="i18n" data-en="total cost" data-zh="總成本">total cost</span></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="measured NVTX (Exp C)" data-zh="量測 NVTX（Exp C）">measured NVTX (Exp C)</span>
+    </td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="DMA as fraction of sync cost" data-zh="DMA 佔 sync 成本的比例">DMA as fraction of sync cost</span></td>
+    <td style="text-align:right">14.2%</td>
+    <td style="text-align:right">14.2%</td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="hardware is NOT the bottleneck" data-zh="硬體並非瓶頸">hardware is NOT the bottleneck</span>
+    </td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Kernel-mode overhead (fixed)" data-zh="核心態開銷（固定）">Kernel-mode overhead (fixed)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">85.8%</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">85.8%</strong></td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="ioctl + interrupt + wakeup latency" data-zh="ioctl + 中斷 + 喚醒延遲">ioctl + interrupt + wakeup latency</span>
+    </td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note" style="margin:1rem 0">
+  <span class="i18n"
+    data-en="<strong>Cross-validation:</strong> The DMA floor is stable to within ±3.6% across JPS=1/2/4 on all four GPUs, confirming that the bottleneck is not memory bandwidth saturation or contention. Upgrading PCIe bandwidth (Gen4 → Gen5) halves the DMA time but provides no relief against the per-call kernel overhead, which remains ~4.74 ms regardless."
+    data-zh="<strong>交叉驗證：</strong>在四種 GPU 的 JPS=1/2/4 中，DMA 下限的穩定性在 ±3.6% 以內，確認瓶頸並非記憶體頻寬飽和或競爭。將 PCIe 頻寬升級（Gen4 → Gen5）可將 DMA 時間減半，但對每次呼叫的核心開銷毫無幫助，後者無論如何仍維持約 4.74 ms。">
+    <strong>Cross-validation:</strong> The DMA floor is stable to within ±3.6% across JPS=1/2/4 on all four GPUs, confirming that the bottleneck is not memory bandwidth saturation or contention. Upgrading PCIe bandwidth (Gen4 → Gen5) halves the DMA time but provides no relief against the per-call kernel overhead, which remains ~4.74 ms regardless.
+  </span>
+</div>
+
+<h3 id="s5-4"><span class="i18n"
+  data-en="1.4 Optimization Path: Why Sync Patches Failed"
+  data-zh="1.4 優化路徑：為何 Sync Patch 失敗">1.4 Optimization Path: Why Sync Patches Failed</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="Two patches targeting synchronization patterns (Exp D and Exp F) were tested to validate the original (incorrect) root cause hypothesis. Both produced negative results — not because the patches were poorly implemented, but because the ~15 ms real offload work is actual GPU computation, not a sync overhead artifact that can be removed by rearranging sync calls."
+    data-zh="兩個針對同步模式的 patch（Exp D 和 Exp F）被測試，用以驗證原先（錯誤的）根因假設。兩者均產生負面結果——不是因為 patch 實作不佳，而是因為 ~15 ms 的真實 offload 工作是實際的 GPU 計算，並非可透過重新排列 sync 呼叫來消除的 sync overhead。">
+    Two patches targeting synchronization patterns (Exp D and Exp F) were tested to validate the original (incorrect) root cause hypothesis. Both produced negative results — not because the patches were poorly implemented, but because the ~15 ms real offload work is actual GPU computation, not a sync overhead artifact that can be removed by rearranging sync calls.
+  </span>
+</p>
+
+<h4 style="margin:1.4rem 0 0.5rem;color:var(--text-primary)"><span class="i18n"
+  data-en="Exp D — Coalesce store_stream Sync (Negative Result)"
+  data-zh="Exp D — 聚合 store_stream Sync（負面結果）">Exp D — Coalesce <code>store_stream</code> Sync (Negative Result)</span></h4>
+
+<p style="color:var(--text-secondary);margin-bottom:0.8rem;max-width:860px;font-size:0.9rem"><span class="i18n"
+  data-en="Removed per-chunk store_stream.synchronize() in gpu_connector.py:from_gpu(), retaining only the single sync at the end of batched_from_gpu(). Tested on H200, H100, A100 (same workload as Exp A, JPS=1 and JPS=6, control vs patched sequentially)."
+  data-zh="移除 gpu_connector.py:from_gpu() 中逐 chunk 的 store_stream.synchronize()，僅保留 batched_from_gpu() 末尾的單次 sync。在 H200、H100、A100 上測試（與 Exp A 相同工作負載，JPS=1 和 JPS=6，control 與 patched 依序執行）。">Removed per-chunk <code>store_stream.synchronize()</code> in <code>gpu_connector.py:from_gpu()</code>, retaining only the single sync at the end of <code>batched_from_gpu()</code>. Tested on H200, H100, A100 (same workload as Exp A, JPS=1 and JPS=6, control vs patched sequentially).</span></p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th>GPU</th>
+    <th><span class="i18n" data-en="Config" data-zh="配置">Config</span></th>
+    <th style="text-align:right">JPS=1 avg</th>
+    <th style="text-align:right">JPS=1 jobs</th>
+    <th style="text-align:right">JPS=6 avg</th>
+    <th style="text-align:right">JPS=6 jobs</th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td rowspan="2"><strong>H200</strong></td>
+    <td><span class="i18n" data-en="control (per-chunk)" data-zh="control（逐 chunk）">control</span></td>
+    <td style="text-align:right"><strong>9.03 s</strong></td>
+    <td style="text-align:right">48</td>
+    <td style="text-align:right"><strong>236.0 s</strong></td>
+    <td style="text-align:right">263</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><span class="i18n" data-en="coalesced" data-zh="聚合">coalesced</span></td>
+    <td style="text-align:right;color:var(--accent-red)">12.40 s <strong>(+37%)</strong></td>
+    <td style="text-align:right">66</td>
+    <td style="text-align:right;color:var(--accent-red)">262.2 s (+11%)</td>
+    <td style="text-align:right">283</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><strong>H100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>8.92 s</strong></td>
+    <td style="text-align:right">47</td>
+    <td style="text-align:right"><strong>276.0 s</strong></td>
+    <td style="text-align:right">257</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td>coalesced</td>
+    <td style="text-align:right;color:var(--accent-red)">10.48 s <strong>(+17%)</strong></td>
+    <td style="text-align:right">55</td>
+    <td style="text-align:right;color:var(--accent-red)">283.7 s (+3%)</td>
+    <td style="text-align:right">272</td>
+  </tr>
+  <tr>
+    <td rowspan="2"><strong>A100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>69.36 s</strong></td>
+    <td style="text-align:right">46</td>
+    <td style="text-align:right"><strong>1294.7 s</strong></td>
+    <td style="text-align:right">270</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp D</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td>coalesced</td>
+    <td style="text-align:right;color:var(--accent-red)">90.28 s <strong>(+30%)</strong></td>
+    <td style="text-align:right">48</td>
+    <td style="text-align:right;color:var(--accent-orange)">1249.0 s (−4%)</td>
+    <td style="text-align:right">264</td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="7" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Negative result: removing per-chunk sync in gpu_connector.from_gpu() alone did NOT reduce per-job latency. At JPS=1, latency increased +17–37% across all GPUs. Total job throughput increased slightly (more jobs completed in 45s), but individual job completion time worsened."
+      data-zh="負面結果：僅移除 gpu_connector.from_gpu() 中的逐 chunk sync 並未降低 per-job latency。JPS=1 時延遲增加 +17–37%（三個 GPU 一致）。總 job 吞吐量略有提升（45s 內完成更多 job），但單一 job 的完成時間反而變長。">Negative result: removing per-chunk sync in <code>gpu_connector.from_gpu()</code> alone did NOT reduce per-job latency. At JPS=1, latency increased +17–37% across all GPUs.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
+
+<h4 style="margin:1.4rem 0 0.5rem;color:var(--text-primary)"><span class="i18n"
+  data-en="Exp F — stream.query() Guard (Negative Result)"
+  data-zh="Exp F — stream.query() 守衛（負面結果）">Exp F — <code>stream.query()</code> Guard (Negative Result)</span></h4>
+
+<p style="color:var(--text-secondary);margin-bottom:0.8rem;max-width:860px;font-size:0.9rem"><span class="i18n"
+  data-en="Added a store_stream.query() guard before each store_stream.synchronize() in gpu_connector.py, so the sync is skipped when the stream is already idle. Results were also negative: JPS=1 latency increased on both GPUs tested."
+  data-zh="在 gpu_connector.py 中每次 store_stream.synchronize() 之前加入 store_stream.query() 守衛，若 stream 已閒置則跳過 sync。結果同樣為負面：兩個受測 GPU 的 JPS=1 延遲皆有所增加。">Added a <code>store_stream.query()</code> guard before each <code>store_stream.synchronize()</code> in <code>gpu_connector.py</code>, so the sync is skipped when the stream is already idle. Results were also negative: JPS=1 latency increased on both GPUs tested.</span></p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th>GPU</th>
+    <th><span class="i18n" data-en="Config" data-zh="配置">Config</span></th>
+    <th style="text-align:right">JPS=1 avg</th>
+    <th style="text-align:right"><span class="i18n" data-en="Change" data-zh="變化">Change</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td rowspan="2"><strong>H200</strong></td>
+    <td><span class="i18n" data-en="control" data-zh="control">control</span></td>
+    <td style="text-align:right"><strong>6.86 s</strong></td>
+    <td style="text-align:right">—</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp F</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><code>stream.query()</code> guard</td>
+    <td style="text-align:right;color:var(--accent-red)">8.29 s</td>
+    <td style="text-align:right;color:var(--accent-red)"><strong>+21%</strong></td>
+  </tr>
+  <tr>
+    <td rowspan="2"><strong>A100</strong></td>
+    <td>control</td>
+    <td style="text-align:right"><strong>27.88 s</strong></td>
+    <td style="text-align:right">—</td>
+    <td rowspan="2" style="font-size:0.75rem;color:var(--text-muted)">Exp F</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><code>stream.query()</code> guard</td>
+    <td style="text-align:right;color:var(--accent-red)">34.85 s</td>
+    <td style="text-align:right;color:var(--accent-red)"><strong>+25%</strong></td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr><td colspan="5" style="font-size:0.78rem;color:var(--text-muted);border-top:1px solid var(--border-color);padding-top:0.4rem">
+    <span class="i18n"
+      data-en="Negative result: skipping store_stream syncs when idle did NOT reduce per-job latency."
+      data-zh="負面結果：當 store_stream 閒置時跳過 sync 並未降低 per-job latency。">Negative result: skipping <code>store_stream</code> syncs when idle did NOT reduce per-job latency.</span>
+  </td></tr>
+  </tfoot>
+</table>
+</div>
+
+<div class="callout warn" style="margin:1rem 0">
+  <div class="callout-title"><span class="i18n" data-en="Why both patches (Exp D and Exp F) failed" data-zh="為何兩個 patch（Exp D 和 Exp F）都失敗">Why both patches (Exp D and Exp F) failed</span></div>
+  <div style="overflow-x:auto;margin:0.5rem 0">
+  <table style="font-size:0.88rem">
+    <thead>
+    <tr>
+      <th><span class="i18n" data-en="Experiment" data-zh="實驗">Experiment</span></th>
+      <th><span class="i18n" data-en="What was patched" data-zh="修改了什麼">What was patched</span></th>
+      <th><span class="i18n" data-en="Target" data-zh="目標">Target</span></th>
+      <th><span class="i18n" data-en="Result" data-zh="結果">Result</span></th>
+      <th><span class="i18n" data-en="Why it failed" data-zh="為何失敗">Why it failed</span></th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr style="background:rgba(239,68,68,0.06)">
+      <td><strong>Exp D</strong></td>
+      <td><span class="i18n" data-en="Coalesce per-chunk store_stream syncs → 1/step" data-zh="將逐 chunk store_stream sync 合併為每 step 1 次">Coalesce per-chunk <code>store_stream</code> syncs → 1/step</span></td>
+      <td><span class="i18n" data-en="store_stream syncs (~11 ms/step)" data-zh="store_stream sync（~11 ms/step）">store_stream syncs (~11 ms/step)</span></td>
+      <td style="color:var(--accent-red)"><span class="i18n" data-en="+17–37% JPS=1 latency" data-zh="+17–37% JPS=1 延遲">+17–37% JPS=1 latency</span></td>
+      <td rowspan="2"><span class="i18n" data-en="The ~15 ms offload work is real GPU work (lmc::load_and_reshape + D2H DMA). Sync-pattern changes cannot remove real computation; they only shift when CPU blocks relative to GPU work completion." data-zh="~15 ms 的 offload 工作是真正的 GPU 工作（lmc::load_and_reshape + D2H DMA）。改變 sync 模式無法去除真正的計算；只是改變 CPU 相對於 GPU 工作完成時的阻塞時機。">The ~15 ms offload work is real GPU work (<code>lmc::load_and_reshape</code> + D2H DMA). Sync-pattern changes cannot remove real computation; they only shift <em>when</em> CPU blocks relative to GPU work completion.</span></td>
+    </tr>
+    <tr style="background:rgba(239,68,68,0.06)">
+      <td><strong>Exp F</strong></td>
+      <td><span class="i18n" data-en="Skip store_stream sync when stream already idle" data-zh="當 stream 已閒置時跳過 store_stream sync">Skip <code>store_stream</code> sync when stream already idle</span></td>
+      <td><span class="i18n" data-en="store_stream syncs (~11 ms/step)" data-zh="store_stream sync（~11 ms/step）">store_stream syncs (~11 ms/step)</span></td>
+      <td style="color:var(--accent-red)"><span class="i18n" data-en="+21–25% JPS=1 latency" data-zh="+21–25% JPS=1 延遲">+21–25% JPS=1 latency</span></td>
+    </tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:0.9rem;margin-top:0.5rem"><span class="i18n"
+    data-en="The correct architectural fix is upstream #37160: make wait_for_save() a no-op, deferring all offload work to get_finished() which runs after model execution. This hides the ~15 ms real offload work behind GPU compute rather than serializing it before the next forward pass."
+    data-zh="正確的架構修復是 upstream #37160：將 wait_for_save() 變為空操作，把所有 offload 工作延遲到 get_finished() 執行（在模型執行之後）。這樣可以將 ~15 ms 的真實 offload 工作隱藏在 GPU 計算後面，而不是在下一個 forward pass 之前串行執行。">The correct architectural fix is upstream #37160: make <code>wait_for_save()</code> a no-op, deferring all offload work to <code>get_finished()</code> which runs after model execution. This hides the ~15 ms real offload work behind GPU compute rather than serializing it before the next forward pass.</span></p>
+</div>
+
+</section>
+<!-- Section 2: Ablation Design (was §6) -->
+<section id="design">
+<h2><span class="i18n" data-en="2. Ablation Experimental Design" data-zh="2. 消融實驗設計">2. Ablation Experimental Design</span></h2>
+
+<h3><span class="i18n" data-en="2.1 Instrumentation" data-zh="2.1 儀器化">2.1 Instrumentation</span></h3>
+
+<div class="grid-2">
+  <div class="card">
+    <div class="card-header">
+      <span class="i18n" data-en="Scheduler Step Instrumentation" data-zh="排程器步驟儀器化">Scheduler Step Instrumentation</span>
+      <span class="file-badge">scheduler.py</span>
+    </div>
+    <p><span class="i18n"
+      data-en="Added <code class='inline-code'>step_detail</code> trace events capturing per-step metrics:"
+      data-zh="新增 <code class='inline-code'>step_detail</code> 追蹤事件，捕捉每步指標：">Added <code class="inline-code">step_detail</code> trace events capturing per-step metrics:</span></p>
+    <ul>
+      <li><code class="inline-code">batch_size</code> / <code class="inline-code">total_tokens</code></li>
+      <li><code class="inline-code">num_prefills</code> / <code class="inline-code">num_decodes</code></li>
+      <li><code class="inline-code">schedule_ms</code> <span class="i18n" data-en="(wall-clock)" data-zh="（掛鐘時間）">(wall-clock)</span></li>
+      <li><code class="inline-code">num_waiting</code> / <code class="inline-code">num_running</code></li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="i18n" data-en="KV Save Pipeline (GPU→CPU)" data-zh="KV Save Pipeline（GPU→CPU）">KV Save Pipeline (GPU→CPU)</span>
+      <span class="file-badge">lmcache_connector.py</span>
+    </div>
+    <p><span class="i18n"
+      data-en="Added <code class='inline-code'>kv_load_timing</code> events to the LMCache connector:"
+      data-zh="在 LMCache connector 中新增 <code class='inline-code'>kv_load_timing</code> 事件：">Added <code class="inline-code">kv_load_timing</code> events to the LMCache connector:</span></p>
+    <ul>
+      <li><code class="inline-code">start_load_kv</code> <span class="i18n" data-en="— CPU→GPU initiation" data-zh="— CPU→GPU 啟動">— CPU→GPU initiation</span></li>
+      <li><code class="inline-code">wait_for_layer_load</code> <span class="i18n" data-en="— per-layer blocking" data-zh="— 每層阻塞">— per-layer blocking</span></li>
+      <li><code class="inline-code">wait_for_save</code> <span class="i18n" data-en="— GPU→CPU offload sync" data-zh="— GPU→CPU offload 同步">— GPU→CPU offload sync</span></li>
+      <li><code class="inline-code">forward_kv_summary</code> <span class="i18n" data-en="— total KV overhead" data-zh="— 總 KV 開銷">— total KV overhead</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="2.2 Sync Ablation (4 Modes)" data-zh="2.2 同步消融（4 種模式）">2.2 Sync Ablation (4 Modes)</span></h3>
+
+<p><span class="i18n"
+  data-en="The initial hypothesis (§2) was that <code class='inline-code'>torch.cuda.synchronize()</code> in LMCache's KV-onload path blocks the CPU scheduler thread and starves the GPU. To falsify or confirm this, we need to <strong>replace the synchronization primitive itself</strong> with progressively looser variants and see whether wall-clock latency improves. If it does, the sync primitive was the bottleneck; if it doesn't, the bottleneck is somewhere else. The tool is <code class='inline-code'>our_experiments/scripts/patch_sync.py</code>, which runtime-patches <code class='inline-code'>gpu_connector.py</code> inside the LMCache installation in the conda env (so vLLM picks up the change on server restart)."
+  data-zh="初始假說（§2）是 LMCache KV-onload 路徑上的 <code class='inline-code'>torch.cuda.synchronize()</code> 會 block CPU scheduler 線程，讓 GPU 餓著。要證偽或確認這點，必須<strong>替換同步 primitive 本身</strong>為越來越鬆的變體，看 wall-clock 延遲有沒有改善。有改善就是 sync primitive 是瓶頸；沒有改善就是瓶頸在別的地方。工具是 <code class='inline-code'>our_experiments/scripts/patch_sync.py</code>，在 conda env 裡 runtime patch LMCache 安裝路徑的 <code class='inline-code'>gpu_connector.py</code>（vLLM server 重啟時生效）。">The initial hypothesis (§2) was that <code class="inline-code">torch.cuda.synchronize()</code> in LMCache's KV-onload path blocks the CPU scheduler thread and starves the GPU. To falsify or confirm this, we need to <strong>replace the synchronization primitive itself</strong> with progressively looser variants and see whether wall-clock latency improves. If it does, the sync primitive was the bottleneck; if it doesn't, the bottleneck is somewhere else. The tool is <code class="inline-code">our_experiments/scripts/patch_sync.py</code>, which runtime-patches <code class="inline-code">gpu_connector.py</code> inside the LMCache installation in the conda env (so vLLM picks up the change on server restart).</span></p>
+
+<p><span class="i18n"
+  data-en="The target line in original LMCache (<code class='inline-code'>gpu_connector.py</code>) is at the end of <code class='inline-code'>batched_to_gpu</code>, after firing the async CPU→GPU KV load on a dedicated <code class='inline-code'>load_stream</code>:"
+  data-zh="原始 LMCache（<code class='inline-code'>gpu_connector.py</code>）的目標行在 <code class='inline-code'>batched_to_gpu</code> 尾端，在 dedicated <code class='inline-code'>load_stream</code> 上發射 async CPU→GPU KV load 之後：">The target line in original LMCache (<code class="inline-code">gpu_connector.py</code>) is at the end of <code class="inline-code">batched_to_gpu</code>, after firing the async CPU→GPU KV load on a dedicated <code class="inline-code">load_stream</code>:</span></p>
+
+<pre><code><span class="cmt"># NOTE: wait until both compute and load streams are done</span>
+torch.cuda.synchronize()   <span class="cmt"># ← the line under test</span></code></pre>
+
+<p><span class="i18n"
+  data-en="Each mode replaces exactly this call with a different primitive (the rest of LMCache code is untouched). All four modes are tested head-to-head against the same FCFS/Continuum baselines under identical JPS and workload. Here is what each mode does and what it is supposed to test:"
+  data-zh="每個模式就是把這一行換成不同的 primitive（LMCache 其他地方不動），然後在同樣的 JPS 和 workload 下跟 FCFS/Continuum baseline 對照測試。四個模式各自做什麼、想驗證什麼：">Each mode replaces exactly this call with a different primitive (the rest of LMCache code is untouched). All four modes are tested head-to-head against the same FCFS/Continuum baselines under identical JPS and workload. Here is what each mode does and what it is supposed to test:</span></p>
+
+<div class="grid-2">
+  <div class="card" style="border-left:4px solid var(--accent-blue)">
+    <div class="card-header">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--accent-blue);color:#fff;font-weight:700;margin-right:0.5rem">D</span>
+      <code class="inline-code">default</code>
+    </div>
+    <p style="font-size:0.85rem"><strong><span class="i18n" data-en="What it does:" data-zh="它做什麼：">What it does:</span></strong> <span class="i18n" data-en="No change — runs LMCache's original <code class='inline-code'>torch.cuda.synchronize()</code>. This is a <strong>device-wide</strong> block: the CPU thread waits until <em>every</em> kernel on <em>every</em> CUDA stream on the current device has completed, not just the load stream." data-zh="不改 — 跑 LMCache 原本的 <code class='inline-code'>torch.cuda.synchronize()</code>。這是 <strong>device-wide</strong> 阻塞：CPU 線程等到該 device 上<em>所有</em> CUDA stream 的<em>所有</em> kernel 都完成，不只是 load stream。">No change — runs LMCache's original <code class="inline-code">torch.cuda.synchronize()</code>. This is a <strong>device-wide</strong> block: the CPU thread waits until <em>every</em> kernel on <em>every</em> CUDA stream on the current device has completed, not just the load stream.</span></p>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-top:0.5rem"><strong><span class="i18n" data-en="What it tests:" data-zh="它驗證什麼：">What it tests:</span></strong> <span class="i18n" data-en="baseline — the 'worst-case' sync strategy that blocks on everything." data-zh="baseline — 最保守的 sync 策略，所有東西都等。">baseline — the "worst-case" sync strategy that blocks on everything.</span></p>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent-orange)">
+    <div class="card-header">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--accent-orange);color:#fff;font-weight:700;margin-right:0.5rem">S</span>
+      <code class="inline-code">stream_only</code>
+    </div>
+    <p style="font-size:0.85rem"><strong><span class="i18n" data-en="What it does:" data-zh="它做什麼：">What it does:</span></strong> <span class="i18n" data-en="replaces <code class='inline-code'>torch.cuda.synchronize()</code> with explicit per-stream syncs on only the streams this operation cares about:" data-zh="把 <code class='inline-code'>torch.cuda.synchronize()</code> 換成明確只同步這個操作關心的 stream：">replaces <code class="inline-code">torch.cuda.synchronize()</code> with explicit per-stream syncs on only the streams this operation cares about:</span></p>
+    <pre style="font-size:0.76rem;margin:0.4rem 0"><code>self.load_stream.synchronize()
+self.compute_stream.synchronize()</code></pre>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"><strong><span class="i18n" data-en="What it tests:" data-zh="它驗證什麼：">What it tests:</span></strong> <span class="i18n" data-en="whether the 'device-wide' scope of default sync is over-conservative. If stream-scoped syncs are meaningfully faster, then default was wasting time waiting for unrelated kernels on other streams." data-zh="default sync 的「device-wide」範圍是不是過度保守。如果 stream-scoped sync 顯著更快，代表 default 在等其他 stream 上不相關的 kernel 浪費時間。">whether the "device-wide" scope of default sync is over-conservative. If stream-scoped syncs are meaningfully faster, then default was wasting time waiting for unrelated kernels on other streams.</span></p>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent-purple)">
+    <div class="card-header">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--accent-purple);color:#fff;font-weight:700;margin-right:0.5rem">E</span>
+      <code class="inline-code">event_async</code>
+    </div>
+    <p style="font-size:0.85rem"><strong><span class="i18n" data-en="What it does:" data-zh="它做什麼：">What it does:</span></strong> <span class="i18n" data-en="replaces the device sync with a CUDA event that records a specific point on the current stream, then waits for just that point:" data-zh="把 device sync 換成 CUDA event — 在 current stream 的一個特定點 record，然後只等那個點：">replaces the device sync with a CUDA event that records a specific point on the current stream, then waits for just that point:</span></p>
+    <pre style="font-size:0.76rem;margin:0.4rem 0"><code>self._sync_event = torch.cuda.Event()
+self._sync_event.record()
+self._sync_event.synchronize()</code></pre>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"><strong><span class="i18n" data-en="What it tests:" data-zh="它驗證什麼：">What it tests:</span></strong> <span class="i18n" data-en="events are the cheapest fine-grained sync primitive CUDA offers — only one condition variable to check, no scan over all device work. If the bottleneck is CPU overhead inside the sync primitive itself, event_async should show it." data-zh="Event 是 CUDA 最便宜的細粒度 sync primitive — 只要檢查一個條件變數，不用掃所有 device work。如果瓶頸是 sync primitive 本身的 CPU overhead，event_async 應該能看出來。">events are the cheapest fine-grained sync primitive CUDA offers — only one condition variable to check, no scan over all device work. If the bottleneck is CPU overhead inside the sync primitive itself, event_async should show it.</span></p>
+    <p style="font-size:0.78rem;color:var(--accent-orange);margin-top:0.3rem"><strong><span class="i18n" data-en="Caveat:" data-zh="注意：">Caveat:</span></strong> <span class="i18n" data-en="<code class='inline-code'>record()</code> without a stream argument records on the <em>current</em> stream (typically the default compute stream), so this event may not actually capture load_stream activity. If that's true, event_async is effectively incorrect — which is part of what the experiment reveals." data-zh="<code class='inline-code'>record()</code> 不給 stream 參數的話是記錄在<em>當前</em> stream（通常是 default compute stream），所以這個 event 可能根本沒抓到 load_stream 的活動。如果是這樣，event_async 實際上是 incorrect 的 — 這也是實驗能揭露的事情之一。"><code class="inline-code">record()</code> without a stream argument records on the <em>current</em> stream (typically the default compute stream), so this event may not actually capture load_stream activity. If that's true, event_async is effectively incorrect — which is part of what the experiment reveals.</span></p>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent-red)">
+    <div class="card-header">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:var(--accent-red);color:#fff;font-weight:700;margin-right:0.5rem">N</span>
+      <code class="inline-code">no_sync</code> <span style="font-size:0.72rem;color:var(--accent-red);font-weight:600">⚠ UNSAFE</span>
+    </div>
+    <p style="font-size:0.85rem"><strong><span class="i18n" data-en="What it does:" data-zh="它做什麼：">What it does:</span></strong> <span class="i18n" data-en="removes <em>all</em> sync calls in the onload path — both the <code class='inline-code'>torch.cuda.synchronize()</code> and the subsequent <code class='inline-code'>self.load_stream.synchronize()</code>:" data-zh="移除 onload 路徑上<em>所有</em> sync call — 包括 <code class='inline-code'>torch.cuda.synchronize()</code> 和後續的 <code class='inline-code'>self.load_stream.synchronize()</code>：">removes <em>all</em> sync calls in the onload path — both the <code class="inline-code">torch.cuda.synchronize()</code> and the subsequent <code class="inline-code">self.load_stream.synchronize()</code>:</span></p>
+    <pre style="font-size:0.76rem;margin:0.4rem 0"><code>pass  <span class="cmt"># sync removed for ceiling measurement</span></code></pre>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin-top:0.3rem"><strong><span class="i18n" data-en="What it tests:" data-zh="它驗證什麼：">What it tests:</span></strong> <span class="i18n" data-en="the <strong>ceiling</strong> — how fast could LMCache possibly run if every synchronization primitive in the onload path were free? This is not a correct implementation (the next kernel could read paged KV blocks before the DMA finishes), but as long as it doesn't crash and the outputs are approximately right, it gives an upper bound on 'best case if sync cost were zero'." data-zh="<strong>上限</strong> — 如果 onload 路徑上每一個 sync primitive 都是免費的，LMCache 能跑多快？這不是正確的實作（下一個 kernel 可能會在 DMA 完成前讀 paged KV block），但只要沒 crash 而且輸出大致正確，就能給出「如果 sync 成本是 0」的上限。">the <strong>ceiling</strong> — how fast could LMCache possibly run if every synchronization primitive in the onload path were free? This is not a correct implementation (the next kernel could read paged KV blocks before the DMA finishes), but as long as it doesn't crash and the outputs are approximately right, it gives an upper bound on "best case if sync cost were zero".</span></p>
+  </div>
+</div>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="Logical progression of the four modes" data-zh="四個模式的邏輯順序">Logical progression of the four modes</span></div>
+  <p><span class="i18n"
+    data-en="The four modes are ordered from most conservative to least: <code class='inline-code'>default</code> blocks on the whole device, <code class='inline-code'>stream_only</code> blocks only on the two involved streams, <code class='inline-code'>event_async</code> blocks only on a single event, and <code class='inline-code'>no_sync</code> blocks on nothing. If the sync-hypothesis is correct, each step should give a progressively larger speedup; if it's wrong, the curve will be flat. The <code class='inline-code'>no_sync</code> ceiling is especially load-bearing — if even the free-sync case doesn't beat <code class='inline-code'>default</code> by more than a few percent, the bottleneck is demonstrably not in any sync primitive. Spoiler: Finding 1 in §5 shows exactly this flat curve."
+    data-zh="四個模式是從最保守到最鬆的順序排列：<code class='inline-code'>default</code> 阻塞整個 device、<code class='inline-code'>stream_only</code> 只阻塞兩個相關 stream、<code class='inline-code'>event_async</code> 只阻塞單一 event、<code class='inline-code'>no_sync</code> 什麼都不阻塞。如果 sync 假說成立，每一階應該給出越來越大的加速；如果假說錯誤，曲線會是平的。<code class='inline-code'>no_sync</code> 的 ceiling 特別關鍵 — 如果連「sync 免費」的情況都不比 <code class='inline-code'>default</code> 快超過幾個百分點，那瓶頸明顯不在任何 sync primitive 上。劇透：§5 的 Finding 1 就是這個平的曲線。">The four modes are ordered from most conservative to least: <code class="inline-code">default</code> blocks on the whole device, <code class="inline-code">stream_only</code> blocks only on the two involved streams, <code class="inline-code">event_async</code> blocks only on a single event, and <code class="inline-code">no_sync</code> blocks on nothing. If the sync-hypothesis is correct, each step should give a progressively larger speedup; if it's wrong, the curve will be flat. The <code class="inline-code">no_sync</code> ceiling is especially load-bearing — if even the free-sync case doesn't beat <code class="inline-code">default</code> by more than a few percent, the bottleneck is demonstrably not in any sync primitive. Spoiler: Finding 1 in §5 shows exactly this flat curve.</span></p>
+</div>
+
+<div class="hflow" style="margin-top:1.2rem">
+  <div class="step">
+    <div class="c">D</div>
+    <div class="lbl">default</div>
+    <div class="desc"><span class="i18n" data-en="device-wide sync" data-zh="device-wide sync">device-wide sync</span></div>
+  </div>
+  <div class="step">
+    <div class="c">S</div>
+    <div class="lbl">stream_only</div>
+    <div class="desc"><span class="i18n" data-en="2 stream syncs" data-zh="2 個 stream sync">2 stream syncs</span></div>
+  </div>
+  <div class="step">
+    <div class="c">E</div>
+    <div class="lbl">event_async</div>
+    <div class="desc"><span class="i18n" data-en="1 event wait" data-zh="1 個 event 等待">1 event wait</span></div>
+  </div>
+  <div class="step">
+    <div class="c">N</div>
+    <div class="lbl">no_sync</div>
+    <div class="desc"><span class="i18n" data-en="0 syncs (unsafe)" data-zh="0 sync (unsafe)">0 syncs (unsafe)</span></div>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="2.3 Transfer Ablation" data-zh="2.3 傳輸消融">2.3 Transfer Ablation</span></h3>
+
+<div class="callout">
+  <div class="callout-title"><code class="inline-code">nocache</code> <span class="i18n" data-en="— isolating framework overhead" data-zh="— 隔離框架開銷">— isolating framework overhead</span></div>
+  <p><span class="i18n"
+    data-en="LMCache with <code class='inline-code'>LMCACHE_MAX_LOCAL_CPU_SIZE=1</code> (1GB — too small for meaningful KV). Isolates whether overhead comes from actual KV transfers or from LMCache's framework/metadata management."
+    data-zh="LMCache 設定 <code class='inline-code'>LMCACHE_MAX_LOCAL_CPU_SIZE=1</code>（1GB — 太小無法存放有意義的 KV）。隔離開銷是來自實際 KV 傳輸還是 LMCache 的框架/元數據管理。">LMCache with <code class="inline-code">LMCACHE_MAX_LOCAL_CPU_SIZE=1</code> (1GB — too small for meaningful KV). Isolates whether overhead comes from actual KV transfers or from LMCache's framework/metadata management.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="2.4 Parameters" data-zh="2.4 參數">2.4 Parameters</span></h3>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th>
+    <th><span class="i18n" data-en="Value" data-zh="值">Value</span></th>
+  </tr>
+  <tr><td><span class="i18n" data-en="Model" data-zh="模型">Model</span></td><td>Llama-3.1-8B-Instruct (bf16, ~16GB)</td></tr>
+  <tr><td><span class="i18n" data-en="Tool output tokens/turn" data-zh="工具輸出 tokens/輪">Tool output tokens/turn</span></td><td><span class="i18n" data-en="Randomized: [1640, 1510, 2455, 1335, 2730, 1930, 775]" data-zh="隨機化：[1640, 1510, 2455, 1335, 2730, 1930, 775]">Randomized: [1640, 1510, 2455, 1335, 2730, 1930, 775]</span></td></tr>
+  <tr><td><span class="i18n" data-en="Completion tokens" data-zh="完成 tokens">Completion tokens</span></td><td><span class="i18n" data-en="Fixed 20/turn" data-zh="固定 20/輪">Fixed 20/turn</span></td></tr>
+  <tr><td><span class="i18n" data-en="Tool execution time" data-zh="工具執行時間">Tool execution time</span></td><td>0.5s</td></tr>
+  <tr><td><span class="i18n" data-en="Turns per job" data-zh="每任務輪數">Turns per job</span></td><td>8</td></tr>
+  <tr><td><span class="i18n" data-en="Context at turn 8" data-zh="第 8 輪上下文">Context at turn 8</span></td><td>~13,000 tokens</td></tr>
+  <tr><td><span class="i18n" data-en="JPS (Jobs per second)" data-zh="JPS（每秒任務數）">JPS (Jobs per second)</span></td><td>1, 3, 6, 10</td></tr>
+  <tr><td><span class="i18n" data-en="Duration per run" data-zh="每次運行時長">Duration per run</span></td><td>45s</td></tr>
+</table>
+
+<h3><span class="i18n" data-en="2.5 GPUs Tested" data-zh="2.5 測試的 GPU">2.5 GPUs Tested</span></h3>
+
+<div class="grid-2" style="grid-template-columns:repeat(4,1fr);gap:1rem">
+  <div class="card" style="border-left:4px solid var(--accent-green);text-align:center">
+    <h4 style="color:var(--accent-green)">H200</h4>
+    <p style="font-size:1.4rem;font-weight:700;color:var(--text-primary)">141 GB</p>
+    <p style="font-size:0.8rem"><span class="yes">28/28 complete</span></p>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-green);text-align:center">
+    <h4 style="color:var(--accent-green)">H100</h4>
+    <p style="font-size:1.4rem;font-weight:700;color:var(--text-primary)">80 GB</p>
+    <p style="font-size:0.8rem"><span class="yes"><span class="i18n" data-en="§2 + §5 complete" data-zh="§2 + §5 完成">§2 + §5 complete</span></span></p>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-green);text-align:center">
+    <h4 style="color:var(--accent-green)">A100</h4>
+    <p style="font-size:1.4rem;font-weight:700;color:var(--text-primary)">80 GB</p>
+    <p style="font-size:0.8rem"><span class="yes"><span class="i18n" data-en="§2 + §5 complete" data-zh="§2 + §5 完成">§2 + §5 complete</span></span></p>
+  </div>
+  <div class="card" style="border-left:4px solid var(--accent-green);text-align:center">
+    <h4 style="color:var(--accent-green)">L40S</h4>
+    <p style="font-size:1.4rem;font-weight:700;color:var(--text-primary)">48 GB</p>
+    <p style="font-size:0.8rem"><span class="yes"><span class="i18n" data-en="§2 + §5 complete" data-zh="§2 + §5 完成">§2 + §5 complete</span></span></p>
+  </div>
+</div>
+</section>
+<!-- Section 3: Ablation Results (was §7) -->
+<section id="results">
+<h2><span class="i18n" data-en="3. Ablation Results" data-zh="3. 消融結果">3. Ablation Results</span></h2>
+
+<h3><span class="i18n" data-en="3.1 Wall-Clock Performance (H200)" data-zh="3.1 掛鐘效能（H200）">3.1 Wall-Clock Performance (H200)</span></h3>
+
+<p style="font-size:0.9rem"><span class="i18n"
+  data-en="Log-scale comparison of all 7 policies. Continuum (green) is the only variant whose curve diverges downward at JPS≥6. The five LMCache variants cluster together above FCFS, confirming that no sync strategy rescues LMCache — see Finding 1 in §5."
+  data-zh="7 種策略的 log-scale 對照。Continuum（綠色）是唯一在 JPS≥6 時向下發散的。五種 LMCache 變體全部群聚在 FCFS 上方，證實沒有任何 sync 策略能救 LMCache — 見 §5 的 Finding 1。">Log-scale comparison of all 7 policies. Continuum (green) is the only variant whose curve diverges downward at JPS≥6. The five LMCache variants cluster together above FCFS, confirming that no sync strategy rescues LMCache — see Finding 1 in §5.</span></p>
+
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:760px;height:auto;display:block;margin:0 auto">
+<rect width="680" height="360" fill="#0f1218" rx="6"/>
+<text x="340" y="22" fill="#e2e8f0" font-size="14" font-weight="600" text-anchor="middle" font-family="system-ui">H200 bottleneck ablation — Avg JCT vs JPS (7 policies)</text>
+<line x1="70" y1="280" x2="640" y2="280" stroke="#2d3148" stroke-width="1.5"/>
+<line x1="70" y1="50" x2="70" y2="280" stroke="#2d3148" stroke-width="1.5"/>
+<line x1="70" y1="280" x2="640" y2="280" stroke="#1a1d2e" stroke-width="1" stroke-dasharray="2,3"/>
+<text x="65" y="284" fill="#64748b" font-size="10" text-anchor="end" font-family="system-ui">1s</text>
+<line x1="70" y1="206" x2="640" y2="206" stroke="#1a1d2e" stroke-width="1" stroke-dasharray="2,3"/>
+<text x="65" y="210" fill="#64748b" font-size="10" text-anchor="end" font-family="system-ui">10s</text>
+<line x1="70" y1="132" x2="640" y2="132" stroke="#1a1d2e" stroke-width="1" stroke-dasharray="2,3"/>
+<text x="65" y="136" fill="#64748b" font-size="10" text-anchor="end" font-family="system-ui">100s</text>
+<line x1="70" y1="57" x2="640" y2="57" stroke="#1a1d2e" stroke-width="1" stroke-dasharray="2,3"/>
+<text x="65" y="61" fill="#64748b" font-size="10" text-anchor="end" font-family="system-ui">1000s</text>
+<text x="25" y="165" fill="#94a3b8" font-size="10" text-anchor="middle" font-family="system-ui" transform="rotate(-90 25 165)">Avg JCT (log scale)</text>
+<line x1="90" y1="280" x2="90" y2="284" stroke="#2d3148" stroke-width="1.5"/>
+<text x="90" y="298" fill="#94a3b8" font-size="11" text-anchor="middle" font-family="system-ui">JPS=1</text>
+<line x1="188" y1="280" x2="188" y2="284" stroke="#2d3148" stroke-width="1.5"/>
+<text x="188" y="298" fill="#94a3b8" font-size="11" text-anchor="middle" font-family="system-ui">JPS=3</text>
+<line x1="334" y1="280" x2="334" y2="284" stroke="#2d3148" stroke-width="1.5"/>
+<text x="334" y="298" fill="#94a3b8" font-size="11" text-anchor="middle" font-family="system-ui">JPS=6</text>
+<line x1="530" y1="280" x2="530" y2="284" stroke="#2d3148" stroke-width="1.5"/>
+<text x="530" y="298" fill="#94a3b8" font-size="11" text-anchor="middle" font-family="system-ui">JPS=10</text>
+<polyline points="90,216 188,177 334,105 530,83" stroke="#3b82f6" stroke-width="3" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90" cy="216" r="3.5" fill="#3b82f6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="177" r="3.5" fill="#3b82f6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="105" r="3.5" fill="#3b82f6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="83" r="3.5" fill="#3b82f6" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,208 188,176 334,105 530,79" stroke="#ef4444" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90" cy="208" r="3.5" fill="#ef4444" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="176" r="3.5" fill="#ef4444" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="105" r="3.5" fill="#ef4444" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="79" r="3.5" fill="#ef4444" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,211 188,170 334,101 530,74" stroke="#f97316" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,3"/>
+<circle cx="90" cy="211" r="3.5" fill="#f97316" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="170" r="3.5" fill="#f97316" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="101" r="3.5" fill="#f97316" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="74" r="3.5" fill="#f97316" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,213 188,171 334,104 530,79" stroke="#eab308" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,3"/>
+<circle cx="90" cy="213" r="3.5" fill="#eab308" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="171" r="3.5" fill="#eab308" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="104" r="3.5" fill="#eab308" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="79" r="3.5" fill="#eab308" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,213 188,164 334,105 530,82" stroke="#ec4899" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,3"/>
+<circle cx="90" cy="213" r="3.5" fill="#ec4899" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="164" r="3.5" fill="#ec4899" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="105" r="3.5" fill="#ec4899" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="82" r="3.5" fill="#ec4899" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,211 188,161 334,102 530,76" stroke="#8b5cf6" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,3"/>
+<circle cx="90" cy="211" r="3.5" fill="#8b5cf6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="161" r="3.5" fill="#8b5cf6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="102" r="3.5" fill="#8b5cf6" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="76" r="3.5" fill="#8b5cf6" stroke="#0f1218" stroke-width="1.2"/>
+<polyline points="90,214 188,179 334,141 530,124" stroke="#00e68a" stroke-width="3" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90" cy="214" r="3.5" fill="#00e68a" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="188" cy="179" r="3.5" fill="#00e68a" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="334" cy="141" r="3.5" fill="#00e68a" stroke="#0f1218" stroke-width="1.2"/>
+<circle cx="530" cy="124" r="3.5" fill="#00e68a" stroke="#0f1218" stroke-width="1.2"/>
+<line x1="540" y1="55" x2="560" y2="55" stroke="#3b82f6" stroke-width="2.5"/>
+<circle cx="550" cy="55" r="3.5" fill="#3b82f6"/>
+<text x="566" y="59" fill="#e2e8f0" font-size="11" font-family="system-ui">FCFS</text>
+<line x1="540" y1="71" x2="560" y2="71" stroke="#ef4444" stroke-width="2.5"/>
+<circle cx="550" cy="71" r="3.5" fill="#ef4444"/>
+<text x="566" y="75" fill="#e2e8f0" font-size="11" font-family="system-ui">LMCache default</text>
+<line x1="540" y1="87" x2="560" y2="87" stroke="#f97316" stroke-width="2.5"/>
+<circle cx="550" cy="87" r="3.5" fill="#f97316"/>
+<text x="566" y="91" fill="#e2e8f0" font-size="11" font-family="system-ui">LMCache stream</text>
+<line x1="540" y1="103" x2="560" y2="103" stroke="#eab308" stroke-width="2.5"/>
+<circle cx="550" cy="103" r="3.5" fill="#eab308"/>
+<text x="566" y="107" fill="#e2e8f0" font-size="11" font-family="system-ui">LMCache event</text>
+<line x1="540" y1="119" x2="560" y2="119" stroke="#ec4899" stroke-width="2.5"/>
+<circle cx="550" cy="119" r="3.5" fill="#ec4899"/>
+<text x="566" y="123" fill="#e2e8f0" font-size="11" font-family="system-ui">LMCache no_sync</text>
+<line x1="540" y1="135" x2="560" y2="135" stroke="#8b5cf6" stroke-width="2.5"/>
+<circle cx="550" cy="135" r="3.5" fill="#8b5cf6"/>
+<text x="566" y="139" fill="#e2e8f0" font-size="11" font-family="system-ui">LMCache nocache</text>
+<line x1="540" y1="151" x2="560" y2="151" stroke="#00e68a" stroke-width="2.5"/>
+<circle cx="550" cy="151" r="3.5" fill="#00e68a"/>
+<text x="566" y="155" fill="#e2e8f0" font-size="11" font-family="system-ui">Continuum</text>
+</svg>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
+    <th>JPS=1</th>
+    <th>JPS=3</th>
+    <th>JPS=6</th>
+    <th>JPS=10</th>
+  </tr>
+  <tr>
+    <td><strong>FCFS</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(baseline)</span></td>
+    <td>7.3s</td><td>24.5s</td><td>226.6s</td><td>453.1s</td>
+  </tr>
+  <tr>
+    <td>LMCache default</td>
+    <td>9.4s <span class="up">(+29%)</span></td>
+    <td>25.5s <span class="up">(+4%)</span></td>
+    <td>226.0s <span class="down">(−0%)</span></td>
+    <td>516.4s <span class="up">(+14%)</span></td>
+  </tr>
+  <tr>
+    <td>LMCache stream_only</td>
+    <td>8.5s <span class="up">(+16%)</span></td>
+    <td>30.2s <span class="up">(+23%)</span></td>
+    <td>261.9s <span class="up">(+16%)</span></td>
+    <td>597.9s <span class="up">(+32%)</span></td>
+  </tr>
+  <tr>
+    <td>LMCache event_async</td>
+    <td>7.9s <span class="up">(+8%)</span></td>
+    <td>29.5s <span class="up">(+20%)</span></td>
+    <td>233.5s <span class="up">(+3%)</span></td>
+    <td>504.0s <span class="up">(+11%)</span></td>
+  </tr>
+  <tr>
+    <td>LMCache no_sync</td>
+    <td>7.9s <span class="up">(+9%)</span></td>
+    <td>37.0s <span class="up">(+51%)</span></td>
+    <td>229.6s <span class="up">(+1%)</span></td>
+    <td>460.5s <span class="up">(+2%)</span></td>
+  </tr>
+  <tr>
+    <td>LMCache nocache (1GB)</td>
+    <td>8.4s <span class="up">(+15%)</span></td>
+    <td>39.6s <span class="up">(+62%)</span></td>
+    <td>249.4s <span class="up">(+10%)</span></td>
+    <td>570.4s <span class="up">(+26%)</span></td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.08)">
+    <td><strong style="color:var(--accent-green)">Continuum</strong></td>
+    <td>7.7s <span class="up">(+5%)</span></td>
+    <td>23.2s <span class="down">(−5%)</span></td>
+    <td style="color:var(--accent-green);font-weight:700">75.2s <span class="down">(−67%)</span></td>
+    <td style="color:var(--accent-green);font-weight:700">125.8s <span class="down">(−72%)</span></td>
+  </tr>
+</table>
+
+<h4><span class="i18n" data-en="JPS=10 Mean JCT Comparison" data-zh="JPS=10 平均 JCT 比較">JPS=10 Mean JCT Comparison</span></h4>
+<div class="bar-chart">
+  <div class="bar-row">
+    <div class="bar-label">FCFS</div>
+    <div class="bar-track"><div class="bar-fill" style="width:75.8%;background:var(--accent-blue)">453.1s</div></div>
+    <div class="bar-value">baseline</div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">LMCache default</div>
+    <div class="bar-track"><div class="bar-fill" style="width:86.4%;background:var(--accent-red)">516.4s</div></div>
+    <div class="bar-value"><span class="up">+14%</span></div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">LMCache stream</div>
+    <div class="bar-track"><div class="bar-fill" style="width:100%;background:var(--accent-red)">597.9s</div></div>
+    <div class="bar-value"><span class="up">+32%</span></div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">LMCache no_sync</div>
+    <div class="bar-track"><div class="bar-fill" style="width:77%;background:var(--accent-orange)">460.5s</div></div>
+    <div class="bar-value"><span class="up">+2%</span></div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label">LMCache nocache</div>
+    <div class="bar-track"><div class="bar-fill" style="width:95.4%;background:var(--accent-red)">570.4s</div></div>
+    <div class="bar-value"><span class="up">+26%</span></div>
+  </div>
+  <div class="bar-row">
+    <div class="bar-label" style="color:var(--accent-green);font-weight:700">Continuum</div>
+    <div class="bar-track"><div class="bar-fill" style="width:21%;background:var(--accent-green)">125.8s</div></div>
+    <div class="bar-value"><span class="down">−72%</span></div>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="3.2 Scheduler Step Analysis (H200)" data-zh="3.2 排程器步驟分析（H200）">3.2 Scheduler Step Analysis (H200)</span></h3>
+
+<div class="callout">
+  <div class="callout-title"><span class="i18n" data-en="What is a scheduler 'step'?" data-zh="什麼是 scheduler 的「step」？">What is a scheduler "step"?</span></div>
+  <p><span class="i18n"
+    data-en="A <strong>step</strong> in vLLM is <em>one full iteration of the engine loop</em>: the scheduler picks a batch of requests, the GPU runs one <code class='inline-code'>model.forward()</code> on that batch (which produces exactly <strong>one output token per request in the batch</strong>), the sampler picks the token, and the loop returns to the scheduler for the next iteration. A request with an 8,000-token prompt and 20 completion tokens will go through at least 20 steps: the first few steps chunk-prefill its prompt, the subsequent steps each generate one decode token. Every metric in the table below counts per-step averages across the 28-run benchmark (4 JPS values × 7 policies)."
+    data-zh="vLLM 裡一個 <strong>step</strong> 是 <em>engine loop 的一次完整 iteration</em>：scheduler 選出一 batch 的 request、GPU 跑一次 <code class='inline-code'>model.forward()</code>（這次 forward 對 batch 裡<strong>每個 request 各產生剛好一個 output token</strong>）、sampler 取樣、然後迴圈回到 scheduler 做下一次 iteration。一個 8,000-token prompt + 20 completion 的 request 會經過至少 20 個 step：前幾個 step chunk-prefill 它的 prompt，後續的 step 各 decode 一個 token。下表每個指標都是 28-run benchmark（4 個 JPS × 7 個 policy）上逐 step 平均。">A <strong>step</strong> in vLLM is <em>one full iteration of the engine loop</em>: the scheduler picks a batch of requests, the GPU runs one <code class="inline-code">model.forward()</code> on that batch (which produces exactly <strong>one output token per request in the batch</strong>), the sampler picks the token, and the loop returns to the scheduler for the next iteration. Every metric in the table below counts per-step averages across the 28-run benchmark (4 JPS values × 7 policies).</span></p>
+</div>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
+    <th><span class="i18n" data-en="Steps (total)" data-zh="Step 總數">Steps (total)</span></th>
+    <th><span class="i18n" data-en="Batch (mean)" data-zh="批次（平均）">Batch (mean)</span></th>
+    <th><span class="i18n" data-en="Tokens/Step (mean)" data-zh="Tokens/Step（平均）">Tokens/Step (mean)</span></th>
+    <th><span class="i18n" data-en="Schedule (ms, mean)" data-zh="Schedule ms（平均）">Schedule (ms, mean)</span></th>
+    <th><span class="i18n" data-en="Waiting Q (mean)" data-zh="Waiting Q（平均）">Waiting Q (mean)</span></th>
+  </tr>
+  <tr><td><strong>FCFS</strong></td><td>8,945</td><td>16.6</td><td>4,223</td><td>1.76</td><td>109.9</td></tr>
+  <tr><td>LMCache default</td><td>8,168</td><td>17.6</td><td>4,378</td><td>2.85</td><td>118.2</td></tr>
+  <tr><td>LMCache stream</td><td>8,689</td><td>18.0</td><td>4,732</td><td>2.70</td><td>147.5</td></tr>
+  <tr><td>LMCache event</td><td>8,500</td><td>16.9</td><td>4,253</td><td>2.48</td><td>112.7</td></tr>
+  <tr><td>LMCache nosync</td><td>8,339</td><td>16.6</td><td>4,127</td><td>2.54</td><td>99.1</td></tr>
+  <tr><td>LMCache nocache</td><td>8,090</td><td>18.8</td><td>4,831</td><td>2.56</td><td>145.2</td></tr>
+  <tr style="background:rgba(0,230,138,0.08)"><td><strong style="color:var(--accent-green)">Continuum</strong></td><td>6,457</td><td>22.0</td><td>2,174</td><td>2.14</td><td style="color:var(--accent-green);font-weight:700">27.8</td></tr>
+</table>
+
+<h3><span class="i18n" data-en="3.3 L40S Results (48GB VRAM) — where the mechanism differs" data-zh="3.3 L40S 結果（48GB VRAM）— 機制不同在哪">3.3 L40S Results (48GB VRAM) — where the mechanism differs</span></h3>
+
+<p><span class="i18n"
+  data-en="L40S shows a much more severe LMCache penalty than H200 — average batch size drops from 26.7 (FCFS) to 8.0 (LMCache default), a 3.3× reduction. On H200 the same comparison is 16.6 vs 17.6, basically unchanged. The obvious-sounding explanation — 'L40S has less VRAM so LMCache's buffers eat into KV budget' — is <strong>wrong</strong>. The actual mechanism is a subtler interaction between vLLM's auto-tuned <code class='inline-code'>max_num_batched_tokens</code> and LMCache's <code class='inline-code'>wait_for_save</code> stall."
+  data-zh="L40S 上 LMCache 的懲罰比 H200 嚴重得多 — 平均 batch size 從 FCFS 的 26.7 掉到 LMCache default 的 8.0，3.3 倍縮減。H200 上同樣的對照是 16.6 vs 17.6，基本沒變。聽起來理所當然的解釋「L40S VRAM 較小所以 LMCache 的 buffer 吃掉 KV 預算」是<strong>錯的</strong>。真正的機制是 vLLM 自動調的 <code class='inline-code'>max_num_batched_tokens</code> 和 LMCache 的 <code class='inline-code'>wait_for_save</code> stall 之間比較微妙的交互作用。">L40S shows a much more severe LMCache penalty than H200 — average batch size drops from 26.7 (FCFS) to 8.0 (LMCache default), a 3.3× reduction. On H200 the same comparison is 16.6 vs 17.6, basically unchanged. The obvious-sounding explanation — "L40S has less VRAM so LMCache's buffers eat into KV budget" — is <strong>wrong</strong>. The actual mechanism is a subtler interaction between vLLM's auto-tuned <code class="inline-code">max_num_batched_tokens</code> and LMCache's <code class="inline-code">wait_for_save</code> stall.</span></p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th></th>
+    <th style="text-align:center"><strong>L40S</strong> (48 GB)</th>
+    <th style="text-align:center"><strong>H200</strong> (141 GB)</th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><code class="inline-code">max_num_batched_tokens</code></td>
+    <td style="text-align:center">2,048</td>
+    <td style="text-align:center">8,192</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="vLLM auto-tuner" data-zh="vLLM auto-tuner">vLLM auto-tuner</span></td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Prefill chunks per 13K-token request" data-zh="13K-token request 的 prefill chunk 數">Prefill chunks / 13K request</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">7</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(13,193 ÷ 2,048)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">2</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(13,193 ÷ 8,192)</span></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="arithmetic" data-zh="算術">arithmetic</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">wait_for_save</code> <span class="i18n" data-en="per prefill step" data-zh="per prefill step">per prefill step</span></td>
+    <td style="text-align:center">187 ms</td>
+    <td style="text-align:center">115.7 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">L40S: Exp B; H200: Exp C §1.1</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Total wfs stall per prefill job" data-zh="每個 prefill job 的總 wfs stall">Total wfs stall / prefill job</span></strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">1,309 ms</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(7 × 187)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">231 ms</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(2 × 115.7)</span></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)"><span class="i18n" data-en="derived" data-zh="推導">derived</span></td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><strong><span class="i18n" data-en="Batch shrink ratio (FCFS ÷ LMCache)" data-zh="Batch 縮減比（FCFS ÷ LMCache）">Batch shrink (FCFS ÷ LMCache)</span></strong></td>
+    <td style="text-align:center"><strong style="color:var(--accent-red)">3.3×</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(26.7 ÷ 8.0)</span></td>
+    <td style="text-align:center"><strong style="color:var(--accent-green)">0.94×</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(no shrink)</span></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout warn">
+  <div class="callout-title"><span class="i18n" data-en="Testable prediction — FALSIFIED (Exp E)" data-zh="可驗證的預測 — 已否定（Exp E）">Testable prediction — FALSIFIED (Exp E)</span></div>
+  <p><span class="i18n"
+    data-en="Prediction: setting <code class='inline-code'>--max-num-batched-tokens=8192</code> on L40S should shrink the LMCache batch-size penalty. Result: <strong>prediction falsified.</strong> Both policies became uniformly slower at mbt=8192. Root cause: L40S smaller VRAM → auto-tuner sets max_num_batched_tokens=2048 → 13K prompt needs 7 chunked prefill steps → 7× wait_for_save stalls → step rate collapses. H200's 8,192 token budget = only 2 chunks = tolerable stall."
+    data-zh="預測：在 L40S 上設 <code class='inline-code'>--max-num-batched-tokens=8192</code> 應能縮小 LMCache 的 batch-size 懲罰。結果：<strong>預測被否定。</strong>兩種策略在 mbt=8192 下均變慢。根因：L40S 較小 VRAM → auto-tuner 設 max_num_batched_tokens=2048 → 13K prompt 需要 7 個 chunked prefill step → 7× wait_for_save stall → step rate 崩潰。H200 的 8,192 token budget = 只要 2 chunk = 可容忍的 stall。">Prediction: setting <code class="inline-code">--max-num-batched-tokens=8192</code> on L40S should shrink the LMCache batch-size penalty. Result: <strong>prediction falsified.</strong> Both policies became uniformly slower at mbt=8192. Root cause: L40S smaller VRAM → auto-tuner sets <code>max_num_batched_tokens</code>=2048 → 13K prompt needs 7 chunked prefill steps → 7× <code>wait_for_save</code> stalls → step rate collapses. H200's 8,192 token budget = only 2 chunks = tolerable stall.</span></p>
+</div>
+</section>
+<!-- Section 4: Deep Dive KV Transfer Pipeline (was §8) -->
+<section id="deep-dive">
+<h2><span class="i18n" data-en="4. Deep Dive: KV Transfer Pipeline" data-zh="4. 深入分析：KV 傳輸管線">4. Deep Dive: KV Transfer Pipeline</span></h2>
+
+<h3><span class="i18n" data-en="4.1 vLLM Step Lifecycle" data-zh="4.1 vLLM Step 生命週期">4.1 vLLM Step Lifecycle</span></h3>
+
+<p><span class="i18n"
+  data-en="A vLLM <strong>step</strong> = one <code class='inline-code'>schedule()</code> + one <code class='inline-code'>model.forward()</code> + sampling. Each step produces <strong>one output token per request</strong> in the batch."
+  data-zh="一個 vLLM <strong>step</strong> = 一次 <code class='inline-code'>schedule()</code> + 一次 <code class='inline-code'>model.forward()</code> + 取樣。每步為批次中的每個請求產生<strong>一個輸出 token</strong>。">A vLLM <strong>step</strong> = one <code class="inline-code">schedule()</code> + one <code class="inline-code">model.forward()</code> + sampling. Each step produces <strong>one output token per request</strong> in the batch.</span></p>
+
+<div class="vflow">
+  <div class="box blue">
+    <h4 style="color:var(--accent-blue)"><code class="inline-code">schedule()</code></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Decide which requests to batch" data-zh="決定要批次處理哪些請求">Decide which requests to batch</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4 style="color:var(--accent-orange)"><code class="inline-code">build_connector_meta()</code></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Build KV work list — per-request ReqMeta with load_spec + save_spec. Pure decode requests are filtered out entirely (skip_save=True + load_spec=None)." data-zh="建構 KV 工作清單 — 每個請求的 ReqMeta 含 load_spec + save_spec。純 decode 請求被完全過濾掉（skip_save=True + load_spec=None）。">Build KV work list — per-request ReqMeta with load_spec + save_spec. Pure decode requests are filtered out entirely (skip_save=True + load_spec=None).</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box green">
+    <h4 style="color:var(--accent-green)"><code class="inline-code">start_load_kv()</code> <span style="font-size:0.75rem;color:var(--text-muted)">— 0.2ms avg, 4.1% of steps</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="CPU→GPU onload (only for new requests with cache hit)" data-zh="CPU→GPU 載入（僅限有快取命中的新請求）">CPU→GPU onload (only for new requests with cache hit)</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box purple">
+    <h4 style="color:var(--accent-purple)"><code class="inline-code">model.forward()</code> — 32 <span class="i18n" data-en="attention layers" data-zh="注意力層">attention layers</span></h4>
+    <ul>
+      <li><code class="inline-code">wait_for_layer_load()</code> <span class="i18n" data-en="— wait for this layer's onload" data-zh="— 等待此層載入">— wait for this layer's onload</span></li>
+      <li><span class="i18n" data-en="attention + MLP (actual GPU compute)" data-zh="attention + MLP（實際 GPU 計算）">attention + MLP (actual GPU compute)</span></li>
+      <li><code class="inline-code">save_kv_layer()</code> <span class="i18n" data-en="— start async GPU→CPU offload" data-zh="— 啟動異步 GPU→CPU offload">— start async GPU→CPU offload</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">wait_for_save()</code> <span style="font-size:0.75rem;color:var(--accent-red)">— see §1 for per-call attribution</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Block until ALL async GPU→CPU copies complete. One prefill in a batch of 23 requests blocks all 22 decode requests." data-zh="阻塞直到所有異步 GPU→CPU 複製完成。一個批次中 23 個請求裡的一個 prefill 會阻塞所有 22 個 decode 請求。">Block until ALL async GPU→CPU copies complete. One prefill in a batch of 23 requests blocks all 22 decode requests.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box gray">
+    <h4><span class="i18n" data-en="sample → 1 token per request" data-zh="取樣 → 每個請求 1 token">sample → 1 token per request</span></h4>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="4.2 Per-JPS Breakdown: Why High Concurrency Hurts More" data-zh="4.2 Per-JPS 分解：為什麼高並發更受影響">4.2 Per-JPS Breakdown: Why High Concurrency Hurts More</span></h3>
+
+<table>
+  <tr>
+    <th>JPS</th>
+    <th><span class="i18n" data-en="Steps" data-zh="步驟數">Steps</span></th>
+    <th><span class="i18n" data-en="Batch" data-zh="批次">Batch</span></th>
+    <th><span class="i18n" data-en="Tokens/Step" data-zh="Tokens/步">Tokens/Step</span></th>
+    <th><span class="i18n" data-en="Prefill %" data-zh="Prefill %">Prefill %</span></th>
+    <th><code class="inline-code">wfs</code> <span class="i18n" data-en="all-steps mean" data-zh="all-steps mean">all-steps mean</span></th>
+    <th><code class="inline-code">wfs</code> <span class="i18n" data-en="prefill-only mean" data-zh="prefill-only mean">prefill-only mean</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  <tr>
+    <td>1</td><td>1,497</td><td>5.3</td><td>431</td>
+    <td style="color:var(--accent-green)">10%</td>
+    <td>13.1 ms</td>
+    <td style="color:var(--accent-red);font-weight:700">115.7 ms</td>
+    <td style="font-size:0.75rem;color:var(--text-muted)">Exp B / Exp C §1.1</td>
+  </tr>
+  <tr>
+    <td>3</td><td>1,603</td><td>13.1</td><td>882</td>
+    <td>16%</td>
+    <td>29.9 ms</td>
+    <td style="color:var(--text-muted)">—</td>
+    <td style="font-size:0.75rem;color:var(--text-muted)">Exp B (no Exp C at JPS=3)</td>
+  </tr>
+  <tr>
+    <td>6</td><td>1,893</td><td>21.6</td><td>5,789</td>
+    <td style="color:var(--accent-orange)">72%</td>
+    <td style="color:var(--accent-orange)">175.2 ms</td>
+    <td style="color:var(--accent-red);font-weight:700">226.0 ms</td>
+    <td style="font-size:0.75rem;color:var(--text-muted)">Exp B / Exp C</td>
+  </tr>
+  <tr>
+    <td>10</td><td>3,170</td><td>23.3</td><td>7,174</td>
+    <td style="color:var(--accent-red);font-weight:700">88%</td>
+    <td style="color:var(--accent-red);font-weight:700">215.1 ms</td>
+    <td style="color:var(--accent-red);font-weight:700">227.1 ms</td>
+    <td style="font-size:0.75rem;color:var(--text-muted)">Exp B / Exp C</td>
+  </tr>
+</table>
+
+<div class="callout danger">
+  <div class="callout-title"><span class="i18n" data-en="Scaling Law" data-zh="縮放定律">Scaling Law</span></div>
+  <p><span class="i18n"
+    data-en="Higher concurrency = more prefill requests per step = more offload transfers = more blocking. At JPS=1, only 10% of steps trigger real saves (13ms). At JPS=10, 88% trigger saves (215ms). This is why LMCache's penalty scales with load."
+    data-zh="更高並發 = 每步更多 prefill 請求 = 更多 offload 傳輸 = 更多阻塞。JPS=1 時，僅 10% 的步驟觸發實際保存（13ms）。JPS=10 時，88% 觸發保存（215ms）。這就是為什麼 LMCache 的懲罰隨負載增長。">Higher concurrency = more prefill requests per step = more offload transfers = more blocking. At JPS=1, only 10% of steps trigger real saves (13ms). At JPS=10, 88% trigger saves (215ms). This is why LMCache's penalty scales with load.</span></p>
+</div>
+
+<h3><span class="i18n" data-en="4.3 Full Call Chain" data-zh="4.3 完整呼叫鏈">4.3 Full Call Chain</span></h3>
+
+<div class="vflow">
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">wait_for_save()</code> <span class="file-badge">vllm_v1_adapter.py:1019</span></h4>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4 style="color:var(--accent-orange)"><code class="inline-code">lmcache_engine.store()</code> <span class="file-badge">cache_engine.py:176</span></h4>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="branch">
+    <div class="box blue">
+      <h4 style="color:var(--accent-blue)"><code class="inline-code">token_database.process_tokens()</code></h4>
+      <p style="font-size:0.78rem"><span class="i18n" data-en="Compute chunk boundaries, hash keys" data-zh="計算區塊邊界、雜湊鍵">Compute chunk boundaries, hash keys</span></p>
+    </div>
+    <div class="box blue">
+      <h4 style="color:var(--accent-blue)"><code class="inline-code">storage_manager.allocate()</code></h4>
+      <p style="font-size:0.78rem"><span class="i18n" data-en="Allocate CPU memory for KV" data-zh="為 KV 分配 CPU 記憶體">Allocate CPU memory for KV</span></p>
+    </div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><code class="inline-code">gpu_connector.batched_from_gpu()</code> <span style="font-size:0.75rem">← <span class="i18n" data-en="dominant cost" data-zh="主要成本">dominant cost</span></span></h4>
+    <ul>
+      <li><code class="inline-code">from_gpu()</code> → <code class="inline-code">lmc_ops.multi_layer_kv_transfer()</code> <span class="i18n" data-en="(CUDA kernel)" data-zh="（CUDA 核心）">(CUDA kernel)</span></li>
+      <li><code class="inline-code">store_stream.synchronize()</code> <span class="i18n" data-en="— wait for DMA completion" data-zh="— 等待 DMA 完成">— wait for DMA completion</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box gray">
+    <h4><code class="inline-code">storage_manager.batched_put()</code></h4>
+    <p style="font-size:0.78rem"><span class="i18n" data-en="Insert into hash table" data-zh="插入雜湊表">Insert into hash table</span></p>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="4.4 Why the blocking wait exists — upstream rationale" data-zh="4.4 為什麼要 blocking — upstream 的說法">4.4 Why the blocking wait exists — upstream rationale</span></h3>
+
+<div class="callout" style="border-left-color:var(--accent-purple);background:rgba(139,92,246,0.06)">
+  <p style="font-style:italic;margin-bottom:0.5rem">"Block until all the save operations is done. This is called as the forward context exits to ensure that the async saving from <code class="inline-code">save_kv_layer</code> is complete before finishing the forward. <strong>This prevents overwrites of paged KV buffer before saving done.</strong>"</p>
+  <p style="font-size:0.82rem;color:var(--text-muted);margin:0"><span class="i18n" data-en="Source:" data-zh="來源：">Source:</span> <a href="https://github.com/vllm-project/vllm/blob/7e3a8dc90670fd312ce1e0d4eba9bf11c571e3ad/vllm/distributed/kv_transfer/kv_connector/v1/base.py" target="_blank"><code class="inline-code">vllm/distributed/kv_transfer/kv_connector/v1/base.py</code></a> — <code class="inline-code">KVConnectorBase_V1.wait_for_save</code> docstring</p>
+</div>
+
+<p><span class="i18n"
+  data-en="That sentence is the <strong>entire</strong> upstream design discussion. There is no GitHub issue debating the trade-off, no PR proposing a non-blocking alternative, no blog post elaborating on the constraint, and no design doc. The wait-for-save barrier is treated as a self-evident safety requirement rather than an explicit trade-off."
+  data-zh="這一句就是<strong>整個</strong> upstream 的設計討論。沒有 GitHub issue 辯論這個 trade-off、沒有 PR 提出非阻塞替代方案、沒有 blog post 展開這個約束、沒有 design doc。Wait-for-save barrier 被當成不言而喻的 safety requirement，而不是一個明確的 trade-off。">That sentence is the <strong>entire</strong> upstream design discussion. There is no GitHub issue debating the trade-off, no PR proposing a non-blocking alternative, no blog post elaborating on the constraint, and no design doc. The wait-for-save barrier is treated as a self-evident safety requirement rather than an explicit trade-off.</span></p>
+
+<h4><span class="i18n" data-en="The paged block reuse hazard" data-zh="Paged block reuse hazard">The paged block reuse hazard</span></h4>
+
+<div class="vflow">
+  <div class="box blue">
+    <h4 style="color:var(--accent-blue)"><span class="i18n" data-en="Step N — request A" data-zh="Step N — request A">Step N — request A</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Prefill writes KV for request A into block #47. At step N's forward-context exit, save_kv_layer() fires an async GPU→CPU DMA reading from block #47, queued on store_stream." data-zh="Request A 的 prefill 把 KV 寫進 block #47。在 step N 的 forward-context exit，save_kv_layer() 發射一個非同步 GPU→CPU DMA，從 block #47 讀，queued 在 store_stream 上。">Prefill writes KV for request A into block #47. At step N's forward-context exit, <code class="inline-code">save_kv_layer()</code> fires an async GPU→CPU DMA reading from block #47, queued on <code class="inline-code">store_stream</code>.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4 style="color:var(--accent-orange)"><span class="i18n" data-en="(no wait_for_save)" data-zh="(沒有 wait_for_save)">(no wait_for_save)</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="vLLM's engine loop proceeds immediately to step N+1. The store_stream DMA is still running in the background, reading block #47 byte by byte." data-zh="vLLM engine loop 立刻進到 step N+1。store_stream DMA 還在後台跑，一個 byte 一個 byte 讀 block #47。">vLLM's engine loop proceeds immediately to step N+1. The store_stream DMA is still running in the background, reading block #47 byte by byte.</span></p>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4 style="color:var(--accent-red)"><span class="i18n" data-en="Step N+1 — request B hijacks block #47" data-zh="Step N+1 — request B 搶走 block #47">Step N+1 — request B hijacks block #47</span></h4>
+    <p style="font-size:0.82rem"><span class="i18n" data-en="Scheduler's block allocator sees #47 as free and allocates it to request B's prefill. B's attention kernel writes new KV to block #47. At the same moment the DMA from step N is still reading — result: CPU-side cache receives a mix of A's and B's bytes. The cache is corrupted silently." data-zh="Scheduler 的 block allocator 看到 #47 是 free 的、把它分配給 request B 的 prefill。B 的 attention kernel 開始寫新 KV 到 block #47。同一時刻 step N 的 DMA 還在讀 — 結果：CPU-side cache 收到 A 和 B 混合的 bytes。Cache 悄悄壞掉。">Scheduler's block allocator sees #47 as free and allocates it to request B's prefill. B's attention kernel writes new KV to block #47. At the same moment the DMA from step N is still reading — result: CPU-side cache receives a mix of A's and B's bytes. The cache is corrupted silently.</span></p>
+  </div>
+</div>
+
+<p><span class="i18n"
+  data-en="The blocking <code class='inline-code'>wait_for_save</code> forbids this by freezing the engine loop until every in-flight save has finished reading every dirty block. It is a <strong>correctness barrier for the block allocator, not a performance choice</strong> — there is no way to skip it without changing the semantics of the free pool."
+  data-zh="阻塞的 <code class='inline-code'>wait_for_save</code> 凍結 engine loop 直到每個 in-flight save 都讀完每個 dirty block，禁止上面的情況發生。這是<strong>給 block allocator 的 correctness barrier，不是 performance 選擇</strong> — 除非改變 free pool 的語意，不然沒辦法跳過這個 wait。">The blocking <code class="inline-code">wait_for_save</code> forbids this by freezing the engine loop until every in-flight save has finished reading every dirty block. It is a <strong>correctness barrier for the block allocator, not a performance choice</strong> — there is no way to skip it without changing the semantics of the free pool.</span></p>
+
+<h4><span class="i18n" data-en="Potential mitigations (none implemented upstream as of 2026-04)" data-zh="可行的緩解手段（截至 2026-04 upstream 都還沒實作）">Potential mitigations (none implemented upstream as of 2026-04)</span></h4>
+
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Mitigation" data-zh="緩解手段">Mitigation</span></th>
+    <th><span class="i18n" data-en="What it changes" data-zh="改變什麼">What it changes</span></th>
+    <th><span class="i18n" data-en="Cost / drawback" data-zh="成本 / 缺點">Cost / drawback</span></th>
+    <th><span class="i18n" data-en="Implementation effort" data-zh="實作 effort">Implementation effort</span></th>
+  </tr>
+  <tr>
+    <td><strong><span class="i18n" data-en="Double buffering" data-zh="Double buffering">Double buffering</span></strong></td>
+    <td><span class="i18n" data-en="Keep a shadow copy of every dirty block while its DMA is in flight." data-zh="每個 dirty block 在 DMA 期間保留一份 shadow copy。">Keep a shadow copy of every dirty block while its DMA is in flight.</span></td>
+    <td><span class="i18n" data-en="~2× VRAM cost for dirty blocks." data-zh="Dirty block 要 2× VRAM 成本。">~2× VRAM cost for dirty blocks.</span></td>
+    <td><span class="i18n" data-en="Medium" data-zh="中等">Medium</span></td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.06)">
+    <td><strong><span class="i18n" data-en="Reference counting on in-flight save" data-zh="In-flight save 的 reference counting">Reference counting on in-flight save</span></strong></td>
+    <td><span class="i18n" data-en="Block allocator tracks a 'DMA pending' refcount per block. A block with pending saves is NOT returned to the free pool." data-zh="Block allocator 每個 block 追蹤一個 'DMA pending' refcount。有 pending save 的 block 不會回到 free pool。">Block allocator tracks a "DMA pending" refcount per block. A block with pending saves is NOT returned to the free pool.</span></td>
+    <td><span class="i18n" data-en="Almost zero cost — a few bytes per block." data-zh="幾乎零成本 — 每個 block 幾個 bytes。">Almost zero cost — a few bytes per block.</span></td>
+    <td><strong><span class="i18n" data-en="Smallest change (~50 LOC in vLLM core)" data-zh="改動最小（vLLM core 約 50 LOC）">Smallest change (~50 LOC in vLLM core)</span></strong></td>
+  </tr>
+  <tr>
+    <td><strong><span class="i18n" data-en="Separated offload process" data-zh="獨立 offload process">Separated offload process</span></strong></td>
+    <td><span class="i18n" data-en="Move the entire transfer subsystem into a sidecar process that shares VRAM via CUDA IPC." data-zh="把整個 transfer subsystem 搬到一個 sidecar process，透過 CUDA IPC 共享 VRAM。">Move the entire transfer subsystem into a sidecar process that shares VRAM via CUDA IPC.</span></td>
+    <td><span class="i18n" data-en="Largest refactor. But most robust." data-zh="最大的重構。但最 robust。">Largest refactor. But most robust.</span></td>
+    <td><span class="i18n" data-en="Very high — this is what RFC vllm#22605 proposes." data-zh="非常高 — 這是 RFC vllm#22605 提出的。">Very high — RFC vllm#22605</span></td>
+  </tr>
+</table>
+
+</section>
+<!-- Section 5: Key Findings (was §9) -->
+<section id="findings">
+<h2><span class="i18n" data-en="5. Key Findings" data-zh="5. 關鍵發現">5. Key Findings</span></h2>
+
+<div class="card" style="border-left:4px solid var(--accent-red)">
+  <div class="card-header" style="color:var(--accent-red)">
+    <span class="i18n" data-en="Finding 1: The sync hypothesis is FALSIFIED" data-zh="發現 1：同步假說被否定">Finding 1: The sync hypothesis is FALSIFIED</span>
+  </div>
+  <p><span class="i18n"
+    data-en="Removing <code class='inline-code'>torch.cuda.synchronize()</code> entirely (<code class='inline-code'>no_sync</code> mode) produced minimal improvement: JPS=10 only 2% better, JPS=3 actually <strong>51% worse</strong>. All sync variants (stream, event, nosync) performed equal or worse than default."
+    data-zh="完全移除 <code class='inline-code'>torch.cuda.synchronize()</code>（<code class='inline-code'>no_sync</code> 模式）僅產生最小改善：JPS=10 僅好 2%，JPS=3 實際上<strong>差 51%</strong>。所有同步變體（stream、event、nosync）表現等於或差於預設。">Removing <code class="inline-code">torch.cuda.synchronize()</code> entirely (<code class="inline-code">no_sync</code> mode) produced minimal improvement: JPS=10 only 2% better, JPS=3 actually <strong>51% worse</strong>. All sync variants (stream, event, nosync) performed equal or worse than default.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-orange)">
+  <div class="card-header" style="color:var(--accent-orange)">
+    <span class="i18n" data-en="Finding 2: wait_for_save is the dominant overhead" data-zh="發現 2：wait_for_save 是主要開銷">Finding 2: wait_for_save is the dominant overhead</span>
+  </div>
+  <p><span class="i18n"
+    data-en="The distribution of <code class='inline-code'>wait_for_save()</code> is <strong>bimodal</strong> (§1.1): 91% of calls (decode-only) return in ~0.01 ms; the remaining 9% (prefill-step) average <strong>115.7 ms</strong> (median 73 ms, p95 253 ms). Per §1.2, of that 115.7 ms: ~100 ms is waiting for the forward pass (unavoidable GPU compute, not LMCache overhead); ~15 ms is actual offload work (lmc::load_and_reshape + D2H DMA + store_stream syncs + Python bookkeeping — the real overhead). 159 steps × 15 ms ≈ 2,385 ms ≈ measured 2.73 s/job overhead. GPU-side DMA hardware floor: 53.6 GB/s (§1.3). The architectural fix (§1.4, upstream #37160) defers offload work to get_finished(), hiding it behind GPU compute."
+    data-zh="<code class='inline-code'>wait_for_save()</code> 的分布為<strong>雙峰</strong>（§1.1）：91% 的呼叫（decode-only）在約 0.01 ms 內返回；其餘 9%（prefill-step）平均 <strong>115.7 ms</strong>（中位數 73 ms、p95 253 ms）。根據 §1.2，115.7 ms 中：~100 ms 是等待 forward pass（不可避免的 GPU 計算，非 LMCache overhead）；~15 ms 是實際 offload 工作——才是真正的 overhead。159 steps × 15 ms ≈ 2,385 ms ≈ 量測的 2.73 s/job overhead。GPU 端 DMA 硬體下限：53.6 GB/s（§1.3）。架構修復方案（§1.4，upstream #37160）將 offload 工作延遲到 get_finished() 以隱藏在 GPU 計算後面。">The distribution of <code class="inline-code">wait_for_save()</code> is <strong>bimodal</strong> (§1.1): 91% of calls (decode-only) return in ~0.01 ms; the remaining 9% (prefill-step) average <strong>115.7 ms</strong> (median 73 ms, p95 253 ms). Per §1.2, of that 115.7 ms: ~100 ms is waiting for the forward pass (unavoidable GPU compute, not LMCache overhead); ~15 ms is actual offload work (<code class="inline-code">lmc::load_and_reshape</code> + D2H DMA + <code class="inline-code">store_stream</code> syncs + Python bookkeeping — the real overhead). 159 steps × 15 ms ≈ 2,385 ms ≈ measured 2.73 s/job overhead. GPU-side DMA hardware floor: 53.6 GB/s (§1.3). The architectural fix (§1.4, upstream #37160) defers offload work to <code class="inline-code">get_finished()</code>, hiding it behind GPU compute.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-purple)">
+  <div class="card-header" style="color:var(--accent-purple)">
+    <span class="i18n" data-en="Finding 3: Overhead is structural, not transfer-related" data-zh="發現 3：開銷是結構性的，非傳輸相關">Finding 3: Overhead is structural, not transfer-related</span>
+  </div>
+  <p><span class="i18n"
+    data-en="<code class='inline-code'>nocache</code> (1GB CPU cache, almost no actual KV stored) is <strong>worse</strong> than default LMCache: JPS=3 +62% vs FCFS, JPS=10 +26%. Even when LMCache has nothing to transfer, its connector metadata management and per-step save/load hooks impose a significant tax."
+    data-zh="<code class='inline-code'>nocache</code>（1GB CPU 快取，幾乎沒有實際 KV 儲存）比預設 LMCache <strong>更差</strong>：JPS=3 +62% vs FCFS，JPS=10 +26%。即使 LMCache 沒有任何東西要傳輸，其 connector 元數據管理和每步 save/load hooks 仍施加顯著開銷。"><code class="inline-code">nocache</code> (1GB CPU cache, almost no actual KV stored) is <strong>worse</strong> than default LMCache: JPS=3 +62% vs FCFS, JPS=10 +26%. Even when LMCache has nothing to transfer, its connector metadata management and per-step save/load hooks impose a significant tax.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-cyan)">
+  <div class="card-header" style="color:var(--accent-cyan)">
+    <span class="i18n" data-en="Finding 4: stream_only makes things worse" data-zh="發現 4：stream_only 使情況更糟">Finding 4: stream_only makes things worse</span>
+  </div>
+  <p><span class="i18n"
+    data-en="Replacing <code class='inline-code'>torch.cuda.synchronize()</code> with <code class='inline-code'>stream.synchronize()</code> was uniformly <strong>worse</strong> across all JPS (+16% to +32%). The device-level sync may provide unintended ordering guarantees that prevent contention."
+    data-zh="將 <code class='inline-code'>torch.cuda.synchronize()</code> 替換為 <code class='inline-code'>stream.synchronize()</code> 在所有 JPS 上均<strong>更差</strong>（+16% 到 +32%）。設備級同步可能提供了非預期的排序保證以防止競爭。">Replacing <code class="inline-code">torch.cuda.synchronize()</code> with <code class="inline-code">stream.synchronize()</code> was uniformly <strong>worse</strong> across all JPS (+16% to +32%). The device-level sync may provide unintended ordering guarantees that prevent contention.</span></p>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-blue)">
+  <div class="card-header" style="color:var(--accent-blue)">
+    <span class="i18n" data-en="Finding 5: Batch size impact is VRAM-dependent" data-zh="發現 5：批次大小影響取決於 VRAM">Finding 5: Batch size impact is VRAM-dependent</span>
+  </div>
+  <table>
+    <tr><th>GPU</th><th><span class="i18n" data-en="FCFS Batch" data-zh="FCFS 批次">FCFS Batch</span></th><th><span class="i18n" data-en="LMCache Batch" data-zh="LMCache 批次">LMCache Batch</span></th><th><span class="i18n" data-en="Ratio" data-zh="比率">Ratio</span></th></tr>
+    <tr><td>H200 (141GB)</td><td>16.6</td><td>17.6</td><td><span class="yes">1.06×</span></td></tr>
+    <tr><td>L40S (48GB)</td><td>26.7</td><td>8.0</td><td><span class="no">0.30×</span></td></tr>
+  </table>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-orange)">
+  <div class="card-header" style="color:var(--accent-orange)">
+    <span class="i18n" data-en="Finding 6: Offload overhead scales with concurrency" data-zh="發現 6：Offload 開銷隨並發度增長">Finding 6: Offload overhead scales with concurrency</span>
+  </div>
+  <table>
+    <tr><th>JPS</th><th><span class="i18n" data-en="Real save frequency" data-zh="實際保存頻率">Real save frequency</span></th><th><code class="inline-code">wait_for_save</code></th></tr>
+    <tr><td>1</td><td>10%</td><td style="color:var(--accent-green)">13ms</td></tr>
+    <tr><td>3</td><td>16%</td><td>30ms</td></tr>
+    <tr><td>6</td><td>72%</td><td style="color:var(--accent-orange)">175ms</td></tr>
+    <tr><td>10</td><td style="color:var(--accent-red);font-weight:700">88%</td><td style="color:var(--accent-red);font-weight:700">215ms</td></tr>
+  </table>
+  <p><span class="i18n"
+    data-en="Higher concurrency = more prefill requests per step = more offload transfers. At JPS=10, one prefill in a batch of 23 requests blocks all 22 decode requests for 215ms."
+    data-zh="更高並發 = 每步更多 prefill 請求 = 更多 offload 傳輸。JPS=10 時，一個批次 23 個請求中的一個 prefill 會阻塞所有 22 個 decode 請求 215ms。">Higher concurrency = more prefill requests per step = more offload transfers. At JPS=10, one prefill in a batch of 23 requests blocks all 22 decode requests for 215ms.</span></p>
+</div>
+</section>
+
+<!-- Section 6: Future Directions (was §10) -->
+<section id="future">
+<h2><span class="i18n" data-en="6. Future Directions" data-zh="6. 未來方向">6. Future Directions</span></h2>
+
+<div class="card" style="border-left:4px solid var(--accent-red)">
+  <div class="card-header">
+    <span class="i18n" data-en="6.1 Optimize wait_for_save (highest impact)" data-zh="6.1 優化 wait_for_save（最高影響）">6.1 Optimize wait_for_save (highest impact)</span>
+  </div>
+  <p><span class="i18n"
+    data-en="The save path runs synchronously after every forward pass. Potential optimizations:"
+    data-zh="Save 路徑在每次前向傳播後同步運行。潛在優化：">The save path runs synchronously after every forward pass. Potential optimizations:</span></p>
+  <ul>
+    <li><strong><span class="i18n" data-en="Lazy save" data-zh="延遲保存">Lazy save</span></strong> — <span class="i18n" data-en="only save KV when the request is about to be evicted, not after every step" data-zh="僅在請求即將被驅逐時保存 KV，而非每步之後">only save KV when the request is about to be evicted, not after every step</span></li>
+    <li><strong><span class="i18n" data-en="Async save pipeline" data-zh="異步保存管線">Async save pipeline</span></strong> — <span class="i18n" data-en="move save to a background thread/stream, don't block the main loop" data-zh="將保存移至背景線程/stream，不阻塞主迴圈">move save to a background thread/stream, don't block the main loop</span></li>
+    <li><strong><span class="i18n" data-en="Selective save" data-zh="選擇性保存">Selective save</span></strong> — <span class="i18n" data-en="skip saving for short-lived requests unlikely to be reused" data-zh="跳過不太可能被重用的短命請求的保存">skip saving for short-lived requests unlikely to be reused</span></li>
+  </ul>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-orange)">
+  <div class="card-header">
+    <span class="i18n" data-en="6.2 Reduce LMCache Framework Overhead" data-zh="6.2 降低 LMCache 框架開銷">6.2 Reduce LMCache Framework Overhead</span>
+  </div>
+  <p><span class="i18n"
+    data-en="The <code class='inline-code'>nocache</code> experiment shows structural overhead even without transfers. Investigate:"
+    data-zh="<code class='inline-code'>nocache</code> 實驗顯示即使沒有傳輸也有結構性開銷。調查：">The <code class="inline-code">nocache</code> experiment shows structural overhead even without transfers. Investigate:</span></p>
+  <ul>
+    <li><span class="i18n" data-en="Eliminate per-step <code class='inline-code'>build_connector_meta</code> cost when no loads/saves are needed" data-zh="當不需要載入/保存時消除每步 <code class='inline-code'>build_connector_meta</code> 成本">Eliminate per-step <code class="inline-code">build_connector_meta</code> cost when no loads/saves are needed</span></li>
+    <li><span class="i18n" data-en="Skip <code class='inline-code'>save_kv_layer</code> calls entirely when CPU cache is full/disabled" data-zh="當 CPU 快取已滿/停用時完全跳過 <code class='inline-code'>save_kv_layer</code> 呼叫">Skip <code class="inline-code">save_kv_layer</code> calls entirely when CPU cache is full/disabled</span></li>
+    <li><span class="i18n" data-en="Profile Python-level overhead (dict lookups, tensor metadata, etc.)" data-zh="分析 Python 層級開銷（dict 查找、tensor 元數據等）">Profile Python-level overhead (dict lookups, tensor metadata, etc.)</span></li>
+  </ul>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-blue)">
+  <div class="card-header">
+    <span class="i18n" data-en="6.3 VRAM-aware Tuning for Smaller GPUs" data-zh="6.3 針對較小 GPU 的 VRAM 感知調整">6.3 VRAM-aware Tuning for Smaller GPUs</span>
+  </div>
+  <p><span class="i18n"
+    data-en="On L40S (48GB), LMCache's buffer allocations reduce batch capacity 3.3×. Potential fixes:"
+    data-zh="在 L40S（48GB）上，LMCache 的緩衝區分配將批次容量降低 3.3 倍。潛在修復：">On L40S (48GB), LMCache's buffer allocations reduce batch capacity 3.3×. Potential fixes:</span></p>
+  <ul>
+    <li><span class="i18n" data-en="Dynamic buffer sizing based on available VRAM" data-zh="根據可用 VRAM 動態調整緩衝區大小">Dynamic buffer sizing based on available VRAM</span></li>
+    <li><span class="i18n" data-en="Reduce <code class='inline-code'>gpu-memory-utilization</code> for LMCache to leave headroom for KV cache slots" data-zh="降低 LMCache 的 <code class='inline-code'>gpu-memory-utilization</code> 以為 KV cache 槽位留出空間">Reduce <code class="inline-code">gpu-memory-utilization</code> for LMCache to leave headroom for KV cache slots</span></li>
+  </ul>
+</div>
+
+<div class="card" style="border-left:4px solid var(--accent-teal)">
+  <div class="card-header">
+    <span class="i18n" data-en="6.4 Clean L40S wait_for_save Baseline" data-zh="6.4 乾淨的 L40S wait_for_save 基準">6.4 Clean L40S wait_for_save Baseline</span>
+  </div>
+  <p><span class="i18n"
+    data-en="The L40S nsys-bn run shared a node with the ctrl-sweep fill job (6428519), contaminating the wait_for_save latency measurements (though from_gpu DMA floor remained clean). A dedicated rerun on an isolated L40S node would provide a clean Gen4 wait_for_save baseline for comparison with the clean A100 Gen4 data."
+    data-zh="L40S 的 nsys-bn run 跟 ctrl-sweep fill job（6428519）共用節點，污染了 wait_for_save 的延遲量測（但 from_gpu DMA floor 仍然乾淨）。在獨立 L40S 節點上重跑可以提供乾淨的 Gen4 wait_for_save 基準，用來跟乾淨的 A100 Gen4 資料比較。">The L40S nsys-bn run shared a node with the ctrl-sweep fill job (6428519), contaminating the <code class="inline-code">wait_for_save</code> latency measurements (though <code class="inline-code">from_gpu</code> DMA floor remained clean). A dedicated rerun on an isolated L40S node would provide a clean Gen4 <code class="inline-code">wait_for_save</code> baseline for comparison with the clean A100 Gen4 data.</span></p>
+</div>
+</section>
+
+<!-- Section 7: Code & Data Files (was §11) -->
+<section id="files">
+<h2><span class="i18n" data-en="7. Code &amp; Data Files" data-zh="7. 程式碼與資料檔案">7. Code &amp; Data Files</span></h2>
+
+<h3><span class="i18n" data-en="Code Changes" data-zh="程式碼變更">Code Changes</span></h3>
+<table>
+  <tr>
+    <th><span class="i18n" data-en="File" data-zh="檔案">File</span></th>
+    <th><span class="i18n" data-en="Change" data-zh="變更">Change</span></th>
+  </tr>
+  <tr>
+    <td><code class="inline-code">vllm/v1/core/sched/trace.py</code></td>
+    <td><span class="i18n" data-en="Added step_detail and kv_load_timing trace events" data-zh="新增 step_detail 和 kv_load_timing 追蹤事件">Added step_detail and kv_load_timing trace events</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">vllm/v1/core/sched/scheduler.py</code></td>
+    <td><span class="i18n" data-en="Added per-step timing and batch composition logging" data-zh="新增每步計時和批次組成記錄">Added per-step timing and batch composition logging</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">vllm/distributed/kv_transfer/kv_connector/v1/lmcache_connector.py</code></td>
+    <td><span class="i18n" data-en="Added timing to start_load_kv, wait_for_layer_load, wait_for_save" data-zh="在 start_load_kv、wait_for_layer_load、wait_for_save 新增計時">Added timing to start_load_kv, wait_for_layer_load, wait_for_save</span></td>
+  </tr>
+</table>
+
+<h3><span class="i18n" data-en="Experiment Scripts" data-zh="實驗腳本">Experiment Scripts</span></h3>
+<table>
+  <tr>
+    <th><span class="i18n" data-en="Script" data-zh="腳本">Script</span></th>
+    <th><span class="i18n" data-en="Purpose" data-zh="用途">Purpose</span></th>
+  </tr>
+  <tr>
+    <td><code class="inline-code">our_experiments/scripts/patch_sync.py</code></td>
+    <td><span class="i18n" data-en="Sync ablation tool (default/stream/event/nosync)" data-zh="同步消融工具（default/stream/event/nosync）">Sync ablation tool (default/stream/event/nosync)</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">our_experiments/scripts/analyze_bottleneck.py</code></td>
+    <td><span class="i18n" data-en="Analysis: parses traces, produces comparison tables" data-zh="分析：解析追蹤，產生比較表">Analysis: parses traces, produces comparison tables</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">pace/21_bottleneck_experiments.sbatch</code></td>
+    <td><span class="i18n" data-en="Full experiment: 7 variants × JPS sweep" data-zh="完整實驗：7 個變體 × JPS 掃描">Full experiment: 7 variants × JPS sweep</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">our_experiments/scripts/vllm_with_nvtx.py</code></td>
+    <td><span class="i18n" data-en="NVTX monkey-patch wrapper for nsys profiling (§1)" data-zh="nsys profiling 用的 NVTX monkey-patch wrapper（§1）">NVTX monkey-patch wrapper for nsys profiling (§1)</span></td>
+  </tr>
+  <tr>
+    <td><code class="inline-code">pace/22_nsys_bottleneck.sbatch</code></td>
+    <td><span class="i18n" data-en="nsys profile capture: NVTX + CUDA runtime × JPS sweep per GPU" data-zh="nsys profile 捕捉：NVTX + CUDA runtime × JPS 掃描 per GPU">nsys profile capture: NVTX + CUDA runtime × JPS sweep per GPU</span></td>
+  </tr>
+</table>
+
+<h3><span class="i18n" data-en="Results Directory" data-zh="結果目錄">Results Directory</span></h3>
+<div class="card" style="font-family:'SF Mono','Fira Code',monospace;font-size:0.82rem">
+  <div style="color:var(--accent-green);font-weight:700">our_experiments/results/20260407_controlled-sweep/</div>
+  <div style="margin-left:16px">
+    <div><span style="color:var(--accent-green)">H200/</span> <span style="color:var(--text-muted)">— 15 JSON (COMPLETE) — §3 source</span></div>
+    <div><span style="color:var(--accent-green)">H100/</span> <span style="color:var(--text-muted)">— 15 JSON (COMPLETE) — §3 source</span></div>
+    <div><span style="color:var(--accent-green)">A100/</span> <span style="color:var(--text-muted)">— 15 JSON (COMPLETE, filled 2026-04-12) — §3 source</span></div>
+    <div><span style="color:var(--accent-green)">L40S/</span> <span style="color:var(--text-muted)">— 15 JSON (COMPLETE, filled 2026-04-11) — §3 source</span></div>
+  </div>
+  <div style="color:var(--accent-orange);font-weight:700;margin-top:0.5rem">our_experiments/results/20260407_bottleneck/</div>
+  <div style="margin-left:16px">
+    <div><span style="color:var(--accent-green)">H200/</span> <span style="color:var(--text-muted)">— 28 JSON + trace files (COMPLETE) — §1–§4 source</span></div>
+    <div><span style="color:var(--accent-orange)">H100/</span> <span style="color:var(--text-muted)">— 10/28 (partial; §1 nsys data covers H100 analysis)</span></div>
+    <div><span style="color:var(--accent-orange)">L40S/</span> <span style="color:var(--text-muted)">— 14/28 (partial; §1 nsys data covers L40S analysis)</span></div>
+    <div><span style="color:var(--text-muted)">A100/</span> <span style="color:var(--text-muted)">— 0/28 (not run; §1 nsys data covers A100 analysis)</span></div>
+  </div>
+  <div style="color:var(--accent-green);font-weight:700;margin-top:0.5rem">our_experiments/results/20260411_nsys-{h200,h100,a100,l40s}/</div>
+  <div style="margin-left:16px">
+    <div><span style="color:var(--accent-green)"><span class="i18n" data-en="All 4 GPUs" data-zh="4 GPU 皆完成">All 4 GPUs</span></span> <span style="color:var(--text-muted)">— 6 nsys profiles + sqlite each (COMPLETE) — §1 source</span></div>
+  </div>
+</div>
+</section>
+
+<footer style="text-align:center;padding:3rem 2rem;border-top:1px solid var(--border-color);color:var(--text-muted);font-size:0.85rem;">
+  <p><span class="i18n" data-en="LMCache KV Transfer Pipeline — Technical Deep Dive" data-zh="LMCache KV 傳輸管線 — 技術深潛">LMCache KV Transfer Pipeline — Technical Deep Dive</span></p>
+  <p><span class="i18n" data-en="Based on nsys profiling from Exp C (2026-04-11)" data-zh="基於 Exp C nsys profiling（2026-04-11）">Based on nsys profiling from Exp C (2026-04-11)</span></p>
+  <p><a href="bottleneck-analysis.html"><span class="i18n" data-en="Exp G Results" data-zh="Exp G 結果">Exp G Results</span></a> | <a href="index.html">LMCache Overview</a></p>
+</footer>
+
+</div> <!-- container -->
+<script>function setLang(l){document.querySelectorAll('.i18n').forEach(e=>{if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)};(function(){var l=localStorage.getItem('lang');if(l)setLang(l)})()</script>
+</body>
+</html>
