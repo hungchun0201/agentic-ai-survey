@@ -907,78 +907,56 @@ tr:nth-child(even) { background: rgba(26,29,46,0.5); }
 <section id="next-steps">
 <h2>4. Next Steps — Roadmap Toward Predictive Prefetch</h2>
 
-<p>The results above define our problem statement. LMCache's reactive offload architecture has a <strong>structural</strong> limit at high concurrency (PCIe wall at JPS=15, 66 KV transfers/s competing for the bus). Continuum's pinned VRAM avoids PCIe but wastes capacity during tool gaps. <strong>Predictive prefetch is the synthesis</strong>: offload during tool execution, prefetch back <em>just before</em> tool completion. The roadmap below stages this into four verifiable phases.</p>
+<p>LMCache hits a PCIe wall at JPS=15; Continuum pins VRAM instead. The synthesis is <strong>predictive prefetch</strong>: offload during tool execution, prefetch back just before the tool returns. Four phases, each isolating one unknown.</p>
 
 <div class="next-step-card">
-  <h4><span class="step-pill">Phase 1</span> Migrate from LMCache to <code class="inline-code">SimpleCPUOffloading</code></h4>
-  <p>Before we can build predictive prefetch, we need a much simpler offload substrate than LMCache. LMCache's connector architecture (per-step <code class="inline-code">build_connector_meta</code>, <code class="inline-code">wait_for_save</code>, per-layer onload) imposes structural overhead and is hard to extend with proactive hints.</p>
+  <h4><span class="step-pill">Phase 1</span> Port to <code class="inline-code">SimpleCPUOffloading</code></h4>
   <ul>
-    <li><strong>Goal:</strong> port the working offload→reload pipeline onto vLLM's <code class="inline-code">SimpleCPUOffloading</code> connector, preserving the same hit-rate behaviour but on a substrate we can modify.</li>
-    <li><strong>Deliverable:</strong> a reference implementation that matches LMCache's large-DRAM H100 numbers within ±5% at JPS 3–10, without the <code class="inline-code">wait_for_save</code> stall.</li>
-    <li><strong>Verification:</strong> same 20260412 workload, same hit-rate, same wall-clock JCT — exposed behind a shim so later phases can swap in predictive logic.</li>
+    <li>Swap LMCache out for vLLM's <code class="inline-code">SimpleCPUOffloading</code> substrate — same hit rate, without <code class="inline-code">wait_for_save</code> stalls.</li>
+    <li><strong>Gate:</strong> match LMCache's large-DRAM H100 JCT within ±5% at JPS 3–10.</li>
   </ul>
 </div>
 
 <div class="next-step-card phase-2">
-  <h4><span class="step-pill" style="background:rgba(0,204,180,0.15);color:var(--accent-teal);border-color:rgba(0,204,180,0.3)">Phase 2</span> Bidirectional PCIe + oracle-driven prefetch (correctness gate)</h4>
-  <p>Once we own the offload substrate, build the predictive prefetch skeleton. In real agents VRAM is almost always full, so we need <strong>two simultaneous PCIe directions</strong>: evict KV we decide won't be used soon, and prefetch KV that will. To isolate the correctness question from the prediction question, we <strong>assume a perfect oracle</strong> for agent tool execution time.</p>
+  <h4><span class="step-pill" style="background:rgba(0,204,180,0.15);color:var(--accent-teal);border-color:rgba(0,204,180,0.3)">Phase 2</span> Bidirectional PCIe + oracle prefetch</h4>
   <ul>
-    <li><strong>Bidirectional PCIe:</strong> the scheduler issues offload (GPU→CPU) and prefetch (CPU→GPU) concurrently. Need to validate stream scheduling, memcpy coalescing, and that both directions actually run in parallel on the H100 (Gen5 x16 full-duplex).</li>
-    <li><strong>Oracle assumption:</strong> we pretend we know the exact tool-return time. The prefetch scheduler uses this to trigger onload at <code class="inline-code">t_return − δ_prefetch</code> — just in time for the KV to be hot in VRAM when the tool result arrives.</li>
-    <li><strong>Correctness check:</strong> verify the prefetched KV actually matches what would have been recomputed (bit-identical attention outputs), and that no VRAM leak or double-free occurs under concurrent offload+prefetch.</li>
-    <li><strong>Success criterion:</strong> with oracle + correct bidirectional plumbing, zero wait on tool return → performance matches or beats Continuum at JPS 3–10, <em>without</em> pinning VRAM.</li>
+    <li>Run offload and prefetch concurrently on H100 Gen5 ×16 full-duplex; assume a perfect oracle for tool-return time.</li>
+    <li><strong>Gate:</strong> zero wait on tool return → matches Continuum at JPS 3–10 without pinning VRAM.</li>
   </ul>
 </div>
 
 <div class="next-step-card phase-3">
-  <h4><span class="step-pill" style="background:rgba(245,158,11,0.15);color:var(--accent-orange);border-color:rgba(245,158,11,0.3)">Phase 3</span> Scoring function — which KV to move?</h4>
-  <p>Once Phase 2 proves the mechanism works with an oracle, the next challenge is the scheduling decision: <em>which</em> KV blocks should be offloaded to make room, and <em>which</em> should be prefetched back? This is a scoring problem. Our current design considers two factors jointly.</p>
-
+  <h4><span class="step-pill" style="background:rgba(245,158,11,0.15);color:var(--accent-orange);border-color:rgba(245,158,11,0.3)">Phase 3</span> Scoring — which KV to move?</h4>
   <div class="grid-2" style="margin-top:0.6rem">
     <div class="card" style="margin-bottom:0;background:rgba(245,158,11,0.04);border-color:rgba(245,158,11,0.2)">
-      <h4 style="color:var(--accent-orange);margin-top:0">Benefit term</h4>
+      <h4 style="color:var(--accent-orange);margin-top:0">Benefit</h4>
       <ul style="font-size:0.88rem;margin-bottom:0">
-        <li><strong>Saved prefill time</strong> — how many tokens of recompute we avoid on reload</li>
-        <li><strong>Opportunity cost</strong> — if this KV stays pinned or pre-fetched, which other requests does it block?</li>
+        <li>Saved prefill tokens on reload</li>
+        <li>Blocking cost for other requests</li>
       </ul>
     </div>
     <div class="card" style="margin-bottom:0;background:rgba(245,158,11,0.04);border-color:rgba(245,158,11,0.2)">
-      <h4 style="color:var(--accent-orange);margin-top:0">Capacity term</h4>
+      <h4 style="color:var(--accent-orange);margin-top:0">Capacity</h4>
       <ul style="font-size:0.88rem;margin-bottom:0">
-        <li><strong>VRAM headroom</strong> — how much eviction pressure is there right now?</li>
-        <li><strong>DRAM capacity</strong> — our §2 finding is that <em>DRAM size is the decisive variable</em> determining whether offload/prefetch is effective at all</li>
+        <li>VRAM eviction pressure</li>
+        <li>DRAM size — first-order per §2</li>
       </ul>
     </div>
   </div>
-  <p style="font-size:0.88rem;margin-top:0.8rem">The score combines these to rank candidate KV blocks for eviction vs retention. The §2 small-vs-large DRAM gap (64 GB → 400 GB turns LMCache from always-loss into H100-JPS=6 win) tells us the capacity term is first-order, not a nuisance factor.</p>
 </div>
 
 <div class="next-step-card phase-4">
-  <h4><span class="step-pill" style="background:rgba(0,230,138,0.15);color:var(--accent-green);border-color:rgba(0,230,138,0.3)">Phase 4</span> Real agent traces + imperfect tool-time estimator</h4>
-  <p>The final step is removing the oracle assumption and testing on real workloads.</p>
+  <h4><span class="step-pill" style="background:rgba(0,230,138,0.15);color:var(--accent-green);border-color:rgba(0,230,138,0.3)">Phase 4</span> Real traces + imperfect estimator</h4>
   <ul>
-    <li><strong>Real traces:</strong> replace the synthetic Poisson 8-turn benchmark with real agent tool-call traces (variable tool duration, heterogeneous turn counts, realistic mixing of tools).</li>
-    <li><strong>Imperfect estimator:</strong> train a predictor for tool-execution time and measure how the scoring function degrades as the predictor's error grows. Questions we want answered:
-      <ul>
-        <li>How much prediction error can we tolerate before prefetch becomes net-negative (late prefetch = wasted PCIe)?</li>
-        <li>Is it better to prefetch slightly early (VRAM cost) or slightly late (recompute cost)?</li>
-        <li>Does the scoring function need to fold in the predictor's confidence?</li>
-      </ul>
-    </li>
-    <li><strong>Target:</strong> match or beat Continuum on real traces while using less VRAM (no permanent pinning), and beat LMCache on H100 JPS 3–10 by closing the wait-on-reload gap.</li>
+    <li>Replace the synthetic benchmark with real agent tool-call traces; train a predictor for tool duration.</li>
+    <li><strong>Gate:</strong> match Continuum on real traces with less VRAM, and beat LMCache on H100 JPS 3–10.</li>
   </ul>
-</div>
-
-<div class="callout info">
-  <div class="callout-title">Why this sequencing</div>
-  <p style="font-size:0.88rem">Each phase has a clean success gate that isolates one unknown. Phase 1 isolates the offload substrate (no prediction). Phase 2 isolates the mechanism (oracle prediction). Phase 3 isolates the scheduling policy (oracle timing, scored decisions). Phase 4 isolates the real-world robustness (no oracle). A failure in any phase points to a specific layer to fix, rather than an ambiguous end-to-end regression.</p>
 </div>
 </section>
 
 <!-- Footer -->
 <div style="text-align:center;padding:3rem 0 2rem;color:var(--text-muted);font-size:0.85rem;border-top:1px solid var(--border-color)">
   <p>Research update 2026-04-14 &middot; LMCache bottleneck &amp; predictive prefetch roadmap &middot; vllm-continuum</p>
-  <p style="margin-top:0.3rem">hlin464 (Georgia Tech) &middot; PACE cluster &middot; seed=42</p>
   <p style="margin-top:0.5rem">
     <a href="bottleneck-analysis.html">Full bottleneck analysis</a> &nbsp;|&nbsp;
     <a href="lmcache-kv-transfer.html">KV Transfer Deep Dive</a> &nbsp;|&nbsp;
