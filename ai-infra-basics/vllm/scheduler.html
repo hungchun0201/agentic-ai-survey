@@ -219,6 +219,264 @@ footer a{color:#6ec6ff;text-decoration:none}
 </pre>
 </div>
 
+<!-- ==================== REQUEST OBJECT ==================== -->
+<div class="section" id="request-object">
+  <span class="section-label">Foundation</span>
+  <h2><span class="i18n" data-en="The <code class=&quot;inline-code&quot;>Request</code> Object &mdash; What the Scheduler Sees" data-zh="<code class=&quot;inline-code&quot;>Request</code> 物件——排程器眼中的請求">The <code class="inline-code">Request</code> Object &mdash; What the Scheduler Sees</span></h2>
+
+  <p><span class="i18n" data-en="Everything the scheduler reasons about lives on a single <code class=&quot;inline-code&quot;>Request</code> object (<code class=&quot;inline-code&quot;>vllm/v1/request.py</code> line 58). It's not a frozen dataclass but a plain class that carries three kinds of data: <strong>identity / inputs</strong> (what the user sent), <strong>progress counters</strong> (how far we've gotten), and <strong>status / lifecycle flags</strong> (which queue it belongs in)." data-zh="排程器推論的一切都存在單一 <code class=&quot;inline-code&quot;>Request</code> 物件上（<code class=&quot;inline-code&quot;>vllm/v1/request.py</code> 第 58 行）。它不是凍結的 dataclass，而是一般 class，承載三類資料：<strong>身份／輸入</strong>（使用者送入的）、<strong>進度計數器</strong>（已做到哪裡）、<strong>狀態／生命週期旗標</strong>（屬於哪個佇列）。">Everything the scheduler reasons about lives on a single <code class="inline-code">Request</code> object (<code class="inline-code">vllm/v1/request.py</code> line 58). It's not a frozen dataclass but a plain class that carries three kinds of data: <strong>identity / inputs</strong> (what the user sent), <strong>progress counters</strong> (how far we've gotten), and <strong>status / lifecycle flags</strong> (which queue it belongs in).</span></p>
+
+  <h3><span class="i18n" data-en="Complete Field Inventory" data-zh="完整欄位清單">Complete Field Inventory</span></h3>
+
+<pre>
+<span class="cm"># vllm/v1/request.py lines 77-177 -- Request.__init__ assignments (condensed)</span>
+<span class="kw">class</span> <span class="nb">Request</span>:
+    <span class="cm"># ---- 1. IDENTITY &amp; METADATA (set once at construction) ----</span>
+    <span class="va">self</span>.request_id: <span class="nb">str</span>
+    <span class="va">self</span>.client_index: <span class="nb">int</span>                    <span class="cm"># which engine client sent this</span>
+    <span class="va">self</span>.priority: <span class="nb">int</span> = <span class="nu">0</span>                    <span class="cm"># lower = higher priority</span>
+    <span class="va">self</span>.arrival_time: <span class="nb">float</span>                 <span class="cm"># tie-breaker for priority</span>
+    <span class="va">self</span>.lora_request: LoRARequest | <span class="kw">None</span>
+    <span class="va">self</span>.cache_salt: <span class="nb">str</span> | <span class="kw">None</span>              <span class="cm"># separates prefix-cache namespaces</span>
+    <span class="va">self</span>.trace_headers: Mapping[<span class="nb">str</span>, <span class="nb">str</span>] | <span class="kw">None</span>
+
+    <span class="cm"># ---- 2. INPUTS / SAMPLING CONFIG ----</span>
+    <span class="va">self</span>.prompt_token_ids: list[<span class="nb">int</span>] | <span class="kw">None</span>
+    <span class="va">self</span>.prompt_embeds: torch.Tensor | <span class="kw">None</span>
+    <span class="va">self</span>.num_prompt_tokens: <span class="nb">int</span>
+    <span class="va">self</span>.mm_features: list[MultiModalFeatureSpec]   <span class="cm"># vision/audio</span>
+    <span class="va">self</span>.sampling_params: SamplingParams | <span class="kw">None</span>
+    <span class="va">self</span>.pooling_params: PoolingParams | <span class="kw">None</span>
+    <span class="va">self</span>.max_tokens: <span class="nb">int</span>                       <span class="cm"># hard cap on output length</span>
+    <span class="va">self</span>.structured_output_request: StructuredOutputRequest | <span class="kw">None</span>
+
+    <span class="cm"># ---- 3. TOKEN STREAMS (mutate as tokens are sampled) ----</span>
+    <span class="va">self</span>._output_token_ids: list[<span class="nb">int</span>]          <span class="cm"># verified outputs only</span>
+    <span class="va">self</span>._all_token_ids: list[<span class="nb">int</span>]             <span class="cm"># prompt + output, concatenated</span>
+    <span class="va">self</span>.spec_token_ids: list[<span class="nb">int</span>]             <span class="cm"># unverified speculative drafts</span>
+
+    <span class="cm"># ---- 4. PROGRESS COUNTERS (the scheduler's core state) ----</span>
+    <span class="va">self</span>.num_computed_tokens: <span class="nb">int</span> = <span class="nu">0</span>        <span class="cm"># KV written for positions [0, N)</span>
+    <span class="va">self</span>.num_output_placeholders: <span class="nb">int</span> = <span class="nu">0</span>    <span class="cm"># async-scheduling IOU</span>
+    <span class="va">self</span>.num_external_computed_tokens: <span class="nb">int</span> = <span class="nu">0</span>  <span class="cm"># from KVConnector (P/D)</span>
+    <span class="va">self</span>.num_cached_tokens: <span class="nb">int</span> = -<span class="nu">1</span>         <span class="cm"># prefix-cache hit on first schedule</span>
+    <span class="va">self</span>.num_preemptions: <span class="nb">int</span> = <span class="nu">0</span>           <span class="cm"># times kicked out of running</span>
+
+    <span class="cm"># ---- 5. STATUS / LIFECYCLE ----</span>
+    <span class="va">self</span>.status: RequestStatus = RequestStatus.WAITING
+    <span class="va">self</span>.events: list[EngineCoreEvent]            <span class="cm"># QUEUED / SCHEDULED / PREEMPTED ...</span>
+    <span class="va">self</span>.stop_reason: <span class="nb">int</span> | <span class="nb">str</span> | <span class="kw">None</span>
+    <span class="va">self</span>.is_prefill_chunk: <span class="nb">bool</span> = <span class="kw">False</span>
+    <span class="va">self</span>.num_nans_in_logits: <span class="nb">int</span> = <span class="nu">0</span>
+
+    <span class="cm"># ---- 6. KV CACHE INDEXING ----</span>
+    <span class="va">self</span>.block_hashes: list[BlockHash]             <span class="cm"># chained hashes per full block</span>
+    <span class="va">self</span>._block_hasher: Callable                   <span class="cm"># called on token append</span>
+    <span class="va">self</span>.skip_reading_prefix_cache: <span class="nb">bool</span>
+
+    <span class="cm"># ---- 7. CONNECTOR / STREAMING EXTRAS ----</span>
+    <span class="va">self</span>.kv_transfer_params: <span class="nb">dict</span> | <span class="kw">None</span>      <span class="cm"># P/D disaggregation</span>
+    <span class="va">self</span>.resumable: <span class="nb">bool</span>                        <span class="cm"># supports streaming input</span>
+    <span class="va">self</span>.streaming_queue: deque[StreamingUpdate | <span class="kw">None</span>] | <span class="kw">None</span>
+    <span class="va">self</span>.discard_latest_async_tokens: <span class="nb">bool</span>
+</pre>
+
+  <p><span class="i18n" data-en="Several &quot;fields&quot; are actually <strong>properties</strong> derived on demand (vllm/v1/request.py lines 226-242):" data-zh="其中幾個「欄位」實際上是<strong>屬性</strong>（vllm/v1/request.py 第 226-242 行），按需計算：">Several "fields" are actually <strong>properties</strong> derived on demand (vllm/v1/request.py lines 226-242):</span></p>
+
+<pre>
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">num_tokens</span>(<span class="va">self</span>) -> <span class="nb">int</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>._all_token_ids)                       <span class="cm"># prompt + verified output</span>
+
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">num_tokens_with_spec</span>(<span class="va">self</span>) -> <span class="nb">int</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>._all_token_ids) + <span class="fn">len</span>(<span class="va">self</span>.spec_token_ids)
+
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">num_output_tokens</span>(<span class="va">self</span>) -> <span class="nb">int</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>._output_token_ids)
+
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">has_encoder_inputs</span>(<span class="va">self</span>) -> <span class="nb">bool</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>.mm_features) > <span class="nu">0</span>
+</pre>
+
+  <h3><span class="i18n" data-en="RequestStatus Lifecycle" data-zh="RequestStatus 生命週期">RequestStatus Lifecycle</span></h3>
+
+  <p><span class="i18n" data-en="Status drives which queue a request belongs in. Anything after <code class=&quot;inline-code&quot;>PREEMPTED</code> in the enum is considered finished (<code class=&quot;inline-code&quot;>is_finished()</code> at line 317 uses <code class=&quot;inline-code&quot;>status &gt; PREEMPTED</code>):" data-zh="狀態決定請求屬於哪個佇列。enum 中 <code class=&quot;inline-code&quot;>PREEMPTED</code> 之後的值皆視為已完成（第 317 行的 <code class=&quot;inline-code&quot;>is_finished()</code> 用 <code class=&quot;inline-code&quot;>status &gt; PREEMPTED</code>）：">Status drives which queue a request belongs in. Anything after <code class="inline-code">PREEMPTED</code> in the enum is considered finished (<code class="inline-code">is_finished()</code> at line 317 uses <code class="inline-code">status &gt; PREEMPTED</code>):</span></p>
+
+<pre>
+<span class="cm"># vllm/v1/request.py lines 295-311</span>
+<span class="kw">class</span> <span class="nb">RequestStatus</span>(enum.<span class="nb">IntEnum</span>):
+    WAITING = enum.<span class="fn">auto</span>()                         <span class="cm"># in self.waiting (admission candidates)</span>
+    WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.<span class="fn">auto</span>()<span class="cm"># in skipped_waiting until grammar ready</span>
+    WAITING_FOR_REMOTE_KVS = enum.<span class="fn">auto</span>()           <span class="cm"># in skipped_waiting, connector loading</span>
+    WAITING_FOR_STREAMING_REQ = enum.<span class="fn">auto</span>()        <span class="cm"># in skipped_waiting, next chunk</span>
+    RUNNING = enum.<span class="fn">auto</span>()                         <span class="cm"># in self.running (has KV blocks)</span>
+    PREEMPTED = enum.<span class="fn">auto</span>()                       <span class="cm"># just freed KV, back to waiting</span>
+    FINISHED_STOPPED = enum.<span class="fn">auto</span>()                <span class="cm"># stop token / stop string matched</span>
+    FINISHED_LENGTH_CAPPED = enum.<span class="fn">auto</span>()          <span class="cm"># hit max_tokens</span>
+    FINISHED_ABORTED = enum.<span class="fn">auto</span>()                <span class="cm"># client disconnected / finish_requests()</span>
+    FINISHED_IGNORED = enum.<span class="fn">auto</span>()                <span class="cm"># prompt &gt; max_model_len</span>
+    FINISHED_ERROR = enum.<span class="fn">auto</span>()                  <span class="cm"># model NaN etc.</span>
+    FINISHED_REPETITION = enum.<span class="fn">auto</span>()
+</pre>
+
+  <div class="callout green">
+    <strong><span class="i18n" data-en="Three waiting sub-states:" data-zh="三種 waiting 子狀態：">Three waiting sub-states:</span></strong> <span class="i18n" data-en="<code class=&quot;inline-code&quot;>_is_blocked_waiting_status()</code> treats <code class=&quot;inline-code&quot;>WAITING_FOR_*</code> as &quot;don't try to schedule me&quot; and shunts them into <code class=&quot;inline-code&quot;>skipped_waiting</code>. Plain <code class=&quot;inline-code&quot;>WAITING</code> is the only status that <code class=&quot;inline-code&quot;>_select_waiting_queue_for_scheduling()</code> will pull into <code class=&quot;inline-code&quot;>running</code>." data-zh="<code class=&quot;inline-code&quot;>_is_blocked_waiting_status()</code> 把 <code class=&quot;inline-code&quot;>WAITING_FOR_*</code> 視為「暫時別排程我」，轉送至 <code class=&quot;inline-code&quot;>skipped_waiting</code>。只有單純的 <code class=&quot;inline-code&quot;>WAITING</code> 狀態會被 <code class=&quot;inline-code&quot;>_select_waiting_queue_for_scheduling()</code> 拉入 <code class=&quot;inline-code&quot;>running</code>。"><code class="inline-code">_is_blocked_waiting_status()</code> treats <code class="inline-code">WAITING_FOR_*</code> as "don't try to schedule me" and shunts them into <code class="inline-code">skipped_waiting</code>. Plain <code class="inline-code">WAITING</code> is the only status that <code class="inline-code">_select_waiting_queue_for_scheduling()</code> will pull into <code class="inline-code">running</code>.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Request Ordering (PRIORITY mode)" data-zh="請求排序（PRIORITY 模式）">Request Ordering (PRIORITY mode)</span></h3>
+
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>Request.__lt__</code> is what <code class=&quot;inline-code&quot;>heapq</code> in <code class=&quot;inline-code&quot;>PriorityRequestQueue</code> uses to order. Three tie-breakers:" data-zh="<code class=&quot;inline-code&quot;>Request.__lt__</code> 是 <code class=&quot;inline-code&quot;>PriorityRequestQueue</code> 中 <code class=&quot;inline-code&quot;>heapq</code> 使用的排序鍵，有三層 tie-breaker："><code class="inline-code">Request.__lt__</code> is what <code class="inline-code">heapq</code> in <code class="inline-code">PriorityRequestQueue</code> uses to order. Three tie-breakers:</span></p>
+
+<pre>
+<span class="cm"># vllm/v1/request.py lines 281-292</span>
+<span class="kw">def</span> <span class="fn">__lt__</span>(<span class="va">self</span>, other: <span class="st">"Request"</span>) -> <span class="nb">bool</span>:
+    <span class="kw">if</span> <span class="va">self</span>.priority != other.priority:
+        <span class="kw">return</span> <span class="va">self</span>.priority < other.priority        <span class="cm"># 1. lower priority wins</span>
+    <span class="kw">if</span> <span class="va">self</span>.arrival_time != other.arrival_time:
+        <span class="kw">return</span> <span class="va">self</span>.arrival_time < other.arrival_time <span class="cm"># 2. earlier arrival wins</span>
+    <span class="kw">if</span> <span class="va">self</span>.request_id != other.request_id:
+        <span class="kw">return</span> <span class="va">self</span>.request_id < other.request_id      <span class="cm"># 3. lex request_id wins</span>
+    <span class="kw">return</span> <span class="fn">id</span>(<span class="va">self</span>) < <span class="fn">id</span>(other)                    <span class="cm"># 4. pointer tiebreak (deterministic)</span>
+</pre>
+</div>
+
+<!-- ==================== HOW SCHEDULER DECIDES ==================== -->
+<div class="section" id="scheduler-decisions">
+  <span class="section-label">Foundation</span>
+  <h2><span class="i18n" data-en="How the Scheduler Picks Which Requests to Run" data-zh="排程器如何決定要排哪些請求">How the Scheduler Picks Which Requests to Run</span></h2>
+
+  <p><span class="i18n" data-en="Each engine step, <code class=&quot;inline-code&quot;>schedule()</code> makes two decisions in order: (1) which of the already-running requests continue, and (2) which waiting requests get admitted. Both phases are governed by the same constraints, evaluated in this priority order:" data-zh="每個引擎步驟中，<code class=&quot;inline-code&quot;>schedule()</code> 依序做兩個決策：(1) 哪些已執行的請求繼續、(2) 哪些等待中的請求可被准入。兩個階段受相同的限制約束，按以下優先順序評估：">Each engine step, <code class="inline-code">schedule()</code> makes two decisions in order: (1) which of the already-running requests continue, and (2) which waiting requests get admitted. Both phases are governed by the same constraints, evaluated in this priority order:</span></p>
+
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  <table>
+    <tr>
+      <th>#</th>
+      <th><span class="i18n" data-en="Constraint" data-zh="限制">Constraint</span></th>
+      <th><span class="i18n" data-en="Code location" data-zh="程式碼位置">Code location</span></th>
+      <th><span class="i18n" data-en="If violated" data-zh="違反時">If violated</span></th>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td><code class="inline-code">token_budget &gt; 0</code> <span class="i18n" data-en="(tokens left in this step)" data-zh="（本步剩餘 token）">(tokens left in this step)</span></td>
+      <td>scheduler.py:385, 567</td>
+      <td><span class="i18n" data-en="Stop both loops" data-zh="停止兩個迴圈">Stop both loops</span></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code class="inline-code">len(running) &lt; max_num_running_reqs</code></td>
+      <td>scheduler.py:568-569</td>
+      <td><span class="i18n" data-en="Stop admitting from waiting" data-zh="停止從等待佇列准入">Stop admitting from waiting</span></td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><span class="i18n" data-en="Status is WAITING (not blocked)" data-zh="狀態為 WAITING（非阻塞）">Status is WAITING (not blocked)</span></td>
+      <td>scheduler.py:578-588</td>
+      <td><span class="i18n" data-en="Move to skipped_waiting, try next" data-zh="移至 skipped_waiting，嘗試下一個">Move to skipped_waiting, try next</span></td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code class="inline-code">max_loras</code> <span class="i18n" data-en="budget per step" data-zh="每步預算">budget per step</span></td>
+      <td>scheduler.py:592-603</td>
+      <td><span class="i18n" data-en="Skip this LoRA, try next request" data-zh="跳過此 LoRA，試下一個請求">Skip this LoRA, try next request</span></td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><span class="i18n" data-en="KV cache has enough free blocks" data-zh="KV 快取有足夠空閒區塊">KV cache has enough free blocks</span></td>
+      <td><code class="inline-code">allocate_slots()</code> <span class="i18n" data-en="returns None" data-zh="回傳 None">returns None</span></td>
+      <td><span class="i18n" data-en="RUNNING: preempt victim &amp; retry; WAITING: break" data-zh="RUNNING：搶占受害者重試；WAITING：break">RUNNING: preempt victim &amp; retry; WAITING: break</span></td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td><span class="i18n" data-en="Encoder compute budget (MM models)" data-zh="編碼器運算預算（多模態模型）">Encoder compute budget (MM models)</span></td>
+      <td><code class="inline-code">_try_schedule_encoder_inputs</code></td>
+      <td><span class="i18n" data-en="Truncate num_new_tokens to before MM input" data-zh="截斷 num_new_tokens 至多模態輸入之前">Truncate num_new_tokens to before MM input</span></td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td><code class="inline-code">num_new_tokens &gt; 0</code> <span class="i18n" data-en="after all caps" data-zh="套用所有上限後">after all caps</span></td>
+      <td>scheduler.py:442-458</td>
+      <td><span class="i18n" data-en="RUNNING: continue to next; WAITING: break" data-zh="RUNNING：繼續下一個；WAITING：break">RUNNING: continue to next; WAITING: break</span></td>
+    </tr>
+  </table>
+  </div>
+
+  <h3><span class="i18n" data-en="Decision 1: Which RUNNING requests continue?" data-zh="決策 1：哪些 RUNNING 請求繼續？">Decision 1: Which RUNNING requests continue?</span></h3>
+
+  <p><span class="i18n" data-en="The scheduler iterates <code class=&quot;inline-code&quot;>self.running</code> <strong>in list order</strong>. For each one, it computes how many tokens it would like to serve (the gap formula from earlier), applies all caps, then asks <code class=&quot;inline-code&quot;>allocate_slots()</code> to reserve KV. The answer is always &quot;yes&quot; unless memory runs out -- and even then, the scheduler preempts a lower-priority victim and retries rather than rejecting the current request." data-zh="排程器<strong>按列表順序</strong>遍歷 <code class=&quot;inline-code&quot;>self.running</code>。對每個請求計算希望服務的 token 數（先前的差距公式），套用所有上限，再請 <code class=&quot;inline-code&quot;>allocate_slots()</code> 保留 KV。答案幾乎總是「可以」，除非記憶體用盡——即使如此，排程器也會搶占優先權較低的受害者並重試，而不是拒絕當前請求。">The scheduler iterates <code class="inline-code">self.running</code> <strong>in list order</strong>. For each one, it computes how many tokens it would like to serve (the gap formula from earlier), applies all caps, then asks <code class="inline-code">allocate_slots()</code> to reserve KV. The answer is always "yes" unless memory runs out -- and even then, the scheduler preempts a lower-priority victim and retries rather than rejecting the current request.</span></p>
+
+  <div class="callout">
+    <strong><span class="i18n" data-en="Running order stability:" data-zh="running 順序穩定性：">Running order stability:</span></strong> <span class="i18n" data-en="<code class=&quot;inline-code&quot;>self.running</code> is a plain <code class=&quot;inline-code&quot;>list</code>, not a priority queue. A request keeps its admission position. Under FCFS preemption pops the tail (<code class=&quot;inline-code&quot;>self.running.pop()</code>), so the <em>most recently admitted</em> request is the first to lose its KV -- classic LIFO eviction." data-zh="<code class=&quot;inline-code&quot;>self.running</code> 是普通 <code class=&quot;inline-code&quot;>list</code>，不是優先佇列。請求保留其准入位置。FCFS 搶占時彈出尾端（<code class=&quot;inline-code&quot;>self.running.pop()</code>），因此<em>最近准入</em>的請求最先失去 KV——經典 LIFO 淘汰。"><code class="inline-code">self.running</code> is a plain <code class="inline-code">list</code>, not a priority queue. A request keeps its admission position. Under FCFS preemption pops the tail (<code class="inline-code">self.running.pop()</code>), so the <em>most recently admitted</em> request is the first to lose its KV -- classic LIFO eviction.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Decision 2: Which WAITING requests get admitted?" data-zh="決策 2：哪些 WAITING 請求可被准入？">Decision 2: Which WAITING requests get admitted?</span></h3>
+
+  <p><span class="i18n" data-en="Only if <strong>no preemptions</strong> happened in the running loop (scheduler.py:564). The queue traversal is:" data-zh="僅在執行迴圈<strong>未發生搶占</strong>時進行（scheduler.py:564）。佇列巡訪順序為：">Only if <strong>no preemptions</strong> happened in the running loop (scheduler.py:564). The queue traversal is:</span></p>
+
+  <div class="step-flow">
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Pick the queue" data-zh="挑選佇列">Pick the queue</span></h4>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>_select_waiting_queue_for_scheduling()</code> picks between <code class=&quot;inline-code&quot;>self.waiting</code> and <code class=&quot;inline-code&quot;>self.skipped_waiting</code>. FCFS: <code class=&quot;inline-code&quot;>skipped_waiting</code> first (older entries). PRIORITY: whichever queue head sorts lower by <code class=&quot;inline-code&quot;>Request.__lt__</code>." data-zh="<code class=&quot;inline-code&quot;>_select_waiting_queue_for_scheduling()</code> 在 <code class=&quot;inline-code&quot;>self.waiting</code> 與 <code class=&quot;inline-code&quot;>self.skipped_waiting</code> 之間挑選。FCFS：<code class=&quot;inline-code&quot;>skipped_waiting</code> 優先（較舊的項目）。PRIORITY：哪個隊首在 <code class=&quot;inline-code&quot;>Request.__lt__</code> 下較小，該佇列勝出。"><code class="inline-code">_select_waiting_queue_for_scheduling()</code> picks between <code class="inline-code">self.waiting</code> and <code class="inline-code">self.skipped_waiting</code>. FCFS: <code class="inline-code">skipped_waiting</code> first (older entries). PRIORITY: whichever queue head sorts lower by <code class="inline-code">Request.__lt__</code>.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Peek the head" data-zh="窺視隊首">Peek the head</span></h4>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>peek_request()</code> looks but does not pop. If the request can't be scheduled this step, it stays where it is (or moves to skipped_waiting)." data-zh="<code class=&quot;inline-code&quot;>peek_request()</code> 只看不取。若該請求本步無法排程，它留在原處（或移至 skipped_waiting）。"><code class="inline-code">peek_request()</code> looks but does not pop. If the request can't be scheduled this step, it stays where it is (or moves to skipped_waiting).</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Filter on blocking status" data-zh="根據阻塞狀態過濾">Filter on blocking status</span></h4>
+      <p><span class="i18n" data-en="If status is <code class=&quot;inline-code&quot;>WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR / REMOTE_KVS / STREAMING_REQ</code>, <code class=&quot;inline-code&quot;>_try_promote_blocked_waiting_request()</code> checks if the blocker resolved. If not, <code class=&quot;inline-code&quot;>pop_request()</code> + prepend into <code class=&quot;inline-code&quot;>step_skipped_waiting</code>." data-zh="若狀態為 <code class=&quot;inline-code&quot;>WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR / REMOTE_KVS / STREAMING_REQ</code>，<code class=&quot;inline-code&quot;>_try_promote_blocked_waiting_request()</code> 檢查阻塞是否已解除。若未解除，<code class=&quot;inline-code&quot;>pop_request()</code> + 前插至 <code class=&quot;inline-code&quot;>step_skipped_waiting</code>。">If status is <code class="inline-code">WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR / REMOTE_KVS / STREAMING_REQ</code>, <code class="inline-code">_try_promote_blocked_waiting_request()</code> checks if the blocker resolved. If not, <code class="inline-code">pop_request()</code> + prepend into <code class="inline-code">step_skipped_waiting</code>.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="LoRA budget check" data-zh="LoRA 預算檢查">LoRA budget check</span></h4>
+      <p><span class="i18n" data-en="If this request's LoRA adapter would exceed <code class=&quot;inline-code&quot;>max_loras</code> in this step, skip it -- same treatment as blocked status." data-zh="若該請求的 LoRA adapter 本步會超過 <code class=&quot;inline-code&quot;>max_loras</code>，跳過——與阻塞狀態相同處理。">If this request's LoRA adapter would exceed <code class="inline-code">max_loras</code> in this step, skip it -- same treatment as blocked status.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Prefix cache lookup" data-zh="前綴快取查找">Prefix cache lookup</span></h4>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>get_computed_blocks()</code> scans <code class=&quot;inline-code&quot;>request.block_hashes</code> against <code class=&quot;inline-code&quot;>cached_block_hash_to_block</code>. Any hit means those blocks are <em>free</em> for this request -- its effective <code class=&quot;inline-code&quot;>num_new_tokens</code> shrinks by <code class=&quot;inline-code&quot;>num_new_local_computed_tokens</code>." data-zh="<code class=&quot;inline-code&quot;>get_computed_blocks()</code> 以 <code class=&quot;inline-code&quot;>request.block_hashes</code> 查詢 <code class=&quot;inline-code&quot;>cached_block_hash_to_block</code>。任何命中代表那些區塊對此請求<em>免費</em>——其有效 <code class=&quot;inline-code&quot;>num_new_tokens</code> 會減去 <code class=&quot;inline-code&quot;>num_new_local_computed_tokens</code>。"><code class="inline-code">get_computed_blocks()</code> scans <code class="inline-code">request.block_hashes</code> against <code class="inline-code">cached_block_hash_to_block</code>. Any hit means those blocks are <em>free</em> for this request -- its effective <code class="inline-code">num_new_tokens</code> shrinks by <code class="inline-code">num_new_local_computed_tokens</code>.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="can_fit_full_sequence() gate (optional)" data-zh="can_fit_full_sequence() 閘門（可選）">can_fit_full_sequence() gate (optional)</span></h4>
+      <p><span class="i18n" data-en="If <code class=&quot;inline-code&quot;>scheduler_reserve_full_isl</code> is enabled, require the whole sequence (prompt + max output) to fit before admitting. Prevents a common pathology where chunked prefill admits something that preempts itself a few steps later." data-zh="若啟用 <code class=&quot;inline-code&quot;>scheduler_reserve_full_isl</code>，要求整個序列（prompt + 最大輸出）可容納後才准入。避免常見病態：分塊預填充准入某請求，幾步後反而自我搶占。">If <code class="inline-code">scheduler_reserve_full_isl</code> is enabled, require the whole sequence (prompt + max output) to fit before admitting. Prevents a common pathology where chunked prefill admits something that preempts itself a few steps later.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="allocate_slots()" data-zh="allocate_slots()">allocate_slots()</span></h4>
+      <p><span class="i18n" data-en="Final gate. If it returns None we <code class=&quot;inline-code&quot;>break</code> out of the waiting loop entirely -- no point trying more requests when the pool is full. Unlike the RUNNING phase, the scheduler does <strong>not</strong> preempt running requests to admit waiting ones." data-zh="最終閘門。若回傳 None，直接 <code class=&quot;inline-code&quot;>break</code> 跳出等待迴圈——池子已滿，試其他請求無意義。與 RUNNING 階段不同，排程器<strong>不會</strong>為了准入等待中的請求而搶占執行中的請求。">Final gate. If it returns None we <code class="inline-code">break</code> out of the waiting loop entirely -- no point trying more requests when the pool is full. Unlike the RUNNING phase, the scheduler does <strong>not</strong> preempt running requests to admit waiting ones.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Commit: move to running" data-zh="提交：移至 running">Commit: move to running</span></h4>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>request_queue.pop_request()</code>, <code class=&quot;inline-code&quot;>self.running.append(request)</code>, set status to <code class=&quot;inline-code&quot;>RUNNING</code>, record its blocks, subtract from <code class=&quot;inline-code&quot;>token_budget</code>. Classify as <code class=&quot;inline-code&quot;>scheduled_new_reqs</code> (fresh) or <code class=&quot;inline-code&quot;>scheduled_resumed_reqs</code> (was PREEMPTED)." data-zh="<code class=&quot;inline-code&quot;>request_queue.pop_request()</code>、<code class=&quot;inline-code&quot;>self.running.append(request)</code>、狀態設為 <code class=&quot;inline-code&quot;>RUNNING</code>、記錄其區塊、從 <code class=&quot;inline-code&quot;>token_budget</code> 扣減。分類為 <code class=&quot;inline-code&quot;>scheduled_new_reqs</code>（新）或 <code class=&quot;inline-code&quot;>scheduled_resumed_reqs</code>（曾被 PREEMPTED）。"><code class="inline-code">request_queue.pop_request()</code>, <code class="inline-code">self.running.append(request)</code>, set status to <code class="inline-code">RUNNING</code>, record its blocks, subtract from <code class="inline-code">token_budget</code>. Classify as <code class="inline-code">scheduled_new_reqs</code> (fresh) or <code class="inline-code">scheduled_resumed_reqs</code> (was PREEMPTED).</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Decision Summary" data-zh="決策摘要">Decision Summary</span></h3>
+  <p><span class="i18n" data-en="Boiled down, the scheduler's logic is:" data-zh="歸納起來，排程器的邏輯為：">Boiled down, the scheduler's logic is:</span></p>
+<pre>
+<span class="cm"># Pseudocode of the full policy</span>
+<span class="kw">for</span> req <span class="kw">in</span> self.running:                       <span class="cm"># in admission order</span>
+    <span class="kw">if</span> token_budget == <span class="nu">0</span>: <span class="kw">break</span>
+    gap = req.num_tokens_with_spec + req.num_output_placeholders - req.num_computed_tokens
+    <span class="kw">if</span> gap == <span class="nu">0</span>: <span class="kw">continue</span>                      <span class="cm"># async skip-ahead</span>
+    n = <span class="fn">min</span>(gap, long_prefill_threshold, token_budget, max_model_len_slack)
+    <span class="kw">while</span> allocate_slots(req, n) <span class="kw">is None</span>:
+        preempt_lowest_priority_or_tail()          <span class="cm"># free blocks, retry</span>
+    token_budget -= n
+
+<span class="kw">if</span> <span class="kw">not</span> preempted_reqs:                          <span class="cm"># admission only if no churn</span>
+    <span class="kw">while</span> (waiting <span class="kw">or</span> skipped_waiting) <span class="kw">and</span> token_budget &gt; <span class="nu">0</span>:
+        <span class="kw">if</span> <span class="fn">len</span>(running) == max_num_running_reqs: <span class="kw">break</span>
+        req = _select_waiting_queue_for_scheduling().<span class="fn">peek_request</span>()
+        <span class="kw">if</span> blocked(req) <span class="kw">or</span> lora_full(req):
+            move_to_skipped_waiting(req); <span class="kw">continue</span>
+        new_computed, num_hit = get_computed_blocks(req)
+        n = <span class="fn">min</span>(req.num_tokens - num_hit, long_prefill_threshold, token_budget)
+        <span class="kw">if</span> allocate_slots(req, n, new_computed_blocks=new_computed) <span class="kw">is None</span>:
+            <span class="kw">break</span>                                  <span class="cm"># pool full -- no retry</span>
+        running.<span class="fn">append</span>(req); token_budget -= n
+</pre>
+</div>
+
 <!-- ==================== SECTION 1: schedule() OVERVIEW ==================== -->
 <div class="section" id="schedule-method">
   <span class="section-label">Section 1</span>
