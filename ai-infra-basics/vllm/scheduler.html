@@ -141,12 +141,12 @@ footer a{color:#6ec6ff;text-decoration:none}
 
 <!-- ==================== HERO ==================== -->
 <div class="hero">
-  <div class="badge"><span class="i18n" data-en="vLLM V1 Internals - Source Code Deep Dive" data-zh="vLLM V1 內部機制 - 原始碼深入剖析">vLLM V1 Internals - Source Code Deep Dive</span></div>
+  <div class="badge"><span class="i18n" data-en="vLLM V1 Internals (v0.19.x) - Source Code Deep Dive" data-zh="vLLM V1 內部機制 (v0.19.x) - 原始碼深入剖析">vLLM V1 Internals (v0.19.x) - Source Code Deep Dive</span></div>
   <h1><span class="i18n" data-en="The <span class=&quot;accent&quot;>Scheduler</span> &amp; KV Cache Manager" data-zh="<span class=&quot;accent&quot;>排程器</span>與 KV 快取管理器">The <span class="accent">Scheduler</span> &amp; KV Cache Manager</span></h1>
   <p class="subtitle">
-    <span class="i18n" data-en="How vLLM V1 decides which requests run each step, manages a unified token budget for prefill and decode, allocates GPU KV cache blocks, and implements prefix caching with a doubly-linked free-block queue." data-zh="vLLM V1 如何決定每一步執行哪些請求、管理預填充與解碼共用的統一 token 預算、分配 GPU KV 快取區塊，以及透過雙向鏈結串列實現前綴快取。">How vLLM V1 decides which requests run each step, manages a unified token budget for prefill and decode, allocates GPU KV cache blocks, and implements prefix caching with a doubly-linked free-block queue.</span>
+    <span class="i18n" data-en="A walk through vLLM V1 (v0.19.x) source: the schedule() method line by line, unified token budget, prefix caching with Merkle-chained hashes, the O(1) doubly-linked free-block queue, preemption via recomputation, async-scheduling skip-ahead, and speculative-decode rejection bookkeeping." data-zh="深入走讀 vLLM V1（v0.19.x）原始碼：schedule() 方法逐行解析、統一 token 預算、基於 Merkle 鏈雜湊的前綴快取、O(1) 雙向鏈結空閒區塊佇列、透過重新計算的搶占機制、非同步排程跳行、以及投機解碼拒絕的記帳。">A walk through vLLM V1 (v0.19.x) source: the schedule() method line by line, unified token budget, prefix caching with Merkle-chained hashes, the O(1) doubly-linked free-block queue, preemption via recomputation, async-scheduling skip-ahead, and speculative-decode rejection bookkeeping.</span>
   </p>
-  <div class="file-ref">vllm/v1/core/sched/scheduler.py &middot; kv_cache_manager.py &middot; block_pool.py &middot; kv_cache_coordinator.py &middot; kv_cache_utils.py</div>
+  <div class="file-ref">vllm/v1/core/sched/{scheduler,request_queue,output}.py &middot; vllm/v1/core/{kv_cache_manager,block_pool,kv_cache_coordinator,kv_cache_utils}.py</div>
 </div>
 
 <div class="container">
@@ -475,20 +475,41 @@ footer a{color:#6ec6ff;text-decoration:none}
   <p><span class="i18n" data-en="There is a single <code class=&quot;inline-code&quot;>token_budget</code> variable shared between prefill and decode. Decode tokens consume 1 token each from the same pool. Long prefills can consume many tokens. This is why vLLM V1 can naturally perform &quot;continuous batching&quot; -- there are no separate phases." data-zh="預填充與解碼共享單一 <code class=&quot;inline-code&quot;>token_budget</code> 變數。解碼 token 從同一池中各消耗 1 個 token。長預填充可消耗大量 token。這就是 vLLM V1 能自然實現「連續批次處理」的原因——不存在獨立的階段。">There is a single <code class="inline-code">token_budget</code> variable shared between prefill and decode. Decode tokens consume 1 token each from the same pool. Long prefills can consume many tokens. This is why vLLM V1 can naturally perform "continuous batching" -- there are no separate phases.</span></p>
 
 <pre>
-<span class="cm"># scheduler.py line 360-363</span>
+<span class="cm"># scheduler.py lines 360-381 -- Budget + bookkeeping init, new step signal</span>
+scheduled_new_reqs: list[<span class="nb">Request</span>] = []
+scheduled_resumed_reqs: list[<span class="nb">Request</span>] = []
+scheduled_running_reqs: list[<span class="nb">Request</span>] = []
+preempted_reqs: list[<span class="nb">Request</span>] = []
+
+req_to_new_blocks: dict[<span class="nb">str</span>, <span class="nb">KVCacheBlocks</span>] = {}
+num_scheduled_tokens: dict[<span class="nb">str</span>, <span class="nb">int</span>] = {}
 token_budget = <span class="va">self</span>.max_num_scheduled_tokens
 <span class="kw">if</span> <span class="va">self</span>._pause_state == PauseState.PAUSED_ALL:
-    token_budget = <span class="nu">0</span>   <span class="cm"># Do not schedule when paused</span>
+    <span class="cm"># Do not schedule any requests when paused.</span>
+    token_budget = <span class="nu">0</span>
+
+<span class="cm"># Encoder-related (multi-modal models).</span>
+scheduled_encoder_inputs: dict[<span class="nb">str</span>, list[<span class="nb">int</span>]] = {}
+encoder_compute_budget = <span class="va">self</span>.max_num_encoder_input_tokens
+<span class="cm"># Spec decode-related (draft tokens previously proposed).</span>
+scheduled_spec_decode_tokens: dict[<span class="nb">str</span>, list[<span class="nb">int</span>]] = {}
+
+scheduled_timestamp = time.<span class="fn">monotonic</span>()
+<span class="va">self</span>.kv_cache_manager.<span class="fn">new_step_starts</span>()   <span class="cm"># Per-type managers drain their take_new_block_ids buffers</span>
 </pre>
 
-  <p><span class="i18n" data-en="The budget is decremented identically for running and waiting requests:" data-zh="執行中和等待中的請求以相同方式遞減預算：">The budget is decremented identically for running and waiting requests:</span></p>
+  <div class="callout">
+    <strong><span class="i18n" data-en="Why new_step_starts() matters:" data-zh="為什麼 new_step_starts() 很重要：">Why new_step_starts() matters:</span></strong> <span class="i18n" data-en="Each <code class=&quot;inline-code&quot;>SingleTypeKVCacheManager</code> accumulates newly allocated block IDs across the current step. <code class=&quot;inline-code&quot;>new_step_starts()</code> clears that buffer so the next <code class=&quot;inline-code&quot;>take_new_block_ids()</code> at the end of this step only reports blocks allocated within it -- used for KV cache zeroing on certain hardware and for KV events exported to external consumers." data-zh="每個 <code class=&quot;inline-code&quot;>SingleTypeKVCacheManager</code> 會累積當前步驟中新分配的區塊 ID。<code class=&quot;inline-code&quot;>new_step_starts()</code> 清除該緩衝區，使得本步驟結尾的 <code class=&quot;inline-code&quot;>take_new_block_ids()</code> 僅回報本步驟內分配的區塊——用於某些硬體上的 KV 快取歸零，以及匯出給外部消費者的 KV 事件。">Each <code class="inline-code">SingleTypeKVCacheManager</code> accumulates newly allocated block IDs across the current step. <code class="inline-code">new_step_starts()</code> clears that buffer so the next <code class="inline-code">take_new_block_ids()</code> at the end of this step only reports blocks allocated within it -- used for KV cache zeroing on certain hardware and for KV events exported to external consumers.</span>
+  </div>
+
+  <p><span class="i18n" data-en="The budget is decremented identically for running and waiting requests -- that uniformity is the whole reason prefill and decode can live in the same loop:" data-zh="執行中和等待中的請求以完全相同的方式遞減預算——這份一致性正是預填充與解碼能共享同一迴圈的根本原因：">The budget is decremented identically for running and waiting requests -- that uniformity is the whole reason prefill and decode can live in the same loop:</span></p>
 
 <pre>
-<span class="cm"># For RUNNING requests (line 509-510):</span>
+<span class="cm"># For RUNNING requests (scheduler.py line 516-517):</span>
 num_scheduled_tokens[request_id] = num_new_tokens
 token_budget -= num_new_tokens
 
-<span class="cm"># For WAITING requests (line 818-819):</span>
+<span class="cm"># For WAITING requests (scheduler.py line 825-826):</span>
 num_scheduled_tokens[request_id] = num_new_tokens
 token_budget -= num_new_tokens
 </pre>
@@ -528,47 +549,152 @@ token_budget -= num_new_tokens
   <p><span class="i18n" data-en="The running queue is iterated <strong>first</strong>. This ensures requests that already hold KV cache blocks get to continue, minimizing wasted GPU memory from preempted partial computations." data-zh="執行佇列<strong>優先</strong>被遍歷。這確保已持有 KV 快取區塊的請求能繼續執行，最小化因搶占部分計算而浪費的 GPU 記憶體。">The running queue is iterated <strong>first</strong>. This ensures requests that already hold KV cache blocks get to continue, minimizing wasted GPU memory from preempted partial computations.</span></p>
 
 <pre>
-<span class="cm"># scheduler.py line 377-378</span>
+<span class="cm"># scheduler.py lines 383-411 -- Iterate RUNNING + compute num_new_tokens</span>
+<span class="cm"># First, schedule the RUNNING requests.</span>
 req_index = <span class="nu">0</span>
 <span class="kw">while</span> req_index < <span class="fn">len</span>(<span class="va">self</span>.running) <span class="kw">and</span> token_budget > <span class="nu">0</span>:
     request = <span class="va">self</span>.running[req_index]
 
+    <span class="cm"># ---- ASYNC SCHEDULING SKIP-AHEAD (lines 388-402) ----</span>
+    <span class="cm"># If we're past max_tokens even after rejecting all draft tokens,</span>
+    <span class="cm"># skip scheduling this request for one more step. The arithmetic</span>
+    <span class="cm"># is: num_computed_tokens + 1 (the step we're scheduling) minus</span>
+    <span class="cm"># (num_output_placeholders - 1) so we account for draft tokens</span>
+    <span class="cm"># that might all be rejected downstream.</span>
+    <span class="kw">if</span> (
+        request.num_output_placeholders > <span class="nu">0</span>
+        <span class="kw">and</span> request.num_computed_tokens + <span class="nu">2</span> - request.num_output_placeholders
+            >= request.num_prompt_tokens + request.max_tokens
+    ):
+        req_index += <span class="nu">1</span>
+        <span class="kw">continue</span>
+
+    <span class="cm"># ---- HOW MANY NEW TOKENS TO SCHEDULE ----</span>
+    <span class="cm"># num_tokens_with_spec = prompt + output + spec_tokens</span>
+    <span class="cm"># num_output_placeholders is non-zero only in async scheduling.</span>
     num_new_tokens = (
         request.num_tokens_with_spec
         + request.num_output_placeholders
         - request.num_computed_tokens
     )
-    <span class="cm"># Apply chunked prefill threshold</span>
+    <span class="cm"># Chunked prefill threshold (0 disables chunking).</span>
     <span class="kw">if</span> <span class="nu">0</span> < <span class="va">self</span>.scheduler_config.long_prefill_token_threshold < num_new_tokens:
         num_new_tokens = <span class="va">self</span>.scheduler_config.long_prefill_token_threshold
     num_new_tokens = <span class="fn">min</span>(num_new_tokens, token_budget)
-</pre>
-
-  <h3><span class="i18n" data-en="Waiting Queue -- Admission Gate" data-zh="等待佇列——准入閘門">Waiting Queue -- Admission Gate</span></h3>
-  <p><span class="i18n" data-en="Waiting requests are only considered if <strong>no preemptions</strong> occurred in the running phase. This prevents a starvation cycle where new requests cause preemptions that cause more new requests." data-zh="只有在執行階段<strong>沒有發生搶占</strong>時才考慮等待中的請求。這防止了新請求導致搶占、進而產生更多新請求的飢餓循環。">Waiting requests are only considered if <strong>no preemptions</strong> occurred in the running phase. This prevents a starvation cycle where new requests cause preemptions that cause more new requests.</span></p>
-
-<pre>
-<span class="cm"># scheduler.py line 557</span>
-<span class="kw">if not</span> preempted_reqs <span class="kw">and</span> <span class="va">self</span>._pause_state == PauseState.UNPAUSED:
-    <span class="cm"># ... schedule waiting requests</span>
-    <span class="kw">while</span> (<span class="va">self</span>.waiting <span class="kw">or</span> <span class="va">self</span>.skipped_waiting) <span class="kw">and</span> token_budget > <span class="nu">0</span>:
-        <span class="kw">if</span> <span class="fn">len</span>(<span class="va">self</span>.running) == <span class="va">self</span>.max_num_running_reqs:
-            <span class="kw">break</span>
-</pre>
-
-  <p><span class="i18n" data-en="Waiting requests get a prefix cache lookup (<code class=&quot;inline-code&quot;>get_computed_blocks()</code>), which may dramatically reduce the number of tokens that need computing:" data-zh="等待請求會進行前綴快取查找（<code class=&quot;inline-code&quot;>get_computed_blocks()</code>），這可能大幅減少需要計算的 token 數量：">Waiting requests get a prefix cache lookup (<code class="inline-code">get_computed_blocks()</code>),
-     which may dramatically reduce the number of tokens that need computing:</span></p>
-
-<pre>
-<span class="cm"># scheduler.py line 603-606</span>
-<span class="kw">if</span> request.num_computed_tokens == <span class="nu">0</span>:
-    new_computed_blocks, num_new_local_computed_tokens = (
-        <span class="va">self</span>.kv_cache_manager.<span class="fn">get_computed_blocks</span>(request)
+    <span class="cm"># Never let scheduled input pos overrun max_model_len - 1.</span>
+    num_new_tokens = <span class="fn">min</span>(
+        num_new_tokens, <span class="va">self</span>.max_model_len - <span class="nu">1</span> - request.num_computed_tokens
     )
 </pre>
 
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Async scheduling skip-ahead:" data-zh="非同步排程跳行：">Async scheduling skip-ahead:</span></strong> <span class="i18n" data-en="When async scheduling is enabled, the scheduler commits a step's outputs before the model has actually sampled them (output tokens are represented as <em>placeholders</em>). If the previous step's scheduled tokens would already push the request past <code class=&quot;inline-code&quot;>max_tokens</code> -- even if every draft spec token ends up rejected -- there's nothing left to do. <code class=&quot;inline-code&quot;>continue</code> skips to the next running request instead of <code class=&quot;inline-code&quot;>break</code>-ing, so newer requests can still fill the slot." data-zh="啟用非同步排程時，排程器會在模型實際抽樣之前就已提交本步輸出（輸出 token 以<em>佔位符</em>表示）。若上一步已排程的 token 足以讓請求達到 <code class=&quot;inline-code&quot;>max_tokens</code>——即使全部草稿 spec token 都被拒絕——那就沒事可做。此處使用 <code class=&quot;inline-code&quot;>continue</code> 跳到下個執行中請求，而非 <code class=&quot;inline-code&quot;>break</code>，讓更新的請求仍能占用該槽位。">When async scheduling is enabled, the scheduler commits a step's outputs before the model has actually sampled them (output tokens are represented as <em>placeholders</em>). If the previous step's scheduled tokens would already push the request past <code class="inline-code">max_tokens</code> -- even if every draft spec token ends up rejected -- there's nothing left to do. <code class="inline-code">continue</code> skips to the next running request instead of <code class="inline-code">break</code>-ing, so newer requests can still fill the slot.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Waiting Queue -- Admission Gate" data-zh="等待佇列——准入閘門">Waiting Queue -- Admission Gate</span></h3>
+  <p><span class="i18n" data-en="Waiting requests are only considered if <strong>no preemptions</strong> occurred in the running phase and the scheduler is not paused. This avoids a churn cycle where newly admitted requests immediately trigger more preemptions." data-zh="只有在執行階段<strong>沒有發生搶占</strong>且排程器未暫停時才考慮等待中的請求。這避免了新准入的請求立即觸發更多搶占的循環。">Waiting requests are only considered if <strong>no preemptions</strong> occurred in the running phase and the scheduler is not paused. This avoids a churn cycle where newly admitted requests immediately trigger more preemptions.</span></p>
+
+<pre>
+<span class="cm"># scheduler.py lines 564-603 -- Admission loop + blocked-status filter</span>
+<span class="kw">if not</span> preempted_reqs <span class="kw">and</span> <span class="va">self</span>._pause_state == PauseState.UNPAUSED:
+    step_skipped_waiting = <span class="fn">create_request_queue</span>(<span class="va">self</span>.policy)
+
+    <span class="kw">while</span> (<span class="va">self</span>.waiting <span class="kw">or</span> <span class="va">self</span>.skipped_waiting) <span class="kw">and</span> token_budget > <span class="nu">0</span>:
+        <span class="kw">if</span> <span class="fn">len</span>(<span class="va">self</span>.running) == <span class="va">self</span>.max_num_running_reqs:
+            <span class="kw">break</span>   <span class="cm"># max_num_seqs cap reached</span>
+
+        request_queue = <span class="va">self</span>.<span class="fn">_select_waiting_queue_for_scheduling</span>()
+        request = request_queue.<span class="fn">peek_request</span>()
+
+        <span class="cm"># Blocked statuses: WAITING_FOR_REMOTE_KVS / GRAMMAR / STREAMING_REQ</span>
+        <span class="cm"># are skipped and re-queued into the "skipped_waiting" pool,</span>
+        <span class="cm"># so they don't block younger requests behind them.</span>
+        <span class="kw">if</span> <span class="va">self</span>.<span class="fn">_is_blocked_waiting_status</span>(request.status) \
+                <span class="kw">and not</span> <span class="va">self</span>.<span class="fn">_try_promote_blocked_waiting_request</span>(request):
+            request_queue.<span class="fn">pop_request</span>()
+            step_skipped_waiting.<span class="fn">prepend_request</span>(request)
+            <span class="kw">continue</span>
+
+        <span class="cm"># Enforce max_loras budget: if adding this LoRA would overflow, skip.</span>
+        <span class="kw">if</span> (<span class="va">self</span>.lora_config <span class="kw">and</span> request.lora_request
+                <span class="kw">and</span> <span class="fn">len</span>(scheduled_loras) == <span class="va">self</span>.lora_config.max_loras
+                <span class="kw">and</span> request.lora_request.lora_int_id <span class="kw">not in</span> scheduled_loras):
+            request_queue.<span class="fn">pop_request</span>()
+            step_skipped_waiting.<span class="fn">prepend_request</span>(request)
+            <span class="kw">continue</span>
+</pre>
+
+  <p><span class="i18n" data-en="Waiting requests get a prefix cache lookup (<code class=&quot;inline-code&quot;>get_computed_blocks()</code>). On a fresh request (<code class=&quot;inline-code&quot;>num_computed_tokens == 0</code>), a KVConnector (for P/D disaggregation or remote KV transfer) may additionally contribute externally computed tokens:" data-zh="等待請求會進行前綴快取查找（<code class=&quot;inline-code&quot;>get_computed_blocks()</code>）。對於全新請求（<code class=&quot;inline-code&quot;>num_computed_tokens == 0</code>），KVConnector（用於 P/D 分離或遠端 KV 傳輸）還可能額外貢獻外部已計算的 token：">Waiting requests get a prefix cache lookup (<code class="inline-code">get_computed_blocks()</code>). On a fresh request (<code class="inline-code">num_computed_tokens == 0</code>), a KVConnector (for P/D disaggregation or remote KV transfer) may additionally contribute externally computed tokens:</span></p>
+
+<pre>
+<span class="cm"># scheduler.py lines 605-650 -- Cache lookup + connector-aware match count</span>
+num_external_computed_tokens = <span class="nu">0</span>
+load_kv_async = <span class="kw">False</span>
+
+<span class="kw">if</span> request.num_computed_tokens == <span class="nu">0</span>:
+    <span class="cm"># 1. Local prefix cache hit (from cached_block_hash_to_block).</span>
+    new_computed_blocks, num_new_local_computed_tokens = (
+        <span class="va">self</span>.kv_cache_manager.<span class="fn">get_computed_blocks</span>(request)
+    )
+
+    <span class="cm"># 2. Optional: remote / external cache (e.g. prefill-decode disagg).</span>
+    <span class="kw">if</span> <span class="va">self</span>.connector <span class="kw">is not None</span>:
+        ext_tokens, load_kv_async = <span class="va">self</span>.connector.<span class="fn">get_num_new_matched_tokens</span>(
+            request, num_new_local_computed_tokens
+        )
+        <span class="kw">if</span> ext_tokens <span class="kw">is None</span>:
+            <span class="cm"># Connector needs a retry -- park in skipped_waiting.</span>
+            request_queue.<span class="fn">pop_request</span>()
+            step_skipped_waiting.<span class="fn">prepend_request</span>(request)
+            <span class="kw">continue</span>
+        num_external_computed_tokens = ext_tokens
+        request.num_external_computed_tokens = ext_tokens
+
+    num_computed_tokens = <span class="fn">min</span>(
+        num_new_local_computed_tokens + num_external_computed_tokens,
+        request.num_tokens,
+    )
+<span class="kw">else</span>:
+    <span class="cm"># Resumed / preempted / KV-transfer-completed requests already</span>
+    <span class="cm"># have num_computed_tokens &gt; 0.</span>
+    new_computed_blocks = <span class="va">self</span>.kv_cache_manager.empty_kv_cache_blocks
+    num_new_local_computed_tokens = <span class="nu">0</span>
+    num_computed_tokens = request.num_computed_tokens
+</pre>
+
   <div class="callout green">
-    <strong><span class="i18n" data-en="Skipped waiting queue:" data-zh="跳過等待佇列：">Skipped waiting queue:</span></strong> <span class="i18n" data-en="Requests that cannot be scheduled due to async dependencies (e.g., waiting for remote KV transfer) are placed in <code class=&quot;inline-code&quot;>self.skipped_waiting</code> and re-checked each step. This avoids head-of-line blocking in the main waiting queue." data-zh="因非同步依賴（例如等待遠端 KV 傳輸）而無法排程的請求會被放入 <code class=&quot;inline-code&quot;>self.skipped_waiting</code>，並在每一步重新檢查。這避免了主等待佇列的隊首阻塞問題。">Requests that cannot be scheduled due to async dependencies (e.g., waiting for remote KV transfer) are placed in <code class="inline-code">self.skipped_waiting</code> and re-checked each step. This avoids head-of-line blocking in the main waiting queue.</span>
+    <strong><span class="i18n" data-en="Skipped waiting queue:" data-zh="跳過等待佇列：">Skipped waiting queue:</span></strong> <span class="i18n" data-en="Requests blocked on async dependencies (waiting for remote KV transfer, grammar compilation, or the next streaming input chunk) are moved to <code class=&quot;inline-code&quot;>self.skipped_waiting</code> and re-checked each step. This avoids head-of-line blocking in the main queue." data-zh="因非同步依賴而阻塞的請求（等待遠端 KV 傳輸、語法編譯、或下一個串流輸入區塊）會被移到 <code class=&quot;inline-code&quot;>self.skipped_waiting</code>，每一步重新檢查。這避免了主佇列的隊首阻塞。">Requests blocked on async dependencies (waiting for remote KV transfer, grammar compilation, or the next streaming input chunk) are moved to <code class="inline-code">self.skipped_waiting</code> and re-checked each step. This avoids head-of-line blocking in the main queue.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Queue Selection: FCFS vs PRIORITY" data-zh="佇列選擇：FCFS 與 PRIORITY">Queue Selection: FCFS vs PRIORITY</span></h3>
+  <p><span class="i18n" data-en="Between <code class=&quot;inline-code&quot;>self.waiting</code> and <code class=&quot;inline-code&quot;>self.skipped_waiting</code>, which does the scheduler drain first? Under FCFS, <code class=&quot;inline-code&quot;>skipped_waiting</code> wins (older requests are ahead). Under PRIORITY, the heads of both queues are compared and the lower-priority tuple wins:" data-zh="<code class=&quot;inline-code&quot;>self.waiting</code> 與 <code class=&quot;inline-code&quot;>self.skipped_waiting</code> 之間，排程器先處理哪一個？在 FCFS 下 <code class=&quot;inline-code&quot;>skipped_waiting</code> 勝出（較舊的請求在前）。在 PRIORITY 下則比較兩佇列的隊首，較低優先權元組勝出：">Between <code class="inline-code">self.waiting</code> and <code class="inline-code">self.skipped_waiting</code>, which does the scheduler drain first? Under FCFS, <code class="inline-code">skipped_waiting</code> wins (older requests are ahead). Under PRIORITY, the heads of both queues are compared and the lower-priority tuple wins:</span></p>
+
+<pre>
+<span class="cm"># scheduler.py lines 1572-1582 -- queue selection</span>
+<span class="kw">def</span> <span class="fn">_select_waiting_queue_for_scheduling</span>(<span class="va">self</span>) -> RequestQueue | <span class="kw">None</span>:
+    <span class="kw">if</span> <span class="va">self</span>.policy == SchedulingPolicy.FCFS:
+        <span class="kw">return</span> <span class="va">self</span>.skipped_waiting <span class="kw">or</span> <span class="va">self</span>.waiting <span class="kw">or</span> <span class="kw">None</span>
+
+    <span class="cm"># PRIORITY: compare queue heads.</span>
+    <span class="kw">if</span> <span class="va">self</span>.waiting <span class="kw">and</span> <span class="va">self</span>.skipped_waiting:
+        waiting_req = <span class="va">self</span>.waiting.<span class="fn">peek_request</span>()
+        skipped_req = <span class="va">self</span>.skipped_waiting.<span class="fn">peek_request</span>()
+        <span class="kw">return</span> <span class="va">self</span>.waiting <span class="kw">if</span> waiting_req < skipped_req <span class="kw">else</span> <span class="va">self</span>.skipped_waiting
+
+    <span class="kw">return</span> <span class="va">self</span>.waiting <span class="kw">or</span> <span class="va">self</span>.skipped_waiting <span class="kw">or</span> <span class="kw">None</span>
+</pre>
+
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>Request.__lt__</code> orders by <code class=&quot;inline-code&quot;>(priority, arrival_time)</code>, so lower numeric priority (or earlier arrival as tie-break) sorts first. The two underlying queue classes are:" data-zh="<code class=&quot;inline-code&quot;>Request.__lt__</code> 按 <code class=&quot;inline-code&quot;>(priority, arrival_time)</code> 排序，因此較低的優先權數值（或作為 tie-break 較早的到達時間）排在前面。底層兩種佇列實作為："><code class="inline-code">Request.__lt__</code> orders by <code class="inline-code">(priority, arrival_time)</code>, so lower numeric priority (or earlier arrival as tie-break) sorts first. The two underlying queue classes are:</span></p>
+
+  <div class="ds-grid">
+    <div class="ds-box">
+      <h5>FCFSRequestQueue(deque)</h5>
+      <p><span class="i18n" data-en="Subclasses <code class=&quot;inline-code&quot;>collections.deque</code>. <code class=&quot;inline-code&quot;>add_request()</code> appends to the right; <code class=&quot;inline-code&quot;>pop_request()</code> is <code class=&quot;inline-code&quot;>popleft</code>; <code class=&quot;inline-code&quot;>prepend_request()</code> is <code class=&quot;inline-code&quot;>appendleft</code>. All O(1)." data-zh="繼承 <code class=&quot;inline-code&quot;>collections.deque</code>。<code class=&quot;inline-code&quot;>add_request()</code> 在右端附加；<code class=&quot;inline-code&quot;>pop_request()</code> 為 <code class=&quot;inline-code&quot;>popleft</code>；<code class=&quot;inline-code&quot;>prepend_request()</code> 為 <code class=&quot;inline-code&quot;>appendleft</code>。全部 O(1)。">Subclasses <code class="inline-code">collections.deque</code>. <code class="inline-code">add_request()</code> appends to the right; <code class="inline-code">pop_request()</code> is <code class="inline-code">popleft</code>; <code class="inline-code">prepend_request()</code> is <code class="inline-code">appendleft</code>. All O(1).</span></p>
+    </div>
+    <div class="ds-box">
+      <h5>PriorityRequestQueue(heapq)</h5>
+      <p><span class="i18n" data-en="Wraps a <code class=&quot;inline-code&quot;>heapq</code> min-heap keyed on <code class=&quot;inline-code&quot;>Request.__lt__</code>. <code class=&quot;inline-code&quot;>prepend_request()</code> collapses to <code class=&quot;inline-code&quot;>add_request()</code> -- you cannot jump the heap order. <code class=&quot;inline-code&quot;>remove_request()</code> triggers an O(n) heapify." data-zh="包裝了以 <code class=&quot;inline-code&quot;>Request.__lt__</code> 為鍵的 <code class=&quot;inline-code&quot;>heapq</code> 最小堆。<code class=&quot;inline-code&quot;>prepend_request()</code> 退化為 <code class=&quot;inline-code&quot;>add_request()</code>——你無法插隊。<code class=&quot;inline-code&quot;>remove_request()</code> 觸發 O(n) heapify。">Wraps a <code class="inline-code">heapq</code> min-heap keyed on <code class="inline-code">Request.__lt__</code>. <code class="inline-code">prepend_request()</code> collapses to <code class="inline-code">add_request()</code> -- you cannot jump the heap order. <code class="inline-code">remove_request()</code> triggers an O(n) heapify.</span></p>
+    </div>
   </div>
 </div>
 
@@ -581,7 +707,7 @@ req_index = <span class="nu">0</span>
 
   <h3><span class="i18n" data-en="For Running Requests (Continued Prefill)" data-zh="執行中的請求（續填充）">For Running Requests (Continued Prefill)</span></h3>
 <pre>
-<span class="cm"># scheduler.py line 402-404</span>
+<span class="cm"># scheduler.py lines 409-411 -- RUNNING branch</span>
 <span class="kw">if</span> <span class="nu">0</span> < <span class="va">self</span>.scheduler_config.long_prefill_token_threshold < num_new_tokens:
     num_new_tokens = <span class="va">self</span>.scheduler_config.long_prefill_token_threshold
 num_new_tokens = <span class="fn">min</span>(num_new_tokens, token_budget)
@@ -589,7 +715,9 @@ num_new_tokens = <span class="fn">min</span>(num_new_tokens, token_budget)
 
   <h3><span class="i18n" data-en="For Waiting Requests (First Prefill)" data-zh="等待中的請求（首次預填充）">For Waiting Requests (First Prefill)</span></h3>
 <pre>
-<span class="cm"># scheduler.py line 658-661</span>
+<span class="cm"># scheduler.py lines 660-668 -- WAITING branch</span>
+<span class="cm"># We use request.num_tokens (not num_prompt_tokens) so resumed/preempted</span>
+<span class="cm"># requests with already-sampled outputs are recomputed correctly.</span>
 num_new_tokens = request.num_tokens - num_computed_tokens
 threshold = <span class="va">self</span>.scheduler_config.long_prefill_token_threshold
 <span class="kw">if</span> <span class="nu">0</span> < threshold < num_new_tokens:
@@ -599,14 +727,16 @@ threshold = <span class="va">self</span>.scheduler_config.long_prefill_token_thr
   <p><span class="i18n" data-en="Without chunked prefill enabled, the scheduler enforces that the full request fits in the budget:" data-zh="未啟用分塊預填充時，排程器強制要求完整請求必須符合預算：">Without chunked prefill enabled, the scheduler enforces that the full request fits in the budget:</span></p>
 
 <pre>
-<span class="cm"># scheduler.py line 666-671</span>
+<span class="cm"># scheduler.py lines 672-681 -- Admission with chunking disabled</span>
 <span class="kw">if</span> (
     <span class="kw">not</span> <span class="va">self</span>.scheduler_config.enable_chunked_prefill
     <span class="kw">and</span> num_new_tokens > token_budget
 ):
-    <span class="cm"># If chunked_prefill is disabled,</span>
-    <span class="cm"># we can stop the scheduling here.</span>
+    <span class="cm"># Whole prefill wouldn't fit, and we can't slice it -- stop.</span>
     <span class="kw">break</span>
+
+num_new_tokens = <span class="fn">min</span>(num_new_tokens, token_budget)
+<span class="kw">assert</span> num_new_tokens > <span class="nu">0</span>
 </pre>
 
   <div class="callout red">
@@ -733,6 +863,26 @@ threshold = <span class="va">self</span>.scheduler_config.long_prefill_token_thr
      a miss at position N guarantees misses at N+1, N+2, ...</span></p>
 
 <pre>
+<span class="cm"># kv_cache_manager.py lines 176-216 -- top-level cache hit entry point</span>
+<span class="kw">def</span> <span class="fn">get_computed_blocks</span>(<span class="va">self</span>, request: <span class="nb">Request</span>) -> <span class="nb">tuple</span>[<span class="nb">KVCacheBlocks</span>, <span class="nb">int</span>]:
+    <span class="kw">if not</span> <span class="va">self</span>.enable_caching <span class="kw">or</span> request.skip_reading_prefix_cache:
+        <span class="kw">return</span> <span class="va">self</span>.empty_kv_cache_blocks, <span class="nu">0</span>
+
+    <span class="cm"># CRITICAL: cap to prompt_length - 1. If every block matched, we would</span>
+    <span class="cm"># have zero tokens to run through the model, so logits couldn't be</span>
+    <span class="cm"># produced for sampling. One-token slack forces at least one recompute.</span>
+    max_cache_hit_length = request.num_tokens - <span class="nu">1</span>
+
+    computed_blocks, num_new_computed_tokens = (
+        <span class="va">self</span>.coordinator.<span class="fn">find_longest_cache_hit</span>(
+            request.block_hashes, max_cache_hit_length
+        )
+    )
+    <span class="kw">return</span> <span class="va">self</span>.<span class="fn">create_kv_cache_blocks</span>(computed_blocks), num_new_computed_tokens
+</pre>
+
+<pre>
+<span class="cm"># UnitaryKVCacheCoordinator delegates to its only single-type manager.</span>
 <span class="cm"># single_type_kv_cache_manager.py -- FullAttentionManager.find_longest_cache_hit()</span>
 max_num_blocks = max_length // block_size
 <span class="kw">for</span> block_hash <span class="kw">in</span> itertools.<span class="fn">islice</span>(block_hashes, max_num_blocks):
@@ -745,7 +895,9 @@ max_num_blocks = max_length // block_size
         <span class="kw">break</span>   <span class="cm"># Chain broken -- no further hits possible</span>
 
 <span class="kw">if</span> use_eagle <span class="kw">and</span> computed_blocks[<span class="nu">0</span>]:
-    <span class="cm"># Drop last matched block to force recompute for EAGLE hidden states</span>
+    <span class="cm"># Drop last matched block to force recompute for EAGLE hidden states.</span>
+    <span class="cm"># EAGLE needs the last block's full hidden state, which the draft</span>
+    <span class="cm"># proposer consumes next step; a cached block alone doesn't carry it.</span>
     <span class="kw">for</span> computed <span class="kw">in</span> computed_blocks:
         computed.<span class="fn">pop</span>()
 </pre>
@@ -1014,20 +1166,31 @@ max_num_blocks = max_length // block_size
   </div>
 
   <h3><span class="i18n" data-en="Allocation: get_new_blocks()" data-zh="分配：get_new_blocks()">Allocation: get_new_blocks()</span></h3>
+  <p><span class="i18n" data-en="Pops N blocks in a single traversal of the free queue. Each popped block may still carry a hash (it was an <em>eviction candidate</em>, not unused) -- so <code class=&quot;inline-code&quot;>_maybe_evict_cached_block()</code> strips its hash entry from <code class=&quot;inline-code&quot;>cached_block_hash_to_block</code> before the block's <code class=&quot;inline-code&quot;>ref_cnt</code> is raised:" data-zh="透過單次巡訪空閒佇列彈出 N 個區塊。每個彈出的區塊可能仍帶有雜湊（它是<em>淘汰候選</em>，而非未使用）——因此 <code class=&quot;inline-code&quot;>_maybe_evict_cached_block()</code> 會在區塊 <code class=&quot;inline-code&quot;>ref_cnt</code> 上升前，從 <code class=&quot;inline-code&quot;>cached_block_hash_to_block</code> 剝除其雜湊項目：">Pops N blocks in a single traversal of the free queue. Each popped block may still carry a hash (it was an <em>eviction candidate</em>, not unused) -- so <code class="inline-code">_maybe_evict_cached_block()</code> strips its hash entry from <code class="inline-code">cached_block_hash_to_block</code> before the block's <code class="inline-code">ref_cnt</code> is raised:</span></p>
 <pre>
-<span class="cm"># block_pool.py -- get_new_blocks()</span>
+<span class="cm"># block_pool.py lines 320-350 -- get_new_blocks() with eviction hook</span>
 <span class="kw">def</span> <span class="fn">get_new_blocks</span>(<span class="va">self</span>, num_blocks: <span class="nb">int</span>) -> list[<span class="nb">KVCacheBlock</span>]:
+    <span class="kw">if</span> num_blocks > <span class="va">self</span>.<span class="fn">get_num_free_blocks</span>():
+        <span class="kw">raise</span> ValueError(<span class="st">f"Cannot get {num_blocks} free blocks from the pool"</span>)
+
     ret: list[<span class="nb">KVCacheBlock</span>] = <span class="va">self</span>.free_block_queue.<span class="fn">popleft_n</span>(num_blocks)
 
     <span class="kw">if</span> <span class="va">self</span>.enable_caching:
         <span class="kw">for</span> block <span class="kw">in</span> ret:
-            <span class="va">self</span>.<span class="fn">_maybe_evict_cached_block</span>(block)  <span class="cm"># Remove hash if block was cached</span>
+            <span class="cm"># If this block was a cached eviction candidate, delete its</span>
+            <span class="cm"># hash -> block entry so future lookups won't match a block</span>
+            <span class="cm"># that's about to be repurposed.</span>
+            <span class="va">self</span>.<span class="fn">_maybe_evict_cached_block</span>(block)
             <span class="kw">assert</span> block.ref_cnt == <span class="nu">0</span>
             block.ref_cnt += <span class="nu">1</span>
+            <span class="kw">if</span> <span class="va">self</span>.metrics_collector:
+                <span class="va">self</span>.metrics_collector.<span class="fn">on_block_allocated</span>(block)
     <span class="kw">else</span>:
         <span class="kw">for</span> block <span class="kw">in</span> ret:
             <span class="kw">assert</span> block.ref_cnt == <span class="nu">0</span>
             block.ref_cnt += <span class="nu">1</span>
+            <span class="kw">if</span> <span class="va">self</span>.metrics_collector:
+                <span class="va">self</span>.metrics_collector.<span class="fn">on_block_allocated</span>(block)
     <span class="kw">return</span> ret
 </pre>
 
@@ -1059,9 +1222,54 @@ max_num_blocks = max_length // block_size
     <strong><span class="i18n" data-en="Shared blocks survive:" data-zh="共享區塊存活：">Shared blocks survive:</span></strong> <span class="i18n" data-en="When two requests share a prefix-cached block, its <code class=&quot;inline-code&quot;>ref_cnt</code> is 2. Freeing one request decrements to 1 -- the block stays allocated for the other request and is NOT added to the free queue. Only when ref_cnt reaches 0 does the block become an eviction candidate." data-zh="當兩個請求共享一個前綴快取區塊時，其 <code class=&quot;inline-code&quot;>ref_cnt</code> 為 2。釋放一個請求後遞減為 1——該區塊保持為另一個請求分配，不會被加入空閒佇列。只有當 ref_cnt 降至 0 時，區塊才成為淘汰候選。">When two requests share a prefix-cached block, its <code class="inline-code">ref_cnt</code> is 2. Freeing one request decrements to 1 -- the block stays allocated for the other request and is NOT added to the free queue. Only when ref_cnt reaches 0 does the block become an eviction candidate.</span>
   </div>
 
-  <h3><span class="i18n" data-en="The popleft_n() Fast Path" data-zh="popleft_n() 快速路徑">The popleft_n() Fast Path</span></h3>
+  <h3><span class="i18n" data-en="Sentinel Head/Tail -- Why?" data-zh="哨兵頭尾——為什麼？">Sentinel Head/Tail -- Why?</span></h3>
+  <p><span class="i18n" data-en="Every free-block queue operation (<code class=&quot;inline-code&quot;>popleft</code>, <code class=&quot;inline-code&quot;>append</code>, <code class=&quot;inline-code&quot;>remove</code>, <code class=&quot;inline-code&quot;>append_n</code>) has to splice pointers. Edge cases (empty list, first / last element) normally require branching. Two fake sentinel blocks (<code class=&quot;inline-code&quot;>fake_free_list_head</code>, <code class=&quot;inline-code&quot;>fake_free_list_tail</code>) eliminate those branches -- every real block is guaranteed to have a prev and next:" data-zh="每個空閒佇列操作（<code class=&quot;inline-code&quot;>popleft</code>、<code class=&quot;inline-code&quot;>append</code>、<code class=&quot;inline-code&quot;>remove</code>、<code class=&quot;inline-code&quot;>append_n</code>）都要拼接指標。邊界情況（空佇列、首尾節點）通常需要分支。兩個虛擬哨兵區塊（<code class=&quot;inline-code&quot;>fake_free_list_head</code>、<code class=&quot;inline-code&quot;>fake_free_list_tail</code>）消除這些分支——每個真實區塊都確保有 prev 與 next：">Every free-block queue operation (<code class="inline-code">popleft</code>, <code class="inline-code">append</code>, <code class="inline-code">remove</code>, <code class="inline-code">append_n</code>) has to splice pointers. Edge cases (empty list, first / last element) normally require branching. Two fake sentinel blocks (<code class="inline-code">fake_free_list_head</code>, <code class="inline-code">fake_free_list_tail</code>) eliminate those branches -- every real block is guaranteed to have a prev and next:</span></p>
+
 <pre>
-<span class="cm"># kv_cache_utils.py -- FreeKVCacheBlockQueue.popleft_n()</span>
+<span class="cm"># kv_cache_utils.py lines 180-208 -- FreeKVCacheBlockQueue.__init__()</span>
+<span class="kw">def</span> <span class="fn">__init__</span>(<span class="va">self</span>, blocks: list[<span class="nb">KVCacheBlock</span>]) -> <span class="kw">None</span>:
+    <span class="va">self</span>.num_free_blocks = <span class="fn">len</span>(blocks)
+
+    <span class="cm"># Pre-link consecutive blocks: blocks[i] &lt;&lt;=&gt;&gt; blocks[i+1].</span>
+    <span class="kw">for</span> i <span class="kw">in</span> <span class="fn">range</span>(<span class="va">self</span>.num_free_blocks):
+        <span class="kw">if</span> i > <span class="nu">0</span>:
+            blocks[i].prev_free_block = blocks[i - <span class="nu">1</span>]
+        <span class="kw">if</span> i < <span class="va">self</span>.num_free_blocks - <span class="nu">1</span>:
+            blocks[i].next_free_block = blocks[i + <span class="nu">1</span>]
+
+    <span class="cm"># Two fake sentinels with block_id=-1. They are NEVER popped and never appear in ret.</span>
+    <span class="va">self</span>.fake_free_list_head = <span class="nb">KVCacheBlock</span>(block_id=-<span class="nu">1</span>)
+    <span class="va">self</span>.fake_free_list_tail = <span class="nb">KVCacheBlock</span>(block_id=-<span class="nu">1</span>)
+    <span class="kw">if</span> <span class="va">self</span>.num_free_blocks > <span class="nu">0</span>:
+        <span class="va">self</span>.fake_free_list_head.next_free_block = blocks[<span class="nu">0</span>]
+        blocks[<span class="nu">0</span>].prev_free_block = <span class="va">self</span>.fake_free_list_head
+        <span class="va">self</span>.fake_free_list_tail.prev_free_block = blocks[-<span class="nu">1</span>]
+        blocks[-<span class="nu">1</span>].next_free_block = <span class="va">self</span>.fake_free_list_tail
+    <span class="kw">else</span>:
+        <span class="va">self</span>.fake_free_list_head.next_free_block = <span class="va">self</span>.fake_free_list_tail
+        <span class="va">self</span>.fake_free_list_tail.prev_free_block = <span class="va">self</span>.fake_free_list_head
+</pre>
+
+  <h3><span class="i18n" data-en="O(1) Middle Removal -- The Point of the Custom List" data-zh="O(1) 中間移除——自訂串列的關鍵理由">O(1) Middle Removal -- The Point of the Custom List</span></h3>
+<pre>
+<span class="cm"># kv_cache_utils.py lines 280-298 -- remove() is what deque can't do</span>
+<span class="kw">def</span> <span class="fn">remove</span>(<span class="va">self</span>, block: <span class="nb">KVCacheBlock</span>) -> <span class="kw">None</span>:
+    <span class="kw">if</span> block.prev_free_block <span class="kw">is None</span> <span class="kw">or</span> block.next_free_block <span class="kw">is None</span>:
+        <span class="cm"># Caller bug: trying to remove a block not in the free list.</span>
+        <span class="kw">raise</span> RuntimeError(<span class="st">f"remove() called on invalid block: {block}"</span>)
+
+    <span class="cm"># Splice around `block` -- sentinels guarantee both neighbours exist.</span>
+    block.prev_free_block.next_free_block = block.next_free_block
+    block.next_free_block.prev_free_block = block.prev_free_block
+
+    block.prev_free_block = block.next_free_block = <span class="kw">None</span>
+    <span class="va">self</span>.num_free_blocks -= <span class="nu">1</span>
+</pre>
+
+  <h3><span class="i18n" data-en="The popleft_n() Fast Path" data-zh="popleft_n() 快速路徑">The popleft_n() Fast Path</span></h3>
+  <p><span class="i18n" data-en="When a big prefill needs dozens of new blocks in one shot, a single <code class=&quot;inline-code&quot;>popleft_n()</code> traversal is cheaper than N calls to <code class=&quot;inline-code&quot;>popleft()</code>: it only rewires the fake head pointer once, at the end:" data-zh="當大型預填充一次需要數十個新區塊時，單次 <code class=&quot;inline-code&quot;>popleft_n()</code> 巡訪比 N 次 <code class=&quot;inline-code&quot;>popleft()</code> 便宜：它只在最後重新接一次假頭指標：">When a big prefill needs dozens of new blocks in one shot, a single <code class="inline-code">popleft_n()</code> traversal is cheaper than N calls to <code class="inline-code">popleft()</code>: it only rewires the fake head pointer once, at the end:</span></p>
+<pre>
+<span class="cm"># kv_cache_utils.py lines 247-278 -- popleft_n()</span>
 <span class="kw">def</span> <span class="fn">popleft_n</span>(<span class="va">self</span>, n: <span class="nb">int</span>) -> list[<span class="nb">KVCacheBlock</span>]:
     <span class="kw">if</span> n == <span class="nu">0</span>: <span class="kw">return</span> []
     <span class="kw">assert</span> <span class="va">self</span>.num_free_blocks >= n
@@ -1073,10 +1281,11 @@ max_num_blocks = max_length // block_size
         ret.<span class="fn">append</span>(curr_block)
         last_block = curr_block
         curr_block = curr_block.next_free_block
-        <span class="cm"># Disconnect popped block from the list</span>
+        <span class="cm"># Disconnect popped block from the list -- no neighbour patching yet.</span>
         last_block.prev_free_block = <span class="kw">None</span>
         last_block.next_free_block = <span class="kw">None</span>
 
+    <span class="cm"># Rewire fake_head -> first surviving block exactly ONCE.</span>
     <span class="kw">if</span> curr_block <span class="kw">is not None</span>:
         <span class="va">self</span>.fake_free_list_head.next_free_block = curr_block
         curr_block.prev_free_block = <span class="va">self</span>.fake_free_list_head
@@ -1140,27 +1349,30 @@ max_num_blocks = max_length // block_size
   <p><span class="i18n" data-en="vLLM V1 uses a <strong>recomputation-only</strong> preemption policy. There is no swapping of KV cache to CPU memory. When a running request cannot fit its new tokens and no free blocks remain, the scheduler preempts the lowest-priority request by freeing ALL its blocks and putting it back in the waiting queue with <code class=&quot;inline-code&quot;>num_computed_tokens = 0</code>." data-zh="vLLM V1 採用<strong>僅重新計算</strong>的搶占策略。不會將 KV 快取交換到 CPU 記憶體。當執行中的請求無法容納新 token 且沒有可用區塊時，排程器通過釋放最低優先權請求的所有區塊並將其放回等待佇列（<code class=&quot;inline-code&quot;>num_computed_tokens = 0</code>）來搶占。">vLLM V1 uses a <strong>recomputation-only</strong> preemption policy. There is no swapping of KV cache to CPU memory. When a running request cannot fit its new tokens and no free blocks remain, the scheduler preempts the lowest-priority request by freeing ALL its blocks and putting it back in the waiting queue with <code class="inline-code">num_computed_tokens = 0</code>.</span></p>
 
 <pre>
-<span class="cm"># scheduler.py -- _preempt_request()</span>
+<span class="cm"># scheduler.py lines 956-976 -- _preempt_request()</span>
 <span class="kw">def</span> <span class="fn">_preempt_request</span>(<span class="va">self</span>, request: <span class="nb">Request</span>, timestamp: <span class="nb">float</span>) -> <span class="kw">None</span>:
     <span class="kw">assert</span> request.status == RequestStatus.RUNNING
-    <span class="va">self</span>.kv_cache_manager.<span class="fn">free</span>(request)        <span class="cm"># Free ALL KV blocks</span>
-    <span class="va">self</span>.encoder_cache_manager.<span class="fn">free</span>(request)  <span class="cm"># Free encoder cache too</span>
+    <span class="va">self</span>.kv_cache_manager.<span class="fn">free</span>(request)        <span class="cm"># Decrement ref_cnt on every block</span>
+    <span class="va">self</span>.encoder_cache_manager.<span class="fn">free</span>(request)
     request.status = RequestStatus.PREEMPTED
-    request.num_computed_tokens = <span class="nu">0</span>           <span class="cm"># Must recompute from scratch!</span>
+    request.num_computed_tokens = <span class="nu">0</span>           <span class="cm"># Force full recompute on re-admit</span>
     <span class="kw">if</span> request.spec_token_ids:
-        request.spec_token_ids = []
+        request.spec_token_ids = []              <span class="cm"># Drafts are context-dependent, discard</span>
     request.num_preemptions += <span class="nu">1</span>
 
-    <span class="cm"># Put back at the front of the waiting queue</span>
+    <span class="cm"># FCFS: prepend_request is appendleft on the deque, so preempted</span>
+    <span class="cm"># requests re-enter at the HEAD of waiting and get first chance.</span>
+    <span class="cm"># PRIORITY: prepend degrades to add_request (heap order wins).</span>
     <span class="va">self</span>.waiting.<span class="fn">prepend_request</span>(request)
 </pre>
 
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>kv_cache_manager.free()</code> decrements <code class=&quot;inline-code&quot;>ref_cnt</code> on every block owned by the request. Prefix-shared blocks (ref_cnt &gt; 1 because another running request also uses them) survive the drop to <code class=&quot;inline-code&quot;>ref_cnt &ge; 1</code> and stay in the cache. Blocks whose <code class=&quot;inline-code&quot;>ref_cnt</code> hits 0 go to the free queue and are still <em>potentially</em> recoverable on re-admit via prefix cache hit -- that's why &quot;recompute only&quot; is cheap in practice." data-zh="<code class=&quot;inline-code&quot;>kv_cache_manager.free()</code> 會對請求所擁有的每個區塊遞減 <code class=&quot;inline-code&quot;>ref_cnt</code>。前綴共享的區塊（因另一個執行中請求也在用，<code class=&quot;inline-code&quot;>ref_cnt &gt; 1</code>）會以 <code class=&quot;inline-code&quot;>ref_cnt &ge; 1</code> 存活於快取中。<code class=&quot;inline-code&quot;>ref_cnt</code> 降至 0 的區塊進入空閒佇列，但<em>仍可能</em>在重新准入時透過前綴快取命中恢復——這就是「僅重新計算」在實務上仍然便宜的原因。"><code class="inline-code">kv_cache_manager.free()</code> decrements <code class="inline-code">ref_cnt</code> on every block owned by the request. Prefix-shared blocks (ref_cnt &gt; 1 because another running request also uses them) survive the drop to <code class="inline-code">ref_cnt &ge; 1</code> and stay in the cache. Blocks whose <code class="inline-code">ref_cnt</code> hits 0 go to the free queue and are still <em>potentially</em> recoverable on re-admit via prefix cache hit -- that's why "recompute only" is cheap in practice.</span></p>
+
   <h3><span class="i18n" data-en="Preemption in the Running Loop" data-zh="執行迴圈中的搶占">Preemption in the Running Loop</span></h3>
-  <p><span class="i18n" data-en="When <code class=&quot;inline-code&quot;>allocate_slots()</code> returns <code class=&quot;inline-code&quot;>None</code> for a running request, the scheduler enters a preemption loop:" data-zh="當 <code class=&quot;inline-code&quot;>allocate_slots()</code> 對執行中的請求回傳 <code class=&quot;inline-code&quot;>None</code> 時，排程器進入搶占迴圈：">When <code class="inline-code">allocate_slots()</code> returns <code class="inline-code">None</code> for a
-     running request, the scheduler enters a preemption loop:</span></p>
+  <p><span class="i18n" data-en="When <code class=&quot;inline-code&quot;>allocate_slots()</code> returns <code class=&quot;inline-code&quot;>None</code> for a running request, the scheduler enters a preemption loop. Under PRIORITY scheduling the victim may already have been scheduled <em>this</em> step, so the scheduler has to roll back the budget and encoder-cache reservations it made for that victim:" data-zh="當 <code class=&quot;inline-code&quot;>allocate_slots()</code> 對執行中的請求回傳 <code class=&quot;inline-code&quot;>None</code> 時，排程器進入搶占迴圈。在 PRIORITY 排程下，被搶占的受害者可能已在<em>本步</em>獲得排程，因此排程器必須還原為其保留的 token 預算與編碼器快取：">When <code class="inline-code">allocate_slots()</code> returns <code class="inline-code">None</code> for a running request, the scheduler enters a preemption loop. Under PRIORITY scheduling the victim may already have been scheduled <em>this</em> step, so the scheduler has to roll back the budget and encoder-cache reservations it made for that victim:</span></p>
 
 <pre>
-<span class="cm"># scheduler.py lines 455-499</span>
+<span class="cm"># scheduler.py lines 462-506 -- Full preemption loop with priority rollback</span>
 <span class="kw">while</span> <span class="kw">True</span>:
     new_blocks = <span class="va">self</span>.kv_cache_manager.<span class="fn">allocate_slots</span>(
         request, num_new_tokens,
@@ -1169,23 +1381,45 @@ max_num_blocks = max_length // block_size
     <span class="kw">if</span> new_blocks <span class="kw">is not None</span>:
         <span class="kw">break</span>   <span class="cm"># Success!</span>
 
-    <span class="cm"># OOM: preempt the lowest-priority request</span>
+    <span class="cm"># ---- OOM PATH ----</span>
     <span class="kw">if</span> <span class="va">self</span>.policy == SchedulingPolicy.PRIORITY:
+        <span class="cm"># Victim = highest (priority, arrival_time) currently running.</span>
         preempted_req = <span class="fn">max</span>(
             <span class="va">self</span>.running,
             key=<span class="kw">lambda</span> r: (r.priority, r.arrival_time),
         )
         <span class="va">self</span>.running.<span class="fn">remove</span>(preempted_req)
+
+        <span class="cm"># If that victim was already scheduled earlier in THIS step,</span>
+        <span class="cm"># roll back the reservations it made so token_budget and the</span>
+        <span class="cm"># encoder compute budget reflect reality.</span>
+        <span class="kw">if</span> preempted_req <span class="kw">in</span> scheduled_running_reqs:
+            pid = preempted_req.request_id
+            scheduled_running_reqs.<span class="fn">remove</span>(preempted_req)
+            token_budget += num_scheduled_tokens.<span class="fn">pop</span>(pid)
+            req_to_new_blocks.<span class="fn">pop</span>(pid)
+            scheduled_spec_decode_tokens.<span class="fn">pop</span>(pid, <span class="kw">None</span>)
+            preempted_enc = scheduled_encoder_inputs.<span class="fn">pop</span>(pid, <span class="kw">None</span>)
+            <span class="kw">if</span> preempted_enc:
+                encoder_compute_budget += <span class="fn">sum</span>(
+                    preempted_req.<span class="fn">get_num_encoder_embeds</span>(i)
+                    <span class="kw">for</span> i <span class="kw">in</span> preempted_enc
+                )
+            req_index -= <span class="nu">1</span>   <span class="cm"># Iterator stepped back since we deleted ahead of it</span>
     <span class="kw">else</span>:
-        <span class="cm"># FCFS: pop from the TAIL (LIFO -- last admitted is first evicted)</span>
+        <span class="cm"># FCFS: pop tail (LIFO -- youngest in running is evicted first).</span>
         preempted_req = <span class="va">self</span>.running.<span class="fn">pop</span>()
 
     <span class="va">self</span>.<span class="fn">_preempt_request</span>(preempted_req, scheduled_timestamp)
     preempted_reqs.<span class="fn">append</span>(preempted_req)
     <span class="kw">if</span> preempted_req == request:
-        <span class="cm"># We preempted ourselves -- give up</span>
+        <span class="cm"># We preempted ourselves -- nothing more to free; give up.</span>
         <span class="kw">break</span>
 </pre>
+
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Why the iterator rewind?" data-zh="為何要後退迭代指標？">Why the iterator rewind?</span></strong> <span class="i18n" data-en="In PRIORITY mode the victim may be a running request with a smaller <code class=&quot;inline-code&quot;>req_index</code> than the one we're trying to schedule. Removing it shrinks <code class=&quot;inline-code&quot;>self.running</code>, so all later indices shift left by one. <code class=&quot;inline-code&quot;>req_index -= 1</code> keeps the <code class=&quot;inline-code&quot;>while</code> loop pointing at the right next candidate." data-zh="在 PRIORITY 模式下受害者可能是比我們正嘗試排程的請求具有更小 <code class=&quot;inline-code&quot;>req_index</code> 的執行中請求。移除它會使 <code class=&quot;inline-code&quot;>self.running</code> 縮小，所有後續索引左移一位。<code class=&quot;inline-code&quot;>req_index -= 1</code> 讓 <code class=&quot;inline-code&quot;>while</code> 迴圈仍指向正確的下個候選。">In PRIORITY mode the victim may be a running request with a smaller <code class="inline-code">req_index</code> than the one we're trying to schedule. Removing it shrinks <code class="inline-code">self.running</code>, so all later indices shift left by one. <code class="inline-code">req_index -= 1</code> keeps the <code class="inline-code">while</code> loop pointing at the right next candidate.</span>
+  </div>
 
   <div class="callout red">
     <strong><span class="i18n" data-en="No swapping in V1:" data-zh="V1 不支援交換：">No swapping in V1:</span></strong> <span class="i18n" data-en="Unlike vLLM V0 which supported CPU swap space, V1 exclusively uses recomputation. Preempted requests go back to the waiting queue and must recompute from token 0 (though prefix caching may recover much of the computation on the next admission)." data-zh="與支援 CPU 交換空間的 vLLM V0 不同，V1 完全使用重新計算。被搶占的請求回到等待佇列，必須從 token 0 開始重新計算（儘管前綴快取可能在下次准入時恢復大部分計算）。">Unlike vLLM V0 which supported CPU swap space, V1 exclusively uses recomputation. Preempted requests go back to the waiting queue and must recompute from token 0 (though prefix caching may recover much of the computation on the next admission).</span>
@@ -1200,6 +1434,72 @@ max_num_blocks = max_length // block_size
     <tr><td>num_computed_tokens</td><td><span class="i18n" data-en="Preserved if swapped" data-zh="若交換則保留">Preserved if swapped</span></td><td><span class="i18n" data-en="Reset to 0" data-zh="重設為 0">Reset to 0</span></td></tr>
   </table>
   </div>
+</div>
+
+<!-- ==================== NEW: SPEC DECODE + UPDATE_FROM_OUTPUT ==================== -->
+<div class="section" id="spec-decode-update">
+  <span class="section-label">Section 7.5</span>
+  <h2><span class="i18n" data-en="Speculative Decoding &amp; update_from_output()" data-zh="投機解碼與 update_from_output()">Speculative Decoding &amp; update_from_output()</span></h2>
+
+  <p><span class="i18n" data-en="Speculative decoding asks a cheap draft model (or EAGLE head) to propose <code class=&quot;inline-code&quot;>num_spec_tokens</code> future tokens, then the target model verifies them in one forward pass. The scheduler's job is to (a) make room for draft tokens during <code class=&quot;inline-code&quot;>schedule()</code> and (b) claw back the <code class=&quot;inline-code&quot;>num_computed_tokens</code> it optimistically advanced when drafts are rejected." data-zh="投機解碼讓廉價的草稿模型（或 EAGLE head）預測 <code class=&quot;inline-code&quot;>num_spec_tokens</code> 個未來 token，目標模型再以一次前向驗證它們。排程器的職責是：(a) 在 <code class=&quot;inline-code&quot;>schedule()</code> 中為草稿 token 預留空間，及 (b) 當草稿被拒絕時回滾之前樂觀推進的 <code class=&quot;inline-code&quot;>num_computed_tokens</code>。">Speculative decoding asks a cheap draft model (or EAGLE head) to propose <code class="inline-code">num_spec_tokens</code> future tokens, then the target model verifies them in one forward pass. The scheduler's job is to (a) make room for draft tokens during <code class="inline-code">schedule()</code> and (b) claw back the <code class="inline-code">num_computed_tokens</code> it optimistically advanced when drafts are rejected.</span></p>
+
+  <h3><span class="i18n" data-en="Packing Spec Tokens at Schedule Time" data-zh="排程時打包 Spec Token">Packing Spec Tokens at Schedule Time</span></h3>
+<pre>
+<span class="cm"># scheduler.py lines 520-536 -- Spec decode packing inside RUNNING loop</span>
+<span class="kw">if</span> request.spec_token_ids:
+    <span class="cm"># How many of the drafts actually got a slot this step?</span>
+    num_scheduled_spec_tokens = (
+        num_new_tokens
+        + request.num_computed_tokens
+        - request.num_tokens
+        - request.num_output_placeholders
+    )
+    <span class="kw">if</span> num_scheduled_spec_tokens > <span class="nu">0</span>:
+        spec_token_ids = request.spec_token_ids
+        <span class="kw">if</span> <span class="fn">len</span>(spec_token_ids) > num_scheduled_spec_tokens:
+            <span class="cm"># Token budget capped us below num_spec_tokens -- trim trailing drafts.</span>
+            spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+        scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+
+    <span class="cm"># Drafts are consumed; update_draft_token_ids() will attach fresh ones.</span>
+    request.spec_token_ids = []
+</pre>
+
+  <h3><span class="i18n" data-en="Rejection Clawback in update_from_output()" data-zh="update_from_output() 中的拒絕回補">Rejection Clawback in update_from_output()</span></h3>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>update_from_output()</code> runs after the model has sampled. The number of generated tokens minus 1 tells us how many drafts were accepted; the rest were rejected and must be re-scheduled next step:" data-zh="<code class=&quot;inline-code&quot;>update_from_output()</code> 在模型抽樣完成後執行。產生的 token 數減 1 告訴我們有多少草稿被接受；其餘被拒絕的必須在下一步重新排程："><code class="inline-code">update_from_output()</code> runs after the model has sampled. The number of generated tokens minus 1 tells us how many drafts were accepted; the rest were rejected and must be re-scheduled next step:</span></p>
+
+<pre>
+<span class="cm"># scheduler.py lines 1366-1390 -- spec decode accept / reject accounting</span>
+scheduled_spec_token_ids = (
+    scheduler_output.scheduled_spec_decode_tokens.<span class="fn">get</span>(req_id)
+)
+<span class="kw">if</span> scheduled_spec_token_ids <span class="kw">and</span> generated_token_ids:
+    num_draft_tokens = <span class="fn">len</span>(scheduled_spec_token_ids)
+    <span class="cm"># The last sampled token is "original" (the verification output of the final draft).</span>
+    num_accepted = <span class="fn">len</span>(generated_token_ids) - <span class="nu">1</span>
+    num_rejected = num_draft_tokens - num_accepted
+
+    <span class="cm"># Roll back the optimistic advance that _update_after_schedule() applied.</span>
+    <span class="kw">if</span> request.num_computed_tokens > <span class="nu">0</span>:
+        request.num_computed_tokens -= num_rejected
+    <span class="kw">if</span> request.num_output_placeholders > <span class="nu">0</span>:
+        request.num_output_placeholders -= num_rejected
+
+    spec_decoding_stats = <span class="va">self</span>.<span class="fn">make_spec_decoding_stats</span>(
+        spec_decoding_stats,
+        num_draft_tokens=num_draft_tokens,
+        num_accepted_tokens=num_accepted,
+        num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+        request_id=req_id,
+    )
+</pre>
+
+  <div class="callout green">
+    <strong><span class="i18n" data-en="Two counters in sync:" data-zh="兩個計數器同步：">Two counters in sync:</span></strong> <span class="i18n" data-en="<code class=&quot;inline-code&quot;>num_computed_tokens</code> and <code class=&quot;inline-code&quot;>num_output_placeholders</code> are both decremented. In async scheduling the placeholders are what kept a slot reserved for the spec tokens; stripping them here means the next <code class=&quot;inline-code&quot;>schedule()</code> call won't mistakenly believe the request has already produced those outputs." data-zh="<code class=&quot;inline-code&quot;>num_computed_tokens</code> 與 <code class=&quot;inline-code&quot;>num_output_placeholders</code> 同步遞減。在非同步排程中，placeholder 是為 spec token 保留槽位的依據；此處扣除後，下次 <code class=&quot;inline-code&quot;>schedule()</code> 不會誤以為該請求已產出這些輸出。"><code class="inline-code">num_computed_tokens</code> and <code class="inline-code">num_output_placeholders</code> are both decremented. In async scheduling the placeholders are what kept a slot reserved for the spec tokens; stripping them here means the next <code class="inline-code">schedule()</code> call won't mistakenly believe the request has already produced those outputs.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="Attaching Fresh Drafts for the Next Step" data-zh="為下一步附加新的草稿">Attaching Fresh Drafts for the Next Step</span></h3>
+  <p><span class="i18n" data-en="After the target model samples, the proposer produces a new batch of drafts. <code class=&quot;inline-code&quot;>update_draft_token_ids()</code> (lines 1669-1689) filters drafts against the structured-output grammar (if any) and attaches them to <code class=&quot;inline-code&quot;>request.spec_token_ids</code> so the next <code class=&quot;inline-code&quot;>schedule()</code> pass will pick them up." data-zh="目標模型抽樣後，proposer 產生新一批草稿。<code class=&quot;inline-code&quot;>update_draft_token_ids()</code>（第 1669-1689 行）依結構化輸出語法（若有）過濾草稿並附加到 <code class=&quot;inline-code&quot;>request.spec_token_ids</code>，好讓下次 <code class=&quot;inline-code&quot;>schedule()</code> 取用。">After the target model samples, the proposer produces a new batch of drafts. <code class="inline-code">update_draft_token_ids()</code> (lines 1669-1689) filters drafts against the structured-output grammar (if any) and attaches them to <code class="inline-code">request.spec_token_ids</code> so the next <code class="inline-code">schedule()</code> pass will pick them up.</span></p>
 </div>
 
 <!-- ==================== SECTION 8: SCHEDULER OUTPUT ==================== -->
@@ -1249,7 +1549,7 @@ max_num_blocks = max_length // block_size
 
   <h3><span class="i18n" data-en="Construction Logic" data-zh="建構邏輯">Construction Logic</span></h3>
 <pre>
-<span class="cm"># scheduler.py lines 907-923 -- Final assembly</span>
+<span class="cm"># scheduler.py lines 914-930 -- Final assembly</span>
 scheduler_output = <span class="nb">SchedulerOutput</span>(
     scheduled_new_reqs=new_reqs_data,
     scheduled_cached_reqs=cached_reqs_data,
@@ -1266,19 +1566,37 @@ scheduler_output = <span class="nb">SchedulerOutput</span>(
 </pre>
 
   <h3><span class="i18n" data-en="CachedRequestData Construction" data-zh="CachedRequestData 建構">CachedRequestData Construction</span></h3>
-  <p><span class="i18n" data-en="The <code class=&quot;inline-code&quot;>_make_cached_request_data()</code> method efficiently packs only the diff:" data-zh="<code class=&quot;inline-code&quot;>_make_cached_request_data()</code> 方法高效地僅打包差異：">The <code class="inline-code">_make_cached_request_data()</code> method efficiently packs only the diff:</span></p>
+  <p><span class="i18n" data-en="The <code class=&quot;inline-code&quot;>_make_cached_request_data()</code> method (scheduler.py lines 1055-1113) efficiently packs only the diff. There are three subtle tricks:" data-zh="<code class=&quot;inline-code&quot;>_make_cached_request_data()</code>（scheduler.py 第 1055-1113 行）高效地僅打包差異。其中有三個細微技巧：">The <code class="inline-code">_make_cached_request_data()</code> method (scheduler.py lines 1055-1113) efficiently packs only the diff. There are three subtle tricks:</span></p>
 
 <pre>
-<span class="cm"># scheduler.py -- _make_cached_request_data()</span>
+<span class="cm"># scheduler.py lines 1072-1103 -- _make_cached_request_data() core loop</span>
 <span class="kw">for</span> idx, req <span class="kw">in</span> <span class="fn">enumerate</span>(itertools.<span class="fn">chain</span>(running_reqs, resumed_reqs)):
     req_id = req.request_id
     req_ids.<span class="fn">append</span>(req_id)
 
+    <span class="cm"># TRICK 1: In PP (pipeline parallelism) without async scheduling,</span>
+    <span class="cm"># sampled tokens have to travel scheduler -> first-stage worker,</span>
+    <span class="cm"># so we ship just the chunk being fed this step (excluding drafts).</span>
+    <span class="kw">if</span> <span class="va">self</span>.use_pp <span class="kw">and not</span> <span class="va">self</span>.scheduler_config.async_scheduling:
+        num_tokens = num_scheduled_tokens[req_id] - <span class="fn">len</span>(
+            spec_decode_tokens.<span class="fn">get</span>(req_id, ())
+        )
+        token_ids = req.all_token_ids[
+            req.num_computed_tokens : req.num_computed_tokens + num_tokens
+        ]
+        new_token_ids.<span class="fn">append</span>(token_ids)
+
+    <span class="cm"># TRICK 2: Distinguish "new in running list" vs "previously scheduled".</span>
     scheduled_in_prev_step = req_id <span class="kw">in</span> <span class="va">self</span>.prev_step_scheduled_req_ids
     <span class="kw">if</span> idx >= num_running_reqs:
-        resumed_req_ids.<span class="fn">add</span>(req_id)  <span class="cm"># This is a resumed (preempted) request</span>
+        <span class="kw">assert not</span> scheduled_in_prev_step
+        resumed_req_ids.<span class="fn">add</span>(req_id)   <span class="cm"># This is a resumed (preempted) request</span>
+
+    <span class="cm"># TRICK 3: Only ship full all_token_ids for entries worker doesn't have.</span>
+    <span class="cm"># Running continuations that were in prev_step_scheduled_req_ids get</span>
+    <span class="cm"># only block-id + num_computed_tokens on the wire.</span>
     <span class="kw">if not</span> scheduled_in_prev_step:
-        all_token_ids[req_id] = req.all_token_ids.<span class="fn">copy</span>()  <span class="cm"># Full token IDs for new entries</span>
+        all_token_ids[req_id] = req.all_token_ids.<span class="fn">copy</span>()
 
     new_block_ids.<span class="fn">append</span>(
         req_to_new_blocks[req_id].<span class="fn">get_block_ids</span>(allow_none=<span class="kw">True</span>)
@@ -1288,7 +1606,36 @@ scheduler_output = <span class="nb">SchedulerOutput</span>(
 </pre>
 
   <div class="callout green">
-    <strong><span class="i18n" data-en="IPC optimization:" data-zh="IPC 最佳化：">IPC optimization:</span></strong> <span class="i18n" data-en="For requests that were scheduled in the previous step and have no new token IDs to propagate, the <code class=&quot;inline-code&quot;>all_token_ids</code> field is omitted. The worker already has these tokens cached. Only <code class=&quot;inline-code&quot;>new_block_ids</code> and updated <code class=&quot;inline-code&quot;>num_computed_tokens</code> are sent." data-zh="對於在上一步已排程且沒有新 token ID 需要傳播的請求，<code class=&quot;inline-code&quot;>all_token_ids</code> 欄位會被省略。工作程序已快取這些 token。僅傳送 <code class=&quot;inline-code&quot;>new_block_ids</code> 和更新後的 <code class=&quot;inline-code&quot;>num_computed_tokens</code>。">For requests that were scheduled in the previous step and have no new token IDs to propagate, the <code class="inline-code">all_token_ids</code> field is omitted. The worker already has these tokens cached. Only <code class="inline-code">new_block_ids</code> and updated <code class="inline-code">num_computed_tokens</code> are sent.</span>
+    <strong><span class="i18n" data-en="IPC optimization:" data-zh="IPC 最佳化：">IPC optimization:</span></strong> <span class="i18n" data-en="For a continuation already seen in the previous step, only <code class=&quot;inline-code&quot;>new_block_ids</code> (new blocks appended this step) plus <code class=&quot;inline-code&quot;>num_computed_tokens</code> cross the process boundary. The worker already has prompt + earlier output tokens cached in its input batch. Resumed (preempted &rarr; re-admitted) requests go to <code class=&quot;inline-code&quot;>resumed_req_ids</code> so the worker replaces its block table rather than appending to it." data-zh="對於上一步已存在的延續請求，跨行程邊界傳輸的只有 <code class=&quot;inline-code&quot;>new_block_ids</code>（本步新增區塊）與 <code class=&quot;inline-code&quot;>num_computed_tokens</code>。工作程序的 input batch 中已快取 prompt 與先前輸出 token。恢復（被搶占 &rarr; 再次准入）的請求會進入 <code class=&quot;inline-code&quot;>resumed_req_ids</code>，這樣工作程序會<em>替換</em>區塊表而非附加。">For a continuation already seen in the previous step, only <code class="inline-code">new_block_ids</code> (new blocks appended this step) plus <code class="inline-code">num_computed_tokens</code> cross the process boundary. The worker already has prompt + earlier output tokens cached in its input batch. Resumed (preempted &rarr; re-admitted) requests go to <code class="inline-code">resumed_req_ids</code> so the worker replaces its block table rather than appending to it.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="_update_after_schedule() -- Bookkeeping Before Return" data-zh="_update_after_schedule()——回傳前的記帳">_update_after_schedule() -- Bookkeeping Before Return</span></h3>
+  <p><span class="i18n" data-en="After the output is built but before <code class=&quot;inline-code&quot;>schedule()</code> returns, <code class=&quot;inline-code&quot;>_update_after_schedule()</code> advances <code class=&quot;inline-code&quot;>num_computed_tokens</code> for every scheduled request. Doing it <strong>after</strong> building the output preserves the original token counts used to compute input indices; doing it <strong>before</strong> the model has actually run lets the <em>next</em> <code class=&quot;inline-code&quot;>schedule()</code> call treat this chunk as already computed -- vital for multi-step chunked prefill." data-zh="在輸出建構完成後、<code class=&quot;inline-code&quot;>schedule()</code> 回傳前，<code class=&quot;inline-code&quot;>_update_after_schedule()</code> 會推進所有已排程請求的 <code class=&quot;inline-code&quot;>num_computed_tokens</code>。放在輸出建構<strong>之後</strong>保留了計算輸入索引所需的原始 token 數；放在模型<strong>實際執行前</strong>則讓下次 <code class=&quot;inline-code&quot;>schedule()</code> 呼叫把本塊視為已計算——這對多步分塊預填充至關重要。">After the output is built but before <code class="inline-code">schedule()</code> returns, <code class="inline-code">_update_after_schedule()</code> advances <code class="inline-code">num_computed_tokens</code> for every scheduled request. Doing it <strong>after</strong> building the output preserves the original token counts used to compute input indices; doing it <strong>before</strong> the model has actually run lets the <em>next</em> <code class="inline-code">schedule()</code> call treat this chunk as already computed -- vital for multi-step chunked prefill.</span></p>
+
+<pre>
+<span class="cm"># scheduler.py lines 978-1010 -- _update_after_schedule()</span>
+<span class="kw">def</span> <span class="fn">_update_after_schedule</span>(<span class="va">self</span>, scheduler_output: SchedulerOutput) -> <span class="kw">None</span>:
+    num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+    <span class="kw">for</span> req_id, num_scheduled_token <span class="kw">in</span> num_scheduled_tokens.<span class="fn">items</span>():
+        request = <span class="va">self</span>.requests[req_id]
+        request.num_computed_tokens += num_scheduled_token
+        <span class="cm"># Recompute is_prefill_chunk: are we still in the prefill regime?</span>
+        request.is_prefill_chunk = request.num_computed_tokens < (
+            request.num_tokens + request.num_output_placeholders
+        )
+        <span class="cm"># Flag is forwarded so the worker can gate structured-output logits work.</span>
+        scheduler_output.has_structured_output_requests |= (
+            request.use_structured_output <span class="kw">and not</span> request.is_prefill_chunk
+        )
+        <span class="kw">if</span> request.has_encoder_inputs:
+            <span class="va">self</span>.<span class="fn">_free_encoder_inputs</span>(request)
+
+    <span class="cm"># NOTE: Don't .clear() -- the SchedulerOutput still holds the set object.</span>
+    <span class="va">self</span>.finished_req_ids = <span class="fn">set</span>()
+</pre>
+
+  <div class="callout">
+    <strong><span class="i18n" data-en="Rejection clawback:" data-zh="拒絕回補：">Rejection clawback:</span></strong> <span class="i18n" data-en="If some of the advance here came from speculative draft tokens, those tokens may be rejected downstream. In that case <code class=&quot;inline-code&quot;>update_from_output()</code> (lines 1369-1383) subtracts the rejected count from <code class=&quot;inline-code&quot;>num_computed_tokens</code> so the next step re-schedules them." data-zh="若此處推進的部份來自投機草稿 token，這些 token 可能在下游被拒絕。此時 <code class=&quot;inline-code&quot;>update_from_output()</code>（第 1369-1383 行）會從 <code class=&quot;inline-code&quot;>num_computed_tokens</code> 中減去被拒絕的數量，使下一步重新排程它們。">If some of the advance here came from speculative draft tokens, those tokens may be rejected downstream. In that case <code class="inline-code">update_from_output()</code> (lines 1369-1383) subtracts the rejected count from <code class="inline-code">num_computed_tokens</code> so the next step re-schedules them.</span>
   </div>
 </div>
 
@@ -1382,37 +1729,107 @@ scheduler_output = <span class="nb">SchedulerOutput</span>(
 <span class="cm"># lookahead = num_lookahead_tokens (for spec decode)</span>
 </pre>
 
-  <p><span class="i18n" data-en="The allocation has three phases:" data-zh="分配有三個階段：">The allocation has three phases:</span></p>
+  <h3><span class="i18n" data-en="Signature" data-zh="函式簽名">Signature</span></h3>
+<pre>
+<span class="cm"># kv_cache_manager.py lines 257-267 -- full allocate_slots signature</span>
+<span class="kw">def</span> <span class="fn">allocate_slots</span>(
+    <span class="va">self</span>,
+    request: <span class="nb">Request</span>,
+    num_new_tokens: <span class="nb">int</span>,
+    num_new_computed_tokens: <span class="nb">int</span> = <span class="nu">0</span>,            <span class="cm"># local prefix cache hits</span>
+    new_computed_blocks: <span class="nb">KVCacheBlocks</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+    num_lookahead_tokens: <span class="nb">int</span> = <span class="nu">0</span>,               <span class="cm"># spec decode drafts</span>
+    num_external_computed_tokens: <span class="nb">int</span> = <span class="nu">0</span>,      <span class="cm"># P/D connector hits</span>
+    delay_cache_blocks: <span class="nb">bool</span> = <span class="kw">False</span>,             <span class="cm"># async KV load path</span>
+    num_encoder_tokens: <span class="nb">int</span> = <span class="nu">0</span>,                <span class="cm"># cross-attn (Whisper etc.)</span>
+) -> <span class="nb">KVCacheBlocks</span> | <span class="kw">None</span>:
+</pre>
+
+  <p><span class="i18n" data-en="The allocation has three phases. The key invariants: (a) no new request state is mutated until we've proven allocation will succeed, and (b) blocks are cached <em>after</em> allocation so the hash table never holds dangling references." data-zh="分配有三個階段。關鍵不變式：(a) 在證明分配能成功前，不修改任何新的請求狀態；(b) 區塊在分配<em>之後</em>才進入快取，以免雜湊表出現懸空引用。">The allocation has three phases. The key invariants: (a) no new request state is mutated until we've proven allocation will succeed, and (b) blocks are cached <em>after</em> allocation so the hash table never holds dangling references.</span></p>
 
   <div class="card">
-    <h4><span class="i18n" data-en="Phase 1: Clean Up Skipped Blocks" data-zh="階段 1：清理跳過的區塊">Phase 1: Clean Up Skipped Blocks</span></h4>
-    <p><span class="i18n" data-en="Remove blocks outside the sliding window. This frees memory before allocation begins:" data-zh="移除滑動視窗外的區塊。這在分配開始前釋放記憶體：">Remove blocks outside the sliding window. This frees memory before allocation begins:</span></p>
+    <h4><span class="i18n" data-en="Phase 1: Compute Capacity Need + Prune" data-zh="階段 1：計算容量需求 + 裁剪">Phase 1: Compute Capacity Need + Prune</span></h4>
+    <p><span class="i18n" data-en="Calculate the total slot count (<code class=&quot;inline-code&quot;>comp + new_comp + ext_comp + new + lookahead</code>), clipped to <code class=&quot;inline-code&quot;>max_model_len</code>. First prune blocks outside the sliding window (they can be freed even if we abort later)." data-zh="計算總槽位數（<code class=&quot;inline-code&quot;>comp + new_comp + ext_comp + new + lookahead</code>），上限為 <code class=&quot;inline-code&quot;>max_model_len</code>。先裁剪滑動視窗外的區塊（即使稍後中止也可釋放）。">Calculate the total slot count (<code class="inline-code">comp + new_comp + ext_comp + new + lookahead</code>), clipped to <code class="inline-code">max_model_len</code>. First prune blocks outside the sliding window (they can be freed even if we abort later).</span></p>
 <pre>
+<span class="cm"># kv_cache_manager.py lines 352-385 -- Phase 1 details</span>
+num_local_computed_tokens = (
+    request.num_computed_tokens + num_new_computed_tokens
+)
+total_computed_tokens = <span class="fn">min</span>(
+    num_local_computed_tokens + num_external_computed_tokens,
+    <span class="va">self</span>.max_model_len,
+)
+num_tokens_main_model = total_computed_tokens + num_new_tokens
+num_tokens_need_slot = <span class="fn">min</span>(
+    num_tokens_main_model + num_lookahead_tokens,
+    <span class="va">self</span>.max_model_len,
+)
+
+<span class="cm"># Sliding-window cleanup BEFORE checking capacity, which may reduce</span>
+<span class="cm"># num_blocks_to_allocate and save us from a spurious OOM.</span>
 <span class="va">self</span>.coordinator.<span class="fn">remove_skipped_blocks</span>(
     request.request_id, total_computed_tokens
+)
+
+num_blocks_to_allocate = <span class="va">self</span>.coordinator.<span class="fn">get_num_blocks_to_allocate</span>(
+    request_id=request.request_id,
+    num_tokens=num_tokens_need_slot,
+    new_computed_blocks=new_computed_block_list,
+    num_encoder_tokens=num_encoder_tokens,
+    total_computed_tokens=num_local_computed_tokens + num_external_computed_tokens,
+    num_tokens_main_model=num_tokens_main_model,
 )
 </pre>
   </div>
 
   <div class="card">
-    <h4><span class="i18n" data-en="Phase 2: Check Free Capacity" data-zh="階段 2：檢查空閒容量">Phase 2: Check Free Capacity</span></h4>
-    <p><span class="i18n" data-en="Calculate how many new blocks are needed and compare against free pool:" data-zh="計算需要多少新區塊並與空閒池比較：">Calculate how many new blocks are needed and compare against free pool:</span></p>
+    <h4><span class="i18n" data-en="Phase 2: Capacity Check (Return None &rarr; Preempt)" data-zh="階段 2：容量檢查（回傳 None &rarr; 觸發搶占）">Phase 2: Capacity Check (Return None &rarr; Preempt)</span></h4>
+    <p><span class="i18n" data-en="If the required block count exceeds what the pool can serve, return <code class=&quot;inline-code&quot;>None</code> so the scheduler knows to preempt a victim and retry:" data-zh="若所需區塊數超過池能提供的，回傳 <code class=&quot;inline-code&quot;>None</code> 讓排程器知道要搶占並重試：">If the required block count exceeds what the pool can serve, return <code class="inline-code">None</code> so the scheduler knows to preempt a victim and retry:</span></p>
 <pre>
-num_blocks_to_allocate = <span class="va">self</span>.coordinator.<span class="fn">get_num_blocks_to_allocate</span>(...)
+<span class="cm"># kv_cache_manager.py lines 387-389</span>
 <span class="kw">if</span> num_blocks_to_allocate > <span class="va">self</span>.block_pool.<span class="fn">get_num_free_blocks</span>():
-    <span class="kw">return</span> <span class="kw">None</span>  <span class="cm"># OOM -- caller must preempt</span>
+    <span class="kw">return</span> <span class="kw">None</span>   <span class="cm"># OOM -- caller preempts and retries</span>
 </pre>
   </div>
 
   <div class="card">
-    <h4><span class="i18n" data-en="Phase 3: Allocate &amp; Cache" data-zh="階段 3：分配與快取">Phase 3: Allocate &amp; Cache</span></h4>
-    <p><span class="i18n" data-en="Add computed blocks (touching them to prevent eviction), then allocate fresh blocks for new tokens. Finally, cache completed blocks by setting their hashes:" data-zh="添加已計算的區塊（觸碰它們以防止被淘汰），然後為新 token 分配新區塊。最後透過設定雜湊來快取已完成的區塊：">Add computed blocks (touching them to prevent eviction), then allocate fresh blocks
-       for new tokens. Finally, cache completed blocks by setting their hashes:</span></p>
+    <h4><span class="i18n" data-en="Phase 3: Attach Computed Blocks, Allocate Fresh, Cache" data-zh="階段 3：掛入已計算區塊、分配新區塊、加入快取">Phase 3: Attach Computed Blocks, Allocate Fresh, Cache</span></h4>
+    <p><span class="i18n" data-en="First attach any prefix-cache hits (touch raises their <code class=&quot;inline-code&quot;>ref_cnt</code> and removes them from the free queue). Then pull fresh blocks from the pool. Finally commit hashes for any newly-full blocks:" data-zh="先掛入前綴快取命中的區塊（touch 會提升其 <code class=&quot;inline-code&quot;>ref_cnt</code> 並自空閒佇列移除）。接著從池中取得新區塊。最後為新填滿的區塊寫入雜湊：">First attach any prefix-cache hits (touch raises their <code class="inline-code">ref_cnt</code> and removes them from the free queue). Then pull fresh blocks from the pool. Finally commit hashes for any newly-full blocks:</span></p>
 <pre>
-<span class="va">self</span>.coordinator.<span class="fn">allocate_new_computed_blocks</span>(...)   <span class="cm"># Touch + extend</span>
-new_blocks = <span class="va">self</span>.coordinator.<span class="fn">allocate_new_blocks</span>(...) <span class="cm"># Fresh blocks from pool</span>
-<span class="va">self</span>.coordinator.<span class="fn">cache_blocks</span>(request, num_tokens_to_cache)  <span class="cm"># Set hashes</span>
+<span class="cm"># kv_cache_manager.py lines 391-425 -- Phase 3 details</span>
+<span class="kw">if</span> (new_computed_block_list <span class="kw">is not</span> <span class="va">self</span>.empty_kv_cache_blocks.blocks
+        <span class="kw">or</span> num_external_computed_tokens > <span class="nu">0</span>):
+    <span class="cm"># Attach cache hits and externally-loaded slots; also touches blocks.</span>
+    <span class="va">self</span>.coordinator.<span class="fn">allocate_new_computed_blocks</span>(
+        request_id=request.request_id,
+        new_computed_blocks=new_computed_block_list,
+        num_local_computed_tokens=num_local_computed_tokens,
+        num_external_computed_tokens=num_external_computed_tokens,
+    )
+
+new_blocks = <span class="va">self</span>.coordinator.<span class="fn">allocate_new_blocks</span>(
+    request.request_id,
+    num_tokens_need_slot,
+    num_tokens_main_model,
+    num_encoder_tokens,
+)
+
+<span class="cm"># P/D: async KV load defers caching until the transfer finishes.</span>
+<span class="kw">if not</span> <span class="va">self</span>.enable_caching <span class="kw">or</span> delay_cache_blocks:
+    <span class="kw">return</span> <span class="va">self</span>.<span class="fn">create_kv_cache_blocks</span>(new_blocks)
+
+<span class="cm"># Cap cache commit at request.num_tokens to exclude unverified drafts.</span>
+num_tokens_to_cache = <span class="fn">min</span>(
+    total_computed_tokens + num_new_tokens,
+    request.num_tokens,
+)
+<span class="va">self</span>.coordinator.<span class="fn">cache_blocks</span>(request, num_tokens_to_cache)
+<span class="kw">return</span> <span class="va">self</span>.<span class="fn">create_kv_cache_blocks</span>(new_blocks)
 </pre>
+  </div>
+
+  <div class="callout">
+    <strong><span class="i18n" data-en="Draft tokens are never cached:" data-zh="草稿 token 永不寫入快取：">Draft tokens are never cached:</span></strong> <span class="i18n" data-en="The <code class=&quot;inline-code&quot;>min(total_computed + num_new, request.num_tokens)</code> cap is the reason speculative decoding doesn't pollute the prefix cache. <code class=&quot;inline-code&quot;>request.num_tokens</code> is the verified-tokens count, so draft tokens beyond it live in blocks but carry no hash until acceptance." data-zh="<code class=&quot;inline-code&quot;>min(total_computed + num_new, request.num_tokens)</code> 上限正是投機解碼不污染前綴快取的原因。<code class=&quot;inline-code&quot;>request.num_tokens</code> 是已驗證 token 數，草稿 token 雖占區塊，但在被接受前沒有雜湊。">The <code class="inline-code">min(total_computed + num_new, request.num_tokens)</code> cap is the reason speculative decoding doesn't pollute the prefix cache. <code class="inline-code">request.num_tokens</code> is the verified-tokens count, so draft tokens beyond it live in blocks but carry no hash until acceptance.</span>
   </div>
 </div>
 
@@ -1539,10 +1956,12 @@ new_blocks = <span class="va">self</span>.coordinator.<span class="fn">allocate_
 
 <!-- ==================== FOOTER ==================== -->
 <footer>
-  <p><span class="i18n" data-en="Deep dive generated from vLLM source code" data-zh="深入分析生成自 vLLM 原始碼">Deep dive generated from vLLM source code</span> &middot;
-     <a href="https://github.com/vllm-project/vllm">vllm-project/vllm</a> &middot;
-     <span class="i18n" data-en="Files:" data-zh="檔案：">Files:</span> <code>vllm/v1/core/sched/scheduler.py</code>, <code>kv_cache_manager.py</code>,
-     <code>kv_cache_coordinator.py</code>, <code>block_pool.py</code>, <code>kv_cache_utils.py</code></p>
+  <p><span class="i18n" data-en="Deep dive generated from vLLM v0.19.x source" data-zh="深入分析生成自 vLLM v0.19.x 原始碼">Deep dive generated from vLLM v0.19.x source</span> &middot;
+     <a href="https://github.com/hungchun0201/Agentic_KVCache_management">hungchun0201/Agentic_KVCache_management</a> (<span class="i18n" data-en="fork" data-zh="分支">fork</span>) &middot;
+     <a href="https://github.com/vllm-project/vllm">vllm-project/vllm</a> (<span class="i18n" data-en="upstream" data-zh="上游">upstream</span>)</p>
+  <p><span class="i18n" data-en="Files analyzed:" data-zh="分析的檔案：">Files analyzed:</span>
+     <code>vllm/v1/core/sched/{scheduler,request_queue,output}.py</code>,
+     <code>vllm/v1/core/{kv_cache_manager,block_pool,kv_cache_coordinator,kv_cache_utils}.py</code></p>
 </footer>
 
 <script>function setLang(l){document.querySelectorAll('.i18n').forEach(e=>{if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)};(function(){var l=localStorage.getItem('lang');if(l)setLang(l)})()</script>
