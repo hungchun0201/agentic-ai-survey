@@ -279,6 +279,88 @@ footer a{color:#6ec6ff;text-decoration:none}
     <strong><span class="i18n" data-en="Unified model:" data-zh="統一模型：">Unified model:</span></strong> <span class="i18n" data-en="A &quot;decode&quot; is just a request where <code class=&quot;inline-code&quot;>num_tokens_with_spec - num_computed_tokens == 1</code>. A &quot;prefill&quot; is any request where the gap is larger. Chunked prefill simply caps how much of that gap is scheduled in a single step." data-zh="「解碼」只是 <code class=&quot;inline-code&quot;>num_tokens_with_spec - num_computed_tokens == 1</code> 的請求。「預填充」則是差距更大的任何請求。分塊預填充僅限制單步中可排程的差距量。">A "decode" is just a request where <code class="inline-code">num_tokens_with_spec - num_computed_tokens == 1</code>. A "prefill" is any request where the gap is larger. Chunked prefill simply caps how much of that gap is scheduled in a single step.</span>
   </div>
 
+  <h3><span class="i18n" data-en="What are num_tokens_with_spec and num_computed_tokens?" data-zh="num_tokens_with_spec 與 num_computed_tokens 是什麼？">What are <code class="inline-code">num_tokens_with_spec</code> and <code class="inline-code">num_computed_tokens</code>?</span></h3>
+
+  <p><span class="i18n" data-en="These two counters on <code class=&quot;inline-code&quot;>Request</code> are the only state the scheduler cares about when deciding how much work to give a request. Everything else -- prefill vs decode, chunk size, speculative drafts -- is derived from them." data-zh="這兩個 <code class=&quot;inline-code&quot;>Request</code> 上的計數器，是排程器決定一個請求要做多少工作時唯一會關心的狀態。其他所有東西——預填充 vs 解碼、分塊大小、投機草稿——都是從它們推導出來的。">These two counters on <code class="inline-code">Request</code> are the only state the scheduler cares about when deciding how much work to give a request. Everything else -- prefill vs decode, chunk size, speculative drafts -- is derived from them.</span></p>
+
+<pre>
+<span class="cm"># vllm/v1/request.py line 135 -- num_computed_tokens is a plain attribute</span>
+<span class="va">self</span>.num_computed_tokens = <span class="nu">0</span>
+
+<span class="cm"># vllm/v1/request.py lines 226-231 -- num_tokens and num_tokens_with_spec are properties</span>
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">num_tokens</span>(<span class="va">self</span>) -> <span class="nb">int</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>._all_token_ids)            <span class="cm"># prompt + output (verified)</span>
+
+<span class="kw">@property</span>
+<span class="kw">def</span> <span class="fn">num_tokens_with_spec</span>(<span class="va">self</span>) -> <span class="nb">int</span>:
+    <span class="kw">return</span> <span class="fn">len</span>(<span class="va">self</span>._all_token_ids) + <span class="fn">len</span>(<span class="va">self</span>.spec_token_ids)
+</pre>
+
+  <div class="ds-grid">
+    <div class="ds-box highlight-orange">
+      <h5>num_tokens_with_spec</h5>
+      <p><span class="i18n" data-en="The number of token positions the request <strong>theoretically occupies</strong> right now: <code class=&quot;inline-code&quot;>prompt + verified outputs + speculative drafts</code>. Speculative drafts are included because the scheduler must reserve KV slots for them before the target model verifies them." data-zh="請求目前<strong>理論上佔用</strong>的 token 位置總數：<code class=&quot;inline-code&quot;>prompt + 已驗證輸出 + 投機草稿</code>。包含草稿是因為排程器必須在目標模型驗證前為它們保留 KV 槽位。">The number of token positions the request <strong>theoretically occupies</strong> right now: <code class="inline-code">prompt + verified outputs + speculative drafts</code>. Speculative drafts are included because the scheduler must reserve KV slots for them before the target model verifies them.</span></p>
+    </div>
+    <div class="ds-box highlight-blue">
+      <h5>num_computed_tokens</h5>
+      <p><span class="i18n" data-en="The number of positions for which the model has <strong>actually run forward</strong> and whose KV is written on GPU. Advanced by <code class=&quot;inline-code&quot;>_update_after_schedule()</code> at the end of each step; rolled back by <code class=&quot;inline-code&quot;>update_from_output()</code> when speculative drafts get rejected." data-zh="模型已<strong>實際前向計算</strong>、KV 已寫入 GPU 的位置數。由每步結尾的 <code class=&quot;inline-code&quot;>_update_after_schedule()</code> 推進；當投機草稿被拒絕時，由 <code class=&quot;inline-code&quot;>update_from_output()</code> 回滾。">The number of positions for which the model has <strong>actually run forward</strong> and whose KV is written on GPU. Advanced by <code class="inline-code">_update_after_schedule()</code> at the end of each step; rolled back by <code class="inline-code">update_from_output()</code> when speculative drafts get rejected.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="The quantity the RUNNING loop computes at line 404-408 is literally just the gap:" data-zh="RUNNING 迴圈第 404-408 行計算的量其實就是這個差距：">The quantity the RUNNING loop computes at line 404-408 is literally just the gap:</span></p>
+
+<pre>
+num_new_tokens = (
+    request.num_tokens_with_spec
+    + request.num_output_placeholders       <span class="cm"># async scheduling: placeholders for in-flight samples</span>
+    - request.num_computed_tokens
+)
+</pre>
+
+  <h3><span class="i18n" data-en="Why no prefill / decode distinction?" data-zh="為什麼不區分 prefill / decode？">Why no prefill / decode distinction?</span></h3>
+
+  <p><span class="i18n" data-en="In classic LLM serving, prefill (process the whole prompt in one big batch) and decode (sample one token at a time) are separate phases, often with separate schedulers. vLLM V1 collapses them into <em>&quot;how many positions need computing this step?&quot;</em>:" data-zh="在傳統 LLM 服務中，prefill（一次處理整個 prompt）與 decode（每次產生一個 token）是不同階段，常由各自的排程器處理。vLLM V1 把兩者收斂成<em>「這一步要計算幾個位置？」</em>：">In classic LLM serving, prefill (process the whole prompt in one big batch) and decode (sample one token at a time) are separate phases, often with separate schedulers. vLLM V1 collapses them into <em>"how many positions need computing this step?"</em>:</span></p>
+
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Classic view" data-zh="傳統視角">Classic view</span></th>
+      <th><span class="i18n" data-en="V1 view (the gap)" data-zh="V1 視角（差距）">V1 view (the gap)</span></th>
+      <th><span class="i18n" data-en="What the scheduler does" data-zh="排程器做什麼">What the scheduler does</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Prefill: run whole prompt" data-zh="Prefill：一次跑完整個 prompt">Prefill: run whole prompt</span></td>
+      <td><code class="inline-code">gap &gt;&gt; 1</code></td>
+      <td><span class="i18n" data-en="Schedule up to <code class=&quot;inline-code&quot;>min(gap, token_budget, long_prefill_threshold)</code> tokens" data-zh="排程 <code class=&quot;inline-code&quot;>min(gap, token_budget, long_prefill_threshold)</code> 個 token">Schedule up to <code class="inline-code">min(gap, token_budget, long_prefill_threshold)</code> tokens</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Decode: sample 1 new token" data-zh="Decode：產生 1 個新 token">Decode: sample 1 new token</span></td>
+      <td><code class="inline-code">gap == 1</code></td>
+      <td><span class="i18n" data-en="Schedule 1 token (consumes 1 from the same pool)" data-zh="排程 1 個 token（從同一個池消耗 1）">Schedule 1 token (consumes 1 from the same pool)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Chunked prefill" data-zh="分塊預填充">Chunked prefill</span></td>
+      <td><code class="inline-code">gap &gt;&gt; 1</code>, <span class="i18n" data-en="threshold caps chunk" data-zh="由 threshold 限制分塊大小">threshold caps chunk</span></td>
+      <td><span class="i18n" data-en="Same formula; <code class=&quot;inline-code&quot;>long_prefill_token_threshold</code> slices the gap" data-zh="同一條公式；<code class=&quot;inline-code&quot;>long_prefill_token_threshold</code> 切分差距">Same formula; <code class="inline-code">long_prefill_token_threshold</code> slices the gap</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Speculative decode" data-zh="投機解碼">Speculative decode</span></td>
+      <td><code class="inline-code">gap == 1 + num_spec</code></td>
+      <td><span class="i18n" data-en="Drafts are already in <code class=&quot;inline-code&quot;>num_tokens_with_spec</code>; no special code path" data-zh="草稿已納入 <code class=&quot;inline-code&quot;>num_tokens_with_spec</code>；無特殊程式碼路徑">Drafts are already in <code class="inline-code">num_tokens_with_spec</code>; no special code path</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Continuous batching" data-zh="連續批次處理">Continuous batching</span></td>
+      <td><span class="i18n" data-en="Mix of gaps in one step" data-zh="一個步驟中混合不同差距">Mix of gaps in one step</span></td>
+      <td><span class="i18n" data-en="Falls out for free -- prefills and decodes share the same budget and batch" data-zh="自然發生——prefill 與 decode 共享同一預算與批次">Falls out for free -- prefills and decodes share the same budget and batch</span></td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="callout key">
+    <strong><span class="i18n" data-en="The payoff:" data-zh="收益：">The payoff:</span></strong> <span class="i18n" data-en="One token budget, one scheduling loop, one <code class=&quot;inline-code&quot;>allocate_slots()</code> call. A single engine step happily mixes a big first-time prefill, a chunked-prefill continuation, and a dozen decodes in the same batch -- because to the scheduler they're all just &quot;requests whose <code class=&quot;inline-code&quot;>num_computed_tokens</code> is behind their <code class=&quot;inline-code&quot;>num_tokens_with_spec</code>.&quot; That is precisely what the NOTE(woosuk) comment above is promising." data-zh="一個 token 預算、一個排程迴圈、一次 <code class=&quot;inline-code&quot;>allocate_slots()</code> 呼叫。一個引擎步驟可以愉快地在同一批次中混合一個大型首次預填充、一個分塊預填充延續、以及十幾個解碼——因為對排程器來說它們全都只是「<code class=&quot;inline-code&quot;>num_computed_tokens</code> 落後於 <code class=&quot;inline-code&quot;>num_tokens_with_spec</code> 的請求」。這正是上面 NOTE(woosuk) 註釋所承諾的內容。">One token budget, one scheduling loop, one <code class="inline-code">allocate_slots()</code> call. A single engine step happily mixes a big first-time prefill, a chunked-prefill continuation, and a dozen decodes in the same batch -- because to the scheduler they're all just "requests whose <code class="inline-code">num_computed_tokens</code> is behind their <code class="inline-code">num_tokens_with_spec</code>." That is precisely what the NOTE(woosuk) comment above is promising.</span>
+  </div>
+
   <!-- Diagram: Scheduler Flow -->
   <div class="diagram-container">
     <svg viewBox="0 0 900 620" xmlns="http://www.w3.org/2000/svg" style="max-width:860px;">
