@@ -1,10 +1,10 @@
 # AI Infrastructure Optimizations for Agentic LLM Workflows
 
 [![GitHub Pages](https://img.shields.io/badge/Website-Live-brightgreen)](https://hungchun0201.github.io/agentic-ai-survey/)
-[![Papers](https://img.shields.io/badge/Papers-72-blue)]()
+[![Papers](https://img.shields.io/badge/Papers-76-blue)]()
 [![Repos Analyzed](https://img.shields.io/badge/Repos%20Analyzed-38-orange)]()
 
-A survey of **72 systems research papers (2023–2026)** on infrastructure optimizations for agentic LLM workloads, covering OSDI, SOSP, ISCA, FAST, MLSys, NeurIPS, ICML, EuroSys, ASPLOS, NSDI, ATC, and SIGCOMM.
+A survey of **76 systems research papers (2023–2026)** on infrastructure optimizations for agentic LLM workloads, covering OSDI, SOSP, ISCA, FAST, MLSys, NeurIPS, ICML, ICLR, EuroSys, ASPLOS, NSDI, ATC, and SIGCOMM.
 
 **[Browse the Interactive Survey](https://hungchun0201.github.io/agentic-ai-survey/)** (Chinese / English)
 
@@ -16,11 +16,11 @@ A survey of **72 systems research papers (2023–2026)** on infrastructure optim
 |---|------|--------|-----------|
 | S1 | Workload Characterization | 5 | Profiling agentic traffic patterns, CPU bottlenecks, sustainability |
 | S2 | Prefill-Decode Disaggregation | 13 | PD splitting, storage NIC bottlenecks, CXL, RDMA |
-| S3 | KV Cache Management | 18 | PagedAttention, RadixAttention, position-independent, workflow-aware |
+| S3 | KV Cache Management | 19 | PagedAttention, RadixAttention, position-independent, workflow-aware, cross-agent KV reuse |
 | S4 | KV Cache TTL & Retention | 4 | Pin/evict during tool-call pauses, AIMD admission, model-driven eviction |
 | S5 | Scheduling & Routing | 11 | Program-level DAGs, stage isolation, declarative workflows, on-device |
 | S6 | Learning-based Cache | 10 | Regret-minimization, RL eviction, combinatorial bandits |
-| S7 | Adjacent Optimizations | 11 | Chunked prefill, MLA compression, speculative tool calls, serverless |
+| S7 | Adjacent Optimizations | 14 | Chunked prefill, MLA compression, speculative decoding critique, multi-path all-to-all, agentic context engineering |
 
 ## Paper List
 
@@ -74,6 +74,7 @@ A survey of **72 systems research papers (2023–2026)** on infrastructure optim
 | MHA2MLA — Retrofitting MLA | ACL'25 | 2502.14837 |
 | Oaken — Hybrid KV Cache Quantization | ISCA'25 | 2503.18599 |
 | TokenLake — Unified Segment Prefix Cache | arXiv'25 | 2508.17219 |
+| KVCOMM — Cross-context KV-cache Communication | NeurIPS'25 | 2510.12872 |
 
 ### S4 — KV Cache TTL & Retention
 
@@ -130,5 +131,8 @@ A survey of **72 systems research papers (2023–2026)** on infrastructure optim
 | Pensieve — Stateful Multi-turn Serving | EuroSys'25 | 2312.05516 |
 | Helix — Heterogeneous GPU Max-Flow | ASPLOS'25 | 2406.01566 |
 | Weaver — Multi-LLM Attention Offloading | ATC'25 | — |
+| ACE — Agentic Context Engineering | ICLR'26 | 2510.04618 |
+| NIMBLE — Multi-Path All-to-All for GPU Clusters | arXiv'26 | 2604.00317 |
+| Speculative Decoding: Performance or Illusion? | arXiv'26 | 2601.11580 |
 
 ★ = Best Paper &nbsp; ★HM = Outstanding Paper Honorable Mention
