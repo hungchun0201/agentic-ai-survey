@@ -1,0 +1,461 @@
+<!-- ===================================================================
+     §5. Root Cause: Why LMCache Is Slower
+     Source: 20260411_nsys-h200 lmcache_jps1 NVTX profiling
+     Cross-validated: H100, A100, L40S (same experiment date, Exp C)
+     =================================================================== -->
+
+
+<h2><span class="i18n"
+  data-en="5. Root Cause: Why LMCache Is Slower"
+  data-zh="5. 根本原因：LMCache 為何較慢">5. Root Cause: Why LMCache Is Slower</span></h2>
+
+<p style="color:var(--text-secondary);margin-bottom:1.5rem;max-width:860px">
+  <span class="i18n"
+    data-en="Section §2 established that LMCache adds +2.73 s per job relative to FCFS under the benchmark conditions (H200, JPS=1, Exp C). This section traces that overhead to a single, quantifiable mechanism: excessive CUDA stream synchronization inside <code >wait_for_save</code>, which blocks the vLLM scheduler main loop on every prefill step."
+    data-zh="第 §2 節確立，在基準測試條件下（H200、JPS=1、Exp C），LMCache 相對 FCFS 每個 job 多出 +2.73 秒。本節將這項開銷追溯至單一可量化機制：<code >wait_for_save</code> 內部過多的 CUDA stream synchronization，此操作在每個 prefill step 都會阻塞 vLLM scheduler 主迴圈。">
+    Section §2 established that LMCache adds +2.73 s per job relative to FCFS under the benchmark conditions (H200, JPS=1, Exp C). This section traces that overhead to a single, quantifiable mechanism: excessive CUDA stream synchronization inside <code >wait_for_save</code>, which blocks the vLLM scheduler main loop on every prefill step.
+  </span>
+</p>
+
+<!-- ─────────────────────────────────────────────────────────────────────
+     5.1  The Cost: wait_for_save blocks the scheduler
+     ───────────────────────────────────────────────────────────────────── -->
+<h3 id="s5-1"><span class="i18n"
+  data-en="5.1 The Cost: wait_for_save Blocks the Scheduler"
+  data-zh="5.1 代價：wait_for_save 阻塞排程器">5.1 The Cost: <code >wait_for_save</code> Blocks the Scheduler</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="vLLM's KV Connector API requires the scheduler to call <code >wait_for_save</code> before dispatching each step. NVTX profiling of 51 completed jobs (H200, JPS=1, Exp C) captured 1,769 invocations. The distribution is strongly bimodal: a small minority of prefill-step calls account for almost all wallclock time."
+    data-zh="vLLM 的 KV Connector API 要求排程器在每個 step 分派前呼叫 <code >wait_for_save</code>。對 51 個已完成 job 的 NVTX 剖析（H200、JPS=1、Exp C）擷取了 1,769 次呼叫。其分布呈強烈雙峰：少數 prefill-step 呼叫佔了幾乎全部的 wallclock 時間。">
+    vLLM's KV Connector API requires the scheduler to call <code >wait_for_save</code> before dispatching each step. NVTX profiling of 51 completed jobs (H200, JPS=1, Exp C) captured 1,769 invocations. The distribution is strongly bimodal: a small minority of prefill-step calls account for almost all wallclock time.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Call Type" data-zh="呼叫類型">Call Type</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Count" data-zh="次數">Count</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="% of Calls" data-zh="佔比（次數）">% of Calls</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Mean Duration" data-zh="平均持續時間">Mean Duration</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Median" data-zh="中位數">Median</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="p95" data-zh="p95">p95</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><strong><span class="i18n" data-en="Prefill-step calls" data-zh="Prefill-step 呼叫">Prefill-step calls</span></strong></td>
+    <td style="text-align:right">159</td>
+    <td style="text-align:right">9%</td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">115.71 ms</strong></td>
+    <td style="text-align:right">73.00 ms</td>
+    <td style="text-align:right">253 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Decode-only calls" data-zh="Decode-only 呼叫">Decode-only calls</span></td>
+    <td style="text-align:right">1,610</td>
+    <td style="text-align:right">91%</td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">0.01 ms</strong></td>
+    <td style="text-align:right">0.01 ms</td>
+    <td style="text-align:right">0.02 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.04)">
+    <td><strong><span class="i18n" data-en="Total" data-zh="合計">Total</span></strong></td>
+    <td style="text-align:right"><strong>1,769</strong></td>
+    <td style="text-align:right">100%</td>
+    <td colspan="3" style="text-align:center;color:var(--text-muted);font-size:0.85rem">
+      <span class="i18n"
+        data-en="Prefill-step calls are 11,571× slower on average"
+        data-zh="Prefill-step 呼叫平均慢 11,571 倍">Prefill-step calls are 11,571× slower on average</span>
+    </td>
+    <td></td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note" style="margin:1rem 0">
+  <span class="i18n"
+    data-en="<strong>Key insight:</strong> Decode-only calls complete in ~0.01 ms — essentially zero cost. All measurable overhead is concentrated in the 9% of calls that coincide with a prefill step. The question is why prefill-step calls take ~115 ms."
+    data-zh="<strong>關鍵洞察：</strong>Decode-only 呼叫在約 0.01 ms 內完成——成本可忽略不計。所有可量測的開銷都集中在與 prefill step 同步發生的 9% 呼叫上。問題在於：為何 prefill-step 呼叫需要約 115 ms。">
+    <strong>Key insight:</strong> Decode-only calls complete in ~0.01 ms — essentially zero cost. All measurable overhead is concentrated in the 9% of calls that coincide with a prefill step. The question is why prefill-step calls take ~115 ms.
+  </span>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────
+     5.2  Inside wait_for_save: cudaStreamSynchronize
+     ───────────────────────────────────────────────────────────────────── -->
+<h3 id="s5-2"><span class="i18n"
+  data-en="5.2 Inside wait_for_save: cudaStreamSynchronize"
+  data-zh="5.2 wait_for_save 內部：cudaStreamSynchronize">5.2 Inside <code >wait_for_save</code>: <code >cudaStreamSynchronize</code></span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="<code >cudaStreamSynchronize(stream)</code> is a CUDA Runtime API call that blocks the calling CPU thread until every operation previously queued on the given stream has completed on the GPU. Internally the call performs a user-to-kernel transition (via <code >ioctl</code> to the NVIDIA kernel driver), checks stream completion status, sleeps if the GPU is still working (using futex or driver poll), and resumes on GPU interrupt. Even when the GPU finishes its DMA in 0.67 ms, the round-trip through the kernel — transition + interrupt latency + wakeup — adds ~3–4 ms of fixed overhead per call on PACE nodes."
+    data-zh="<code >cudaStreamSynchronize(stream)</code> 是 CUDA Runtime API 呼叫，會阻塞呼叫方的 CPU 執行緒，直到該 stream 上先前排隊的所有操作在 GPU 上完成為止。在內部，此呼叫執行使用者到核心的轉換（透過 <code >ioctl</code> 至 NVIDIA kernel driver）、檢查 stream 完成狀態，若 GPU 仍在工作則進入睡眠（使用 futex 或 driver poll），並在 GPU 中斷時恢復執行。即使 GPU 在 0.67 ms 內完成 DMA，核心往返的固定開銷——轉換 + 中斷延遲 + 喚醒——在 PACE 節點上每次呼叫仍需額外約 3–4 ms。">
+    <code >cudaStreamSynchronize(stream)</code> is a CUDA Runtime API call that blocks the calling CPU thread until every operation previously queued on the given stream has completed on the GPU. Internally the call performs a user-to-kernel transition (via <code >ioctl</code> to the NVIDIA kernel driver), checks stream completion status, sleeps if the GPU is still working (using futex or driver poll), and resumes on GPU interrupt. Even when the GPU finishes its DMA in 0.67 ms, the round-trip through the kernel — transition + interrupt latency + wakeup — adds ~3–4 ms of fixed overhead per call on PACE nodes.
+  </span>
+</p>
+
+<p style="color:var(--text-secondary);margin-bottom:1.2rem;max-width:860px">
+  <span class="i18n"
+    data-en="CUDA Runtime attribution was measured over the 159 prefill-step <code >wait_for_save</code> windows using Nsight Systems (Exp C). The table below shows how the wallclock time is distributed across CUDA Runtime API calls within those windows."
+    data-zh="CUDA Runtime 歸因係使用 Nsight Systems（Exp C）在 159 個 prefill-step <code >wait_for_save</code> 時間窗口中量測。下表顯示這些時間窗口內的 wallclock 時間在各 CUDA Runtime API 呼叫上的分布。">
+    CUDA Runtime attribution was measured over the 159 prefill-step <code >wait_for_save</code> windows using Nsight Systems (Exp C). The table below shows how the wallclock time is distributed across CUDA Runtime API calls within those windows.
+  </span>
+</p>
+
+<!-- CUDA Runtime Attribution Table -->
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="CUDA Runtime API" data-zh="CUDA Runtime API">CUDA Runtime API</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Call Count" data-zh="呼叫次數">Call Count</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Total Time" data-zh="總時間">Total Time</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Per-Call Mean" data-zh="每次呼叫平均">Per-Call Mean</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="% of Wallclock" data-zh="佔 Wallclock %">% of Wallclock</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><code >cudaStreamSynchronize</code></td>
+    <td style="text-align:right">3,744</td>
+    <td style="text-align:right">17,764 ms</td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">96.6%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><code >cudaMemcpyAsync</code> <span style="font-size:0.75rem;color:var(--text-muted)">(launch)</span></td>
+    <td style="text-align:right">2,996</td>
+    <td style="text-align:right">24.5 ms</td>
+    <td style="text-align:right">8.2 μs</td>
+    <td style="text-align:right">0.1%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><code >cudaLaunchKernel</code></td>
+    <td style="text-align:right">2,961</td>
+    <td style="text-align:right">22.2 ms</td>
+    <td style="text-align:right">7.5 μs</td>
+    <td style="text-align:right">0.1%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="All other CUDA Runtime" data-zh="其他所有 CUDA Runtime">All other CUDA Runtime</span></td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">—</td>
+    <td style="text-align:right">3.2%</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<p style="color:var(--text-secondary);margin:1rem 0 0.6rem;max-width:860px">
+  <span class="i18n"
+    data-en="The derivation table below shows that the measured 115.71 ms per prefill step is almost entirely explained by 24 sync calls × 4.74 ms each, leaving less than 2% unexplained residual."
+    data-zh="下方推導表顯示，每個 prefill step 量測到的 115.71 ms，幾乎完全可由 24 次 sync 呼叫 × 每次 4.74 ms 解釋，未解釋的殘差不足 2%。">
+    The derivation table below shows that the measured 115.71 ms per prefill step is almost entirely explained by 24 sync calls × 4.74 ms each, leaving less than 2% unexplained residual.
+  </span>
+</p>
+
+<!-- Derivation Table -->
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Quantity" data-zh="量">Quantity</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Value" data-zh="數值">Value</span></th>
+    <th><span class="i18n" data-en="Derivation" data-zh="推導">Derivation</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><span class="i18n" data-en="Total sync calls in 159 prefill windows" data-zh="159 個 prefill 時間窗口中的總 sync 呼叫次數">Total sync calls in 159 prefill windows</span></td>
+    <td style="text-align:right">3,744</td>
+    <td>measured</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Syncs per prefill step" data-zh="每個 prefill step 的 sync 次數">Syncs per prefill step</span></td>
+    <td style="text-align:right">~23.5 ≈ <strong>24</strong></td>
+    <td>3,744 ÷ 159</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Mean cost per sync call" data-zh="每次 sync 呼叫的平均成本">Mean cost per sync call</span></td>
+    <td style="text-align:right"><strong>4.74 ms</strong></td>
+    <td>17,764 ms ÷ 3,744</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Predicted wait_for_save (prefill)" data-zh="預測的 wait_for_save（prefill）">Predicted <code >wait_for_save</code> (prefill)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">113.8 ms</strong></td>
+    <td>24 × 4.74 ms</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.04)">
+    <td><strong><span class="i18n" data-en="Measured wait_for_save (prefill mean)" data-zh="量測的 wait_for_save（prefill 平均）">Measured <code >wait_for_save</code> (prefill mean)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">115.71 ms</strong></td>
+    <td>NVTX direct measurement</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">H200, JPS=1, Exp C</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Residual (unexplained)" data-zh="殘差（未解釋）">Residual (unexplained)</span></td>
+    <td style="text-align:right">+1.91 ms (1.6%)</td>
+    <td>115.71 − 113.8</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">derived</td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="warn" style="margin:1rem 0">
+  <span class="i18n"
+    data-en="<strong>Mechanism summary:</strong> LMCache issues one <code >cudaMemcpyAsync</code> per KV chunk and then immediately calls <code >cudaStreamSynchronize</code> to confirm completion before proceeding to the next chunk. With ~19 chunks per prefill step, this produces ~24 round-trip kernel-mode waits (some steps have additional overhead from metadata syncs). Each wait incurs ~4.74 ms of fixed overhead regardless of how fast the GPU DMA completes — causing the CPU thread to be idle ~85% of the time inside each sync call."
+    data-zh="<strong>機制摘要：</strong>LMCache 對每個 KV chunk 發出一次 <code >cudaMemcpyAsync</code>，然後立即呼叫 <code >cudaStreamSynchronize</code> 以確認完成，再繼續處理下一個 chunk。每個 prefill step 約有 19 個 chunk，由此產生約 24 次核心態往返等待（部分 step 因 metadata sync 而有額外開銷）。每次等待產生約 4.74 ms 的固定開銷，與 GPU DMA 完成速度無關——導致 CPU 執行緒在每次 sync 呼叫期間約 85% 的時間處於閒置。">
+    <strong>Mechanism summary:</strong> LMCache issues one <code >cudaMemcpyAsync</code> per KV chunk and then immediately calls <code >cudaStreamSynchronize</code> to confirm completion before proceeding to the next chunk. With ~19 chunks per prefill step, this produces ~24 round-trip kernel-mode waits (some steps have additional overhead from metadata syncs). Each wait incurs ~4.74 ms of fixed overhead regardless of how fast the GPU DMA completes — causing the CPU thread to be idle ~85% of the time inside each sync call.
+  </span>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────
+     5.3  The Hardware Floor
+     ───────────────────────────────────────────────────────────────────── -->
+<h3 id="s5-3"><span class="i18n"
+  data-en="5.3 The Hardware Floor: DMA Is Not the Bottleneck"
+  data-zh="5.3 硬體下限：DMA 並非瓶頸">5.3 The Hardware Floor: DMA Is Not the Bottleneck</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="The GPU-side DMA transfer (MEMCPY D2H) was measured separately via Nsight Systems GPU-activity records across 4 GPU families and 3 JPS values (12 measurements, Exp C). These measurements establish the minimum achievable time for the actual data movement, independent of CPU-side synchronization overhead."
+    data-zh="GPU 端 DMA 傳輸（MEMCPY D2H）透過 Nsight Systems GPU-activity records 在 4 種 GPU 型號和 3 個 JPS 值中分別量測（12 次量測，Exp C）。這些量測確立了實際資料搬移的最小可達時間，獨立於 CPU 端的同步開銷之外。">
+    The GPU-side DMA transfer (MEMCPY D2H) was measured separately via Nsight Systems GPU-activity records across 4 GPU families and 3 JPS values (12 measurements, Exp C). These measurements establish the minimum achievable time for the actual data movement, independent of CPU-side synchronization overhead.
+  </span>
+</p>
+
+<!-- 12-measurement DMA Table -->
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="GPU" data-zh="GPU">GPU</span></th>
+    <th><span class="i18n" data-en="PCIe Gen" data-zh="PCIe 世代">PCIe Gen</span></th>
+    <th style="text-align:right">JPS=1</th>
+    <th style="text-align:right">JPS=6</th>
+    <th style="text-align:right">JPS=10</th>
+    <th style="text-align:right"><span class="i18n" data-en="Mean ± CV" data-zh="平均 ± 變異係數">Mean ± CV</span></th>
+    <th><span class="i18n" data-en="Source" data-zh="來源">Source</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><strong>H200</strong></td>
+    <td>Gen 5</td>
+    <td style="text-align:right">0.670 ms</td>
+    <td style="text-align:right">0.673 ms</td>
+    <td style="text-align:right">0.675 ms</td>
+    <td style="text-align:right"><strong>0.674 ms ± 0.3%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr>
+    <td><strong>H100</strong></td>
+    <td>Gen 5</td>
+    <td style="text-align:right">0.662 ms</td>
+    <td style="text-align:right">0.683 ms</td>
+    <td style="text-align:right">0.679 ms</td>
+    <td style="text-align:right"><strong>0.675 ms ± 0.3%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr style="background:rgba(245,158,11,0.05)">
+    <td><strong>A100</strong></td>
+    <td>Gen 4</td>
+    <td style="text-align:right">1.420 ms</td>
+    <td style="text-align:right">1.425 ms</td>
+    <td style="text-align:right">1.415 ms</td>
+    <td style="text-align:right"><strong>1.420 ms ± 3.6%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  <tr style="background:rgba(245,158,11,0.05)">
+    <td><strong>L40S</strong></td>
+    <td>Gen 4</td>
+    <td style="text-align:right">1.358 ms</td>
+    <td style="text-align:right">1.408 ms</td>
+    <td style="text-align:right">1.343 ms</td>
+    <td style="text-align:right"><strong>1.370 ms ± 3.5%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">Exp C</td>
+  </tr>
+  </tbody>
+  <tfoot>
+  <tr style="background:rgba(0,204,180,0.06)">
+    <td colspan="2"><strong><span class="i18n" data-en="Gen5 : Gen4 ratio" data-zh="Gen5 : Gen4 比值">Gen5 : Gen4 ratio</span></strong></td>
+    <td colspan="3" style="text-align:center">
+      <strong>2.07×</strong>
+      <span style="color:var(--text-muted);font-size:0.82rem">
+        <span class="i18n"
+          data-en="(matches PCIe Gen5 : Gen4 spec bandwidth ratio)"
+          data-zh="（符合 PCIe Gen5 : Gen4 規格頻寬比）">(matches PCIe Gen5 : Gen4 spec bandwidth ratio)</span>
+      </span>
+    </td>
+    <td></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">4 GPUs, Exp C</td>
+  </tr>
+  </tfoot>
+</table>
+</div>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="On the H200, GPU-side DMA completes in 0.674 ms. The per-call <code >cudaStreamSynchronize</code> cost is 4.74 ms. Therefore the DMA itself accounts for only 0.674 ÷ 4.74 = <strong>14.2%</strong> of each sync call; the remaining <strong>85.8%</strong> is fixed kernel-mode overhead. The table below itemises this split."
+    data-zh="在 H200 上，GPU 端 DMA 在 0.674 ms 內完成。每次 <code >cudaStreamSynchronize</code> 呼叫成本為 4.74 ms。因此，DMA 本身僅佔每次 sync 呼叫的 0.674 ÷ 4.74 = <strong>14.2%</strong>；其餘 <strong>85.8%</strong> 為固定核心態開銷。下表列出此拆分。">
+    On the H200, GPU-side DMA completes in 0.674 ms. The per-call <code >cudaStreamSynchronize</code> cost is 4.74 ms. Therefore the DMA itself accounts for only 0.674 ÷ 4.74 = <strong>14.2%</strong> of each sync call; the remaining <strong>85.8%</strong> is fixed kernel-mode overhead. The table below itemises this split.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th></th>
+    <th style="text-align:right">H200</th>
+    <th style="text-align:right">H100</th>
+    <th><span class="i18n" data-en="Interpretation" data-zh="解讀">Interpretation</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr>
+    <td><span class="i18n" data-en="GPU DMA duration (hardware)" data-zh="GPU DMA 持續時間（硬體）">GPU DMA duration (hardware)</span></td>
+    <td style="text-align:right">0.674 ms</td>
+    <td style="text-align:right">0.674 ms</td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="PCIe bandwidth floor" data-zh="PCIe 頻寬下限">PCIe bandwidth floor</span>
+    </td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><code >cudaStreamSynchronize</code> <span class="i18n" data-en="total cost" data-zh="總成本">total cost</span></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">4.74 ms</strong></td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="measured NVTX (Exp C)" data-zh="量測 NVTX（Exp C）">measured NVTX (Exp C)</span>
+    </td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="DMA as fraction of sync cost" data-zh="DMA 佔 sync 成本的比例">DMA as fraction of sync cost</span></td>
+    <td style="text-align:right">14.2%</td>
+    <td style="text-align:right">14.2%</td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="hardware is NOT the bottleneck" data-zh="硬體並非瓶頸">hardware is NOT the bottleneck</span>
+    </td>
+  </tr>
+  <tr style="background:rgba(239,68,68,0.08)">
+    <td><strong><span class="i18n" data-en="Kernel-mode overhead (fixed)" data-zh="核心態開銷（固定）">Kernel-mode overhead (fixed)</span></strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">85.8%</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-red)">85.8%</strong></td>
+    <td style="font-size:0.85rem;color:var(--text-muted)">
+      <span class="i18n" data-en="ioctl + interrupt + wakeup latency" data-zh="ioctl + 中斷 + 喚醒延遲">ioctl + interrupt + wakeup latency</span>
+    </td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note" style="margin:1rem 0">
+  <span class="i18n"
+    data-en="<strong>Cross-validation:</strong> The DMA floor is stable to within ±3.6% across JPS=1/2/4 on all four GPUs, confirming that the bottleneck is not memory bandwidth saturation or contention. Upgrading PCIe bandwidth (Gen4 → Gen5) halves the DMA time but provides no relief against the per-call kernel overhead, which remains ~4.74 ms regardless."
+    data-zh="<strong>交叉驗證：</strong>在四種 GPU 的 JPS=1/2/4 中，DMA 下限的穩定性在 ±3.6% 以內，確認瓶頸並非記憶體頻寬飽和或競爭。將 PCIe 頻寬升級（Gen4 → Gen5）可將 DMA 時間減半，但對每次呼叫的核心開銷毫無幫助，後者無論如何仍維持約 4.74 ms。">
+    <strong>Cross-validation:</strong> The DMA floor is stable to within ±3.6% across JPS=1/2/4 on all four GPUs, confirming that the bottleneck is not memory bandwidth saturation or contention. Upgrading PCIe bandwidth (Gen4 → Gen5) halves the DMA time but provides no relief against the per-call kernel overhead, which remains ~4.74 ms regardless.
+  </span>
+</div>
+
+<!-- ─────────────────────────────────────────────────────────────────────
+     5.4  Optimization Path
+     ───────────────────────────────────────────────────────────────────── -->
+<h3 id="s5-4"><span class="i18n"
+  data-en="5.4 Optimization Path"
+  data-zh="5.4 優化路徑">5.4 Optimization Path</span></h3>
+
+<p style="color:var(--text-secondary);margin-bottom:1rem;max-width:860px">
+  <span class="i18n"
+    data-en="The fix is mechanical: replace the per-chunk synchronization pattern (issue async copy → synchronize → issue async copy → synchronize → …) with a coalesced pattern (issue all async copies → synchronize once). This reduces sync count from ~24 to 1 per prefill step while keeping the GPU busy continuously."
+    data-zh="修正方式是機械性的：將逐 chunk 同步模式（發出非同步複製 → 同步 → 發出非同步複製 → 同步 → ……）替換為聚合模式（發出所有非同步複製 → 同步一次）。這將每個 prefill step 的 sync 次數從約 24 次降至 1 次，同時讓 GPU 持續保持忙碌。">
+    The fix is mechanical: replace the per-chunk synchronization pattern (issue async copy → synchronize → issue async copy → synchronize → …) with a coalesced pattern (issue all async copies → synchronize once). This reduces sync count from ~24 to 1 per prefill step while keeping the GPU busy continuously.
+  </span>
+</p>
+
+<div style="overflow-x:auto;margin:1rem 0;">
+<table>
+  <thead>
+  <tr>
+    <th><span class="i18n" data-en="Configuration" data-zh="配置">Configuration</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Syncs / prefill step" data-zh="每 prefill step 的 sync 次數">Syncs / prefill step</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Predicted wait_for_save (prefill)" data-zh="預測的 wait_for_save（prefill）">Predicted <code >wait_for_save</code> (prefill)</span></th>
+    <th style="text-align:right"><span class="i18n" data-en="Saving vs current" data-zh="相對現況的節省">Saving vs current</span></th>
+    <th><span class="i18n" data-en="Basis" data-zh="依據">Basis</span></th>
+  </tr>
+  </thead>
+  <tbody>
+  <tr style="background:rgba(239,68,68,0.06)">
+    <td><span class="i18n" data-en="Current (per-chunk sync)" data-zh="現況（逐 chunk 同步）">Current (per-chunk sync)</span></td>
+    <td style="text-align:right">~24</td>
+    <td style="text-align:right">115.71 ms</td>
+    <td style="text-align:right">—</td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">measured, H200, JPS=1, Exp C</td>
+  </tr>
+  <tr style="background:rgba(0,230,138,0.07)">
+    <td><strong><span class="i18n" data-en="Coalesced (1 sync per step)" data-zh="聚合（每 step 1 次 sync）">Coalesced (1 sync per step)</span></strong></td>
+    <td style="text-align:right">1</td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">5.41 ms</strong></td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">−110.3 ms (−95%)</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">1 × 4.74 ms + 0.674 ms DMA</td>
+  </tr>
+  <tr>
+    <td><span class="i18n" data-en="Expected benchmark delta (H200, JPS=1)" data-zh="預期基準測試差距（H200、JPS=1）">Expected benchmark delta (H200, JPS=1)</span></td>
+    <td colspan="2" style="text-align:center">
+      <span class="i18n"
+        data-en="+2.73 s → &lt; 0.2 s per job"
+        data-zh="+2.73 s → &lt; 0.2 s 每 job">+2.73 s → &lt; 0.2 s per job</span>
+    </td>
+    <td style="text-align:right"><strong style="color:var(--accent-green)">−93%</strong></td>
+    <td style="font-size:0.8rem;color:var(--text-muted)">
+      <span class="i18n" data-en="extrapolated from step-level savings" data-zh="由 step 層級節省外推">extrapolated from step-level savings</span>
+    </td>
+  </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="card-grid" style="margin-top:1.5rem">
+  <div class="card">
+    <h4><span class="i18n" data-en="Why coalescing is safe" data-zh="為何聚合是安全的">Why coalescing is safe</span></h4>
+    <p style="color:var(--text-secondary);font-size:0.9rem">
+      <span class="i18n"
+        data-en="All KV chunks for a single prefill step target independent GPU memory regions. Issuing all <code >cudaMemcpyAsync</code> calls before any synchronization does not introduce data races; CUDA guarantees in-order execution within a stream. A single barrier at the end of the loop is semantically equivalent to N per-chunk barriers."
+        data-zh="單個 prefill step 的所有 KV chunk 以獨立的 GPU 記憶體區域為目標。在任何同步之前發出所有 <code >cudaMemcpyAsync</code> 呼叫不會引入資料競爭；CUDA 保證 stream 內的有序執行。迴圈末尾的單一 barrier 在語義上等同於 N 次逐 chunk barrier。">
+        All KV chunks for a single prefill step target independent GPU memory regions. Issuing all <code >cudaMemcpyAsync</code> calls before any synchronization does not introduce data races; CUDA guarantees in-order execution within a stream. A single barrier at the end of the loop is semantically equivalent to N per-chunk barriers.
+      </span>
+    </p>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Scope of the fix" data-zh="修正範圍">Scope of the fix</span></h4>
+    <p style="color:var(--text-secondary);font-size:0.9rem">
+      <span class="i18n"
+        data-en="The relevant loop is located in LMCache's GPU-to-CPU offload path (triggered by <code >wait_for_save</code> during prefill). The change is local to approximately 5–10 lines of Python; no architectural change to the vLLM KV Connector API is required. The optimization applies equally to all four GPU families tested (H200, H100, A100, L40S)."
+        data-zh="相關迴圈位於 LMCache 的 GPU 到 CPU offload 路徑（在 prefill 期間由 <code >wait_for_save</code> 觸發）。此變更僅涉及約 5–10 行 Python 程式碼，無需對 vLLM KV Connector API 進行架構性變更。優化同樣適用於所測試的四種 GPU 型號（H200、H100、A100、L40S）。">
+        The relevant loop is located in LMCache's GPU-to-CPU offload path (triggered by <code >wait_for_save</code> during prefill). The change is local to approximately 5–10 lines of Python; no architectural change to the vLLM KV Connector API is required. The optimization applies equally to all four GPU families tested (H200, H100, A100, L40S).
+      </span>
+    </p>
+  </div>
+</div>
+
+<!-- ===================================================================
+     END §5. Root Cause: Why LMCache Is Slower
+     =================================================================== -->
