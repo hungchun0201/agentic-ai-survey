@@ -964,6 +964,155 @@ req_index = <span class="nu">0</span>
             <span class="kw">continue</span>
 </pre>
 
+  <h4><span class="i18n" data-en="Layer-by-Layer Walkthrough" data-zh="逐層拆解">Layer-by-Layer Walkthrough</span></h4>
+
+  <p><span class="i18n" data-en="This block has three simultaneous queue-management concerns braided together. Unpacking them in order:" data-zh="這段程式碼糾纏著三個同時進行的佇列管理邏輯。按順序拆解：">This block has three simultaneous queue-management concerns braided together. Unpacking them in order:</span></p>
+
+  <h5><span class="i18n" data-en="Layer 1 -- Why wrap everything in <code class=&quot;inline-code&quot;>if not preempted_reqs</code>?" data-zh="Layer 1 -- 為什麼整個區塊要包在 <code class=&quot;inline-code&quot;>if not preempted_reqs</code> 裡？">Layer 1 -- Why wrap everything in <code class="inline-code">if not preempted_reqs</code>?</span></h5>
+
+  <p><span class="i18n" data-en="The RUNNING loop just finished. If it had to preempt anyone (<code class=&quot;inline-code&quot;>preempted_reqs</code> non-empty), the KV pool was just proven too tight for current load. Admitting new requests right now almost guarantees another OOM in the next step -- triggering more preemptions -- creating a thrash cycle. So this step the scheduler <strong>skips admission entirely</strong>, handing the freed budget back to the preempted requests (which <code class=&quot;inline-code&quot;>_preempt_request</code> already <code class=&quot;inline-code&quot;>prepend_request</code>-ed to the front of <code class=&quot;inline-code&quot;>self.waiting</code>). Next step they get priority re-admission." data-zh="RUNNING 迴圈剛跑完。如果有任何請求被搶占（<code class=&quot;inline-code&quot;>preempted_reqs</code> 非空），代表 KV 池剛剛才吃緊到要踢人。此時再去 admit 新請求，幾乎保證下一步又 OOM → 又搶占 → 又 admit……陷入 thrashing。所以本步<strong>完全放棄 admission</strong>，把 slot 還給被搶占的請求（它們已被 <code class=&quot;inline-code&quot;>_preempt_request</code> 用 <code class=&quot;inline-code&quot;>prepend_request</code> 塞回 <code class=&quot;inline-code&quot;>self.waiting</code> 最前面）。下一步它們優先 re-admit。">The RUNNING loop just finished. If it had to preempt anyone (<code class="inline-code">preempted_reqs</code> non-empty), the KV pool was just proven too tight for current load. Admitting new requests right now almost guarantees another OOM in the next step -- triggering more preemptions -- creating a thrash cycle. So this step the scheduler <strong>skips admission entirely</strong>, handing the freed budget back to the preempted requests (which <code class="inline-code">_preempt_request</code> already <code class="inline-code">prepend_request</code>-ed to the front of <code class="inline-code">self.waiting</code>). Next step they get priority re-admission.</span></p>
+
+  <h5><span class="i18n" data-en="Layer 2 -- Three queues, not two" data-zh="Layer 2 -- 三個佇列，不是兩個">Layer 2 -- Three queues, not two</span></h5>
+
+  <p><span class="i18n" data-en="Look carefully: three different collections are moving at once." data-zh="注意看：三個不同的集合同時在動。">Look carefully: three different collections are moving at once.</span></p>
+
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Queue" data-zh="佇列">Queue</span></th>
+      <th><span class="i18n" data-en="Role" data-zh="角色">Role</span></th>
+      <th><span class="i18n" data-en="Role in this block" data-zh="在本段中的角色">Role in this block</span></th>
+    </tr>
+    <tr>
+      <td><code class="inline-code">self.waiting</code></td>
+      <td><span class="i18n" data-en="Normal waiting queue (new + preempted)" data-zh="正常等待佇列（新 + 被搶占）">Normal waiting queue (new + preempted)</span></td>
+      <td><span class="i18n" data-en="peek/pop source #1" data-zh="peek/pop 來源之一">peek/pop source #1</span></td>
+    </tr>
+    <tr>
+      <td><code class="inline-code">self.skipped_waiting</code></td>
+      <td><span class="i18n" data-en="Requests parked in earlier steps (async deps)" data-zh="先前步驟被 park 住的請求（非同步依賴）">Requests parked in earlier steps (async deps)</span></td>
+      <td><span class="i18n" data-en="peek/pop source #2" data-zh="peek/pop 來源之二">peek/pop source #2</span></td>
+    </tr>
+    <tr>
+      <td><code class="inline-code">step_skipped_waiting</code></td>
+      <td><span class="i18n" data-en="Local temp queue (this step only)" data-zh="本步的本地臨時池">Local temp queue (this step only)</span></td>
+      <td><span class="i18n" data-en="Destination for requests skipped <strong>in this iteration</strong>" data-zh="<strong>本次迭代</strong>被跳過的請求的目的地">Destination for requests skipped <strong>in this iteration</strong></span></td>
+    </tr>
+  </table>
+  </div>
+
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Why not dump skipped requests directly back into <code class=&quot;inline-code&quot;>self.skipped_waiting</code>?" data-zh="為什麼不直接把跳過的請求丟回 <code class=&quot;inline-code&quot;>self.skipped_waiting</code>？">Why not dump skipped requests directly back into <code class="inline-code">self.skipped_waiting</code>?</span></strong> <span class="i18n" data-en="<strong>Infinite loop</strong>. The next <code class=&quot;inline-code&quot;>peek_request()</code> call would pull the same request right back and loop forever. The third queue is a &quot;processed this step -- don't touch again&quot; holding area. Only at the end of the while loop (scheduler.py:848-850) is it merged back:" data-zh="<strong>會無限迴圈</strong>。下次 <code class=&quot;inline-code&quot;>peek_request()</code> 會立刻再次拉到同一個請求，永遠出不去。第三個佇列扮演「本步已處理、別再碰」的隔離池。只有在 while 迴圈結束時（scheduler.py:848-850）才合併回去："><strong>Infinite loop.</strong> The next <code class="inline-code">peek_request()</code> call would pull the same request right back and loop forever. The third queue is a "processed this step -- don't touch again" holding area. Only at the end of the while loop (scheduler.py:848-850) is it merged back:</span>
+<pre style="margin-top:0.6rem;">
+<span class="cm"># scheduler.py lines 848-850 -- merge happens AFTER the while loop exits</span>
+<span class="kw">if</span> step_skipped_waiting:
+    <span class="va">self</span>.skipped_waiting.<span class="fn">prepend_requests</span>(step_skipped_waiting)
+</pre>
+  </div>
+
+  <h5><span class="i18n" data-en="Layer 3 -- The three while-loop exits" data-zh="Layer 3 -- while 迴圈的三個退出條件">Layer 3 -- The three while-loop exits</span></h5>
+
+<pre>
+<span class="kw">while</span> (<span class="va">self</span>.waiting <span class="kw">or</span> <span class="va">self</span>.skipped_waiting) <span class="kw">and</span> token_budget > <span class="nu">0</span>:
+    <span class="kw">if</span> <span class="fn">len</span>(<span class="va">self</span>.running) == <span class="va">self</span>.max_num_running_reqs:
+        <span class="kw">break</span>
+</pre>
+
+  <p><span class="i18n" data-en="Three reasons to stop admitting:" data-zh="三個停止 admit 的理由：">Three reasons to stop admitting:</span></p>
+
+  <ol style="padding-left:1.5rem;color:#d0d5e0;">
+    <li><span class="i18n" data-en="Both source queues empty -- nothing to try" data-zh="兩個來源佇列都空了——沒東西可試">Both source queues empty -- nothing to try</span></li>
+    <li><span class="i18n" data-en="<code class=&quot;inline-code&quot;>token_budget &lt;= 0</code> -- step is full" data-zh="<code class=&quot;inline-code&quot;>token_budget &lt;= 0</code>——本步 token 額度用完"><code class="inline-code">token_budget &lt;= 0</code> -- step is full</span></li>
+    <li><span class="i18n" data-en="<code class=&quot;inline-code&quot;>len(running) == max_num_seqs</code> -- batch width cap hit (protects per-seq overhead)" data-zh="<code class=&quot;inline-code&quot;>len(running) == max_num_seqs</code>——batch 寬度上限（保護 per-seq overhead）"><code class="inline-code">len(running) == max_num_seqs</code> -- batch width cap hit (protects per-seq overhead)</span></li>
+  </ol>
+
+  <p><span class="i18n" data-en="Note that #3 is a <code class=&quot;inline-code&quot;>break</code>, not a <code class=&quot;inline-code&quot;>continue</code>. Once running is full, no amount of token budget can help -- the scheduler stops cold." data-zh="注意第 3 條是 <code class=&quot;inline-code&quot;>break</code> 而非 <code class=&quot;inline-code&quot;>continue</code>。一旦 running 滿了，再多 token budget 也沒用——排程器徹底停止。">Note that #3 is a <code class="inline-code">break</code>, not a <code class="inline-code">continue</code>. Once running is full, no amount of token budget can help -- the scheduler stops cold.</span></p>
+
+  <h5><span class="i18n" data-en="Layer 4 -- Peek, don't pop" data-zh="Layer 4 -- 先 peek，不要 pop">Layer 4 -- Peek, don't pop</span></h5>
+
+<pre>
+request_queue = <span class="va">self</span>.<span class="fn">_select_waiting_queue_for_scheduling</span>()
+request = request_queue.<span class="fn">peek_request</span>()
+</pre>
+
+  <p><span class="i18n" data-en="The selector picks between <code class=&quot;inline-code&quot;>self.waiting</code> and <code class=&quot;inline-code&quot;>self.skipped_waiting</code> (scheduler.py:1572-1582):" data-zh="選擇器在 <code class=&quot;inline-code&quot;>self.waiting</code> 與 <code class=&quot;inline-code&quot;>self.skipped_waiting</code> 之間挑選（scheduler.py:1572-1582）：">The selector picks between <code class="inline-code">self.waiting</code> and <code class="inline-code">self.skipped_waiting</code> (scheduler.py:1572-1582):</span></p>
+
+  <ul style="padding-left:1.5rem;color:#d0d5e0;">
+    <li><span class="i18n" data-en="<strong>FCFS</strong>: always pulls from <code class=&quot;inline-code&quot;>skipped_waiting</code> first (those entries have been parked longer)" data-zh="<strong>FCFS</strong>：永遠先從 <code class=&quot;inline-code&quot;>skipped_waiting</code> 拿（那邊的請求被 park 更久）"><strong>FCFS</strong>: always pulls from <code class="inline-code">skipped_waiting</code> first (those entries have been parked longer)</span></li>
+    <li><span class="i18n" data-en="<strong>PRIORITY</strong>: compares the heads of both queues via <code class=&quot;inline-code&quot;>Request.__lt__</code>, picks the lower <code class=&quot;inline-code&quot;>(priority, arrival_time)</code>" data-zh="<strong>PRIORITY</strong>：透過 <code class=&quot;inline-code&quot;>Request.__lt__</code> 比較兩佇列的 head，選 <code class=&quot;inline-code&quot;>(priority, arrival_time)</code> 較小的"><strong>PRIORITY</strong>: compares the heads of both queues via <code class="inline-code">Request.__lt__</code>, picks the lower <code class="inline-code">(priority, arrival_time)</code></span></li>
+  </ul>
+
+  <p><span class="i18n" data-en="Then <strong>peek, not pop</strong>. This is deliberate: admission might still fail (blocked status, LoRA budget, OOM in <code class=&quot;inline-code&quot;>allocate_slots</code>). Peeking lets the filter layers run their checks first and only actually remove from the queue when we've decided the fate -- either admit (pop + add to running) or defer (pop + prepend into <code class=&quot;inline-code&quot;>step_skipped_waiting</code>). This minimizes queue churn." data-zh="然後是 <strong>peek 而非 pop</strong>。這是刻意設計：admission 仍可能失敗（blocked status、LoRA 預算、<code class=&quot;inline-code&quot;>allocate_slots</code> 回傳 OOM）。先 peek 讓過濾層跑完檢查，決定命運後才實際從佇列移除——admit（pop + 加進 running）或 defer（pop + 前插到 <code class=&quot;inline-code&quot;>step_skipped_waiting</code>）。這樣佇列搬動成本最低。">Then <strong>peek, not pop</strong>. This is deliberate: admission might still fail (blocked status, LoRA budget, OOM in <code class="inline-code">allocate_slots</code>). Peeking lets the filter layers run their checks first and only actually remove from the queue when we've decided the fate -- either admit (pop + add to running) or defer (pop + prepend into <code class="inline-code">step_skipped_waiting</code>). This minimizes queue churn.</span></p>
+
+  <h5><span class="i18n" data-en="Layer 5 -- Blocked-status filter" data-zh="Layer 5 -- Blocked status 過濾">Layer 5 -- Blocked-status filter</span></h5>
+
+<pre>
+<span class="kw">if</span> <span class="va">self</span>.<span class="fn">_is_blocked_waiting_status</span>(request.status) \
+        <span class="kw">and not</span> <span class="va">self</span>.<span class="fn">_try_promote_blocked_waiting_request</span>(request):
+    request_queue.<span class="fn">pop_request</span>()
+    step_skipped_waiting.<span class="fn">prepend_request</span>(request)
+    <span class="kw">continue</span>
+</pre>
+
+  <p><span class="i18n" data-en="A two-question chain:" data-zh="兩個問題串聯：">A two-question chain:</span></p>
+
+  <p><strong>Q1:</strong> <code class="inline-code">_is_blocked_waiting_status()</code> <span class="i18n" data-en="-- is this request in one of the three async-blocked states?" data-zh="——此請求是否處於下列三種非同步阻塞狀態之一？">-- is this request in one of the three async-blocked states?</span></p>
+
+  <ul style="padding-left:1.5rem;color:#d0d5e0;">
+    <li><code class="inline-code">WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR</code> <span class="i18n" data-en="-- xgrammar/outlines still compiling the grammar" data-zh="——xgrammar/outlines 還在編譯 grammar">-- xgrammar/outlines still compiling the grammar</span></li>
+    <li><code class="inline-code">WAITING_FOR_REMOTE_KVS</code> <span class="i18n" data-en="-- KVConnector still fetching KV from another node (P/D disaggregation)" data-zh="——KVConnector 還在從另一台節點拉 KV（P/D 分離）">-- KVConnector still fetching KV from another node (P/D disaggregation)</span></li>
+    <li><code class="inline-code">WAITING_FOR_STREAMING_REQ</code> <span class="i18n" data-en="-- streaming input session waiting for the next chunk" data-zh="——streaming input 在等下一塊輸入">-- streaming input session waiting for the next chunk</span></li>
+  </ul>
+
+  <p><strong>Q2:</strong> <code class="inline-code">_try_promote_blocked_waiting_request()</code> <span class="i18n" data-en="-- try to unblock. If the async dependency has resolved (grammar compiled, KV transfer finished), flip status back to <code class=&quot;inline-code&quot;>WAITING</code> and return <code class=&quot;inline-code&quot;>True</code>. The short-circuit <code class=&quot;inline-code&quot;>and not</code> means: still blocked AND couldn't promote &rArr; defer." data-zh="——嘗試解鎖。若非同步依賴已解除（grammar 編完、KV 傳輸完成），把 status 改回 <code class=&quot;inline-code&quot;>WAITING</code> 並回傳 <code class=&quot;inline-code&quot;>True</code>。短路的 <code class=&quot;inline-code&quot;>and not</code> 邏輯：仍阻塞 AND 無法晉升 &rArr; 延後。">-- try to unblock. If the async dependency has resolved (grammar compiled, KV transfer finished), flip status back to <code class="inline-code">WAITING</code> and return <code class="inline-code">True</code>. The short-circuit <code class="inline-code">and not</code> means: still blocked AND couldn't promote &rArr; defer.</span></p>
+
+  <p><span class="i18n" data-en="Deferral = pop from the source queue + <code class=&quot;inline-code&quot;>prepend_request</code> into <code class=&quot;inline-code&quot;>step_skipped_waiting</code> + <code class=&quot;inline-code&quot;>continue</code>. Note that <code class=&quot;inline-code&quot;>prepend_request</code> on an FCFS <code class=&quot;inline-code&quot;>deque</code> is <code class=&quot;inline-code&quot;>appendleft</code>, so the most-recently-skipped request sits at the head of <code class=&quot;inline-code&quot;>step_skipped_waiting</code>. When the whole pool is merged back at loop end via <code class=&quot;inline-code&quot;>prepend_requests</code> (which does <code class=&quot;inline-code&quot;>extendleft</code>), the order is reversed again -- so next step's <code class=&quot;inline-code&quot;>peek_request</code> sees the earliest-skipped request first. Fair." data-zh="延後 = 從來源佇列 pop + <code class=&quot;inline-code&quot;>prepend_request</code> 塞到 <code class=&quot;inline-code&quot;>step_skipped_waiting</code> + <code class=&quot;inline-code&quot;>continue</code>。注意：FCFS <code class=&quot;inline-code&quot;>deque</code> 上的 <code class=&quot;inline-code&quot;>prepend_request</code> 其實是 <code class=&quot;inline-code&quot;>appendleft</code>，所以最晚被跳過的請求位於 <code class=&quot;inline-code&quot;>step_skipped_waiting</code> 的頭部。等迴圈結束整批合併回去時（透過 <code class=&quot;inline-code&quot;>prepend_requests</code> 亦即 <code class=&quot;inline-code&quot;>extendleft</code>），順序再次反轉——下一步 <code class=&quot;inline-code&quot;>peek_request</code> 會先看到最早被跳過的請求。公平。">Deferral = pop from the source queue + <code class="inline-code">prepend_request</code> into <code class="inline-code">step_skipped_waiting</code> + <code class="inline-code">continue</code>. Note that <code class="inline-code">prepend_request</code> on an FCFS <code class="inline-code">deque</code> is <code class="inline-code">appendleft</code>, so the most-recently-skipped request sits at the head of <code class="inline-code">step_skipped_waiting</code>. When the whole pool is merged back at loop end via <code class="inline-code">prepend_requests</code> (which does <code class="inline-code">extendleft</code>), the order is reversed again -- so next step's <code class="inline-code">peek_request</code> sees the earliest-skipped request first. Fair.</span></p>
+
+  <h5><span class="i18n" data-en="Layer 6 -- LoRA budget filter" data-zh="Layer 6 -- LoRA 預算過濾">Layer 6 -- LoRA budget filter</span></h5>
+
+<pre>
+<span class="kw">if</span> (<span class="va">self</span>.lora_config <span class="kw">and</span> request.lora_request
+        <span class="kw">and</span> <span class="fn">len</span>(scheduled_loras) == <span class="va">self</span>.lora_config.max_loras
+        <span class="kw">and</span> request.lora_request.lora_int_id <span class="kw">not in</span> scheduled_loras):
+    request_queue.<span class="fn">pop_request</span>()
+    step_skipped_waiting.<span class="fn">prepend_request</span>(request)
+    <span class="kw">continue</span>
+</pre>
+
+  <p><span class="i18n" data-en="Four ANDs:" data-zh="四重 AND 條件：">Four ANDs:</span></p>
+
+  <ol style="padding-left:1.5rem;color:#d0d5e0;">
+    <li><span class="i18n" data-en="System has LoRA enabled" data-zh="系統啟用了 LoRA">System has LoRA enabled</span></li>
+    <li><span class="i18n" data-en="This request carries a LoRA adapter" data-zh="此請求帶有 LoRA adapter">This request carries a LoRA adapter</span></li>
+    <li><span class="i18n" data-en="Already-scheduled LoRAs in this step have hit <code class=&quot;inline-code&quot;>max_loras</code>" data-zh="本步已排入的 LoRA 數量已達 <code class=&quot;inline-code&quot;>max_loras</code>">Already-scheduled LoRAs in this step have hit <code class="inline-code">max_loras</code></span></li>
+    <li><span class="i18n" data-en="<strong>This request's LoRA is NOT one of the already-scheduled ones</strong>" data-zh="<strong>此請求的 LoRA 不在已排入的集合中</strong>"><strong>This request's LoRA is NOT one of the already-scheduled ones</strong></span></li>
+  </ol>
+
+  <div class="callout key">
+    <strong><span class="i18n" data-en="Condition #4 is the clever part:" data-zh="條件 #4 是精妙之處：">Condition #4 is the clever part:</span></strong> <span class="i18n" data-en="Multiple requests sharing the <em>same</em> LoRA don't consume extra budget -- the adapter only has to be loaded once. So only a request that would introduce a <strong>new</strong> LoRA species beyond the cap gets deferred. This lets a batch saturated on, say, 4 LoRAs still admit many more requests as long as they use those same 4 adapters." data-zh="多個請求共用<em>同一個</em> LoRA 不會額外占預算——adapter 只需載入一次。所以只有「引入**新的** LoRA 種類且已達上限」的請求會被延後。這讓一個已飽和 4 個 LoRA 的 batch 仍能繼續 admit 使用這 4 個 adapter 的請求。">Multiple requests sharing the <em>same</em> LoRA don't consume extra budget -- the adapter only has to be loaded once. So only a request that would introduce a <strong>new</strong> LoRA species beyond the cap gets deferred. This lets a batch saturated on, say, 4 LoRAs still admit many more requests as long as they use those same 4 adapters.</span>
+  </div>
+
+  <h5><span class="i18n" data-en="Full admission flow" data-zh="完整 admission 流程">Full admission flow</span></h5>
+
+<pre>
+<span class="cm"># Per iteration of the while loop:</span>
+├─ Check <span class="nu">3</span> exit conditions (queues empty / budget / max_seqs)
+├─ _select_waiting_queue_for_scheduling() → pick self.waiting OR self.skipped_waiting
+├─ peek queue head (NOT pop yet)
+├─ Filter layer 1: blocked status?
+│    └─ pop + prepend_request(step_skipped_waiting) + continue
+├─ Filter layer 2: LoRA budget full?
+│    └─ pop + prepend_request(step_skipped_waiting) + continue
+├─ (remaining code handles prefix-cache lookup, allocate_slots, move to running)
+│
+<span class="cm"># After the while loop exits:</span>
+└─ self.skipped_waiting.<span class="fn">prepend_requests</span>(step_skipped_waiting)
+</pre>
+
+  <div class="callout green">
+    <strong><span class="i18n" data-en="One-sentence takeaway:" data-zh="一句話總結：">One-sentence takeaway:</span></strong> <span class="i18n" data-en="This is a <strong>three-queue state machine</strong> where <code class=&quot;inline-code&quot;>waiting</code> / <code class=&quot;inline-code&quot;>skipped_waiting</code> / <code class=&quot;inline-code&quot;>step_skipped_waiting</code> each have distinct roles; peek-before-pop minimizes queue churn; and the existence of <code class=&quot;inline-code&quot;>step_skipped_waiting</code> is the one trick that prevents the while loop from looping forever on a blocked request." data-zh="這是一個<strong>三佇列狀態機</strong>，<code class=&quot;inline-code&quot;>waiting</code> / <code class=&quot;inline-code&quot;>skipped_waiting</code> / <code class=&quot;inline-code&quot;>step_skipped_waiting</code> 各司其職；peek-before-pop 最小化佇列搬動；而 <code class=&quot;inline-code&quot;>step_skipped_waiting</code> 的存在是唯一能防止 while 迴圈在 blocked 請求上無限迴圈的關鍵設計。">This is a <strong>three-queue state machine</strong> where <code class="inline-code">waiting</code> / <code class="inline-code">skipped_waiting</code> / <code class="inline-code">step_skipped_waiting</code> each have distinct roles; peek-before-pop minimizes queue churn; and the existence of <code class="inline-code">step_skipped_waiting</code> is the one trick that prevents the while loop from looping forever on a blocked request.</span>
+  </div>
+
   <p><span class="i18n" data-en="Waiting requests get a prefix cache lookup (<code class=&quot;inline-code&quot;>get_computed_blocks()</code>). On a fresh request (<code class=&quot;inline-code&quot;>num_computed_tokens == 0</code>), a KVConnector (for P/D disaggregation or remote KV transfer) may additionally contribute externally computed tokens:" data-zh="等待請求會進行前綴快取查找（<code class=&quot;inline-code&quot;>get_computed_blocks()</code>）。對於全新請求（<code class=&quot;inline-code&quot;>num_computed_tokens == 0</code>），KVConnector（用於 P/D 分離或遠端 KV 傳輸）還可能額外貢獻外部已計算的 token：">Waiting requests get a prefix cache lookup (<code class="inline-code">get_computed_blocks()</code>). On a fresh request (<code class="inline-code">num_computed_tokens == 0</code>), a KVConnector (for P/D disaggregation or remote KV transfer) may additionally contribute externally computed tokens:</span></p>
 
 <pre>
