@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV Cache Strategies</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fff;
+    color: #222;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    padding: 36px 48px;
+    min-width: 1100px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 20px; }
+
+  /* Toggle buttons */
+  .toggle-group {
+    display: flex; gap: 0; margin-bottom: 28px;
+  }
+  .toggle-btn {
+    padding: 8px 24px;
+    font-size: 0.85rem; font-weight: 600;
+    border: 2px solid #ddd;
+    background: #fafafa; color: #888;
+    cursor: pointer; transition: all 0.15s;
+    user-select: none;
+  }
+  .toggle-btn:first-child { border-radius: 6px 0 0 6px; }
+  .toggle-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+  .toggle-btn.active-short {
+    background: #e8f5e9; color: #2e7d32; border-color: #66bb6a;
+  }
+  .toggle-btn.active-long {
+    background: #fff3e0; color: #d84315; border-color: #ff8a65;
+  }
+
+  .strategy { margin-bottom: 28px; }
+  .strategy-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+  }
+  .strategy-name { font-size: 1.0rem; font-weight: 700; }
+  .strategy-tag {
+    font-size: 0.68rem; padding: 2px 8px; border-radius: 3px; font-weight: 600;
+  }
+  .strategy-desc {
+    font-size: 0.78rem; color: #777; margin-bottom: 6px;
+  }
+
+  .dual-row { border-radius: 6px; overflow: hidden; border: 1px solid #ddd; }
+  .vram-row { display: flex; height: 44px; position: relative; }
+  .dram-row { display: flex; height: 28px; border-top: 1px dashed #ddd; }
+  .row-label {
+    width: 50px; min-width: 50px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.6rem; font-weight: 700; color: #999;
+    background: #fafafa; border-right: 1px solid #eee;
+  }
+
+  .seg {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-size: 0.72rem; font-weight: 600; padding: 2px 8px;
+    white-space: nowrap; transition: width 0.3s ease, min-width 0.3s ease, opacity 0.3s ease;
+  }
+  .seg .sub {
+    font-size: 0.58rem; font-weight: 400; opacity: 0.65; margin-top: 1px;
+  }
+
+  .c-infer { background: #dbeeff; color: #1a73e8; }
+  .c-pin { background: #e8f5e9; color: #2e7d32; }
+  .c-pin-expired { background: #f5f5f5; color: #aaa; }
+  .c-freed { background: #f5f5f5; color: #aaa; }
+  .c-empty { background: #f5f5f5; color: #aaa; }
+  .c-offload { background: #f3e5f5; color: #7b1fa2; }
+  .c-reload { background: #f3e5f5; color: #7b1fa2; }
+  .c-prefetch { background: #e0f2f1; color: #00796b; }
+  .c-recompute { background: #fff3e0; color: #d84315; }
+  .c-dram-hold { background: #f3e5f5; color: #9c27b0; }
+  .c-dram-empty { background: #fafafa; color: #ccc; }
+  .c-repeat { background: none; color: #bbb; width: 36px; min-width: 36px; }
+
+  .name-fcfs { color: #c62828; }
+  .name-cont { color: #2e7d32; }
+  .name-lmc { color: #7b1fa2; }
+  .name-pref { color: #00796b; }
+  .tag-base { background: #fce4ec; color: #c62828; }
+  .tag-pin { background: #e8f5e9; color: #2e7d32; }
+  .tag-off { background: #f3e5f5; color: #7b1fa2; }
+  .tag-pre { background: #e0f2f1; color: #00796b; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 16px; margin-top: 28px;
+    padding: 12px 16px; background: #fafafa; border-radius: 6px; border: 1px solid #eee;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: #555; }
+  .legend-color { width: 14px; height: 14px; border-radius: 2px; }
+  .legend-color-stripe {
+    width: 14px; height: 14px; border-radius: 2px;
+    background: #f5f5f5;
+  }
+
+  .footer { margin-top: 18px; font-size: 0.72rem; color: #aaa; text-align: center; }
+  .hidden { display: none; }
+
+  /* Ranking badge */
+  .rank-badge {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 4px;
+    white-space: nowrap;
+    z-index: 5;
+  }
+  .rank-best { background: #e8f5e9; color: #2e7d32; border: 1.5px solid #66bb6a; }
+  .rank-worst { background: #fce4ec; color: #c62828; border: 1.5px solid #ef9a9a; }
+  .rank-mid { background: #fff3e0; color: #e67e00; border: 1.5px solid #ffcc80; }
+
+  /* Timeline markers */
+  .timeline-wrapper { position: relative; padding-top: 18px; }
+  .marker-line {
+    position: absolute;
+    top: 18px; /* start at dual-row top */
+    height: 72px; /* = vram 44 + dram 28 */
+    border-left: 2px dashed;
+    z-index: 10;
+  }
+  .marker-line.start { border-color: #1a73e8; }
+  .marker-line.finish { border-color: #d32f2f; }
+  .marker-line.ttl { border-color: #e67e00; }
+  .marker-label {
+    position: absolute;
+    top: 1px;
+    transform: translateX(-50%);
+    font-size: 0.6rem; font-weight: 600;
+    white-space: nowrap;
+    background: #fff; padding: 0 4px;
+  }
+  .marker-label.start { color: #1a73e8; }
+  .marker-label.finish { color: #d32f2f; }
+  .marker-label.ttl { color: #e67e00; }
+</style>
+</head>
+<body>
+
+<h1>Agentic KV Cache — Four Strategies</h1>
+<p class="subtitle">How each strategy handles KV cache during tool-call gaps under high memory pressure (KV cache &gt;90%)</p>
+
+<div class="toggle-group">
+  <div class="toggle-btn active-short" id="btn-short" onclick="showMode('short')">Short Tool Call (&lt; TTL)</div>
+  <div class="toggle-btn" id="btn-long" onclick="showMode('long')">Long Tool Call (&gt; TTL)</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SHORT TOOL MODE                                               -->
+<!-- tool started: 160+50=210px  tool finished: 560+50=610px       -->
+<!-- ============================================================ -->
+<div id="mode-short">
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-fcfs">1. FCFS</span>
+    <span class="strategy-tag tag-base">recompute on return</span>
+  </div>
+  <p class="strategy-desc">KV freed immediately. Blocks evicted by other requests → full recompute on return.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:610px"></div>
+    <div class="marker-label finish" style="left:610px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-worst">Slowest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-freed" style="width:400px;min-width:400px">tool executing — KV freed → evicted<span class="sub">blocks taken by others</span></div>
+        <div class="seg c-recompute" style="width:120px;min-width:120px">recompute ⚠<span class="sub">re-prefill all tokens</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">resume generation</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="flex:1">— unused —</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-cont">2. Continuum</span>
+    <span class="strategy-tag tag-pin">VRAM pin with TTL</span>
+  </div>
+  <p class="strategy-desc">KV pinned in VRAM. Tool returns before TTL expires → cache hit, zero recompute.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:610px"></div>
+    <div class="marker-label finish" style="left:610px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-best">★ Fastest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-pin" style="width:400px;min-width:400px">tool executing — KV pinned ✓<span class="sub">blocks in VRAM, not evictable</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">cache hit, zero recompute</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="flex:1">— unused —</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-lmc">3. LMCache</span>
+    <span class="strategy-tag tag-off">DRAM offload + reactive reload</span>
+  </div>
+  <p class="strategy-desc">KV offloaded to DRAM, GPU freed. On tool return, reload from DRAM.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:610px"></div>
+    <div class="marker-label finish" style="left:610px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-mid">Medium</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-offload" style="width:72px;min-width:72px">offload ↓<span class="sub">GPU→CPU</span></div>
+        <div class="seg c-empty" style="width:328px;min-width:328px">GPU memory freed<span class="sub">available for other requests</span></div>
+        <div class="seg c-reload" style="width:72px;min-width:72px">reload ↑<span class="sub">CPU→GPU</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">restored, skip recompute</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="width:160px;min-width:160px"></div>
+        <div class="seg c-dram-hold" style="width:400px;min-width:400px">KV data held in CPU pinned memory</div>
+        <div class="seg c-dram-empty" style="flex:1"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-pref">4. Predictive Prefetch (Ours)</span>
+    <span class="strategy-tag tag-pre">DRAM offload + proactive prefetch</span>
+  </div>
+  <p class="strategy-desc">KV offloaded to DRAM, GPU freed. Prefetch KV back <em>before</em> tool returns → zero wait.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:610px"></div>
+    <div class="marker-label finish" style="left:610px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-best">★ Fastest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-offload" style="width:72px;min-width:72px">offload ↓<span class="sub">GPU→CPU</span></div>
+        <div class="seg c-empty" style="width:256px;min-width:256px">GPU memory freed<span class="sub">available for others</span></div>
+        <div class="seg c-prefetch" style="width:72px;min-width:72px">prefetch ↑<span class="sub">at t−δ</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">cache hit, zero wait</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="width:160px;min-width:160px"></div>
+        <div class="seg c-dram-hold" style="width:328px;min-width:328px">KV data held in CPU pinned memory</div>
+        <div class="seg c-dram-empty" style="flex:1"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end mode-short -->
+
+<!-- ============================================================ -->
+<!-- LONG TOOL MODE                                                -->
+<!-- tool started: 210px  TTL expires: 410px  tool finished: 810px -->
+<!-- ============================================================ -->
+<div id="mode-long" class="hidden">
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-fcfs">1. FCFS</span>
+    <span class="strategy-tag tag-base">recompute on return</span>
+  </div>
+  <p class="strategy-desc">KV freed immediately. Blocks evicted → full recompute on return.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:810px"></div>
+    <div class="marker-label finish" style="left:810px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-worst">Slowest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-freed" style="width:600px;min-width:600px">tool executing — KV freed → evicted<span class="sub">blocks taken by others</span></div>
+        <div class="seg c-recompute" style="width:120px;min-width:120px">recompute ⚠<span class="sub">re-prefill all tokens</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">resume generation</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="flex:1">— unused —</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-cont">2. Continuum</span>
+    <span class="strategy-tag tag-pin">VRAM pin with TTL</span>
+  </div>
+  <p class="strategy-desc">KV pinned, but TTL expires before tool returns → blocks unpinned and evicted → must recompute.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line ttl" style="left:410px"></div>
+    <div class="marker-label ttl" style="left:410px">TTL expired</div>
+    <div class="marker-line finish" style="left:810px"></div>
+    <div class="marker-label finish" style="left:810px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-worst">Slowest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-pin" style="width:200px;min-width:200px">KV pinned ✓<span class="sub">TTL active</span></div>
+        <div class="seg c-pin-expired" style="width:400px;min-width:400px">unpinned → evicted<span class="sub">blocks taken by others</span></div>
+        <div class="seg c-recompute" style="width:120px;min-width:120px">recompute ⚠<span class="sub">re-prefill all tokens</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">resume generation</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="flex:1">— unused —</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-lmc">3. LMCache</span>
+    <span class="strategy-tag tag-off">DRAM offload + reactive reload</span>
+  </div>
+  <p class="strategy-desc">KV safe in DRAM regardless of tool duration. On return, reload from DRAM.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:810px"></div>
+    <div class="marker-label finish" style="left:810px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-mid">Medium</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-offload" style="width:72px;min-width:72px">offload ↓<span class="sub">GPU→CPU</span></div>
+        <div class="seg c-empty" style="width:528px;min-width:528px">GPU memory freed<span class="sub">available for other requests</span></div>
+        <div class="seg c-reload" style="width:72px;min-width:72px">reload ↑<span class="sub">CPU→GPU</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">restored, skip recompute</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="width:160px;min-width:160px"></div>
+        <div class="seg c-dram-hold" style="width:600px;min-width:600px">KV data held in CPU pinned memory</div>
+        <div class="seg c-dram-empty" style="flex:1"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="strategy">
+  <div class="strategy-header">
+    <span class="strategy-name name-pref">4. Predictive Prefetch (Ours)</span>
+    <span class="strategy-tag tag-pre">DRAM offload + proactive prefetch</span>
+  </div>
+  <p class="strategy-desc">KV safe in DRAM. Prefetch completes <em>before</em> tool returns — same performance as short tool case.</p>
+  <div class="timeline-wrapper">
+    <div class="marker-line start" style="left:210px"></div>
+    <div class="marker-label start" style="left:210px">tool started</div>
+    <div class="marker-line finish" style="left:810px"></div>
+    <div class="marker-label finish" style="left:810px">tool finished</div>
+    <div class="dual-row">
+      <div class="vram-row">
+        <div class="rank-badge rank-best">★ Fastest</div>
+        <div class="row-label">VRAM</div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">KV allocated</span></div>
+        <div class="seg c-offload" style="width:72px;min-width:72px">offload ↓<span class="sub">GPU→CPU</span></div>
+        <div class="seg c-empty" style="width:456px;min-width:456px">GPU memory freed<span class="sub">available for others</span></div>
+        <div class="seg c-prefetch" style="width:72px;min-width:72px">prefetch ↑<span class="sub">at t−δ</span></div>
+        <div class="seg c-infer" style="width:160px;min-width:160px">LLM inference<span class="sub">cache hit, zero wait</span></div>
+        <div class="seg c-repeat">…</div>
+      </div>
+      <div class="dram-row">
+        <div class="row-label">DRAM</div>
+        <div class="seg c-dram-empty" style="width:160px;min-width:160px"></div>
+        <div class="seg c-dram-hold" style="width:528px;min-width:528px">KV data held in CPU pinned memory</div>
+        <div class="seg c-dram-empty" style="flex:1"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end mode-long -->
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-color" style="background:#dbeeff"></div>LLM inference</div>
+  <div class="legend-item"><div class="legend-color" style="background:#e8f5e9"></div>KV pinned in VRAM</div>
+  <div class="legend-item"><div class="legend-color-stripe"></div>TTL expired → evicted</div>
+  <div class="legend-item"><div class="legend-color" style="background:#fce4ec"></div>KV freed / evicted</div>
+  <div class="legend-item"><div class="legend-color" style="background:#f3e5f5"></div>DRAM offload / reload</div>
+  <div class="legend-item"><div class="legend-color" style="background:#e0f2f1"></div>Predictive prefetch</div>
+  <div class="legend-item"><div class="legend-color" style="background:#fff3e0"></div>Recompute (costly)</div>
+  <div class="legend-item"><div class="legend-color" style="background:#f5f5f5"></div>GPU memory available</div>
+</div>
+
+<p class="footer">vllm-continuum · Llama 3.1 8B · RTX 5090</p>
+
+<script>
+function showMode(mode) {
+  const shortEl = document.getElementById('mode-short');
+  const longEl = document.getElementById('mode-long');
+  const btnShort = document.getElementById('btn-short');
+  const btnLong = document.getElementById('btn-long');
+
+  if (mode === 'short') {
+    shortEl.classList.remove('hidden');
+    longEl.classList.add('hidden');
+    btnShort.className = 'toggle-btn active-short';
+    btnLong.className = 'toggle-btn';
+  } else {
+    shortEl.classList.add('hidden');
+    longEl.classList.remove('hidden');
+    btnShort.className = 'toggle-btn';
+    btnLong.className = 'toggle-btn active-long';
+  }
+}
+</script>
+
+</body>
+</html>
