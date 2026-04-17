@@ -145,36 +145,7 @@ footer a{color:#6ec6ff}
       <tr><td colspan="2"></td><td>others</td><td>2%</td></tr>
     </tbody>
   </table>
-  <h4>Sample trace (one trajectory, truncated)</h4>
-  <p>Each SWE-smith trajectory is an OpenAI-format chat log: a system prompt, the issue description as the user message, and alternating assistant / tool turns. Below is an abridged view of <code>instance_id=astropy__astropy-12907</code> showing the first two turns.</p>
-  <pre><code>{
-  <span class="st">"instance_id"</span>: <span class="st">"astropy__astropy-12907"</span>,
-  <span class="st">"messages"</span>: [
-    {<span class="st">"role"</span>: <span class="st">"system"</span>,
-     <span class="st">"content"</span>: <span class="st">"You are a SWE agent. Use the tools to explore the repo and fix the issue…"</span>},
-
-    {<span class="st">"role"</span>: <span class="st">"user"</span>,
-     <span class="st">"content"</span>: <span class="st">"&lt;issue&gt;Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels&lt;/issue&gt;&lt;repo&gt;astropy/astropy&lt;/repo&gt;"</span>},
-
-    <span class="cm">// turn 1 — explore</span>
-    {<span class="st">"role"</span>: <span class="st">"assistant"</span>,
-     <span class="st">"content"</span>: <span class="st">"Let me look at the modeling package."</span>,
-     <span class="st">"tool_calls"</span>: [{<span class="st">"id"</span>: <span class="st">"c1"</span>, <span class="st">"type"</span>: <span class="st">"function"</span>,
-       <span class="st">"function"</span>: {<span class="st">"name"</span>: <span class="st">"cd"</span>, <span class="st">"arguments"</span>: <span class="st">"{\"path\": \"astropy/modeling\"}"</span>}}]},
-    {<span class="st">"role"</span>: <span class="st">"tool"</span>, <span class="st">"tool_call_id"</span>: <span class="st">"c1"</span>, <span class="st">"content"</span>: <span class="st">"/astropy/modeling"</span>},
-
-    <span class="cm">// turn 2 — read the suspect file</span>
-    {<span class="st">"role"</span>: <span class="st">"assistant"</span>,
-     <span class="st">"content"</span>: <span class="st">"Opening separable.py to inspect _separable()."</span>,
-     <span class="st">"tool_calls"</span>: [{<span class="st">"id"</span>: <span class="st">"c2"</span>, <span class="st">"type"</span>: <span class="st">"function"</span>,
-       <span class="st">"function"</span>: {<span class="st">"name"</span>: <span class="st">"editor_view"</span>, <span class="st">"arguments"</span>: <span class="st">"{\"path\": \"separable.py\", \"view_range\": [1, 120]}"</span>}}]},
-    {<span class="st">"role"</span>: <span class="st">"tool"</span>, <span class="st">"tool_call_id"</span>: <span class="st">"c2"</span>,
-     <span class="st">"content"</span>: <span class="st">"def _separable(transform): …  # ~115 lines of source"</span>},
-
-    <span class="cm">// … 15 more turns (editor_str_replace, editor_view, editor_str_replace, submit) …</span>
-  ]
-}</code></pre>
-  <div class="note"><span><strong>Preprocessing step:</strong> the <code>tool_calls</code> field is OpenAI-native but Continuum's pin estimator classifies by parsing a trailing <code>```bash\n&lt;tool_name&gt;\n```</code> block in the assistant's <code>content</code>. Our preprocessor synthesizes that block from <code>tool_calls[0].function.name</code> before tokenization, so <code>cd</code> becomes <code>"Let me look at the modeling package.\n```bash\ncd\n```"</code>. See §2.2.</span></div>
+  <p><span>Each SWE-smith trajectory is an OpenAI-format chat log: a system prompt, the issue description as the user message, and alternating assistant / tool turns. A worked example showing the JSON structure together with its per-turn token budget lives in <a href="#turn-budget">§2.1</a>.</span></p>
   <h3>1.3 Scheduling policies tested</h3>
   <table>
     <thead><tr><th>Policy variant</th><th>KV strategy</th><th>External tier</th></tr></thead>
@@ -201,8 +172,37 @@ footer a{color:#6ec6ff}
   <p>Minimum engine steps for a single turn = <strong>1</strong> (prefill, ≥ 1 if chunked) <strong>+ <em>N</em></strong> (one per decoded token) = <strong>1 + num_output_tokens</strong>.</p>
 
   <h3>2.1 Worked example — <code>astropy__astropy-12907</code> turn 2</h3>
-  <p>The request arriving at the engine for turn 2 carries the full chat history up to that point plus the new assistant role prefix. Counts below are representative (Llama-3.1 tokenizer).</p>
-  <pre><code><span class="cm"># Input side — prompt_tokens fed to the engine for turn 2</span>
+  <p>The trajectory (abridged) and the token accounting for turn 2 share one block below. Counts are representative (Llama-3.1 tokenizer).</p>
+  <pre><code><span class="cm"># ── Trajectory (abridged, 2 of ~17 turns shown) ──────────────────────────</span>
+{
+  <span class="st">"instance_id"</span>: <span class="st">"astropy__astropy-12907"</span>,
+  <span class="st">"messages"</span>: [
+    {<span class="st">"role"</span>: <span class="st">"system"</span>,
+     <span class="st">"content"</span>: <span class="st">"You are a SWE agent. Use the tools to explore the repo and fix the issue…"</span>},
+
+    {<span class="st">"role"</span>: <span class="st">"user"</span>,
+     <span class="st">"content"</span>: <span class="st">"&lt;issue&gt;Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels&lt;/issue&gt;&lt;repo&gt;astropy/astropy&lt;/repo&gt;"</span>},
+
+    <span class="cm">// turn 1 — explore</span>
+    {<span class="st">"role"</span>: <span class="st">"assistant"</span>,
+     <span class="st">"content"</span>: <span class="st">"Let me look at the modeling package."</span>,
+     <span class="st">"tool_calls"</span>: [{<span class="st">"id"</span>: <span class="st">"c1"</span>, <span class="st">"type"</span>: <span class="st">"function"</span>,
+       <span class="st">"function"</span>: {<span class="st">"name"</span>: <span class="st">"cd"</span>, <span class="st">"arguments"</span>: <span class="st">"{\"path\": \"astropy/modeling\"}"</span>}}]},
+    {<span class="st">"role"</span>: <span class="st">"tool"</span>, <span class="st">"tool_call_id"</span>: <span class="st">"c1"</span>, <span class="st">"content"</span>: <span class="st">"/astropy/modeling"</span>},
+
+    <span class="cm">// turn 2 — read the suspect file   ← the turn we score below</span>
+    {<span class="st">"role"</span>: <span class="st">"assistant"</span>,
+     <span class="st">"content"</span>: <span class="st">"Opening separable.py to inspect _separable()."</span>,
+     <span class="st">"tool_calls"</span>: [{<span class="st">"id"</span>: <span class="st">"c2"</span>, <span class="st">"type"</span>: <span class="st">"function"</span>,
+       <span class="st">"function"</span>: {<span class="st">"name"</span>: <span class="st">"editor_view"</span>, <span class="st">"arguments"</span>: <span class="st">"{\"path\": \"separable.py\", \"view_range\": [1, 120]}"</span>}}]},
+    {<span class="st">"role"</span>: <span class="st">"tool"</span>, <span class="st">"tool_call_id"</span>: <span class="st">"c2"</span>,
+     <span class="st">"content"</span>: <span class="st">"def _separable(transform): …  # ~115 lines of source"</span>},
+
+    <span class="cm">// … 15 more turns (editor_str_replace, editor_view, editor_str_replace, submit) …</span>
+  ]
+}
+
+<span class="cm"># ── Turn 2 · Input side — prompt_tokens fed to the engine ────────────────</span>
   system prompt                              …   604 tok
   user (issue body + reproduction code)      … 1,498 tok
   turn 1 assistant text + tool_calls JSON    …    35 tok
@@ -212,14 +212,14 @@ footer a{color:#6ec6ff}
                                              ─────────
   <span class="kw">prompt_tokens</span> (prefill input)           = <span style="display:inline-block;padding:.05rem .55rem;border:2px solid var(--accent);border-radius:5px;color:var(--accent);font-weight:700;background:rgba(var(--accent-rgb),.12);line-height:1.2">2,155 tok</span>
 
-<span class="cm"># Output side — tokens generated during turn 2's decode</span>
+<span class="cm"># ── Turn 2 · Output side — tokens generated during decode ────────────────</span>
   "Opening separable.py to inspect _separable()."        → 10 tok
   tool_calls JSON (editor_view, separable.py, 1..120)    → 13 tok
   synthesized ```bash\neditor_view\n```                  →  5 tok
                                                          ─────────
   <span class="kw">output_tokens</span>                                       = <span style="display:inline-block;padding:.05rem .55rem;border:2px solid var(--accent);border-radius:5px;color:var(--accent);font-weight:700;background:rgba(var(--accent-rgb),.12);line-height:1.2">   28 tok</span>
 
-<span class="cm"># Minimum engine steps for turn 2</span>
+<span class="cm"># ── Turn 2 · Minimum engine steps ────────────────────────────────────────</span>
   prefill   : 1 step   (2,155 ≤ max_num_batched_tokens = 8,192 → one forward pass)
   decode    : 28 steps (one forward pass per emitted token)
                                                ─────────
