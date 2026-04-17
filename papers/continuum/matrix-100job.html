@@ -83,21 +83,20 @@ footer a{color:#6ec6ff}
     <li><a href="index.html">Continuum Paper</a></li>
     <li><a href="execution-note.html">Execution Note</a></li>
     <li><a href="#setup">1. Setup</a></li>
-    <li><a href="#methodology">2. Methodology</a></li>
-    <li><a href="#config">3. Config</a></li>
-    <li><a href="#results">4. Results</a></li>
-    <li><a href="#h100">4.1 H100</a></li>
-    <li><a href="#a100">4.2 A100</a></li>
-    <li><a href="#h200">4.3 H200</a></li>
-    <li><a href="#regression">5. Regression</a></li>
-    <li><a href="#takeaways">6. Takeaways</a></li>
+    <li><a href="#turn-budget">2. Turn budget</a></li>
+    <li><a href="#results">3. Results</a></li>
+    <li><a href="#h100">3.1 H100</a></li>
+    <li><a href="#a100">3.2 A100</a></li>
+    <li><a href="#h200">3.3 H200</a></li>
+    <li><a href="#regression">4. Regression</a></li>
+    <li><a href="#takeaways">5. Takeaways</a></li>
     <li><a href="#viewer" style="color:#a6e3a1">Trace Viewer</a></li>
   </ul>
 </nav>
 
 <div class="hero">
   <h1>Matrix Sweep: Agentic KV Scheduling Across GPUs</h1>
-  <p class="sub">72-run experiment: 3 GPUs × 6 policy variants × 4 JPS arrival rates × 100 SWE-smith trajectories. Each trajectory replayed token-by-token via V1 LogitsProcessor forced decoding + 1 s synthesized tool-exec delay between turns.</p>
+  <p class="sub">72-run experiment: 3 GPUs × 6 policy variants × 4 JPS arrival rates × 100 SWE-smith trajectories. Each trajectory replayed turn-by-turn with a 1 s synthesized tool-exec delay between turns.</p>
   <div class="badges">
     <span class="badge">H100 80GB · A100 40GB · H200 141GB</span>
     <span class="badge">Llama-3.1-8B-Instruct</span>
@@ -175,7 +174,7 @@ footer a{color:#6ec6ff}
     <span class="cm">// … 15 more turns (editor_str_replace, editor_view, editor_str_replace, submit) …</span>
   ]
 }</code></pre>
-  <div class="note"><span><strong>Preprocessing step:</strong> the <code>tool_calls</code> field is OpenAI-native but Continuum's pin estimator classifies by parsing a trailing <code>```bash\n&lt;tool_name&gt;\n```</code> block in the assistant's <code>content</code>. Our preprocessor synthesizes that block from <code>tool_calls[0].function.name</code> before tokenization, so <code>cd</code> becomes <code>"Let me look at the modeling package.\n```bash\ncd\n```"</code>. See §2.1.</span></div>
+  <div class="note"><span><strong>Preprocessing step:</strong> the <code>tool_calls</code> field is OpenAI-native but Continuum's pin estimator classifies by parsing a trailing <code>```bash\n&lt;tool_name&gt;\n```</code> block in the assistant's <code>content</code>. Our preprocessor synthesizes that block from <code>tool_calls[0].function.name</code> before tokenization, so <code>cd</code> becomes <code>"Let me look at the modeling package.\n```bash\ncd\n```"</code>. See §2.2.</span></div>
   <h3>1.3 Scheduling policies tested</h3>
   <table>
     <thead><tr><th>Policy variant</th><th>KV strategy</th><th>External tier</th></tr></thead>
@@ -192,42 +191,49 @@ footer a{color:#6ec6ff}
   <p>Jobs arrive as a Poisson process. JPS (jobs per second) values: 1, 3, 6, 10. Each job runs its full ~18-turn trajectory; between turns a 1-second synthesized tool-exec delay is inserted to emulate real agent loop back-pressure.</p>
 </section>
 
-<section id="methodology">
-  <h2>2. Methodology — Forced Decoding via V1 LogitsProcessor</h2>
-  <p>Every turn's output is pre-recorded in the trajectory. To replay deterministically, we mask all logits except the target token via a custom V1 LogitsProcessor registered at engine startup.</p>
-  <pre><code><span class="kw">class</span> <span class="fn">ForceTokensLogitsProcessor</span>(LogitsProcessor):
-    <span class="kw">def</span> <span class="fn">update_state</span>(self, batch_update):
-        <span class="cm"># Track (forced_tokens, output_tok_ids_ref) per batch idx.</span>
-        <span class="kw">for</span> idx, params, _, output_ids <span class="kw">in</span> batch_update.added:
-            forced = (params.extra_args <span class="kw">or</span> {}).get(<span class="st">"forced_tokens"</span>)
-            <span class="kw">if</span> forced:
-                self.per_req[idx] = (<span class="fn">list</span>(forced), output_ids)
-
-    <span class="kw">def</span> <span class="fn">apply</span>(self, logits):
-        <span class="kw">for</span> idx, (targets, output_ids) <span class="kw">in</span> self.per_req.items():
-            pos = <span class="fn">len</span>(output_ids)  <span class="cm"># reference → auto-updates</span>
-            <span class="kw">if</span> pos &lt; <span class="fn">len</span>(targets):
-                logits[idx, :] = <span class="fn">float</span>(<span class="st">"-inf"</span>)
-                logits[idx, targets[pos]] = 0.0
-        <span class="kw">return</span> logits
-</code></pre>
-  <div class="note"><span>The key V1 API detail: <code>output_ids</code> passed in <code>BatchUpdate</code> is a live reference — it auto-advances as each request generates, so <code>apply()</code> always sees the current decode position without bookkeeping.</span></div>
-  <h3>2.1 Synthesized tool-call injection</h3>
-  <p><span>Continuum's pin estimator parses assistant output for a bash code block to classify tool type. Raw SWE-smith trajectories use OpenAI function-calling (<code>tool_calls</code> field), not bash blocks, so a preprocessor appends a synthetic <code>```bash\n&lt;tool_name&gt;\n```</code> block to each assistant turn's <code>output_text</code> before tokenization.</span></p>
-</section>
-
-<section id="config">
-  <h2>3. Observability Stack</h2>
-  <p>Each run emits two JSONL traces:</p>
+<section id="turn-budget">
+  <h2>2. Per-turn prefill / decode token budget</h2>
+  <p>Every chat turn of a job goes through exactly two phases inside the vLLM engine:</p>
   <ul>
-    <li><code>sched_trace.&lt;policy&gt;.steps.jsonl</code> — <span>one line per <code>schedule()</code> invocation: running/waiting queues, pinned jobs, free/used/pinned blocks, CPU-tier free/total, <code>max_num_scheduled_tokens</code> budget, step_decision categories (new/resumed/running/preempted).</span></li>
-    <li><code>sched_trace.&lt;policy&gt;.requests.jsonl</code> — <span>per-step full request state: <code>num_prompt_tokens</code>, <code>num_cached_tokens</code>, <code>num_computed_tokens</code>, <code>spec_tokens_count</code>, <code>job_id</code>, turn_idx, decoded output_tail, …</span></li>
+    <li><strong>Prefill</strong> — one forward pass over the input tokens that are <em>not</em> already in the prefix cache. Counts as <strong>≥ 1 step</strong> (1 if all uncached tokens fit in <code>max_num_batched_tokens</code>, otherwise split into chunked-prefill steps).</li>
+    <li><strong>Decode</strong> — each forward pass emits exactly one token. <em>N</em> output tokens ⇒ <strong><em>N</em> decode steps</strong>.</li>
   </ul>
-  <p><span>In addition, a <code>prefix_cache_lookup</code> event records <code>(local_hit, external_hit, total_prompt)</code> at each request's first schedule, splitting vLLM prefix-cache hits from connector-provided hits (CPUOffload / LMCache).</span></p>
+  <p>Minimum engine steps for a single turn = <strong>1</strong> (prefill, ≥ 1 if chunked) <strong>+ <em>N</em></strong> (one per decoded token) = <strong>1 + num_output_tokens</strong>.</p>
+
+  <h3>2.1 Worked example — <code>astropy__astropy-12907</code> turn 2</h3>
+  <p>The request arriving at the engine for turn 2 carries the full chat history up to that point plus the new assistant role prefix. Counts below are representative (Llama-3.1 tokenizer).</p>
+  <pre><code><span class="cm"># Input side — prompt_tokens fed to the engine for turn 2</span>
+  system prompt                              …   604 tok
+  user (issue body + reproduction code)      … 1,498 tok
+  turn 1 assistant text + tool_calls JSON    …    35 tok
+  turn 1 synthesized ```bash cd ```          …     5 tok
+  turn 1 tool response "/astropy/modeling"   …    10 tok
+  turn 2 assistant role prefix               …     3 tok
+                                             ─────────
+  <span class="kw">prompt_tokens</span> (prefill input)           = <span style="display:inline-block;padding:.05rem .55rem;border:2px solid var(--accent);border-radius:5px;color:var(--accent);font-weight:700;background:rgba(var(--accent-rgb),.12);line-height:1.2">2,155 tok</span>
+
+<span class="cm"># Output side — tokens generated during turn 2's decode</span>
+  "Opening separable.py to inspect _separable()."        → 10 tok
+  tool_calls JSON (editor_view, separable.py, 1..120)    → 13 tok
+  synthesized ```bash\neditor_view\n```                  →  5 tok
+                                                         ─────────
+  <span class="kw">output_tokens</span>                                       = <span style="display:inline-block;padding:.05rem .55rem;border:2px solid var(--accent);border-radius:5px;color:var(--accent);font-weight:700;background:rgba(var(--accent-rgb),.12);line-height:1.2">   28 tok</span>
+
+<span class="cm"># Minimum engine steps for turn 2</span>
+  prefill   : 1 step   (2,155 ≤ max_num_batched_tokens = 8,192 → one forward pass)
+  decode    : 28 steps (one forward pass per emitted token)
+                                               ─────────
+  <span class="kw">min steps</span>                             = <span style="display:inline-block;padding:.05rem .55rem;border:2px solid #ffb74d;border-radius:5px;color:#ffb74d;font-weight:700;background:rgba(255,183,77,.12);line-height:1.2">29 steps</span>
+  <span class="cm">general form: 1 + num_output_tokens</span>
+</code></pre>
+  <div class="note"><span><strong>Prefix cache effect.</strong> With <code>enable_prefix_caching=True</code>, turn 1's full prefix (2,152 tok) is reused, so the prefill for turn 2 only computes the 3-tok new role prefix — one cheap forward pass instead of 2,155 tokens of attention. <em>The step count is unchanged (still 1 + 28 = 29)</em>; prefix cache saves compute and KV memory, not engine steps.</span></div>
+
+  <h3>2.2 Synthesized tool-call injection</h3>
+  <p><span>Continuum's pin estimator classifies the upcoming tool by parsing a trailing <code>```bash\n&lt;tool_name&gt;\n```</code> block in the assistant's <code>content</code>. Raw SWE-smith trajectories carry tools in the OpenAI <code>tool_calls</code> field instead, so a preprocessor synthesizes that bash block from <code>tool_calls[0].function.name</code> before tokenization — the extra 5 tokens shown in the example above.</span></p>
 </section>
 
 <section id="results">
-  <h2>4. Results — Summary Table (avg job duration, seconds)</h2>
+  <h2>3. Results — Summary Table (avg job duration, seconds)</h2>
   <p>Below: mean total turn duration per job including queue wait, across 100 jobs × ~18 turns. Lower = better. Bold highlights per-row winner.</p>
 
   <h3>H100 80GB</h3>
@@ -267,7 +273,7 @@ footer a{color:#6ec6ff}
 </section>
 
 <section id="h100">
-  <h2>4.1 H100 80GB — 9-chart panel</h2>
+  <h2>3.1 H100 80GB — 9-chart panel</h2>
   <div class="chart">
     <img src="charts_matrix_100job/plot_h100_fwd_histogram.png" alt="H100 max fwd tokens histogram">
     <div class="cap"><strong>Fig. H100-a</strong> — <span>Histogram of max forward tokens per scheduler step across all policies (log-scale y). The dominant cluster at 1–4 tokens = decode steps. The budget-cap spike at 2048 = prefill-heavy steps hitting <code>max_num_scheduled_tokens</code>. Continuum and cpu_offload_128G show tighter distributions; cpu_offload_16G and lmcache_16G have heavier right tails due to prefill retries after eviction.</span></div>
@@ -283,7 +289,7 @@ footer a{color:#6ec6ff}
 </section>
 
 <section id="a100">
-  <h2>4.2 A100 PCIE 40GB — 9-chart panel</h2>
+  <h2>3.2 A100 PCIE 40GB — 9-chart panel</h2>
   <div class="chart">
     <img src="charts_matrix_100job/plot_a100_fwd_histogram.png" alt="A100 max fwd tokens histogram">
     <div class="cap"><strong>Fig. A100-a</strong> — A100 histogram. With only ~90K KV tokens, chunked-prefill fragmentation is extreme: lmcache_16G shows a broad secondary peak around 256 tokens (constant small-chunk prefill). Continuum shifts left-heavy (decode-dominated) because pinning retains prefix blocks across turns.</div>
@@ -299,7 +305,7 @@ footer a{color:#6ec6ff}
 </section>
 
 <section id="h200">
-  <h2>4.3 H200 141GB — 9-chart panel</h2>
+  <h2>3.3 H200 141GB — 9-chart panel</h2>
   <div class="chart">
     <img src="charts_matrix_100job/plot_h200_fwd_histogram.png" alt="H200 max fwd tokens histogram">
     <div class="cap"><strong>Fig. H200-a</strong> — <span>H200 histogram. All policies converge into a near-identical shape because the 141 GB KV cache fits essentially the entire working set. <code>lmcache_16G</code> is the only outlier — deliberately tight DRAM forces external-cache thrash even when GPU KV is plentiful.</span></div>
@@ -315,7 +321,7 @@ footer a{color:#6ec6ff}
 </section>
 
 <section id="regression">
-  <h2>5. Regression Analysis — Compute Cost Model</h2>
+  <h2>4. Regression Analysis — Compute Cost Model</h2>
   <p><span>Fitting <code>step_duration = slope·max_fwd_tokens + intercept</code> across all policies on each GPU:</span></p>
   <table>
     <thead><tr><th>GPU</th><th>n (steps)</th><th>slope (μs/token)</th><th>intercept (ms)</th><th>R²</th><th>Interpretation</th></tr></thead>
@@ -329,7 +335,7 @@ footer a{color:#6ec6ff}
 </section>
 
 <section id="takeaways">
-  <h2>6. Takeaways</h2>
+  <h2>5. Takeaways</h2>
   <div class="cards">
     <div class="card hl">
       <h4>Continuum wins decisively on tight-KV GPUs</h4>
@@ -349,7 +355,7 @@ footer a{color:#6ec6ff}
     </div>
   </div>
 
-  <h3>6.1 Engineering issues surfaced by this matrix</h3>
+  <h3>5.1 Engineering issues surfaced by this matrix</h3>
   <ul>
     <li><strong>Scheduler assertion crash under heavy KV pressure (A100 40GB + Continuum):</strong> <span><code>vllm/v1/core/sched/scheduler.py:1021</code> asserts <code>sum(scheduled_*_req_ids) &le; len(self.running)</code>. Under extreme contention the invariant temporarily breaks. Downgraded to a warning; no downstream effect observed.</span></li>
     <li><strong>vLLM cache grows in $HOME silently:</strong> <span>vLLM writes ~10 GB of compile cache into <code>~/.cache/vllm</code>, which overflows PACE's 20 GB home quota after ~5 runs. Root cause: <code>XDG_CACHE_HOME</code> alone is insufficient — vllm hardcodes <code>Path.home() / '.cache' / 'vllm'</code>. Fix: <code>export VLLM_CACHE_ROOT=&lt;scratch-dir&gt;/vllm</code> alongside <code>XDG_CACHE_HOME</code>.</span></li>
@@ -357,7 +363,7 @@ footer a{color:#6ec6ff}
     <li><strong>Slurm default --gres=gpu:1 can route to V100:</strong> <span>V100 (sm_70) cannot load vLLM 0.19 (FlashAttention 2 requires sm_80+). Must pin <code>--gres=gpu:h100:1</code> or <code>:a100:1</code> explicitly.</span></li>
   </ul>
 
-  <h3>6.2 What we did not measure (limitations)</h3>
+  <h3>5.2 What we did not measure (limitations)</h3>
   <ul>
     <li><span>Tool exec delay is uniform 1 s. Real tools (<code>find</code>/<code>grep</code>/<code>python</code>) span 0.01 s (<code>cd</code>) to 60 s (<code>pytest</code>). A per-tool-type distribution would test Continuum's dynamic pin-TTL more faithfully.</span></li>
     <li>No long-context (&gt;16K) jobs included. Llama-3.1-8B supports 128K; tight-KV GPUs would be hit even harder and policy gaps would widen.</li>
