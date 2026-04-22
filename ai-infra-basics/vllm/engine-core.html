@@ -358,34 +358,36 @@ footer{text-align:center;padding:2rem;color:#8fa4c0;font-size:.85rem;border-top:
 
 <h3><span class="i18n" data-en="2.1 The run_busy_loop() Entry Point" data-zh="2.1 run_busy_loop() 入口點">2.1 The run_busy_loop() Entry Point</span></h3>
 
-<p><span class="i18n" data-en="The <code>EngineCoreProc</code> subclass wraps <code>EngineCore</code> with ZMQ I/O and runs the busy loop in a background process. In vLLM 0.19.0, the loop is a plain <code>while True</code> — termination is driven by the SIGINT / SIGTERM handlers installed in <code>run_engine_core()</code>, which raise <code>SystemExit</code> to break out:" data-zh="<code>EngineCoreProc</code> 子類別把 <code>EngineCore</code> 包上 ZMQ I/O，在背景行程內執行忙碌迴圈。在 vLLM 0.19.0 中這個迴圈就是單純的 <code>while True</code> —— 結束由 <code>run_engine_core()</code> 裝好的 SIGINT / SIGTERM 訊號處理器負責，它會丟出 <code>SystemExit</code> 來跳離迴圈：">The <code>EngineCoreProc</code> subclass wraps <code>EngineCore</code> with ZMQ I/O and runs the busy loop in a background process. In vLLM 0.19.0, the loop is a plain <code>while True</code> — termination is driven by the SIGINT / SIGTERM handlers installed in <code>run_engine_core()</code>, which raise <code>SystemExit</code> to break out:</span></p>
+<p><span class="i18n" data-en="The <code>EngineCoreProc</code> subclass wraps <code>EngineCore</code> with ZMQ I/O and runs the busy loop in a background process. The loop is driven by <code>_handle_shutdown()</code> (line 1202): it returns <code>True</code> while <code>shutdown_state == RUNNING</code>, so normally the loop just alternates between draining the input queue and stepping the engine. When SIGINT / SIGTERM flips <code>shutdown_state</code> to <code>REQUESTED</code>, the helper drains or aborts in-flight requests and eventually returns <code>False</code>, letting the loop fall through to <code>raise SystemExit</code>:" data-zh="<code>EngineCoreProc</code> 子類別把 <code>EngineCore</code> 包上 ZMQ I/O，在背景行程裡跑忙碌迴圈。迴圈條件來自 <code>_handle_shutdown()</code>（1202 行）：正常情況下 <code>shutdown_state == RUNNING</code> 它就回 <code>True</code>，因此主體不斷在 drain input queue 與 step 引擎之間切換。當 SIGINT / SIGTERM 把 <code>shutdown_state</code> 轉為 <code>REQUESTED</code>，這個 helper 會把還在飛的請求收尾 / abort，最後回 <code>False</code>，迴圈才會走到 <code>raise SystemExit</code>：">The <code>EngineCoreProc</code> subclass wraps <code>EngineCore</code> with ZMQ I/O and runs the busy loop in a background process. The loop is driven by <code>_handle_shutdown()</code> (line 1202): it returns <code>True</code> while <code>shutdown_state == RUNNING</code>, so normally the loop just alternates between draining the input queue and stepping the engine. When SIGINT / SIGTERM flips <code>shutdown_state</code> to <code>REQUESTED</code>, the helper drains or aborts in-flight requests and eventually returns <code>False</code>, letting the loop fall through to <code>raise SystemExit</code>:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_busy_loop()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_busy_loop() — lines 1136-1144</span>
 <pre><code><span class="kw">def</span> <span class="fn">run_busy_loop</span>(<span class="self">self</span>):
     <span class="str">"""Core busy loop of the EngineCore."""</span>
-
-    <span class="cmt"># Loop until process is sent a SIGINT or SIGTERM.</span>
-    <span class="cmt"># The signal handler installed in run_engine_core() raises</span>
-    <span class="cmt"># SystemExit which propagates out of this while True.</span>
-    <span class="kw">while True</span>:
-        <span class="cmt"># 1) Block until at least one request is in the input queue,</span>
-        <span class="cmt">#    then drain every pending input message non-blocking.</span>
-        <span class="cmt">#    Input messages arrive from the Input I/O thread after</span>
-        <span class="cmt">#    msgpack deserialization + preprocess_add_request().</span>
+    <span class="cmt"># _handle_shutdown() returns True while shutdown_state == RUNNING.</span>
+    <span class="cmt"># On SIGTERM/SIGINT the handler flips it to REQUESTED -- the helper</span>
+    <span class="cmt"># then drains/aborts in-flight reqs and eventually returns False.</span>
+    <span class="kw">while</span> <span class="self">self</span>._handle_shutdown():
+        <span class="cmt"># 1) Poll the input queue until there is work to do.</span>
+        <span class="cmt">#    Blocks while has_work() is False and is_running() is True;</span>
+        <span class="cmt">#    releases the GIL so the Input I/O thread can run.</span>
         <span class="self">self</span>._process_input_queue()
 
-        <span class="cmt"># 2) Run one engine step: schedule(), execute_model(),</span>
-        <span class="cmt">#    update_from_output(). Put the resulting EngineCoreOutputs</span>
-        <span class="cmt">#    onto the output_queue for the Output I/O thread to serialize.</span>
-        <span class="self">self</span>._process_engine_step()</code></pre>
+        <span class="cmt"># 2) Step the engine core and return the outputs.</span>
+        <span class="cmt">#    step_fn is either step() or step_with_batch_queue()</span>
+        <span class="cmt">#    depending on pipeline-parallel config (see §2.3).</span>
+        <span class="self">self</span>._process_engine_step()
 
-<p><span class="i18n" data-en="This loop has only two phases: drain the input queue (blocking on a condition — see §2.5), then step the engine once. On SIGINT / SIGTERM the handler raises <code>SystemExit</code>; the <code>try / finally</code> in <code>run_engine_core()</code> then calls <code>engine_core.shutdown()</code> to tear down the executor and scheduler cleanly." data-zh="整個迴圈只有兩個階段：先排空 input queue（會按條件阻塞，見 §2.5），再執行一次引擎 step。收到 SIGINT / SIGTERM 時處理器丟出 <code>SystemExit</code>，由 <code>run_engine_core()</code> 外層 <code>try / finally</code> 呼叫 <code>engine_core.shutdown()</code> 正常地關掉 executor 與 scheduler。">This loop has only two phases: drain the input queue (blocking on a condition — see §2.5), then step the engine once. On SIGINT / SIGTERM the handler raises <code>SystemExit</code>; the <code>try / finally</code> in <code>run_engine_core()</code> then calls <code>engine_core.shutdown()</code> to tear down the executor and scheduler cleanly.</span></p>
+    <span class="cmt"># shutdown_state == COMPLETED reached -- exit cleanly so the</span>
+    <span class="cmt"># try/finally in run_engine_core() can call self.shutdown().</span>
+    <span class="kw">raise</span> <span class="cls">SystemExit</span></code></pre>
+
+<p><span class="i18n" data-en="This loop has only two phases: drain the input queue (blocking on a condition — see §2.5), then step the engine once. The <code>try / finally</code> in <code>run_engine_core()</code> catches the <code>SystemExit</code> and calls <code>engine_core.shutdown()</code> to tear down the executor and scheduler cleanly." data-zh="整個迴圈只有兩個階段：先排空 input queue（會按條件阻塞，見 §2.5），再執行一次引擎 step。<code>run_engine_core()</code> 外層的 <code>try / finally</code> 會接住 <code>SystemExit</code>，再呼叫 <code>engine_core.shutdown()</code> 正常地關掉 executor 與 scheduler。">This loop has only two phases: drain the input queue (blocking on a condition — see §2.5), then step the engine once. The <code>try / finally</code> in <code>run_engine_core()</code> catches the <code>SystemExit</code> and calls <code>engine_core.shutdown()</code> to tear down the executor and scheduler cleanly.</span></p>
 
 <h3><span class="i18n" data-en="2.2 The step() Function: Schedule, Execute, Update" data-zh="2.2 step() 函式：Schedule、Execute、Update">2.2 The step() Function: Schedule, Execute, Update</span></h3>
 
-<p><span class="i18n" data-en="The core computation happens in <code>step()</code> — vLLM's per-iteration heartbeat. In 0.19.0 the function is deliberately short; pipeline-parallel overlap lives in the separate <code>step_with_batch_queue()</code> path (§2.3):" data-zh="核心計算發生在 <code>step()</code> —— vLLM 每次迭代的心跳。在 0.19.0 這個函式刻意寫得很短；pipeline 平行的重疊邏輯放在另一條路徑 <code>step_with_batch_queue()</code>（見 §2.3）：">The core computation happens in <code>step()</code> — vLLM's per-iteration heartbeat. In 0.19.0 the function is deliberately short; pipeline-parallel overlap lives in the separate <code>step_with_batch_queue()</code> path (§2.3):</span></p>
+<p><span class="i18n" data-en="The core computation happens in <code>step()</code> — vLLM's per-iteration heartbeat. In 0.19.0 the path dispatches the forward pass asynchronously (<code>non_block=True</code>), builds the grammar bitmask while the model is still computing, then waits on <code>future.result()</code> under logging context managers. An <em>aborts queue</em> is drained between the forward pass and the scheduler update so late aborts don't leak into the next iteration:" data-zh="核心計算發生在 <code>step()</code> —— vLLM 每次迭代的心跳。0.19.0 以 <code>non_block=True</code> 把 forward pass 非同步送出，趁模型還在算時先把 grammar bitmask 組好，再用 logging context manager 包住 <code>future.result()</code>。前向結束後、scheduler update 之前會先排空 <em>aborts queue</em>，避免遲到的 abort 漏進下一輪：">The core computation happens in <code>step()</code> — vLLM's per-iteration heartbeat. In 0.19.0 the path dispatches the forward pass asynchronously (<code>non_block=True</code>), builds the grammar bitmask while the model is still computing, then waits on <code>future.result()</code> under logging context managers. An <em>aborts queue</em> is drained between the forward pass and the scheduler update so late aborts don't leak into the next iteration:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCore.step()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCore.step() — lines 380-409</span>
 <pre><code><span class="kw">def</span> <span class="fn">step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">tuple</span>[<span class="cls">dict</span>[<span class="cls">int</span>, <span class="cls">EngineCoreOutputs</span>], <span class="cls">bool</span>]:
     <span class="str">"""Schedule, execute, and make output.
 
@@ -400,41 +402,53 @@ footer{text-align:center;padding:2rem;color:#8fa4c0;font-size:.85rem;border-top:
 
     <span class="cmt"># 1) Scheduler picks the next batch: which running requests to</span>
     <span class="cmt">#    decode, which waiting requests to prefill, which blocks to</span>
-    <span class="cmt">#    allocate / evict. Returns a SchedulerOutput describing the batch.</span>
+    <span class="cmt">#    allocate / evict. Returns a SchedulerOutput.</span>
     scheduler_output = <span class="self">self</span>.scheduler.schedule()
 
-    <span class="cmt"># 2) Dispatch to the Executor (e.g., UniProcExecutor, MultiprocExecutor,</span>
-    <span class="cmt">#    RayDistributedExecutor). The error-logging wrapper catches any</span>
-    <span class="cmt">#    exception from the worker and dumps the SchedulerOutput + stats</span>
-    <span class="cmt">#    via dump_engine_exception() before re-raising.</span>
-    model_output = <span class="self">self</span>.execute_model_with_error_logging(
-        <span class="self">self</span>.model_executor.execute_model,  <span class="cmt"># type: ignore</span>
-        scheduler_output)
+    <span class="cmt"># 2) Dispatch the forward pass non-blocking (future-based).</span>
+    <span class="cmt">#    execute_model returns immediately; the worker is now running.</span>
+    future = <span class="self">self</span>.model_executor.execute_model(scheduler_output,
+                                                non_block=<span class="kw">True</span>)
+    <span class="cmt"># 3) While the GPU is busy, compute the grammar bitmask (structured</span>
+    <span class="cmt">#    output / JSON schema constraint) on the CPU -- pure overlap.</span>
+    grammar_output = <span class="self">self</span>.scheduler.get_grammar_bitmask(scheduler_output)
 
-    <span class="cmt"># 3) Feed the ModelRunnerOutput back into the scheduler so it can</span>
-    <span class="cmt">#    append sampled tokens, detect finished requests, free blocks,</span>
-    <span class="cmt">#    and emit per-request EngineCoreOutput records (keyed by client).</span>
+    <span class="cmt"># 4) Join on the forward pass and emit iteration logging / error</span>
+    <span class="cmt">#    context. log_error_detail dumps the SchedulerOutput on failure;</span>
+    <span class="cmt">#    log_iteration_details records timing / shapes.</span>
+    <span class="kw">with</span> (
+        <span class="self">self</span>.log_error_detail(scheduler_output),
+        <span class="self">self</span>.log_iteration_details(scheduler_output),
+    ):
+        model_output = future.result()
+        <span class="cmt"># If the worker returned None it means sampling was deferred;</span>
+        <span class="cmt"># drive sampling here with the grammar bitmask.</span>
+        <span class="kw">if</span> model_output <span class="kw">is None</span>:
+            model_output = <span class="self">self</span>.model_executor.sample_tokens(grammar_output)
+
+    <span class="cmt"># 5) Drain any aborts that arrived DURING model execution. Doing</span>
+    <span class="cmt">#    this before update_from_output prevents freed requests from</span>
+    <span class="cmt">#    receiving token appends they can no longer consume.</span>
+    <span class="self">self</span>._process_aborts_queue()
+
+    <span class="cmt"># 6) Feed the ModelRunnerOutput back into the scheduler so it</span>
+    <span class="cmt">#    appends sampled tokens, detects finished requests, frees</span>
+    <span class="cmt">#    blocks, and emits per-client EngineCoreOutput records.</span>
     engine_core_outputs = <span class="self">self</span>.scheduler.update_from_output(
-        scheduler_output, model_output)  <span class="cmt"># type: ignore</span>
+        scheduler_output, model_output
+    )
 
-    <span class="cmt"># model_executed = True iff at least one token was scheduled this</span>
-    <span class="cmt"># iteration. A step with 0 scheduled tokens is still valid (e.g.,</span>
-    <span class="cmt"># all requests waiting on KV evictions) but reported as no-op upstream.</span>
-    <span class="kw">return</span> (engine_core_outputs,
-            scheduler_output.total_num_scheduled_tokens > <span class="num">0</span>)</code></pre>
+    <span class="kw">return</span> engine_core_outputs, scheduler_output.total_num_scheduled_tokens > <span class="num">0</span></code></pre>
 
 <div class="callout callout-green">
-  <span class="i18n" data-en="<strong>Three-phase execution per iteration:</strong><br>1. <code>scheduler.schedule()</code> — picks requests to batch, allocates blocks<br>2. <code>model_executor.execute_model()</code> — runs forward pass + sampling via the worker(s)<br>3. <code>scheduler.update_from_output()</code> — appends new tokens, frees finished requests, builds per-client <code>EngineCoreOutputs</code><br><br>Note: the <code>execute_model_with_error_logging</code> wrapper catches worker exceptions and dumps the offending SchedulerOutput before re-raising — this is how operators diagnose bad batches in production." data-zh="<strong>每次迭代的三階段執行：</strong><br>1. <code>scheduler.schedule()</code> —— 選出要批次的請求、分配 KV blocks<br>2. <code>model_executor.execute_model()</code> —— 透過 worker 跑 forward pass + 取樣<br>3. <code>scheduler.update_from_output()</code> —— 把新 token 寫回、釋放結束的請求、組出 per-client 的 <code>EngineCoreOutputs</code><br><br>補充：<code>execute_model_with_error_logging</code> 包裝器在 worker 丟例外時會先 dump 出肇事的 SchedulerOutput 再重丟，這是線上查壞批次時的主要線索。"><strong>Three-phase execution per iteration:</strong><br>
-  1. <code>scheduler.schedule()</code> — picks requests to batch, allocates blocks<br>
-  2. <code>model_executor.execute_model()</code> — runs forward pass + sampling via the worker(s)<br>
-  3. <code>scheduler.update_from_output()</code> — appends new tokens, frees finished requests, builds per-client <code>EngineCoreOutputs</code></span>
+  <span class="i18n" data-en="<strong>Three-phase execution per iteration (with CPU/GPU overlap):</strong><br>1. <code>scheduler.schedule()</code> → picks requests to batch, allocates blocks<br>2. <code>execute_model(non_block=True)</code> → fires forward pass as a future. <code>get_grammar_bitmask()</code> runs on CPU meanwhile.<br>3. <code>future.result()</code> joins; <code>sample_tokens(grammar_output)</code> finishes sampling if deferred.<br>4. <code>_process_aborts_queue()</code> drains aborts that arrived during the forward pass.<br>5. <code>scheduler.update_from_output()</code> appends new tokens and frees finished requests." data-zh="<strong>每輪三階段執行（含 CPU/GPU 重疊）：</strong><br>1. <code>scheduler.schedule()</code> → 選請求、配置 KV block<br>2. <code>execute_model(non_block=True)</code> → 把 forward pass 以 future 形式送出；趁此同時 <code>get_grammar_bitmask()</code> 在 CPU 組 grammar bitmask。<br>3. <code>future.result()</code> join；若 sampling 延後執行，用 <code>sample_tokens(grammar_output)</code> 補齊。<br>4. <code>_process_aborts_queue()</code> 排空 forward pass 期間到達的 abort。<br>5. <code>scheduler.update_from_output()</code> 把新 token 寫回並釋放完成的請求。"><strong>Three-phase execution per iteration (with CPU/GPU overlap):</strong></span>
 </div>
 
 <h3><span class="i18n" data-en="2.3 Pipeline Parallelism: step_with_batch_queue()" data-zh="2.3 Pipeline 平行：step_with_batch_queue()">2.3 Pipeline Parallelism: step_with_batch_queue()</span></h3>
 
 <p><span class="i18n" data-en="When pipeline parallelism is enabled (<code>max_concurrent_batches &gt; 1</code>), vLLM swaps in <code>step_with_batch_queue()</code>, which keeps a deque of in-flight (future, scheduler_output) pairs. Scheduling can run ahead of execution by up to <code>batch_queue_size</code> batches, so the GPU never waits for the next schedule() to finish:" data-zh="當啟用 pipeline 平行 (<code>max_concurrent_batches &gt; 1</code>) 時，vLLM 改用 <code>step_with_batch_queue()</code>，維護一個 (future, scheduler_output) 的 deque。Scheduling 可以領先執行最多 <code>batch_queue_size</code> 個 batch，GPU 就不必等下一次 schedule() 才有事做：">When pipeline parallelism is enabled (<code>max_concurrent_batches &gt; 1</code>), vLLM swaps in <code>step_with_batch_queue()</code>, which keeps a deque of in-flight (future, scheduler_output) pairs. Scheduling can run ahead of execution by up to <code>batch_queue_size</code> batches, so the GPU never waits for the next schedule() to finish:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCore.__init__() + step_with_batch_queue()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCore.__init__() lines 185-213 + step_with_batch_queue() lines 421-512</span>
 <pre><code><span class="cmt"># --- in __init__: pick the step function based on PP config ---</span>
 <span class="self">self</span>.batch_queue_size = <span class="self">self</span>.model_executor.max_concurrent_batches
 <span class="self">self</span>.batch_queue: <span class="cls">Optional</span>[<span class="cls">deque</span>[...]] = <span class="kw">None</span>
@@ -476,7 +490,7 @@ engine_core_outputs = <span class="self">self</span>.scheduler.update_from_outpu
 
 <h3><span class="i18n" data-en="2.4 _process_engine_step(): Dispatching Output" data-zh="2.4 _process_engine_step()：把輸出送出去">2.4 _process_engine_step(): Dispatching Output</span></h3>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_engine_step()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_engine_step() — lines 1177-1200</span>
 <pre><code><span class="kw">def</span> <span class="fn">_process_engine_step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">bool</span>:
     <span class="str">"""Called only when there are unfinished local requests."""</span>
 
@@ -489,7 +503,7 @@ engine_core_outputs = <span class="self">self</span>.scheduler.update_from_outpu
     <span class="cmt"># Output I/O thread via an unbounded queue.Queue. The thread</span>
     <span class="cmt"># serializes with msgpack and sends on a ZMQ PUSH socket.</span>
     <span class="cmt"># put_nowait() never blocks the main thread.</span>
-    <span class="kw">for</span> output <span class="kw">in</span> (outputs.items() <span class="kw">if</span> outputs <span class="kw">else</span> ()):
+    <span class="kw">for</span> output <span class="kw">in</span> outputs.items() <span class="kw">if</span> outputs <span class="kw">else</span> ():
         <span class="self">self</span>.output_queue.put_nowait(output)
 
     <span class="cmt"># Post-step hook: in EngineCore base class this picks up</span>
@@ -497,48 +511,71 @@ engine_core_outputs = <span class="self">self</span>.scheduler.update_from_outpu
     <span class="cmt"># the scheduler. DP subclass also publishes request counts here.</span>
     <span class="self">self</span>.post_step(model_executed)
 
+    <span class="cmt"># If no model execution happened but there are waiting requests</span>
+    <span class="cmt"># (e.g., WAITING_FOR_REMOTE_KVS during disaggregated prefill),</span>
+    <span class="cmt"># yield the GIL briefly so background threads -- NIXL handshake,</span>
+    <span class="cmt"># connector polling, etc. -- can make progress. Without this</span>
+    <span class="cmt"># sleep, the tight poll loop can starve those threads.</span>
+    <span class="kw">if not</span> model_executed <span class="kw">and</span> <span class="self">self</span>.scheduler.has_unfinished_requests():
+        time.sleep(<span class="num">0.001</span>)
+
     <span class="kw">return</span> model_executed</code></pre>
 
-<p><span class="i18n" data-en="After each step, outputs are placed into <code>self.output_queue</code> (a <code>queue.Queue</code>). The dedicated Output I/O thread pops them, msgpack-encodes them, and sends them over a ZMQ PUSH socket to the frontend. There is no <code>time.sleep</code> or GIL-yielding in the main thread — blocking on the next input is handled by <code>_process_input_queue()</code> (§2.5)." data-zh="每次 step 結束後，outputs 放到 <code>self.output_queue</code>（一個 <code>queue.Queue</code>）。專屬的 Output I/O 執行緒把它們抓出來、msgpack 編碼、透過 ZMQ PUSH socket 送回前端。主執行緒沒有任何 <code>time.sleep</code> 或讓出 GIL 的動作 —— 阻塞等待下一筆輸入是 <code>_process_input_queue()</code> 的職責（見 §2.5）。">After each step, outputs are placed into <code>self.output_queue</code> (a <code>queue.Queue</code>). The dedicated Output I/O thread pops them, msgpack-encodes them, and sends them over a ZMQ PUSH socket to the frontend. There is no <code>time.sleep</code> or GIL-yielding in the main thread — blocking on the next input is handled by <code>_process_input_queue()</code> (§2.5).</span></p>
+<p><span class="i18n" data-en="After each step, outputs are placed into <code>self.output_queue</code> (a <code>queue.Queue</code>). The dedicated Output I/O thread pops them, msgpack-encodes them, and sends them over a ZMQ PUSH socket to the frontend. The <code>time.sleep(0.001)</code> guard only fires when the scheduler has unfinished requests but no forward pass ran — typical with KV-transfer stalls (<code>WAITING_FOR_REMOTE_KVS</code>) where background threads need CPU time to make progress." data-zh="每次 step 結束後，outputs 放到 <code>self.output_queue</code>（一個 <code>queue.Queue</code>）。專屬的 Output I/O 執行緒把它們抓出來、做 msgpack 編碼、透過 ZMQ PUSH socket 送回前端。最後那個 <code>time.sleep(0.001)</code> 只有在「scheduler 還有請求但這一輪沒跑模型」時才會觸發 —— 常見於 KV-transfer 卡住（<code>WAITING_FOR_REMOTE_KVS</code>）的情境，背景執行緒需要 CPU 時間才能繼續推進。">After each step, outputs are placed into <code>self.output_queue</code> (a <code>queue.Queue</code>). The dedicated Output I/O thread pops them, msgpack-encodes them, and sends them over a ZMQ PUSH socket to the frontend. The <code>time.sleep(0.001)</code> guard only fires when the scheduler has unfinished requests but no forward pass ran — typical with KV-transfer stalls (<code>WAITING_FOR_REMOTE_KVS</code>) where background threads need CPU time to make progress.</span></p>
 
 <h3><span class="i18n" data-en="2.5 Input Queue Processing: Blocking vs. Non-Blocking" data-zh="2.5 輸入佇列處理：阻塞 vs 非阻塞">2.5 Input Queue Processing: Blocking vs. Non-Blocking</span></h3>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_input_queue()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc._process_input_queue() — lines 1146-1175</span>
 <pre><code><span class="kw">def</span> <span class="fn">_process_input_queue</span>(<span class="self">self</span>):
     <span class="str">"""Exits when an engine step needs to be performed."""</span>
 
     waited = <span class="kw">False</span>
 
-    <span class="cmt"># Block on input_queue.get() only while ALL three are true:</span>
-    <span class="cmt">#   * engines_running is False -- DP coordinator has paused us</span>
-    <span class="cmt">#     OR we just started (no wave in progress)</span>
-    <span class="cmt">#   * scheduler has no requests  -- nothing to step on</span>
-    <span class="cmt">#   * batch_queue is empty       -- no PP batches in flight</span>
-    <span class="cmt"># If any one of these is False, we must return so the main loop</span>
-    <span class="cmt"># can call _process_engine_step() instead of waiting for I/O.</span>
-    <span class="kw">while not</span> <span class="self">self</span>.engines_running <span class="kw">and not</span> <span class="self">self</span>.scheduler.has_requests() \
-            <span class="kw">and not</span> <span class="self">self</span>.batch_queue:
-        <span class="kw">if</span> logger.isEnabledFor(DEBUG) <span class="kw">and</span> <span class="self">self</span>.input_queue.empty():
-            logger.debug(<span class="str">"EngineCore waiting for work."</span>)
-            waited = <span class="kw">True</span>
-        <span class="cmt"># Blocking get: sleeps the main thread, releasing the GIL so</span>
-        <span class="cmt"># the Input and Output I/O threads can run. Returns as soon</span>
-        <span class="cmt"># as the Input thread does input_queue.put_nowait().</span>
-        req = <span class="self">self</span>.input_queue.get()
-        <span class="self">self</span>._handle_client_request(*req)
+    <span class="cmt"># Loop while has_work() returns False and shutdown hasn't been</span>
+    <span class="cmt"># requested. has_work() is True iff any of:</span>
+    <span class="cmt">#   engines_running (DP wave active) or</span>
+    <span class="cmt">#   scheduler.has_requests() (work to step on) or</span>
+    <span class="cmt">#   batch_queue (in-flight PP batches).</span>
+    <span class="kw">while not</span> <span class="self">self</span>.has_work() <span class="kw">and</span> <span class="self">self</span>.is_running():
+        <span class="cmt"># Fire any pending "engine became idle" callbacks -- used by</span>
+        <span class="cmt"># DP coordinator handshake and KV-transfer waiters.</span>
+        <span class="self">self</span>._notify_idle_state_callbacks()
+
+        <span class="kw">if</span> <span class="self">self</span>.input_queue.empty():
+            <span class="cmt"># Clear the aborts_queue while we have nothing else to do.</span>
+            <span class="cmt"># Aborts also travel through input_queue -- this mirror is</span>
+            <span class="cmt"># only used by step() for mid-forward-pass draining -- so</span>
+            <span class="cmt"># clearing it here is safe and prevents unbounded growth.</span>
+            <span class="kw">with</span> <span class="self">self</span>.aborts_queue.mutex:
+                <span class="self">self</span>.aborts_queue.queue.clear()
+            <span class="kw">if</span> logger.isEnabledFor(DEBUG):
+                logger.debug(<span class="str">"EngineCore waiting for work."</span>)
+                waited = <span class="kw">True</span>
+
+        <span class="cmt"># process_input_queue_block: True for the normal busy loop,</span>
+        <span class="cmt"># False for tight polling paths where we don't want to sleep.</span>
+        block = <span class="self">self</span>.process_input_queue_block
+        <span class="kw">try</span>:
+            <span class="cmt"># Blocking get releases the GIL so Input I/O thread runs.</span>
+            req = <span class="self">self</span>.input_queue.get(block=block)
+            <span class="self">self</span>._handle_client_request(*req)
+        <span class="kw">except</span> <span class="cls">queue.Empty</span>:
+            <span class="cmt"># Only reached when block=False -- exit and let caller retry.</span>
+            <span class="kw">break</span>
+        <span class="kw">if not</span> block:
+            <span class="kw">break</span>
 
     <span class="kw">if</span> waited:
         logger.debug(<span class="str">"EngineCore loop active."</span>)
 
-    <span class="cmt"># Drain any remaining pending messages non-blocking. This</span>
-    <span class="cmt"># matters because multiple ADDs may arrive back-to-back while</span>
-    <span class="cmt"># the engine is mid-step, and we want them all handled before</span>
-    <span class="cmt"># the next schedule() so they can be batched together.</span>
+    <span class="cmt"># Drain any messages that arrived while we were already running.</span>
+    <span class="cmt"># Coalescing multiple ADDs into a single schedule() call is what</span>
+    <span class="cmt"># lets late requests join the current batch.</span>
     <span class="kw">while not</span> <span class="self">self</span>.input_queue.empty():
         req = <span class="self">self</span>.input_queue.get_nowait()
         <span class="self">self</span>._handle_client_request(*req)</code></pre>
 
-<p><span class="i18n" data-en="When the engine has nothing to do (no running/waiting requests, no in-flight PP batch, no active DP wave), it parks on <code>input_queue.get()</code> — the main thread sleeps, the GIL is released, and the Input I/O thread keeps reading from ZMQ in the background. As soon as any message is pushed, the loop resumes. Once there is work, it non-blockingly drains every remaining message so they all enter the same <code>schedule()</code> call and can be batched together." data-zh="當引擎沒工作可做時（scheduler 沒有 running / waiting 請求、沒有飛行中的 PP batch、DP wave 尚未啟動），主執行緒就停在 <code>input_queue.get()</code> 上 —— 釋放 GIL，讓 Input / Output I/O 執行緒繼續在背景讀寫 ZMQ。一旦有訊息被 push 進來就立刻返回。有工作之後會非阻塞地把剩下的訊息全部拉光，讓它們進同一次 <code>schedule()</code> 一起批次處理。">When the engine has nothing to do (no running/waiting requests, no in-flight PP batch, no active DP wave), it parks on <code>input_queue.get()</code> — the main thread sleeps, the GIL is released, and the Input I/O thread keeps reading from ZMQ in the background. As soon as any message is pushed, the loop resumes. Once there is work, it non-blockingly drains every remaining message so they all enter the same <code>schedule()</code> call and can be batched together.</span></p>
+<p><span class="i18n" data-en="When the engine has nothing to do (<code>has_work()</code> is False and <code>is_running()</code> is True), it parks on <code>input_queue.get()</code> — the main thread sleeps, the GIL is released, and the Input I/O thread keeps reading from ZMQ in the background. As soon as any message is pushed, the loop resumes. The <code>aborts_queue</code> is a lightweight mirror cleared here on idle; the real abort dispatch goes through <code>input_queue</code> (see §4.4). After work arrives, the final non-blocking drain coalesces multiple ADDs into the same <code>schedule()</code> call so they can be batched together." data-zh="引擎沒工作（<code>has_work()</code> 為 False 且 <code>is_running()</code> 為 True）時，主執行緒就停在 <code>input_queue.get()</code> —— 釋放 GIL 讓 Input I/O 執行緒繼續在背景讀 ZMQ。訊息一進來就恢復執行。<code>aborts_queue</code> 是一個輕量鏡像，在 idle 時順手清掉；真正的 abort 派送走 <code>input_queue</code>（見 §4.4）。有工作之後最後的非阻塞 drain 把連續 ADD 併進同一個 <code>schedule()</code>，可以一起 batch。">When the engine has nothing to do (<code>has_work()</code> is False and <code>is_running()</code> is True), it parks on <code>input_queue.get()</code> — the main thread sleeps, the GIL is released, and the Input I/O thread keeps reading from ZMQ in the background. As soon as any message is pushed, the loop resumes. The <code>aborts_queue</code> is a lightweight mirror cleared here on idle; the real abort dispatch goes through <code>input_queue</code> (see §4.4). After work arrives, the final non-blocking drain coalesces multiple ADDs into the same <code>schedule()</code> call so they can be batched together.</span></p>
 </section>
 
 <!-- ====================================================================== -->
@@ -582,64 +619,80 @@ engine_core_outputs = <span class="self">self</span>.scheduler.update_from_outpu
 
 <h3><span class="i18n" data-en="3.1 Process Spawning" data-zh="3.1 行程孕育 (Process Spawning)">3.1 Process Spawning</span></h3>
 
-<p><span class="i18n" data-en="<code>EngineCoreProc.run_engine_core()</code> is the static entry point invoked by the child process (spawned by <code>CoreEngineProcManager</code> in the API server). It installs signal handlers, constructs the correct <code>EngineCoreProc</code> subclass for the parallel config, and runs the busy loop:" data-zh="<code>EngineCoreProc.run_engine_core()</code> 是子行程的 static 入口，由 API server 的 <code>CoreEngineProcManager</code> spawn 出來後呼叫。它會裝訊號處理器、依照 parallel config 選對應的 <code>EngineCoreProc</code> 子類、然後跑忙碌迴圈："><code>EngineCoreProc.run_engine_core()</code> is the static entry point invoked by the child process (spawned by <code>CoreEngineProcManager</code> in the API server). It installs signal handlers, constructs the correct <code>EngineCoreProc</code> subclass for the parallel config, and runs the busy loop:</span></p>
+<p><span class="i18n" data-en="<code>EngineCoreProc.run_engine_core()</code> is the static entry point the child process runs after spawn. It sets the process title, optionally switches to the MoE-aware <code>DPEngineCoreProc</code>, installs signal handlers that wake the engine via <code>input_queue</code>, and finally enters the busy loop:" data-zh="<code>EngineCoreProc.run_engine_core()</code> 是子行程 spawn 之後的 static 入口。它會設 process title、在 MoE 時切換到 <code>DPEngineCoreProc</code>、裝上透過 <code>input_queue</code> 喚醒引擎的訊號處理器，最後進入忙碌迴圈："><code>EngineCoreProc.run_engine_core()</code> is the static entry point the child process runs after spawn. It sets the process title, optionally switches to the MoE-aware <code>DPEngineCoreProc</code>, installs signal handlers that wake the engine via <code>input_queue</code>, and finally enters the busy loop:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_engine_core()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.run_engine_core() — lines 1038-1119</span>
 <pre><code><span class="dec">@staticmethod</span>
 <span class="kw">def</span> <span class="fn">run_engine_core</span>(*args, dp_rank: <span class="cls">int</span> = <span class="num">0</span>,
                     local_dp_rank: <span class="cls">int</span> = <span class="num">0</span>, **kwargs):
     <span class="str">"""Launch EngineCore busy loop in background process."""</span>
-
-    <span class="cmt"># One-shot guard: make sure we only raise SystemExit once even</span>
-    <span class="cmt"># if both SIGTERM and SIGINT fire (e.g. user Ctrl-C during graceful</span>
-    <span class="cmt"># shutdown). This avoids noisy double-exit errors.</span>
-    shutdown_requested = <span class="kw">False</span>
-
-    <span class="cmt"># Ensure custom transformer configs survive pickling across fork.</span>
+    <span class="cmt"># Ensure custom transformer configs survive pickling across spawn.</span>
     maybe_register_config_serialize_by_value()
 
-    <span class="kw">def</span> <span class="fn">signal_handler</span>(signum, frame):
-        <span class="kw">nonlocal</span> shutdown_requested
-        <span class="kw">if not</span> shutdown_requested:
-            shutdown_requested = <span class="kw">True</span>
-            <span class="cmt"># Break out of run_busy_loop()'s while True cleanly.</span>
-            <span class="kw">raise</span> <span class="cls">SystemExit</span>()
-
-    <span class="cmt"># SIGTERM is how the supervisor cleanly stops us;</span>
-    <span class="cmt"># SIGINT is Ctrl-C in offline (LLMEngine) mode.</span>
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    engine_core: <span class="cls">Optional</span>[<span class="cls">EngineCoreProc</span>] = <span class="kw">None</span>
+    engine_core: <span class="cls">EngineCoreProc</span> | <span class="kw">None</span> = <span class="kw">None</span>
+    signal_callback: <span class="cls">SignalCallback</span> | <span class="kw">None</span> = <span class="kw">None</span>
     <span class="kw">try</span>:
-        parallel_config: <span class="cls">ParallelConfig</span> = kwargs[
-            <span class="str">"vllm_config"</span>].parallel_config
-
-        <span class="cmt"># Two spawn paths. The DP subclass owns wave protocol and an</span>
-        <span class="cmt"># stateless torch distributed process group for all-reduce'ing</span>
-        <span class="cmt"># "all DP ranks finished" — see §8 and DPEngineCoreProc.</span>
-        <span class="kw">if</span> parallel_config.data_parallel_size > <span class="num">1</span> <span class="kw">or</span> dp_rank > <span class="num">0</span>:
-            set_process_title(<span class="str">"EngineCore"</span>, <span class="str">f"DP{dp_rank}"</span>)
-            decorate_logs()
-            <span class="cmt"># Tell the config where this process sits in the DP mesh.</span>
-            parallel_config.data_parallel_rank = dp_rank
+        vllm_config: <span class="cls">VllmConfig</span> = kwargs[<span class="str">"vllm_config"</span>]
+        parallel_config: <span class="cls">ParallelConfig</span> = vllm_config.parallel_config
+        data_parallel = parallel_config.data_parallel_size > <span class="num">1</span> <span class="kw">or</span> dp_rank > <span class="num">0</span>
+        <span class="kw">if</span> data_parallel:
             parallel_config.data_parallel_rank_local = local_dp_rank
+            process_title = <span class="str">f"EngineCore_DP{dp_rank}"</span>
+        <span class="kw">else</span>:
+            process_title = <span class="str">"EngineCore"</span>
+        set_process_title(process_title)
+        maybe_init_worker_tracer(<span class="str">"vllm.engine_core"</span>, <span class="str">"engine_core"</span>, process_title)
+        decorate_logs()
+
+        <span class="cmt"># Per-DP-rank kv_transfer_config.engine_id uniqueness, so remote</span>
+        <span class="cmt"># KV peers can route correctly in disaggregated setups.</span>
+        <span class="kw">if</span> data_parallel <span class="kw">and</span> vllm_config.kv_transfer_config <span class="kw">is not None</span>:
+            vllm_config.kv_transfer_config.engine_id = (
+                <span class="str">f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"</span>
+            )
+
+        parallel_config.data_parallel_index = dp_rank
+        <span class="cmt"># MoE + DP takes the DPEngineCoreProc path so wave protocol and</span>
+        <span class="cmt"># expert-parallel all-reduce can synchronize across ranks.</span>
+        <span class="kw">if</span> data_parallel <span class="kw">and</span> vllm_config.model_config.is_moe:
+            parallel_config.data_parallel_rank = dp_rank
             engine_core = <span class="cls">DPEngineCoreProc</span>(*args, **kwargs)
         <span class="kw">else</span>:
-            set_process_title(<span class="str">"EngineCore"</span>)
-            decorate_logs()
-            engine_core = <span class="cls">EngineCoreProc</span>(*args, **kwargs)
+            <span class="cmt"># Non-MoE DP ranks are independent -- drop to DP=1 semantics</span>
+            <span class="cmt"># but keep data_parallel_index for logging / observability.</span>
+            parallel_config.data_parallel_size = <span class="num">1</span>
+            parallel_config.data_parallel_size_local = <span class="num">1</span>
+            parallel_config.data_parallel_rank = <span class="num">0</span>
+            engine_core = <span class="cls">EngineCoreProc</span>(*args, engine_index=dp_rank, **kwargs)
 
-        <span class="cmt"># Blocks here until a signal handler raises SystemExit.</span>
-        engine_core.run_busy_loop()
+        <span class="kw">assert</span> engine_core <span class="kw">is not None</span>
+
+        <span class="kw">def</span> <span class="fn">wakeup_engine</span>():
+            <span class="cmt"># Signal-safe wake path: pushing a WAKEUP message so the</span>
+            <span class="cmt"># blocking input_queue.get() in _process_input_queue returns.</span>
+            <span class="cmt"># Doing this from a signal handler directly would be unsafe --</span>
+            <span class="cmt"># the main thread may be holding input_queue.mutex mid-put.</span>
+            engine_core.input_queue.put_nowait((<span class="cls">EngineCoreRequestType</span>.WAKEUP, <span class="kw">None</span>))
+
+        signal_callback = <span class="cls">SignalCallback</span>(wakeup_engine)
+
+        <span class="kw">def</span> <span class="fn">signal_handler</span>(signum, frame):
+            <span class="cmt"># Set shutdown state; _handle_shutdown() will notice it and</span>
+            <span class="cmt"># start draining/aborting in-flight requests next iteration.</span>
+            engine_core.shutdown_state = <span class="cls">EngineShutdownState</span>.REQUESTED
+            signal_callback.trigger()
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        engine_core.run_busy_loop()   <span class="cmt"># blocks until _handle_shutdown returns False</span>
 
     <span class="kw">except</span> <span class="cls">SystemExit</span>:
-        <span class="cmt"># Normal termination path -- log at debug only.</span>
         logger.debug(<span class="str">"EngineCore exiting."</span>)
         <span class="kw">raise</span>
     <span class="kw">except</span> <span class="cls">Exception</span> <span class="kw">as</span> e:
-        <span class="cmt"># Abnormal termination: send a sentinel back to the client so it</span>
-        <span class="cmt"># fails fast instead of timing out. See §3.3.</span>
+        <span class="cmt"># Abnormal path -- send ENGINE_CORE_DEAD so the client</span>
+        <span class="cmt"># fails fast instead of hanging on ZMQ recv.</span>
         <span class="kw">if</span> engine_core <span class="kw">is None</span>:
             logger.exception(<span class="str">"EngineCore failed to start."</span>)
         <span class="kw">else</span>:
@@ -647,18 +700,22 @@ engine_core_outputs = <span class="self">self</span>.scheduler.update_from_outpu
             engine_core._send_engine_dead()
         <span class="kw">raise</span> e
     <span class="kw">finally</span>:
-        <span class="cmt"># Tear down executor (kills worker procs, frees GPU memory) and</span>
-        <span class="cmt"># scheduler — even on abnormal exit.</span>
+        <span class="cmt"># Restore default signal dispositions before shutting down so</span>
+        <span class="cmt"># a second SIGINT during cleanup kills the process quickly.</span>
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        <span class="kw">if</span> signal_callback <span class="kw">is not None</span>:
+            signal_callback.stop()
         <span class="kw">if</span> engine_core <span class="kw">is not None</span>:
             engine_core.shutdown()</code></pre>
 
-<p><span class="i18n" data-en="Note: in vLLM 0.19.0, the choice between <code>EngineCoreProc</code> and <code>DPEngineCoreProc</code> is driven purely by <code>data_parallel_size &gt; 1</code>, not by whether the model is MoE. The MoE-vs-dense distinction lives one layer down, inside the Executor and the distributed process group, not at this dispatch point." data-zh="注意：在 vLLM 0.19.0，選 <code>EngineCoreProc</code> 還是 <code>DPEngineCoreProc</code> 只看 <code>data_parallel_size &gt; 1</code>，跟模型是不是 MoE 無關。MoE 與稠密模型的差異發生在更下一層的 Executor 與分散式 process group，不在這個分派點。">Note: in vLLM 0.19.0, the choice between <code>EngineCoreProc</code> and <code>DPEngineCoreProc</code> is driven purely by <code>data_parallel_size &gt; 1</code>, not by whether the model is MoE. The MoE-vs-dense distinction lives one layer down, inside the Executor and the distributed process group, not at this dispatch point.</span></p>
+<p><span class="i18n" data-en="Two details worth calling out: (a) the <code>DPEngineCoreProc</code> path is gated on <strong>both</strong> <code>data_parallel &gt; 1</code> <em>and</em> <code>model_config.is_moe</code> — non-MoE DP ranks are treated as independent DP=1 processes; (b) signal handlers don't raise inside the handler — they flip <code>shutdown_state</code> to <code>REQUESTED</code> and push a <code>WAKEUP</code> message onto <code>input_queue</code>, so the blocking <code>get()</code> returns and <code>_handle_shutdown()</code> sees the state change on the next loop iteration." data-zh="有兩個細節要留意：(a) 走 <code>DPEngineCoreProc</code> 同時要滿足 <code>data_parallel &gt; 1</code> <em>且</em> <code>model_config.is_moe</code> —— 非 MoE 的 DP rank 會被當成獨立 DP=1 行程處理；(b) 訊號處理器裡不直接丟例外，而是把 <code>shutdown_state</code> 設為 <code>REQUESTED</code>，再 push 一則 <code>WAKEUP</code> 訊息到 <code>input_queue</code>，阻塞中的 <code>get()</code> 就會回來、下一輪 <code>_handle_shutdown()</code> 才看到狀態變化。">Two details worth calling out: (a) the <code>DPEngineCoreProc</code> path is gated on <strong>both</strong> <code>data_parallel &gt; 1</code> <em>and</em> <code>model_config.is_moe</code> — non-MoE DP ranks are treated as independent DP=1 processes; (b) signal handlers don't raise inside the handler — they flip <code>shutdown_state</code> to <code>REQUESTED</code> and push a <code>WAKEUP</code> message onto <code>input_queue</code>, so the blocking <code>get()</code> returns and <code>_handle_shutdown()</code> sees the state change on the next loop iteration.</span></p>
 
 <h3><span class="i18n" data-en="3.2 I/O Thread Architecture" data-zh="3.2 I/O 執行緒架構">3.2 I/O Thread Architecture</span></h3>
 
 <p><span class="i18n" data-en="<code>EngineCoreProc.__init__()</code> spawns two daemon threads that bridge ZMQ sockets with the main loop's <code>queue.Queue</code> objects. Both threads do all their CPU-heavy work (msgpack encode/decode, request preprocessing) while holding the GIL only briefly — they release it on every ZMQ syscall, letting the main thread run model forward passes in parallel." data-zh="<code>EngineCoreProc.__init__()</code> 啟動兩條 daemon 執行緒，把 ZMQ socket 與主迴圈的 <code>queue.Queue</code> 串起來。這兩條執行緒的 CPU 重活（msgpack 編/解、請求預處理）只會在短暫持有 GIL 時做 —— 每次 ZMQ syscall 都會把 GIL 放掉，主執行緒就能同時跑模型 forward。"><code>EngineCoreProc.__init__()</code> spawns two daemon threads that bridge ZMQ sockets with the main loop's <code>queue.Queue</code> objects. Both threads do all their CPU-heavy work (msgpack encode/decode, request preprocessing) while holding the GIL only briefly — they release it on every ZMQ syscall, letting the main thread run model forward passes in parallel.</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.__init__()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.__init__() — lines 785-895</span>
 <pre><code><span class="cmt"># Background Threads and Queues for IO. These enable us to</span>
 <span class="cmt"># overlap ZMQ socket IO with GPU since they release the GIL,</span>
 <span class="cmt"># and to overlap some serialization/deserialization with the</span>
@@ -756,32 +813,39 @@ input_thread.start()
 
 <p><span class="i18n" data-en="Before the busy loop starts, <code>EngineCoreProc</code> performs a two-phase handshake with the frontend on a dedicated ZMQ DEALER socket. Phase 1 (<code>HELLO</code>) announces the engine and receives the ZMQ addresses it should bind its input/output/coordinator sockets to. Phase 2 (<code>READY</code>) reports back the KV-cache block count so the frontend knows the engine finished profiling and is ready for traffic:" data-zh="忙碌迴圈啟動前，<code>EngineCoreProc</code> 會在一條專用的 ZMQ DEALER socket 上跟前端做兩階段握手。第一階段 <code>HELLO</code>：通告自己存在、並收到要綁定的 input / output / coordinator ZMQ 位址；第二階段 <code>READY</code>：回報 KV-cache block 數，讓前端知道 profiling 已完成、可以開始送請求：">Before the busy loop starts, <code>EngineCoreProc</code> performs a two-phase handshake with the frontend on a dedicated ZMQ DEALER socket. Phase 1 (<code>HELLO</code>) announces the engine and receives the ZMQ addresses it should bind its input/output/coordinator sockets to. Phase 2 (<code>READY</code>) reports back the KV-cache block count so the frontend knows the engine finished profiling and is ready for traffic:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.startup_handshake() + _perform_handshake()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.startup_handshake() — lines 1000-1035</span>
 <pre><code><span class="dec">@staticmethod</span>
 <span class="kw">def</span> <span class="fn">startup_handshake</span>(
     handshake_socket: zmq.Socket,
     local_client: <span class="cls">bool</span>,
     headless: <span class="cls">bool</span>,
-    parallel_config: <span class="cls">Optional</span>[<span class="cls">ParallelConfig</span>] = <span class="kw">None</span>,
+    parallel_config: <span class="cls">ParallelConfig</span> | <span class="kw">None</span> = <span class="kw">None</span>,
 ) <span class="op">-></span> <span class="cls">EngineZmqAddresses</span>:
 
     <span class="cmt"># Phase 1: HELLO. Advertise this engine's identity + deployment</span>
-    <span class="cmt"># flags so the frontend can route to us and decide DP mode.</span>
-    handshake_socket.send(msgspec.msgpack.encode({
-        <span class="str">"status"</span>: <span class="str">"HELLO"</span>,
-        <span class="str">"local"</span>: local_client,    <span class="cmt"># colocated with front-end?</span>
-        <span class="str">"headless"</span>: headless,     <span class="cmt"># no API server in this proc?</span>
-    }))
+    <span class="cmt"># flags so the frontend can route to us and pick DP mode.</span>
+    handshake_socket.send(
+        msgspec.msgpack.encode({
+            <span class="str">"status"</span>: <span class="str">"HELLO"</span>,
+            <span class="str">"local"</span>: local_client,    <span class="cmt"># colocated with front-end?</span>
+            <span class="str">"headless"</span>: headless,     <span class="cmt"># no API server in this proc?</span>
+        })
+    )
 
-    logger.info(<span class="str">"Waiting for init message from front-end."</span>)
+    <span class="cmt"># Receive initialization message.</span>
+    logger.debug(<span class="str">"Waiting for init message from front-end."</span>)
     <span class="cmt"># Hard timeout protects us from a silently-dead parent.</span>
     <span class="kw">if not</span> handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * <span class="num">60_000</span>):
-        <span class="kw">raise</span> <span class="cls">RuntimeError</span>(<span class="str">"Did not receive response from front-end "</span>
-                           <span class="str">f"within {HANDSHAKE_TIMEOUT_MINS} minutes"</span>)
-
+        <span class="kw">raise</span> <span class="cls">RuntimeError</span>(
+            <span class="str">"Did not receive response from front-end "</span>
+            <span class="str">f"process within {HANDSHAKE_TIMEOUT_MINS} "</span>
+            <span class="str">f"minutes"</span>
+        )
     init_bytes = handshake_socket.recv()
     init_message: <span class="cls">EngineHandshakeMetadata</span> = msgspec.msgpack.decode(
-        init_bytes, type=<span class="cls">EngineHandshakeMetadata</span>)
+        init_bytes, type=<span class="cls">EngineHandshakeMetadata</span>
+    )
+    logger.debug(<span class="str">"Received init message: %s"</span>, init_message)
 
     <span class="cmt"># Frontend can push parallel-config overrides (e.g. the actual</span>
     <span class="cmt"># DP mesh size after launcher resolves auto-discovery).</span>
@@ -790,12 +854,13 @@ input_thread.start()
             setattr(parallel_config, key, value)
 
     <span class="cmt"># Returns the EngineZmqAddresses struct: inputs, outputs,</span>
-    <span class="cmt"># coordinator_input, coordinator_output, stats_publish.</span>
+    <span class="cmt"># coordinator_input, coordinator_output, frontend_stats_publish.</span>
     <span class="kw">return</span> init_message.addresses
 
 
-<span class="cmt"># Phase 2 (inside _perform_handshake, after profiling finishes):</span>
-<span class="cmt"># Report KV cache block count back to the frontend.</span>
+<span class="cmt"># Phase 2 (inside _perform_handshake around line ~970, after profiling):</span>
+<span class="cmt"># Report KV cache block count back to the frontend so the client</span>
+<span class="cmt"># knows the engine finished warmup and is ready for traffic.</span>
 handshake_socket.send(msgspec.msgpack.encode({
     <span class="str">"status"</span>: <span class="str">"READY"</span>,
     <span class="str">"local"</span>: local_client,
@@ -861,7 +926,7 @@ handshake_socket.send(msgspec.msgpack.encode({
 
 <p><span class="i18n" data-en="The <code>MPClient</code> base class sets up two ZMQ sockets for bidirectional communication. The client owns the ROUTER (binds) and PULL (connects); each engine connects to them via DEALER and PUSH respectively:" data-zh="<code>MPClient</code> 基底類別建立兩條 ZMQ socket 來做雙向通訊：client 端持有 ROUTER（bind）和 PULL（connect），每個 engine 行程分別用 DEALER 跟 PUSH 連進來："> The <code>MPClient</code> base class sets up two ZMQ sockets for bidirectional communication. The client owns the ROUTER (binds) and PULL (connects); each engine connects to them via DEALER and PUSH respectively:</span></p>
 
-<span class="src-file">vllm/v1/engine/core_client.py : MPClient.__init__()</span>
+<span class="src-file">vllm/v1/engine/core_client.py : MPClient.__init__() — lines 460-700</span>
 <pre><code><span class="cmt"># ZMQ context: 2 I/O threads is enough because most work</span>
 <span class="cmt"># happens in the per-client asyncio loop, not in ZMQ threads.</span>
 sync_ctx = zmq.Context(io_threads=<span class="num">2</span>)
@@ -927,7 +992,7 @@ sync_ctx = zmq.Context(io_threads=<span class="num">2</span>)
 
 <h3><span class="i18n" data-en="4.2 Sending Requests: AsyncMPClient._send_input()" data-zh="4.2 送出請求：AsyncMPClient._send_input()">4.2 Sending Requests: AsyncMPClient._send_input()</span></h3>
 
-<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._send_input()</span>
+<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._send_input() / _send_input_message() — lines 988-1044</span>
 <pre><code><span class="kw">def</span> <span class="fn">_send_input</span>(<span class="self">self</span>, request_type, request, engine=<span class="kw">None</span>):
     <span class="kw">if</span> engine <span class="kw">is None</span>:
         engine = <span class="self">self</span>.core_engine
@@ -950,7 +1015,7 @@ sync_ctx = zmq.Context(io_threads=<span class="num">2</span>)
 
 <h3><span class="i18n" data-en="4.3 Receiving Outputs: Async Output Queue" data-zh="4.3 接收輸出：非同步輸出佇列">4.3 Receiving Outputs: Async Output Queue</span></h3>
 
-<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._ensure_output_queue_task()</span>
+<span class="src-file">vllm/v1/engine/core_client.py : AsyncMPClient._ensure_output_queue_task() — lines 908-975 (process_outputs_socket inner task at line 929)</span>
 <pre><code><span class="kw">async def</span> <span class="fn">process_outputs_socket</span>():
     <span class="kw">try</span>:
         <span class="kw">while True</span>:
@@ -969,49 +1034,56 @@ sync_ctx = zmq.Context(io_threads=<span class="num">2</span>)
 
 <h3><span class="i18n" data-en="4.4 The Engine Input Thread: Deserialization and Preprocessing" data-zh="4.4 引擎端的 Input 執行緒：反序列化與預處理">4.4 The Engine Input Thread: Deserialization and Preprocessing</span></h3>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_input_sockets()</span>
-<pre><code><span class="cmt"># Two decoders: one strongly-typed for EngineCoreRequest so</span>
-<span class="cmt"># msgspec can populate the struct in C, one untyped for control</span>
-<span class="cmt"># messages (ABORT, UTILITY, START_DP_WAVE...).</span>
-add_request_decoder = <span class="cls">MsgpackDecoder</span>(<span class="cls">EngineCoreRequest</span>)
-generic_decoder = <span class="cls">MsgpackDecoder</span>()
-
-<span class="cmt"># DEALER sockets connect to the client's ROUTER. Sending an</span>
-<span class="cmt"># initial empty frame on each tells the ROUTER the identity,</span>
-<span class="cmt"># after which it can route replies here.</span>
-<span class="kw">for</span> input_socket <span class="kw">in</span> input_sockets:
-    input_socket.send(<span class="str">b''</span>)
-    poller.register(input_socket, zmq.POLLIN)
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_input_sockets() — lines 1343-1432</span>
+<pre><code><span class="cmt"># Two decoders. The strongly-typed one populates EngineCoreRequest</span>
+<span class="cmt"># in C; both wire up oob_tensor_provider so multimodal tensors that</span>
+<span class="cmt"># travel via shared memory can be reconstructed (see §5).</span>
+add_request_decoder = <span class="cls">MsgpackDecoder</span>(
+    <span class="cls">EngineCoreRequest</span>, oob_tensor_provider=<span class="self">self</span>.tensor_ipc_receiver
+)
+generic_decoder = <span class="cls">MsgpackDecoder</span>(oob_tensor_provider=<span class="self">self</span>.tensor_ipc_receiver)
 
 <span class="kw">while True</span>:
-    <span class="cmt"># Block until any socket has data. Releases the GIL</span>
-    <span class="cmt"># so the main thread can run the model forward pass.</span>
     <span class="kw">for</span> input_socket, _ <span class="kw">in</span> poller.poll():
-        <span class="cmt"># Frame 0: EngineCoreRequestType byte string (ADD / ABORT / UTILITY / ...)</span>
-        <span class="cmt"># Frames 1+: msgpack payload + optional zero-copy tensor buffers</span>
+        <span class="cmt"># Frame 0: request type byte string (ADD / ABORT / UTILITY / ...).</span>
+        <span class="cmt"># Frames 1+: msgpack payload + optional zero-copy tensor buffers.</span>
         type_frame, *data_frames = input_socket.recv_multipart(copy=<span class="kw">False</span>)
+        <span class="cmt"># Coordinator may send b"READY" on the XSUB channel to wake new</span>
+        <span class="cmt"># engines; ignore it -- nothing to enqueue.</span>
+        <span class="kw">if</span> type_frame.buffer == <span class="str">b"READY"</span>:
+            <span class="kw">assert</span> input_socket == coord_socket
+            <span class="kw">continue</span>
         request_type = <span class="cls">EngineCoreRequestType</span>(bytes(type_frame.buffer))
 
+        <span class="cmt"># Deserialize the request data.</span>
+        request: <span class="cls">Any</span>
         <span class="kw">if</span> request_type == <span class="cls">EngineCoreRequestType</span>.ADD:
-            <span class="cmt"># Decode into a strongly-typed EngineCoreRequest.</span>
-            request = add_request_decoder.decode(data_frames)
-            <span class="cmt"># preprocess_add_request() does:</span>
-            <span class="cmt">#   * MM cache lookup (fills already-encoded image embeddings)</span>
-            <span class="cmt">#   * KV-cache block hash computation for prefix cache</span>
-            <span class="cmt">#   * StructuredOutput (grammar) initialization</span>
-            <span class="cmt"># All of this is CPU work that overlaps with GPU execution.</span>
-            request = <span class="self">self</span>.preprocess_add_request(request)
+            req: <span class="cls">EngineCoreRequest</span> = add_request_decoder.decode(data_frames)
+            <span class="kw">try</span>:
+                <span class="cmt"># preprocess_add_request() does MM cache lookup, KV block</span>
+                <span class="cmt"># hash computation, and grammar init -- all CPU work that</span>
+                <span class="cmt"># overlaps with the main thread's forward pass.</span>
+                request = <span class="self">self</span>.preprocess_add_request(req)
+            <span class="kw">except</span> <span class="cls">Exception</span>:
+                <span class="cmt"># Bad request: surface the error to the client immediately</span>
+                <span class="cmt"># and skip enqueue so the engine never sees it.</span>
+                <span class="self">self</span>._handle_request_preproc_error(req)
+                <span class="kw">continue</span>
         <span class="kw">else</span>:
-            <span class="cmt"># ABORT payload is list[str] (request ids), UTILITY is</span>
-            <span class="cmt"># (client_index, call_id, method_name, args), etc.</span>
             request = generic_decoder.decode(data_frames)
 
-        <span class="cmt"># Single shared queue -- the main thread's</span>
-        <span class="cmt"># _handle_client_request() dispatches on request_type.</span>
+            <span class="kw">if</span> request_type == <span class="cls">EngineCoreRequestType</span>.ABORT:
+                <span class="cmt"># Aborts go to BOTH queues: the eager aborts_queue lets</span>
+                <span class="cmt"># step() drain in-flight aborts mid-forward-pass; the</span>
+                <span class="cmt"># input_queue copy preserves ordering for FIFO dispatch.</span>
+                <span class="cmt"># Idempotent on the scheduler side, so dual-delivery is safe.</span>
+                <span class="self">self</span>.aborts_queue.put_nowait(request)
+
+        <span class="cmt"># Push to input queue for the main loop to pick up.</span>
         <span class="self">self</span>.input_queue.put_nowait((request_type, request))</code></pre>
 
 <div class="callout callout-purple">
-  <span class="i18n" data-en="<strong>Design insight:</strong> The Input I/O thread does all CPU-heavy preprocessing — multimodal cache lookup, KV block hashing, structured-output grammar compilation — in parallel with the main thread's GPU forward pass. Both the ZMQ syscalls and most of the preprocessing work release the GIL, so the two threads overlap effectively. There is <em>no</em> separate <code>aborts_queue</code> in 0.19.0: aborts ride the same <code>input_queue</code> and are dispatched via <code>_handle_client_request()</code>." data-zh="<strong>設計洞察：</strong>Input I/O 執行緒把 CPU 重活（多模態快取查找、KV block 雜湊、structured output 文法編譯）全部放在跟主執行緒 GPU forward 平行的位置跑。ZMQ syscall 和大部分預處理都會放掉 GIL，所以兩條執行緒真正能重疊。補充：0.19.0 <em>沒有</em>獨立的 <code>aborts_queue</code>，ABORT 訊息走的就是同一條 <code>input_queue</code>，由 <code>_handle_client_request()</code> 依 request_type 分派。"><strong>Design insight:</strong> The Input I/O thread does all CPU-heavy preprocessing — multimodal cache lookup, KV block hashing, structured-output grammar compilation — in parallel with the main thread's GPU forward pass. Both the ZMQ syscalls and most of the preprocessing work release the GIL, so the two threads overlap effectively. There is <em>no</em> separate <code>aborts_queue</code> in 0.19.0: aborts ride the same <code>input_queue</code> and are dispatched via <code>_handle_client_request()</code>.</span>
+  <span class="i18n" data-en="<strong>Design insight:</strong> The Input I/O thread does all CPU-heavy preprocessing — multimodal cache lookup, KV block hashing, structured-output grammar compilation — in parallel with the main thread's GPU forward pass. <code>EngineCoreRequestType.ABORT</code> messages are written to <em>both</em> <code>aborts_queue</code> (eager mid-step drain) and <code>input_queue</code> (FIFO ordering); the scheduler-side abort is idempotent so dual delivery is safe." data-zh="<strong>設計洞察：</strong>Input I/O 執行緒把 CPU 重活（多模態快取查找、KV block 雜湊、structured output 文法編譯）全部放在跟主執行緒 GPU forward 平行的位置跑。<code>EngineCoreRequestType.ABORT</code> 訊息會同時寫到 <em>兩個</em> queue：<code>aborts_queue</code> 給 step() 在 forward pass 中途即時 drain；<code>input_queue</code> 維持 FIFO 順序。Scheduler 端的 abort 是 idempotent，所以雙重派送是安全的。"><strong>Design insight:</strong> The Input I/O thread does all CPU-heavy preprocessing — multimodal cache lookup, KV block hashing, structured-output grammar compilation — in parallel with the main thread's GPU forward pass. <code>EngineCoreRequestType.ABORT</code> messages are written to <em>both</em> <code>aborts_queue</code> (eager mid-step drain) and <code>input_queue</code> (FIFO ordering); the scheduler-side abort is idempotent so dual delivery is safe.</span>
 </div>
 </section>
 
@@ -1021,81 +1093,94 @@ generic_decoder = <span class="cls">MsgpackDecoder</span>()
 <section id="msgpack">
 <h2><span class="section-num">#5</span> <span class="i18n" data-en="Msgpack Serialization for Cross-Process Data Transfer" data-zh="Msgpack 跨行程資料序列化">Msgpack Serialization for Cross-Process Data Transfer</span></h2>
 
-<!-- VISUAL: Two-tier tensor serialization strategy (vLLM 0.19.0) -->
+<!-- VISUAL: Three-tier tensor serialization strategy (vLLM 0.19.0) -->
 <div style="max-width:900px;margin:16px auto;background:#1e2d4a;border-radius:10px;padding:1rem;">
-  <div style="font-size:0.75rem;font-weight:700;color:#2ecc71;text-align:center;margin-bottom:0.6rem;">Two-Tier Tensor Serialization (per-tensor decision based on <code>nbytes</code>)</div>
+  <div style="font-size:0.75rem;font-weight:700;color:#2ecc71;text-align:center;margin-bottom:0.6rem;">Three-Tier Tensor Serialization (per-tensor decision)</div>
   <div style="display:flex;gap:0.5rem;flex-wrap:wrap;justify-content:center;">
-    <div style="flex:1;min-width:180px;background:rgba(30,45,74,0.8);border:1px solid #2ecc71;border-radius:10px;padding:0.6rem;text-align:center;">
-      <div style="font-size:0.8rem;font-weight:700;color:#2ecc71;">Tier 1: Inline</div>
-      <div style="font-size:0.7rem;color:#2ecc71;margin-top:0.3rem;">nbytes &lt; 256 B (default)</div>
-      <div style="font-size:0.7rem;color:#8fa4c0;margin-top:0.3rem;">Embedded in the main msgpack buffer as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW,&nbsp;...)</code></div>
-      <div style="background:#1b5e20;color:#fff;border-radius:4px;padding:0.2rem 0.4rem;font-size:0.65rem;font-weight:600;margin-top:0.4rem;display:inline-block;">Ext(RAW_VIEW, data)</div>
+    <div style="flex:1;min-width:150px;background:rgba(30,45,74,0.8);border:1px solid #2ecc71;border-radius:10px;padding:0.5rem;text-align:center;">
+      <div style="font-size:0.75rem;font-weight:700;color:#2ecc71;">Tier 1: Inline</div>
+      <div style="font-size:0.6rem;color:#2ecc71;margin-top:0.2rem;">CPU + nbytes &lt; 256 B</div>
+      <div style="font-size:0.6rem;color:#8fa4c0;margin-top:0.2rem;">Embed in main msgpack buffer</div>
+      <div style="background:#1b5e20;color:#fff;border-radius:4px;padding:0.15rem 0.3rem;font-size:0.55rem;font-weight:600;margin-top:0.3rem;display:inline-block;">Ext(RAW_VIEW, data)</div>
     </div>
-    <div style="flex:1;min-width:180px;background:rgba(30,45,74,0.8);border:1px solid #2ecc71;border-radius:10px;padding:0.6rem;text-align:center;">
-      <div style="font-size:0.8rem;font-weight:700;color:#2ecc71;">Tier 2: Zero-Copy (aux frame)</div>
-      <div style="font-size:0.7rem;color:#2ecc71;margin-top:0.3rem;">nbytes &ge; 256 B</div>
-      <div style="font-size:0.7rem;color:#8fa4c0;margin-top:0.3rem;">Main buffer stores an integer index; tensor bytes sent as a separate ZMQ frame (no copy)</div>
-      <div style="background:#2e7d32;color:#fff;border-radius:4px;padding:0.2rem 0.4rem;font-size:0.65rem;font-weight:600;margin-top:0.4rem;display:inline-block;">aux_buffers[idx]</div>
+    <div style="flex:1;min-width:150px;background:#81c784;border:2px solid #43a047;border-radius:10px;padding:0.5rem;text-align:center;">
+      <div style="font-size:0.75rem;font-weight:700;color:#1b5e20;">Tier 2: OOB IPC</div>
+      <div style="font-size:0.6rem;color:#1b5e20;margin-top:0.2rem;">CUDA / shared-mem candidates</div>
+      <div style="font-size:0.6rem;color:#1b5e20;margin-top:0.2rem;">oob_consumer accepts → returns dict</div>
+      <div style="background:#388e3c;color:#fff;border-radius:4px;padding:0.15rem 0.3rem;font-size:0.55rem;font-weight:600;margin-top:0.3rem;display:inline-block;">tensor_ipc dict</div>
+    </div>
+    <div style="flex:1;min-width:150px;background:rgba(30,45,74,0.8);border:1px solid #2ecc71;border-radius:10px;padding:0.5rem;text-align:center;">
+      <div style="font-size:0.75rem;font-weight:700;color:#2ecc71;">Tier 3: Zero-Copy aux frame</div>
+      <div style="font-size:0.6rem;color:#2ecc71;margin-top:0.2rem;">Everything else (the fall-through)</div>
+      <div style="font-size:0.6rem;color:#8fa4c0;margin-top:0.2rem;">Separate ZMQ frame</div>
+      <div style="background:#2e7d32;color:#fff;border-radius:4px;padding:0.15rem 0.3rem;font-size:0.55rem;font-weight:600;margin-top:0.3rem;display:inline-block;">aux_buffers[idx]</div>
     </div>
   </div>
   <div style="font-size:0.65rem;color:#8fa4c0;text-align:center;margin-top:0.5rem;">
-    Threshold controlled by <code>VLLM_MSGPACK_ZERO_COPY_THRESHOLD</code> env var.
+    Threshold from <code>VLLM_MSGPACK_ZERO_COPY_THRESHOLD</code>; OOB tier active only when <code>oob_tensor_consumer</code> is wired up (multimodal fast-path).
   </div>
 </div>
 
-<p><span class="i18n" data-en="vLLM uses <code>msgspec</code> (a high-performance msgpack library) with custom extension types for tensors, numpy arrays, slices, and multimodal kwargs. The implementation is in <code>vllm/v1/serial_utils.py</code>. In 0.19.0 there is no out-of-band tensor IPC path — every tensor either inlines or rides an aux buffer frame." data-zh="vLLM 使用 <code>msgspec</code>（高效能的 msgpack 函式庫），並針對 tensor、numpy 陣列、slice、多模態 kwargs 註冊了自訂 extension type。實作在 <code>vllm/v1/serial_utils.py</code>。0.19.0 沒有走共享記憶體的 out-of-band tensor 路徑 —— 每個 tensor 要不是 inline、就是放進 aux buffer 當獨立 ZMQ frame 送。">vLLM uses <code>msgspec</code> (a high-performance msgpack library) with custom extension types for tensors, numpy arrays, slices, and multimodal kwargs. The implementation is in <code>vllm/v1/serial_utils.py</code>. In 0.19.0 there is no out-of-band tensor IPC path — every tensor either inlines or rides an aux buffer frame.</span></p>
+<p><span class="i18n" data-en="vLLM uses <code>msgspec</code> (a high-performance msgpack library) with custom extension types for tensors, numpy arrays, slices, and multimodal kwargs. The implementation is in <code>vllm/v1/serial_utils.py</code>. The <code>oob_tensor_consumer</code> / <code>oob_tensor_provider</code> pair is what enables true OOB IPC for CUDA / shared-memory tensors — see lines 152 and 327 of the source." data-zh="vLLM 使用 <code>msgspec</code>（高效能 msgpack 函式庫），並針對 tensor、numpy 陣列、slice、多模態 kwargs 註冊自訂 extension type。實作在 <code>vllm/v1/serial_utils.py</code>。<code>oob_tensor_consumer</code> / <code>oob_tensor_provider</code> 這組 hook 才是真正讓 CUDA / 共享記憶體 tensor 走 OOB IPC 的關鍵 —— 程式碼分別在第 152 行與第 327 行。">vLLM uses <code>msgspec</code> (a high-performance msgpack library) with custom extension types for tensors, numpy arrays, slices, and multimodal kwargs. The implementation is in <code>vllm/v1/serial_utils.py</code>. The <code>oob_tensor_consumer</code> / <code>oob_tensor_provider</code> pair is what enables true OOB IPC for CUDA / shared-memory tensors — see lines 152 and 327 of the source.</span></p>
 
 <h3><span class="i18n" data-en="5.1 MsgpackEncoder: Zero-Copy Tensor Serialization" data-zh="5.1 MsgpackEncoder：零拷貝 tensor 序列化">5.1 MsgpackEncoder: Zero-Copy Tensor Serialization</span></h3>
 
-<span class="src-file">vllm/v1/serial_utils.py : MsgpackEncoder</span>
+<span class="src-file">vllm/v1/serial_utils.py : MsgpackEncoder — lines 136-275</span>
 <pre><code><span class="kw">class</span> <span class="cls">MsgpackEncoder</span>:
     <span class="str">"""Encoder with custom torch tensor and numpy array serialization.
 
     By default, arrays below 256B are serialized inline. Larger will get
     sent via dedicated messages. Note that this is a per-tensor limit.
+
+    When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will
+    be offered to it for out-of-band handling.
     """</span>
 
-    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, size_threshold: <span class="cls">Optional</span>[<span class="cls">int</span>] = <span class="kw">None</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        <span class="self">self</span>,
+        size_threshold: <span class="cls">int</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+        oob_tensor_consumer: <span class="cls">OOBTensorConsumer</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+    ):
         <span class="kw">if</span> size_threshold <span class="kw">is None</span>:
             <span class="cmt"># VLLM_MSGPACK_ZERO_COPY_THRESHOLD, default 256.</span>
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         <span class="self">self</span>.encoder = msgpack.Encoder(enc_hook=<span class="self">self</span>.enc_hook)
-        <span class="cmt"># Buffers collected during one encode() call. aux_buffers[0]</span>
-        <span class="cmt"># is the main msgpack frame; aux_buffers[1:] are raw tensor</span>
-        <span class="cmt"># memory views referenced by integer indices in the main frame.</span>
-        <span class="self">self</span>.aux_buffers: <span class="cls">Optional</span>[<span class="cls">list</span>[bytestr]] = <span class="kw">None</span>
+        <span class="cmt"># Local stash so enc_hook (no custom-data param) can find the</span>
+        <span class="cmt"># aux_buffers list during a single encode() call.</span>
+        <span class="self">self</span>.aux_buffers: <span class="cls">list</span>[bytestr] | <span class="kw">None</span> = <span class="kw">None</span>
         <span class="self">self</span>.size_threshold = size_threshold
+        <span class="self">self</span>.oob_tensor_consumer = oob_tensor_consumer
 
     <span class="kw">def</span> <span class="fn">encode</span>(<span class="self">self</span>, obj: <span class="cls">Any</span>) <span class="op">-></span> <span class="cls">Sequence</span>[bytestr]:
         <span class="kw">try</span>:
-            <span class="cmt"># Start with a placeholder for the main frame. The enc_hook</span>
-            <span class="cmt"># (called inside self.encoder.encode) will append tensor</span>
-            <span class="cmt"># backing buffers into this list as it encounters them.</span>
-            <span class="self">self</span>.aux_buffers = bufs = [<span class="str">b''</span>]
+            <span class="cmt"># OOB consumer needs per-message state (e.g. shared-mem cursor).</span>
+            <span class="kw">if</span> <span class="self">self</span>.oob_tensor_consumer <span class="kw">is not None</span>:
+                <span class="self">self</span>.oob_tensor_consumer.new_message()
+            <span class="cmt"># bufs[0] reserved for main msgpack frame; bufs[1:] grow as</span>
+            <span class="cmt"># enc_hook appends tensor backing buffers (aux frames).</span>
+            <span class="self">self</span>.aux_buffers = bufs = [<span class="str">b""</span>]
             bufs[<span class="num">0</span>] = <span class="self">self</span>.encoder.encode(obj)
             <span class="kw">return</span> bufs
         <span class="kw">finally</span>:
             <span class="self">self</span>.aux_buffers = <span class="kw">None</span>
 
     <span class="kw">def</span> <span class="fn">_encode_tensor</span>(<span class="self">self</span>, obj: torch.Tensor):
-        <span class="kw">assert</span> <span class="self">self</span>.aux_buffers <span class="kw">is not None</span>
-        <span class="cmt"># View the tensor as a contiguous 1-D uint8 buffer so the</span>
-        <span class="cmt"># downstream transport (msgpack Ext / ZMQ frame) only needs</span>
-        <span class="cmt"># to move raw bytes.</span>
-        arr = obj.flatten().contiguous().view(torch.uint8).numpy()
-
-        <span class="kw">if</span> obj.nbytes < <span class="self">self</span>.size_threshold:
-            <span class="cmt"># Tier 1: inline. Ext type carries the bytes inside</span>
-            <span class="cmt"># the main msgpack frame. Decoder gets a zero-copy</span>
-            <span class="cmt"># memoryview back via ext_hook.</span>
-            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
+        oob_consumer = <span class="self">self</span>.oob_tensor_consumer
+        <span class="kw">if</span> obj.nbytes < <span class="self">self</span>.size_threshold <span class="kw">and</span> obj.is_cpu:
+            <span class="cmt"># Tier 1: inline. Ext type carries the bytes inside the main</span>
+            <span class="cmt"># msgpack frame; decoder returns a zero-copy memoryview.</span>
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))
+        <span class="kw">elif</span> oob_consumer <span class="kw">is not None</span> <span class="kw">and</span> (data := oob_consumer(obj)) <span class="kw">is not None</span>:
+            <span class="cmt"># Tier 2: out-of-band IPC. Consumer returns a dict describing</span>
+            <span class="cmt"># where the tensor lives (e.g. shared-mem segment id, offset).</span>
+            <span class="kw">assert</span> isinstance(data, <span class="cls">dict</span>)
         <span class="kw">else</span>:
-            <span class="cmt"># Tier 2: zero-copy aux frame. Encode an integer</span>
-            <span class="cmt"># index into aux_buffers; ZMQ send_multipart will</span>
-            <span class="cmt"># transmit arr.data as its own frame without copying.</span>
+            <span class="cmt"># Tier 3: zero-copy aux frame. Encode integer index;</span>
+            <span class="cmt"># ZMQ send_multipart will transmit tensor_data(obj) as a</span>
+            <span class="cmt"># separate frame without copying.</span>
+            <span class="kw">assert</span> <span class="self">self</span>.aux_buffers <span class="kw">is not None</span>
             data = len(<span class="self">self</span>.aux_buffers)
-            <span class="self">self</span>.aux_buffers.append(arr.data)
-
+            <span class="self">self</span>.aux_buffers.append(tensor_data(obj))
         dtype = str(obj.dtype).removeprefix(<span class="str">"torch."</span>)
         <span class="kw">return</span> dtype, obj.shape, data</code></pre>
 
@@ -1109,15 +1194,21 @@ generic_decoder = <span class="cls">MsgpackDecoder</span>()
 <tbody>
 <tr>
   <td><strong>Inline</strong></td>
-  <td><code>nbytes &lt; size_threshold</code> (default 256 B)</td>
-  <td>Embed as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)</code> inside the main frame</td>
-  <td><span class="i18n" data-en="Single ZMQ frame, minimal overhead; decoder returns a memoryview with no copy" data-zh="單一 ZMQ frame，開銷最小；decoder 回傳 memoryview，不做拷貝">Single ZMQ frame, minimal overhead; decoder returns a memoryview with no copy</span></td>
+  <td><code>obj.is_cpu and nbytes &lt; size_threshold</code> (default 256 B)</td>
+  <td>Embed as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))</code> inside the main frame</td>
+  <td><span class="i18n" data-en="Single ZMQ frame; decoder returns a zero-copy memoryview" data-zh="單一 ZMQ frame；decoder 回傳 zero-copy memoryview">Single ZMQ frame; decoder returns a zero-copy memoryview</span></td>
+</tr>
+<tr>
+  <td><strong>OOB IPC</strong></td>
+  <td><code>oob_tensor_consumer</code> wired up <em>and</em> consumer accepts the tensor (returns a dict)</td>
+  <td>Tensor stays in shared memory / CUDA IPC; main frame carries only the metadata dict</td>
+  <td><span class="i18n" data-en="Best for large multimodal tensors (vision encoder embeddings, video frames)" data-zh="大型多模態 tensor（視覺 encoder embedding、影片 frame）的最佳路徑">Best for large multimodal tensors (vision encoder embeddings, video frames)</span></td>
 </tr>
 <tr>
   <td><strong>Zero-copy aux frame</strong></td>
-  <td><code>nbytes &ge; size_threshold</code></td>
+  <td>Fall-through: large CPU tensors, or any tensor the OOB consumer rejects</td>
   <td>Main frame stores integer index; tensor bytes go out as a separate ZMQ frame (<code>send_multipart(copy=False)</code>)</td>
-  <td><span class="i18n" data-en="No copy on send; receiver keeps a message buffer reference while the tensor is alive" data-zh="送出端零拷貝；接收端在 tensor 還活著時要持有整個訊息 buffer 的參考">No copy on send; receiver keeps a message buffer reference while the tensor is alive</span></td>
+  <td><span class="i18n" data-en="No copy on send; receiver pins the message buffer in memory while the tensor is alive" data-zh="送出端零拷貝；接收端在 tensor 還活著時把整個訊息 buffer 釘住">No copy on send; receiver pins the message buffer in memory while the tensor is alive</span></td>
 </tr>
 </tbody>
 </table>
@@ -1125,46 +1216,63 @@ generic_decoder = <span class="cls">MsgpackDecoder</span>()
 
 <h3><span class="i18n" data-en="5.3 MsgpackDecoder: Reconstruction" data-zh="5.3 MsgpackDecoder：重建 tensor">5.3 MsgpackDecoder: Reconstruction</span></h3>
 
-<span class="src-file">vllm/v1/serial_utils.py : MsgpackDecoder</span>
+<span class="src-file">vllm/v1/serial_utils.py : MsgpackDecoder — lines 313-425</span>
 <pre><code><span class="kw">class</span> <span class="cls">MsgpackDecoder</span>:
-    <span class="kw">def</span> <span class="fn">decode</span>(<span class="self">self</span>, bufs: <span class="cls">Union</span>[bytestr, <span class="cls">Sequence</span>[bytestr]]) <span class="op">-></span> <span class="cls">Any</span>:
-        <span class="kw">if</span> isinstance(bufs, (<span class="cls">bytes</span>, <span class="cls">bytearray</span>, <span class="cls">memoryview</span>, zmq.Frame)):
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        <span class="self">self</span>,
+        t: <span class="cls">Any</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+        oob_tensor_provider: <span class="cls">OOBTensorProvider</span> | <span class="kw">None</span> = <span class="kw">None</span>,
+    ):
+        <span class="cmt"># Provider is the symmetric peer of the encoder's consumer:</span>
+        <span class="cmt"># it knows how to look a tensor up in shared memory / CUDA IPC.</span>
+        <span class="self">self</span>.oob_tensor_provider = oob_tensor_provider
+        ...
+
+    <span class="kw">def</span> <span class="fn">decode</span>(<span class="self">self</span>, bufs: bytestr | <span class="cls">Sequence</span>[bytestr]) <span class="op">-></span> <span class="cls">Any</span>:
+        <span class="kw">if</span> isinstance(bufs, bytestr):
             <span class="cmt"># Single-frame message (no aux tensor frames).</span>
             <span class="kw">return</span> <span class="self">self</span>.decoder.decode(bufs)
-
         <span class="cmt"># Multi-frame: aux_buffers stashes the extra frames so the</span>
-        <span class="cmt"># dec_hook can pull them out by index when decoding tensors.</span>
+        <span class="cmt"># dec_hook can pull them by index when decoding tensors.</span>
         <span class="self">self</span>.aux_buffers = bufs
         <span class="kw">try</span>:
-            <span class="kw">return</span> <span class="self">self</span>.decoder.decode(bufs[<span class="num">0</span>])  <span class="cmt"># main frame</span>
+            <span class="kw">return</span> <span class="self">self</span>.decoder.decode(bufs[<span class="num">0</span>])
         <span class="kw">finally</span>:
             <span class="self">self</span>.aux_buffers = ()
 
     <span class="kw">def</span> <span class="fn">_decode_tensor</span>(<span class="self">self</span>, arr: <span class="cls">Any</span>) <span class="op">-></span> torch.Tensor:
         dtype, shape, data = arr
-        <span class="cmt"># int -> look up the aux frame; bytes -> decoded inline buffer.</span>
-        <span class="cmt"># The bytearray copy decouples the returned tensor from the</span>
-        <span class="cmt"># original (read-only) message buffer, which also quiets</span>
-        <span class="cmt"># torch.frombuffer's read-only complaint.</span>
-        buffer = <span class="self">self</span>.aux_buffers[data] <span class="kw">if</span> isinstance(data, <span class="cls">int</span>) \
-            <span class="kw">else</span> <span class="cls">bytearray</span>(data)
+        <span class="kw">if</span> isinstance(data, <span class="cls">dict</span>):
+            <span class="cmt"># Tier 2 path: tensor lives out-of-band; ask provider to fetch it.</span>
+            <span class="kw">assert</span> <span class="self">self</span>.oob_tensor_provider, (
+                <span class="str">"Received OOB tensor but tensor provider is not set"</span>)
+            <span class="kw">return</span> <span class="self">self</span>.oob_tensor_provider(dtype, shape, data)
+
+        is_aux = isinstance(data, <span class="cls">int</span>)
+        buffer = <span class="self">self</span>.aux_buffers[data] <span class="kw">if</span> is_aux <span class="kw">else</span> data
+        buffer = buffer <span class="kw">if</span> isinstance(buffer, <span class="cls">memoryview</span>) <span class="kw">else</span> <span class="cls">memoryview</span>(buffer)
         torch_dtype = getattr(torch, dtype)
-        <span class="kw">if not</span> buffer:
-            <span class="cmt"># torch.frombuffer refuses empty buffers; handle 0-d or</span>
-            <span class="cmt"># zero-size shape explicitly.</span>
+        <span class="kw">if not</span> buffer.nbytes:
+            <span class="cmt"># torch.frombuffer refuses empty buffers; produce empty tensor.</span>
             <span class="kw">assert</span> <span class="num">0</span> <span class="kw">in</span> shape
             <span class="kw">return</span> torch.empty(shape, dtype=torch_dtype)
-
-        <span class="cmt"># frombuffer views the bytes as uint8, then .view() reinterprets</span>
-        <span class="cmt"># the memory as the target dtype -- still zero-copy.</span>
+        <span class="cmt"># Zero-copy view of the bytes as uint8.</span>
         arr = torch.frombuffer(buffer, dtype=torch.uint8)
+
+        <span class="cmt"># Inline tensors: clone() so the returned tensor owns its memory</span>
+        <span class="cmt"># (decoupled from the message buffer that may be recycled).</span>
+        <span class="cmt"># Aux tensors: pin_memory() if requested for fast CPU->GPU H2D.</span>
+        <span class="kw">if not</span> is_aux:
+            arr = arr.clone()
+        <span class="kw">elif not</span> <span class="self">self</span>.share_mem:
+            arr = arr.pin_memory() <span class="kw">if</span> <span class="self">self</span>.pin_tensors <span class="kw">else</span> arr.clone()
         <span class="kw">return</span> arr.view(torch_dtype).view(shape)</code></pre>
 
 <h3><span class="i18n" data-en="5.4 Output Thread: Buffer Reuse for Encoding" data-zh="5.4 Output 執行緒：重用 buffer 編碼">5.4 Output Thread: Buffer Reuse for Encoding</span></h3>
 
 <p><span class="i18n" data-en="The Output I/O thread reuses <code>bytearray</code> buffers to keep msgpack encoding off the allocator hot path. It only reclaims a buffer back into the pool once ZMQ's <code>MessageTracker</code> reports that the socket has finished with it, so the zero-copy send is safe:" data-zh="Output I/O 執行緒會重用 <code>bytearray</code>，把 msgpack 編碼排除在 allocator hot path 外。buffer 只有在 ZMQ 的 <code>MessageTracker</code> 回報 socket 已處理完後，才會還回重用池，確保零拷貝送出仍然安全：">The Output I/O thread reuses <code>bytearray</code> buffers to keep msgpack encoding off the allocator hot path. It only reclaims a buffer back into the pool once ZMQ's <code>MessageTracker</code> reports that the socket has finished with it, so the zero-copy send is safe:</span></p>
 
-<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_output_sockets()</span>
+<span class="src-file">vllm/v1/engine/core.py : EngineCoreProc.process_output_sockets() — lines 1431-1540</span>
 <pre><code>encoder = <span class="cls">MsgpackEncoder</span>()
 <span class="cmt"># Pool of bytearrays we can hand back to MsgpackEncoder.encode_into()</span>
 <span class="cmt"># instead of allocating a fresh one for every message.</span>
@@ -1253,7 +1361,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <h3><span class="i18n" data-en="6.1 Client Selection Factory" data-zh="6.1 Client 選擇工廠">6.1 Client Selection Factory</span></h3>
 
-<span class="src-file">vllm/v1/engine/core_client.py : EngineCoreClient.make_client() + make_async_mp_client()</span>
+<span class="src-file">vllm/v1/engine/core_client.py : EngineCoreClient.make_client() lines 81-103 + make_async_mp_client() lines 107-125</span>
 <pre><code><span class="dec">@staticmethod</span>
 <span class="kw">def</span> <span class="fn">make_client</span>(
     multiprocess_mode: <span class="cls">bool</span>,
@@ -1360,31 +1468,37 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="The simplest variant — no IPC, no threads, no msgpack. The <code>EngineCore</code> instance runs in the same Python process as <code>LLMEngine</code>; <code>get_output()</code> drives it by calling <code>step()</code> directly. Used by <code>LLMEngine.step()</code> in offline scripts and tests." data-zh="最簡單的變體 —— 沒有 IPC、沒有執行緒、不用 msgpack。<code>EngineCore</code> 跟 <code>LLMEngine</code> 同一個 Python 行程，<code>get_output()</code> 直接呼叫 <code>step()</code> 驅動它。離線腳本與測試會用這條路徑。">The simplest variant — no IPC, no threads, no msgpack. The <code>EngineCore</code> instance runs in the same Python process as <code>LLMEngine</code>; <code>get_output()</code> drives it by calling <code>step()</code> directly. Used by <code>LLMEngine.step()</code> in offline scripts and tests.</span></p>
 
-<span class="src-file">vllm/v1/engine/core_client.py : InprocClient</span>
+<span class="src-file">vllm/v1/engine/core_client.py : InprocClient — lines 274-297</span>
 <pre><code><span class="kw">class</span> <span class="cls">InprocClient</span>(<span class="cls">EngineCoreClient</span>):
-    <span class="str">"""InprocClient: client for in-process EngineCore. Intended
+    <span class="str">"""
+    InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
-    EngineCore setup in this process (no busy loop).
+        EngineCore setup in this process (no busy loop).
 
         * pushes EngineCoreRequest directly into the EngineCore
         * pulls EngineCoreOutputs by stepping the EngineCore
     """</span>
 
     <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, *args, **kwargs):
-        <span class="cmt"># Construct EngineCore in-process. This triggers model load,</span>
-        <span class="cmt"># KV cache profiling, scheduler setup -- all synchronously.</span>
+        <span class="cmt"># Construct EngineCore in-process: model load, KV profiling,</span>
+        <span class="cmt"># scheduler setup — all synchronous.</span>
         <span class="self">self</span>.engine_core = <span class="cls">EngineCore</span>(*args, **kwargs)
 
     <span class="kw">def</span> <span class="fn">get_output</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">EngineCoreOutputs</span>:
-        <span class="cmt"># Single iteration of schedule() -> execute_model() -> update.</span>
-        <span class="cmt"># outputs is a dict keyed by client_index; InprocClient only</span>
-        <span class="cmt"># ever has one client (index 0), so look that up.</span>
-        outputs, _ = <span class="self">self</span>.engine_core.step()
-        <span class="kw">return</span> outputs.get(<span class="num">0</span>) <span class="kw">or</span> <span class="cls">EngineCoreOutputs</span>()
+        <span class="cmt"># step_fn is bound to either step() or step_with_batch_queue()</span>
+        <span class="cmt"># in EngineCore.__init__, depending on pipeline-parallel config.</span>
+        outputs, model_executed = <span class="self">self</span>.engine_core.step_fn()
+        <span class="cmt"># post_step() drives speculative-decoding draft-token handoff;</span>
+        <span class="cmt"># also where DP rank publishes request counts to coordinator.</span>
+        <span class="self">self</span>.engine_core.post_step(model_executed=model_executed)
+        <span class="cmt"># InprocClient has only client_index 0. If outputs is None or</span>
+        <span class="cmt"># has no key 0, hand back an empty struct so the caller's</span>
+        <span class="cmt"># downstream loop stays uniform.</span>
+        <span class="kw">return</span> outputs <span class="kw">and</span> outputs.get(<span class="num">0</span>) <span class="kw">or</span> <span class="cls">EngineCoreOutputs</span>()
 
     <span class="kw">def</span> <span class="fn">add_request</span>(<span class="self">self</span>, request: <span class="cls">EngineCoreRequest</span>) <span class="op">-></span> <span class="kw">None</span>:
-        <span class="cmt"># Preprocess (MM cache, block hashing, grammar init) and hand</span>
-        <span class="cmt"># directly to the scheduler's waiting queue -- no IPC boundary.</span>
+        <span class="cmt"># Preprocess (MM cache lookup, KV block hashing, grammar init)</span>
+        <span class="cmt"># and push straight into the scheduler -- no IPC boundary.</span>
         req, request_wave = <span class="self">self</span>.engine_core.preprocess_add_request(request)
         <span class="self">self</span>.engine_core.add_request(req, request_wave)
 
@@ -1396,41 +1510,43 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="The most sophisticated client variant routes each request to one of the DP engine processes, using recent queue-length stats published by the DPCoordinator. Callers can override the decision by setting <code>request.data_parallel_rank</code>; otherwise the client runs a linear-scan argmin on a per-engine score:" data-zh="最複雜的 client 變體 —— 把每筆請求路由到某個 DP engine 行程。依據是 DPCoordinator 定期 publish 的佇列長度。呼叫方可以指定 <code>request.data_parallel_rank</code> 強制 pin；否則 client 就做線性掃描找分數最低的 engine：">The most sophisticated client variant routes each request to one of the DP engine processes, using recent queue-length stats published by the DPCoordinator. Callers can override the decision by setting <code>request.data_parallel_rank</code>; otherwise the client runs a linear-scan argmin on a per-engine score:</span></p>
 
-<span class="src-file">vllm/v1/engine/core_client.py : DPLBAsyncMPClient.get_core_engine_for_request()</span>
+<span class="src-file">vllm/v1/engine/core_client.py : DPLBAsyncMPClient.get_core_engine_for_request() — lines 1337-1365</span>
 <pre><code><span class="kw">def</span> <span class="fn">get_core_engine_for_request</span>(
         <span class="self">self</span>, request: <span class="cls">EngineCoreRequest</span>) <span class="op">-></span> <span class="cls">EngineIdentity</span>:
-    <span class="cmt"># Pin path: caller explicitly asked for a specific DP rank</span>
-    <span class="cmt"># (e.g. to preserve session affinity or KV cache prefix locality).</span>
-    <span class="kw">if</span> (eng_index := request.data_parallel_rank) <span class="kw">is None</span>:
-        <span class="cmt"># lb_engines is a list[[waiting, running]] mirror of the last</span>
-        <span class="cmt"># stats the coordinator pushed (every ~100ms).</span>
+    <span class="cmt"># Engines are in rank order.</span>
+    <span class="kw">if</span> (eng_index := request.data_parallel_rank) <span class="kw">is None and</span> (
+        <span class="cmt"># Late-interaction models (e.g. ColBERT-style pooling) pin</span>
+        <span class="cmt"># requests to a specific DP rank based on the pooling params,</span>
+        <span class="cmt"># so embeddings for one document always land on the same engine.</span>
+        eng_index := get_late_interaction_engine_index(
+            request.pooling_params, len(<span class="self">self</span>.core_engines)
+        )
+    ) <span class="kw">is None</span>:
+        <span class="cmt"># Neither explicit pin nor late-interaction routing -- fall</span>
+        <span class="cmt"># through to load-based selection.</span>
         current_counts = <span class="self">self</span>.lb_engines
+        <span class="cmt"># TODO use P2C alg for larger DP sizes</span>
         num_engines = len(current_counts)
         min_score = sys.maxsize
         eng_index = <span class="num">0</span>
-
-        <span class="cmt"># Rotate the scan start so multiple clients with empty queues</span>
-        <span class="cmt"># don't all pick engine 0 in lockstep.</span>
         <span class="kw">for</span> i <span class="kw">in</span> range(num_engines):
+            <span class="cmt"># Rotate the scan start across clients so N simultaneous</span>
+            <span class="cmt"># requests with empty queues don't all pick engine 0.</span>
             idx = (<span class="self">self</span>.eng_start_index + i) % num_engines
             waiting, running = current_counts[idx]
             <span class="cmt"># 4x weight on waiting means "prefer any engine currently</span>
-            <span class="cmt"># running over one that is queueing". Tuned empirically to</span>
-            <span class="cmt"># keep TPOT flat under bursty load.</span>
+            <span class="cmt"># running over one that's queueing". Tuned to keep TPOT flat.</span>
             score = waiting * <span class="num">4</span> + running
             <span class="kw">if</span> score < min_score:
                 min_score = score
                 eng_index = idx
-
-        <span class="cmt"># Optimistically bump our local waiting count for the chosen</span>
-        <span class="cmt"># engine. This prevents N simultaneous API server clients from</span>
-        <span class="cmt"># all sending to the same "empty" engine between coordinator</span>
-        <span class="cmt"># stats publishes.</span>
+        <span class="cmt"># Optimistically bump our mirror so concurrent pick calls</span>
+        <span class="cmt"># between coordinator stats publishes (~100ms) don't all</span>
+        <span class="cmt"># pile onto the same "empty" engine.</span>
         current_counts[eng_index][<span class="num">0</span>] += <span class="self">self</span>.client_count
 
     chosen_engine = <span class="self">self</span>.core_engines[eng_index]
-    <span class="cmt"># Record choice so subsequent abort_requests() knows where to</span>
-    <span class="cmt"># send the ABORT message.</span>
+    <span class="cmt"># Record choice so abort_requests() knows where to route the ABORT.</span>
     <span class="self">self</span>.reqs_in_flight[request.request_id] = chosen_engine
     <span class="kw">return</span> chosen_engine</code></pre>
 
@@ -1537,7 +1653,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <h3><span class="i18n" data-en="7.1 The Main Processing Loop" data-zh="7.1 主要處理迴圈">7.1 The Main Processing Loop</span></h3>
 
-<span class="src-file">vllm/v1/engine/output_processor.py : OutputProcessor.process_outputs()</span>
+<span class="src-file">vllm/v1/engine/output_processor.py : OutputProcessor.process_outputs() — lines 572-700</span>
 <pre><code><span class="kw">def</span> <span class="fn">process_outputs</span>(<span class="self">self</span>, engine_core_outputs, engine_core_timestamp=<span class="kw">None</span>, iteration_stats=<span class="kw">None</span>):
     <span class="str">"""Process the EngineCoreOutputs:
     1) Compute stats for logging
@@ -1592,42 +1708,55 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="For <code>AsyncLLM</code>, each request has a <code>RequestOutputCollector</code> that uses <code>asyncio.Event</code> for backpressure. If the OutputProcessor produces faster than the user's <code>generate()</code> consumer, deltas are merged in place instead of queuing (no unbounded growth):" data-zh="在 <code>AsyncLLM</code> 中，每筆請求各自配一個 <code>RequestOutputCollector</code>，以 <code>asyncio.Event</code> 做 backpressure。如果 OutputProcessor 送出比使用者 <code>generate()</code> 消費得快，delta 會就地合併而不是把佇列撐大（避免無界增長）：">For <code>AsyncLLM</code>, each request has a <code>RequestOutputCollector</code> that uses <code>asyncio.Event</code> for backpressure. If the OutputProcessor produces faster than the user's <code>generate()</code> consumer, deltas are merged in place instead of queuing (no unbounded growth):</span></p>
 
-<span class="src-file">vllm/v1/engine/output_processor.py : RequestOutputCollector</span>
+<span class="src-file">vllm/v1/engine/output_processor.py : RequestOutputCollector — lines 45-87</span>
 <pre><code><span class="kw">class</span> <span class="cls">RequestOutputCollector</span>:
-    <span class="str">"""Collects streamed RequestOutputs per individual request,
+    <span class="str">"""
+    Collects streamed RequestOutputs per individual request,
     for hand-off to the consuming asyncio generate task.
 
     When streaming deltas, RequestOutputs are merged if the
     producer gets ahead of the consumer.
     """</span>
 
-    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, output_kind: <span class="cls">RequestOutputKind</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, output_kind: <span class="cls">RequestOutputKind</span>, request_id: <span class="cls">str</span>):
         <span class="cmt"># DELTA mode streams per-step diffs that can be merged;</span>
         <span class="cmt"># FINAL_ONLY and CUMULATIVE always overwrite.</span>
         <span class="self">self</span>.aggregate = output_kind == <span class="cls">RequestOutputKind</span>.DELTA
-        <span class="self">self</span>.output: <span class="cls">Optional</span>[<span class="cls">Union</span>[<span class="cls">RequestOutput</span>, <span class="cls">PoolingRequestOutput</span>,
-                                    <span class="cls">Exception</span>]] = <span class="kw">None</span>
+        <span class="cmt"># request_id kept so debug logs / cancel paths can identify</span>
+        <span class="cmt"># the owner without walking up to the Processor.</span>
+        <span class="self">self</span>.request_id = request_id
+        <span class="self">self</span>.output: <span class="cls">RequestOutput</span> | <span class="cls">PoolingRequestOutput</span> | <span class="cls">Exception</span> | <span class="kw">None</span> = <span class="kw">None</span>
         <span class="self">self</span>.ready = asyncio.Event()
+        <span class="cmt"># Reserved for input-stream driven flows (e.g. audio/video</span>
+        <span class="cmt"># prompt streaming). Populated by AsyncLLM when applicable.</span>
+        <span class="self">self</span>._input_stream_task: asyncio.Task | <span class="kw">None</span> = <span class="kw">None</span>
 
     <span class="kw">def</span> <span class="fn">put</span>(<span class="self">self</span>, output) <span class="op">-></span> <span class="kw">None</span>:
         <span class="str">"""Non-blocking put operation."""</span>
         <span class="kw">if</span> <span class="self">self</span>.output <span class="kw">is None or</span> isinstance(output, <span class="cls">Exception</span>):
             <span class="cmt"># First delta after a get(), or an error that trumps any</span>
-            <span class="cmt"># pending data. Wake up the waiting consumer.</span>
+            <span class="cmt"># pending data. Wake up the waiting consumer immediately.</span>
             <span class="self">self</span>.output = output
             <span class="self">self</span>.ready.set()
-        <span class="kw">elif</span> isinstance(<span class="self">self</span>.output, (<span class="cls">RequestOutput</span>, <span class="cls">PoolingRequestOutput</span>)):
-            <span class="cmt"># Consumer hasn't picked up the previous delta yet --</span>
-            <span class="cmt"># merge into it so memory stays bounded and the consumer</span>
-            <span class="cmt"># sees a single coalesced chunk on its next await.</span>
+        <span class="kw">elif</span> isinstance(<span class="self">self</span>.output, <span class="cls">RequestOutput</span>) <span class="kw">and</span> isinstance(
+            output, <span class="cls">RequestOutput</span>
+        ):
+            <span class="cmt"># Consumer hasn't drained yet -- merge into pending output so</span>
+            <span class="cmt"># memory stays bounded and the consumer sees a single coalesced</span>
+            <span class="cmt"># chunk on its next await. add() handles per-request-index</span>
+            <span class="cmt"># merging when n>1 so parallel samples don't overwrite.</span>
             <span class="self">self</span>.output.add(output, aggregate=<span class="self">self</span>.aggregate)
+        <span class="kw">elif</span> isinstance(<span class="self">self</span>.output, <span class="cls">PoolingRequestOutput</span>) <span class="kw">and</span> isinstance(
+            output, <span class="cls">PoolingRequestOutput</span>
+        ):
+            <span class="cmt"># Pooling outputs are point-in-time embeddings -- latest wins.</span>
+            <span class="self">self</span>.output = output
 
-    <span class="kw">async def</span> <span class="fn">get</span>(<span class="self">self</span>):
+    <span class="kw">async def</span> <span class="fn">get</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">RequestOutput</span> | <span class="cls">PoolingRequestOutput</span>:
         <span class="str">"""Get operation blocks on put event."""</span>
         <span class="cmt"># Sleep efficiently until put() fires the event; no busy wait.</span>
         <span class="kw">while</span> (output := <span class="self">self</span>.output) <span class="kw">is None</span>:
             <span class="kw">await</span> <span class="self">self</span>.ready.wait()
-        <span class="cmt"># Hand the output off and reset state for the next delta.</span>
         <span class="self">self</span>.output = <span class="kw">None</span>
         <span class="self">self</span>.ready.clear()
         <span class="kw">if</span> isinstance(output, <span class="cls">Exception</span>):
@@ -1638,7 +1767,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="<code>AsyncLLM</code> lives in the frontend process and owns three collaborators: a <code>Processor</code> (tokenization + MM input handling), an <code>OutputProcessor</code> (detokenization + streaming), and an <code>engine_core</code> client (ZMQ bridge to the background EngineCore process):" data-zh="<code>AsyncLLM</code> 住在前端行程，持有三個協作元件：<code>Processor</code>（tokenize + 多模態輸入處理）、<code>OutputProcessor</code>（反 tokenize + 串流）、以及 <code>engine_core</code> client（連到背景 EngineCore 行程的 ZMQ 橋樑）："><code>AsyncLLM</code> lives in the frontend process and owns three collaborators: a <code>Processor</code> (tokenization + MM input handling), an <code>OutputProcessor</code> (detokenization + streaming), and an <code>engine_core</code> client (ZMQ bridge to the background EngineCore process):</span></p>
 
-<span class="src-file">vllm/v1/engine/async_llm.py : AsyncLLM.__init__()</span>
+<span class="src-file">vllm/v1/engine/async_llm.py : AsyncLLM.__init__() — lines 74-175</span>
 <pre><code><span class="cmt"># Tokenizer: may be None for text-free pooling models.</span>
 <span class="self">self</span>.tokenizer = init_tokenizer_from_configs(...)
 
@@ -1670,41 +1799,51 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <h3><span class="i18n" data-en="7.4 The LLMEngine.step() Flow (Sync Path)" data-zh="7.4 LLMEngine.step() 的同步路徑">7.4 The LLMEngine.step() Flow (Sync Path)</span></h3>
 
-<span class="src-file">vllm/v1/engine/llm_engine.py : LLMEngine.step()</span>
-<pre><code><span class="kw">def</span> <span class="fn">step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">Union</span>[<span class="cls">list</span>[<span class="cls">RequestOutput</span>], <span class="cls">list</span>[<span class="cls">PoolingRequestOutput</span>]]:
+<span class="src-file">vllm/v1/engine/llm_engine.py : LLMEngine.step() — lines 294-332</span>
+<pre><code><span class="kw">def</span> <span class="fn">step</span>(<span class="self">self</span>) <span class="op">-></span> <span class="cls">list</span>[<span class="cls">RequestOutput</span> | <span class="cls">PoolingRequestOutput</span>]:
 
-    <span class="cmt"># Dummy-batch bypass: when no real requests are active but we</span>
-    <span class="cmt"># still need to keep the CUDA graph warm / execute for</span>
-    <span class="cmt"># synchronization in DP settings.</span>
+    <span class="cmt"># Dummy-batch bypass: runs an empty forward pass to keep CUDA</span>
+    <span class="cmt"># graphs warm and to satisfy DP sync barriers when this rank</span>
+    <span class="cmt"># has nothing scheduled.</span>
     <span class="kw">if</span> <span class="self">self</span>.should_execute_dummy_batch:
         <span class="self">self</span>.should_execute_dummy_batch = <span class="kw">False</span>
         <span class="self">self</span>.engine_core.execute_dummy_batch()
         <span class="kw">return</span> []
 
-    <span class="cmt"># 1) Ask the EngineCore for the next batch of outputs.</span>
-    <span class="cmt">#    InprocClient -> direct step(); MPClient -> blocking ZMQ recv.</span>
-    outputs = <span class="self">self</span>.engine_core.get_output()
+    <span class="cmt"># 1) Pull EngineCoreOutputs from the EngineCore. Each branch</span>
+    <span class="cmt">#    (Inproc direct step vs MP blocking recv) is wrapped with</span>
+    <span class="cmt">#    record_function_or_nullcontext for PyTorch Profiler spans.</span>
+    <span class="kw">with</span> record_function_or_nullcontext(<span class="str">"llm_engine step: get_output"</span>):
+        outputs = <span class="self">self</span>.engine_core.get_output()
 
-    <span class="cmt"># 2) Detokenize, run stop-string checks, build RequestOutput</span>
-    <span class="cmt">#    objects. reqs_to_abort captures requests that finished</span>
-    <span class="cmt">#    via a stop string (engine side didn't know yet).</span>
-    iteration_stats = <span class="cls">IterationStats</span>() <span class="kw">if</span> <span class="self">self</span>.log_stats <span class="kw">else None</span>
-    processed_outputs = <span class="self">self</span>.output_processor.process_outputs(
-        outputs.outputs,
-        engine_core_timestamp=outputs.timestamp,
-        iteration_stats=iteration_stats)
+    <span class="cmt"># 2) Detokenize + stop-string check + build RequestOutput.</span>
+    <span class="cmt">#    Also updates scheduler-stats mirrors used for logging.</span>
+    <span class="kw">with</span> record_function_or_nullcontext(<span class="str">"llm_engine step: process_outputs"</span>):
+        iteration_stats = <span class="cls">IterationStats</span>() <span class="kw">if</span> <span class="self">self</span>.log_stats <span class="kw">else None</span>
+        processed_outputs = <span class="self">self</span>.output_processor.process_outputs(
+            outputs.outputs,
+            engine_core_timestamp=outputs.timestamp,
+            iteration_stats=iteration_stats,
+        )
+        <span class="self">self</span>.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
-    <span class="cmt"># 3) Send abort-by-stop-string back so EngineCore can free</span>
-    <span class="cmt">#    their KV blocks on its next iteration.</span>
-    <span class="self">self</span>.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+    <span class="cmt"># 3) Stop-string detection happens locally; engine needs to</span>
+    <span class="cmt">#    hear about it so it can free KV blocks on the next iter.</span>
+    <span class="kw">with</span> record_function_or_nullcontext(<span class="str">"llm_engine step: abort_requests"</span>):
+        <span class="self">self</span>.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-    <span class="cmt"># 4) Record per-iteration metrics (scheduler queue sizes,</span>
-    <span class="cmt">#    TPOT samples) for Prometheus / stdout loggers.</span>
-    <span class="kw">if</span> <span class="self">self</span>.stat_logger <span class="kw">is not None</span>:
-        <span class="kw">assert</span> outputs.scheduler_stats <span class="kw">is not None</span>
-        <span class="self">self</span>.stat_logger.record(
-            scheduler_stats=outputs.scheduler_stats,
-            iteration_stats=iteration_stats)
+    <span class="cmt"># 4) Emit Prometheus / stdout metrics. Skip when outputs.outputs</span>
+    <span class="cmt">#    is empty — no point recording a zero-token iteration.</span>
+    <span class="kw">with</span> record_function_or_nullcontext(<span class="str">"llm_engine step: record_stats"</span>):
+        <span class="kw">if</span> (<span class="self">self</span>.logger_manager <span class="kw">is not None</span>
+                <span class="kw">and</span> outputs.scheduler_stats <span class="kw">is not None</span>
+                <span class="kw">and</span> len(outputs.outputs) > <span class="num">0</span>):
+            <span class="self">self</span>.logger_manager.record(
+                scheduler_stats=outputs.scheduler_stats,
+                iteration_stats=iteration_stats,
+                mm_cache_stats=<span class="self">self</span>.renderer.stat_mm_cache(),
+            )
+            <span class="self">self</span>.do_log_stats_with_interval()
 
     <span class="kw">return</span> processed_outputs.request_outputs</code></pre>
 </section>
@@ -1751,7 +1890,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <h3><span class="i18n" data-en="8.1 Coordinator Architecture" data-zh="8.1 Coordinator 架構">8.1 Coordinator Architecture</span></h3>
 
-<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinator.__init__()</span>
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinator.__init__() — lines 78-135</span>
 <pre><code><span class="kw">class</span> <span class="cls">DPCoordinator</span>:
     <span class="str">"""Coordinator process used for data-parallel deployments (DP>1).
 
@@ -1760,36 +1899,44 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
     * Collects stats from each DP engine (waiting / running queue lengths)
       and publishes them to all front-ends for LB decisions.
-    * Tracks the current DP request-wave number and global running state,
-      received from rank 0 and forwarded to front-ends.
-    * Broadcasts START_DP_WAVE to engines when any one of them receives
-      a request during the paused state.
+    * Tracks the current DP request-wave number. This transition is
+      synchronized via the all-reduce in
+      DPEngineCoreProc._has_global_unfinished_reqs().
+    * Broadcasts START_DP_WAVE to engines when any one receives a request
+      during the paused state.
     """</span>
 
-    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="self">self</span>, parallel_config: <span class="cls">ParallelConfig</span>):
+    <span class="kw">def</span> <span class="fn">__init__</span>(
+        <span class="self">self</span>, parallel_config: <span class="cls">ParallelConfig</span>,
+        enable_wave_coordination: <span class="cls">bool</span> = <span class="kw">True</span>,
+    ):
         dp_size = parallel_config.data_parallel_size
         <span class="kw">assert</span> dp_size > <span class="num">1</span>, <span class="str">"Coordinator only used for data parallel"</span>
 
         host = parallel_config.data_parallel_master_ip
-        external_lb = parallel_config.data_parallel_external_lb
-        hybrid_lb = parallel_config.data_parallel_hybrid_lb
-
-        <span class="cmt"># When both external and hybrid LB are off we assume the</span>
-        <span class="cmt"># coordinator is colocated with the front-end -- use an IPC</span>
-        <span class="cmt"># transport instead of TCP.</span>
-        local_only = <span class="kw">not</span> (external_lb <span class="kw">or</span> hybrid_lb)
-        front_publish_address = get_engine_client_zmq_addr(
-            local_only=local_only, host=host)
-
-        <span class="cmt"># Engine-side sockets can be IPC only if every DP engine is local.</span>
+        <span class="cmt"># Colocation signal from parallel_config (internal LB means the</span>
+        <span class="cmt"># coordinator shares a host with front-ends, so IPC is fine).</span>
+        local_only = <span class="kw">not</span> parallel_config.local_engines_only
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+        <span class="cmt"># Elastic-EP needs to scale from intra-node to inter-node, so force TCP.</span>
+        <span class="kw">if</span> parallel_config.enable_elastic_ep:
+            local_only_eng = <span class="kw">False</span>
 
-        <span class="cmt"># Spawn the coordinator as a daemon multiprocessing.Process.</span>
-        <span class="cmt"># Uses mp_context (spawn on macOS / Windows, fork on Linux by default).</span>
+        <span class="kw">def</span> <span class="fn">bind_address</span>(local_only: <span class="cls">bool</span>) <span class="op">-></span> <span class="cls">str</span>:
+            <span class="cmt"># IPC when colocated, TCP port-0 (kernel-assigned) otherwise.</span>
+            <span class="kw">return</span> (get_engine_client_zmq_addr(local_only=<span class="kw">True</span>, host=host)
+                    <span class="kw">if</span> local_only <span class="kw">else</span> get_tcp_uri(host, <span class="num">0</span>))
+
+        front_publish_address = bind_address(local_only)
+        back_publish_address = bind_address(local_only_eng)
+        back_output_address = bind_address(local_only_eng)
+
+        <span class="cmt"># Duplex=False one-way pipe: child sends back the actual bound</span>
+        <span class="cmt"># addresses (after kernel port-0 assignment) so the parent knows</span>
+        <span class="cmt"># where to tell engines and front-ends to connect.</span>
         context = get_mp_context()
-        <span class="self">self</span>.proc = context.Process(
+        parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=<span class="kw">False</span>)
+        <span class="self">self</span>.proc: multiprocessing.Process = context.Process(
             target=<span class="cls">DPCoordinatorProc</span>.run_coordinator,
             name=<span class="str">"VLLM_DP_Coordinator"</span>,
             kwargs={
@@ -1797,11 +1944,18 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
                 <span class="str">"front_publish_address"</span>: front_publish_address,
                 <span class="str">"back_output_address"</span>: back_output_address,
                 <span class="str">"back_publish_address"</span>: back_publish_address,
+                <span class="str">"zmq_addr_pipe"</span>: child_zmq_addr_pipe,
+                <span class="str">"enable_wave_coordination"</span>: enable_wave_coordination,
             },
-            daemon=<span class="kw">True</span>)
+            daemon=<span class="kw">True</span>,
+        )
         <span class="self">self</span>.proc.start()
+        child_zmq_addr_pipe.close()
+        <span class="cmt"># Block (with 30s timeout) until the child reports back the</span>
+        <span class="cmt"># bound addresses; also trips if the child dies during startup.</span>
+        (front_publish_address, back_output_address,
+         back_publish_address) = <span class="self">self</span>._wait_for_zmq_addrs(parent_zmq_addr_pipe)
 
-        <span class="cmt"># Expose addresses to MPClient and DPEngineCoreProc construction.</span>
         <span class="self">self</span>.stats_publish_address = front_publish_address
         <span class="self">self</span>.coord_in_address = back_publish_address
         <span class="self">self</span>.coord_out_address = back_output_address
@@ -1832,7 +1986,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="The &quot;request wave&quot; is the DP barrier mechanism: all engines alternate between a global running state and a global paused state, and the count of running&rarr;paused transitions is the wave number. Rank 0 drives wave_complete via an all-reduce in <code>DPEngineCoreProc._has_global_unfinished_reqs()</code>; the coordinator uses start_wave to wake engines that received a request during a paused wave." data-zh="&quot;request wave&quot; 是 DP 的柵欄機制：所有 engine 在全域 running 與 paused 狀態之間切換，每發生一次 running&rarr;paused 轉換 wave 編號就 +1。Rank 0 透過 <code>DPEngineCoreProc._has_global_unfinished_reqs()</code> 的 all-reduce 負責決定 wave_complete；Coordinator 則用 start_wave 把 paused 期間收到請求的 engine 喚醒。">The "request wave" is the DP barrier mechanism: all engines alternate between a global running state and a global paused state, and the count of running&rarr;paused transitions is the wave number. Rank 0 drives wave_complete via an all-reduce in <code>DPEngineCoreProc._has_global_unfinished_reqs()</code>; the coordinator uses start_wave to wake engines that received a request during a paused wave.</span></p>
 
-<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket()</span>
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket() — lines 414-443 (wave branch)</span>
 <pre><code><span class="cmt"># Wave coordination: handle wave completion and start notifications</span>
 <span class="kw">if</span> (wave := outputs.wave_complete) <span class="kw">is not None</span>:
     <span class="cmt"># Notification from rank 0 engine that we've moved into</span>
@@ -1854,7 +2008,7 @@ max_reuse_bufs = len(sockets) + <span class="num">1</span>
 
 <p><span class="i18n" data-en="Engines PUSH their per-step SchedulerStats to <code>output_back</code>. The coordinator tracks the freshest (wave, step) pair per engine and only publishes to front-ends when either (a) the wave state changed or (b) the rate-limited publish timer fires. This keeps the fan-out cheap — a DP=8 deployment does not produce 8 messages per engine step." data-zh="Engine 透過 <code>output_back</code> PUSH 每一步的 SchedulerStats 給 coordinator。Coordinator 針對每個 engine 追蹤最新的 (wave, step)，只在以下兩種情況下 publish 給前端：(a) wave 狀態改變、或 (b) 限流計時器觸發。這樣 DP=8 時不會每 step 產生 8 則訊息，fan-out 成本很低。">Engines PUSH their per-step SchedulerStats to <code>output_back</code>. The coordinator tracks the freshest (wave, step) pair per engine and only publishes to front-ends when either (a) the wave state changed or (b) the rate-limited publish timer fires. This keeps the fan-out cheap — a DP=8 deployment does not produce 8 messages per engine step.</span></p>
 
-<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket()</span>
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket() — output_back branch lines ~380-413 + publish lines ~445-460</span>
 <pre><code><span class="cmt"># (inside the output_back (PULL) branch, after decoding EngineCoreOutputs)</span>
 eng_index = outputs.engine_index
 scheduler_stats = outputs.scheduler_stats
@@ -1951,7 +2105,7 @@ scheduler_stats = outputs.scheduler_stats
 
 <p><span class="i18n" data-en="The coordinator also supports dynamic scaling of the engine mesh. When an API server sends a <code>SCALE_ELASTIC_EP</code> message on publish_front, the coordinator resizes its per-engine <code>EngineState</code> list and resets the global running flag so newly-added engines (which start at wave 0) will participate in the next START_DP_WAVE broadcast:" data-zh="Coordinator 也支援動態擴縮 engine 數量。當 API server 透過 publish_front 送出 <code>SCALE_ELASTIC_EP</code> 時，coordinator 會調整 per-engine <code>EngineState</code> list 並重置全域 running 旗標，讓新加入（wave = 0）的 engine 能參與下一次 START_DP_WAVE 廣播：">The coordinator also supports dynamic scaling of the engine mesh. When an API server sends a <code>SCALE_ELASTIC_EP</code> message on publish_front, the coordinator resizes its per-engine <code>EngineState</code> list and resets the global running flag so newly-added engines (which start at wave 0) will participate in the next START_DP_WAVE broadcast:</span></p>
 
-<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket()</span>
+<span class="src-file">vllm/v1/engine/coordinator.py : DPCoordinatorProc.process_input_socket() — SCALE_ELASTIC_EP branch lines 313-340</span>
 <pre><code><span class="cmt"># Received on the publish_front XPUB socket from an API server.</span>
 <span class="cmt"># Payload is a 2-tuple: ("SCALE_ELASTIC_EP", new_engine_count).</span>
 <span class="kw">if</span> isinstance(decoded, (<span class="cls">list</span>, <span class="cls">tuple</span>)) <span class="kw">and</span> len(decoded) == <span class="num">2</span> \
