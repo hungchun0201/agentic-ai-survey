@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM SimpleCPUOffload — H100 nsys DMA Overlap Analysis</title>
+<style>
+/* ===== ACCENT (cyan: diagnostic / profiling page) ===== */
+:root{--accent:#29b6f6;--accent-rgb:41,182,246;--nav-bg:rgba(10,30,45,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#a0b8c8;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent;cursor:pointer}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#0c1c2a 0%,#0e2735 50%,#101a2e 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(110,198,255,.05) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative;line-height:1.2}
+.hero h1 .accent-text{background:linear-gradient(90deg,#29b6f6,#a6e3a1);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero .subtitle{font-size:1.15rem;color:#9fb4c8;max-width:840px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative;margin-bottom:1.2rem}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.35);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;text-transform:none;white-space:nowrap}
+.hero .file-ref{display:inline-block;background:#1e1e2e;color:#89dceb;padding:.4rem .9rem;border-radius:6px;font-size:.74rem;font-family:'JetBrains Mono','Fira Code',monospace;line-height:1.7;text-align:left;max-width:calc(100% - 2rem);position:relative}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+.section{margin-bottom:2.5rem}
+.section-label{display:inline-block;background:rgba(255,159,67,.15);color:#ffb74d;padding:.2rem .8rem;border-radius:12px;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:.75rem}
+.section p{margin-bottom:1rem;color:#d0d5e0}
+
+h2{font-size:1.75rem;font-weight:700;color:#fff;margin:2.5rem 0 1.1rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#29b6f6,#a6e3a1)}
+h3{font-size:1.25rem;color:#e0e7f0;margin:1.6rem 0 .7rem;font-weight:600}
+h4{font-size:1.02rem;color:#ffb74d;margin:1.1rem 0 .55rem;font-weight:600}
+p,li,td{overflow-wrap:anywhere;word-break:normal}
+h1,h2,h3,h4{overflow-wrap:anywhere;word-break:normal}
+
+.container p,.container li{max-width:none}
+
+/* ===== CALLOUTS ===== */
+.callout{background:rgba(var(--accent-rgb),0.07);border:1px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:1rem 1.4rem;margin:1rem 0;font-size:.93rem}
+.callout strong{color:#fff}
+.callout.warn{background:rgba(255,159,67,.07);border-color:rgba(255,159,67,.3)}
+.callout.warn strong{color:#ffb74d}
+.callout.green{background:rgba(102,187,106,.07);border-color:rgba(102,187,106,.3)}
+.callout.green strong{color:#a6e3a1}
+.callout.red{background:rgba(239,83,80,.07);border-color:rgba(239,83,80,.3)}
+.callout.red strong{color:#ef9a9a}
+.callout.purple{background:rgba(179,136,255,.07);border-color:rgba(179,136,255,.3)}
+.callout.purple strong{color:#ce93d8}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.85em}
+.inline-code,p code,li code,td code{background:rgba(var(--accent-rgb),0.1);padding:.1em .4em;border-radius:4px;color:#89dceb;font-size:.85em}
+.src-ref{display:inline-block;font-family:'JetBrains Mono','Fira Code',monospace;background:rgba(137,220,235,0.08);border:1px solid rgba(137,220,235,0.2);color:#89dceb;padding:.1rem .55rem;border-radius:4px;font-size:.76rem;margin:.15rem 0}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}.ty{color:#f9e2af}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.12);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== METRIC BARS ===== */
+.metric-row{display:grid;grid-template-columns:130px 1fr 60px;gap:1rem;align-items:center;margin:.6rem 0;font-size:.88rem}
+.metric-row .label{color:#cbd5e1;font-weight:500;text-align:right;padding-right:.5rem}
+.metric-row .bar-wrap{height:24px;background:rgba(255,255,255,0.04);border-radius:6px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.06)}
+.metric-row .bar{height:100%;border-radius:5px;transition:width .4s;display:flex;align-items:center;padding-left:8px;font-size:.72rem;font-weight:600;color:rgba(255,255,255,.95);text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.metric-row .bar.idle{background:linear-gradient(90deg,#5c6bc0,#7986cb)}
+.metric-row .bar.fa{background:linear-gradient(90deg,#43a047,#66bb6a)}
+.metric-row .bar.h2d{background:linear-gradient(90deg,#e53935,#ef5350)}
+.metric-row .val{color:#fff;font-weight:700;text-align:right;font-family:'JetBrains Mono',monospace;font-size:.82rem}
+
+.metric-block{background:#151522;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem 1.8rem;margin:1.2rem 0}
+.metric-block h4{margin-top:0;color:#fff;font-size:1.05rem;display:flex;align-items:center;gap:.6rem}
+.metric-block h4 .scale{font-size:.72rem;color:#8fa4c0;font-weight:400;font-family:'JetBrains Mono',monospace}
+.metric-legend{display:flex;gap:1.2rem;margin-top:1rem;flex-wrap:wrap;font-size:.78rem;color:#9fb4c8}
+.metric-legend .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.metric-legend .dot.idle{background:#5c6bc0}
+.metric-legend .dot.fa{background:#43a047}
+.metric-legend .dot.h2d{background:#e53935}
+
+/* ===== STREAM USAGE GRID ===== */
+.stream-viz{background:#151522;border:1px solid #2d2d44;border-radius:12px;padding:1.4rem 1.6rem;margin:1.2rem 0}
+.stream-viz h4{margin:0 0 .8rem;color:#fff;font-size:1rem}
+.stream-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(28px,1fr));gap:3px;margin:.8rem 0}
+.stream-cell{aspect-ratio:1;background:rgba(255,255,255,0.05);border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:.55rem;font-family:'JetBrains Mono',monospace;color:#5a6680}
+.stream-cell.busy-major{background:linear-gradient(135deg,#e53935,#ef5350);color:#fff;font-weight:700;font-size:.65rem;box-shadow:0 0 12px rgba(239,83,80,0.5)}
+.stream-cell.busy-minor{background:linear-gradient(135deg,#ffa726,#ffb74d);color:#1a1030;font-weight:700;font-size:.65rem}
+.stream-cell.idle-zero{background:rgba(255,255,255,0.04);color:#3a4658}
+.stream-cell.high-pri{border:1px solid rgba(126,87,194,.4)}
+.stream-legend{display:flex;gap:1rem;margin-top:.6rem;flex-wrap:wrap;font-size:.76rem;color:#9fb4c8}
+.stream-legend .dot{display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:6px;vertical-align:middle}
+.stream-legend .dot.busy-major{background:linear-gradient(135deg,#e53935,#ef5350)}
+.stream-legend .dot.busy-minor{background:linear-gradient(135deg,#ffa726,#ffb74d)}
+.stream-legend .dot.idle-zero{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15)}
+
+/* ===== CODE PATH FLOW ===== */
+.codepath{background:#151522;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.2rem 0}
+.codepath h4{margin:0 0 1rem;color:#fff}
+.cp-step{display:grid;grid-template-columns:38px 1fr 1fr;gap:14px;align-items:start;margin-bottom:.8rem}
+.cp-step .num{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#a6e3a1);color:#0e0b12;font-weight:800;font-size:.95rem;display:flex;align-items:center;justify-content:center}
+.cp-step .file{font-family:'JetBrains Mono',monospace;font-size:.78rem;color:#89dceb;background:rgba(137,220,235,0.08);border:1px solid rgba(137,220,235,0.2);border-radius:6px;padding:.5rem .7rem;align-self:start}
+.cp-step .desc{font-size:.85rem;color:#cbd5e1;line-height:1.5}
+.cp-step .desc strong{color:#fff}
+.cp-arrow{margin-left:14px;color:#5a6680;font-size:1.2rem;line-height:1;padding:0 0 .4rem 9px}
+
+/* ===== TIMELINE ===== */
+.tline{background:#151522;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem 1.6rem;margin:1.2rem 0}
+.tline h4{margin:0 0 .9rem;color:#fff}
+.tline .lane{display:grid;grid-template-columns:130px 1fr;gap:14px;align-items:center;margin-bottom:8px;min-height:46px}
+.tline .lane .lane-label{font-size:.82rem;color:#9fb4c8;text-align:right;padding-right:.4rem;font-weight:500}
+.tline .lane .lane-track{height:36px;background:rgba(255,255,255,0.03);border-radius:6px;display:flex;overflow:hidden;border:1px solid rgba(255,255,255,0.05)}
+.tline .seg{height:100%;display:flex;align-items:center;justify-content:center;font-size:.74rem;font-weight:600;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);border-right:1px solid rgba(255,255,255,0.06);position:relative;padding:0 4px;overflow:hidden}
+.tline .seg.fwd{background:linear-gradient(135deg,#43a047,#66bb6a)}
+.tline .seg.idle{background:repeating-linear-gradient(45deg,rgba(120,130,140,.18),rgba(120,130,140,.18) 6px,rgba(150,160,170,.08) 6px,rgba(150,160,170,.08) 12px);color:#9fb4c8;font-weight:500}
+.tline .seg.dma{background:linear-gradient(135deg,#e53935,#ef5350)}
+.tline .seg.cpu{background:linear-gradient(135deg,#5c6bc0,#7986cb)}
+.tline .seg.empty{background:transparent;border:none}
+.tline .timeline-axis{display:grid;grid-template-columns:130px 1fr;gap:14px;margin-top:8px;align-items:center}
+.tline .timeline-axis .axis-label{font-size:.7rem;color:#6c7086;text-align:right;padding-right:.4rem}
+.tline .timeline-axis .axis-track{height:14px;border-top:1px dashed rgba(255,255,255,0.15);position:relative}
+.tline .timeline-axis .axis-track .tick{position:absolute;top:-4px;width:1px;height:8px;background:rgba(255,255,255,0.2)}
+.tline .timeline-axis .axis-track .lbl{position:absolute;top:0;font-size:.65rem;color:#6c7086;transform:translateX(-50%)}
+.tline .ts-cap{font-size:.78rem;color:#8fa4c0;margin-top:.6rem;font-style:italic}
+
+/* ===== COMPARISON CARDS ===== */
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin:1.4rem 0}
+.compare-card{background:rgba(30,30,46,0.7);border-radius:12px;padding:1.4rem 1.6rem;border:1px solid rgba(255,255,255,0.06)}
+.compare-card.bad{border-left:4px solid #e94560}
+.compare-card.good{border-left:4px solid #66bb6a}
+.compare-card .ctitle{font-weight:700;font-size:1.05rem;margin-bottom:.6rem;display:flex;align-items:center;gap:.5rem}
+.compare-card.bad .ctitle{color:#ef9a9a}
+.compare-card.good .ctitle{color:#a6e3a1}
+.compare-card .ctitle .icon{font-family:'JetBrains Mono',monospace;font-size:1.1rem}
+.compare-card ul{margin:.4rem 0 0 1.2rem;font-size:.88rem}
+.compare-card li{margin-bottom:.3rem}
+
+/* ===== TLDR / KEY INSIGHT ===== */
+.tldr{background:linear-gradient(135deg,rgba(var(--accent-rgb),0.1),rgba(166,227,161,0.06));border:1px solid rgba(var(--accent-rgb),0.3);border-left:5px solid var(--accent);border-radius:10px;padding:1.4rem 1.8rem;margin:1.4rem 0}
+.tldr h3{margin:0 0 .8rem;color:#fff;font-size:1.15rem;display:flex;align-items:center;gap:.5rem}
+.tldr h3 .badge{display:inline-block;background:var(--accent);color:#0e0b12;padding:.15rem .55rem;border-radius:5px;font-size:.7rem;font-weight:800;letter-spacing:.5px}
+.tldr ul{margin:.4rem 0 0 1.2rem;font-size:.92rem}
+.tldr li{margin-bottom:.4rem}
+.tldr strong{color:#fff}
+
+/* ===== STAT BOX ROW ===== */
+.statbox{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin:1.4rem 0}
+.statbox .box{background:rgba(30,30,46,0.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.statbox .box .v{font-size:2rem;font-weight:800;color:var(--accent);line-height:1.05}
+.statbox .box .v.red{color:#ef5350}
+.statbox .box .v.green{color:#66bb6a}
+.statbox .box .v.amber{color:#ffb74d}
+.statbox .box .l{font-size:.8rem;color:#9fb4c8;margin-top:6px;line-height:1.35}
+
+/* ===== HYPOTHESIS CARDS ===== */
+.hypothesis{background:rgba(30,30,46,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:1.2rem 1.5rem;margin:1rem 0}
+.hypothesis .htag{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:.7rem;padding:.2rem .65rem;border-radius:5px;font-weight:700;letter-spacing:.5px;margin-bottom:.6rem}
+.hypothesis.refuted{border-left:4px solid #e94560}
+.hypothesis.refuted .htag{background:rgba(233,69,96,0.18);color:#ef9a9a}
+.hypothesis.likely{border-left:4px solid #66bb6a}
+.hypothesis.likely .htag{background:rgba(102,187,106,0.18);color:#a6e3a1}
+.hypothesis h4{margin:0 0 .5rem;color:#fff}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(var(--accent-rgb),0.15)}
+footer a{color:#6ec6ff;text-decoration:none}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  .hero{padding:3rem 1rem 2.5rem}
+  .hero h1{font-size:1.6rem;line-height:1.25}
+  .hero .subtitle{font-size:1rem;padding:0 .2rem}
+  .hero .file-ref{font-size:.65rem;word-break:break-all;white-space:normal;text-align:left;line-height:1.5}
+  .container{padding:1rem}
+  h2{font-size:1.3rem;line-height:1.3}
+  h3{font-size:1.05rem}
+  h4{font-size:.98rem}
+  .compare,.cp-step{grid-template-columns:1fr;gap:8px}
+  .cp-step .num{margin-bottom:4px}
+  .metric-row{grid-template-columns:90px 1fr 50px;gap:.6rem;font-size:.78rem}
+  .metric-row .val{font-size:.74rem}
+  .tline .lane{grid-template-columns:90px 1fr;gap:8px}
+  .tline .lane .lane-label{font-size:.74rem}
+  .tline .seg{font-size:.65rem;padding:0 2px}
+  .timeline-axis{grid-template-columns:90px 1fr !important}
+  pre{font-size:.72rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .55rem;font-size:.76rem}
+  html,body{overflow-x:hidden;max-width:100%;width:100%}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../index.html">&larr; AI Infra</a></li>
+    <li><a href="index.html">Overview</a></li>
+    <li><a href="entrypoints.html">Entrypoints</a></li>
+    <li><a href="engine-core.html">EngineCore</a></li>
+    <li><a href="scheduler.html">Scheduler</a></li>
+    <li><a href="kv-cache-manager.html">KV Cache</a></li>
+    <li><a href="sched-trace-viewer.html">Trace Viewer</a></li>
+    <li><a href="connector.html">Connector</a></li>
+    <li><a href="connector-dma-overlap.html" class="active">DMA Overlap (nsys)</a></li>
+    <li><a href="model-runner.html">ModelRunner</a></li>
+    <li><a href="distributed.html">Distributed</a></li>
+    <li><a href="attention.html">Attention</a></li>
+    <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
+  </ul>
+</nav>
+
+<!-- ==================== HERO ==================== -->
+<div class="hero">
+  <div class="badges">
+    <span class="badge">H100 nsys 2025.3.2</span>
+    <span class="badge">SimpleCPUOffload</span>
+    <span class="badge">PR #37160 follow-up</span>
+    <span class="badge">2026-04-27</span>
+  </div>
+  <h1><span class="i18n" data-en="Does Bulk H2D Really <span class=&quot;accent-text&quot;>Overlap</span> with Decode?" data-zh="大塊 H2D 真的能跟 decode <span class=&quot;accent-text&quot;>並行</span>嗎？">Does Bulk H2D Really <span class="accent-text">Overlap</span> with Decode?</span></h1>
+  <p class="subtitle">
+    <span class="i18n" data-en="An H100 nsys deep dive validating (and partially refuting) the SimpleCPUOffloadConnector's multi-stream design. Source-code intent: dedicated <code>load_stream</code>/<code>store_stream</code> let DMA run alongside compute. Empirical reality: 135 CUDA streams exist, but every kernel and every H2D copy attributes to stream 7. GPU metrics show DMA and FlashAttn never co-active." data-zh="一次 H100 nsys 深度剖析，驗證(也部分推翻) SimpleCPUOffloadConnector 的 multi-stream 設計。原始碼意圖：專屬 <code>load_stream</code>/<code>store_stream</code> 讓 DMA 跟 compute 並行跑。實測真相：trace 中存在 135 個 CUDA stream，但所有 kernel 跟 H2D 全 attribute 到 stream 7。GPU metric 顯示 DMA 跟 FlashAttn 從未同時 active。">An H100 nsys deep dive validating (and partially refuting) the SimpleCPUOffloadConnector's multi-stream design. Source-code intent: dedicated <code>load_stream</code>/<code>store_stream</code> let DMA run alongside compute. Empirical reality: 135 CUDA streams exist, but every kernel and every H2D copy attributes to stream 7. GPU metrics show DMA and FlashAttn never co-active.</span>
+  </p>
+  <div class="file-ref">vllm/v1/simple_kv_offload/{worker,copy_backend,cuda_mem_ops}.py<br>nsys 2025.3.2 GPU_METRICS @ 100Hz, CUPTI_ACTIVITY_KIND_{KERNEL,MEMCPY}</div>
+</div>
+
+<div class="container">
+
+<div style="margin-bottom:1.5rem;">
+  <a href="connector.html" style="color:#6ec6ff;font-weight:600;font-size:.95rem;">&larr; <span class="i18n" data-en="Back to Connector deep dive" data-zh="返回 Connector 深度解析">Back to Connector deep dive</span></a>
+</div>
+
+<!-- ==================== TLDR ==================== -->
+<div class="tldr">
+  <h3><span class="badge">TL;DR</span> <span class="i18n" data-en="Three findings, in order of confidence" data-zh="三個發現，依信心強度排序">Three findings, in order of confidence</span></h3>
+  <ul>
+    <li><span class="i18n" data-en="<strong>HBM contention is NOT the slowdown mechanism.</strong> Across 68k 100Hz GPU samples, the (BULK_H2D + FLASH_ATTN) regime is <em>empty</em>. During bulk H2D: SM Active = 0%, Tensor Active = 0%, DRAM Read BW = 0.9%." data-zh="<strong>HBM 競爭不是 decode 變慢的機制。</strong>68k 個 100Hz GPU sample 中，(BULK_H2D + FLASH_ATTN) 同時 active 的 bucket <em>是空的</em>。bulk H2D 期間：SM Active = 0%、Tensor Active = 0%、DRAM Read BW = 0.9%。"></span></li>
+    <li><span class="i18n" data-en="<strong>Source code does design for stream concurrency.</strong> <code>worker.py:189-192</code> creates dedicated low-priority <code>load_stream</code>/<code>store_stream</code>; <code>cuda_mem_ops.py:113,148</code> threads the handle into <code>cuMemcpyBatchAsync</code>. The intent is real." data-zh="<strong>原始碼確實設計了 stream-level 並行。</strong><code>worker.py:189-192</code> 建立專屬 low-priority <code>load_stream</code>/<code>store_stream</code>；<code>cuda_mem_ops.py:113,148</code> 把 stream handle 一路傳到 <code>cuMemcpyBatchAsync</code>。設計意圖是真實的。"></span></li>
+    <li><span class="i18n" data-en="<strong>The deferred-launch pattern likely defeats the design.</strong> <code>worker.py:213-217</code> defers <code>launch_copy()</code> to <code>get_finished()</code> (post-forward) to amortize ~5ms CPU overhead. Net effect: H2D runs in the gap <em>between</em> forward steps — not concurrently with them. SM idles." data-zh="<strong>Deferred-launch 模式很可能讓並行設計失效。</strong><code>worker.py:213-217</code> 把 <code>launch_copy()</code> 延後到 <code>get_finished()</code>(forward 之後跑) 以攤銷 ~5ms CPU 開銷。實際效果：H2D 跑在 forward 步驟<em>之間</em>的空隙 — 而不是跟 forward 並行。SM 因此閒置。"></span></li>
+  </ul>
+</div>
+
+<!-- ==================== 1. CONTEXT ==================== -->
+<div class="section" id="context">
+  <span class="section-label"><span class="i18n" data-en="Setup &middot; Why this analysis" data-zh="背景 &middot; 為何做這次分析">Setup &middot; Why this analysis</span></span>
+  <h2><span class="i18n" data-en="1. Why we profiled" data-zh="1. 為什麼要 profile">1. Why we profiled</span></h2>
+
+  <p><span class="i18n" data-en="In production runs of the SimpleCPUOffloadConnector with FCFS scheduling on H100, <strong>decode-only steps slow down 2.8×</strong> (p50) and <strong>6×</strong> (p99) when bulk H2D + D2H DMA fires concurrently versus when no DMA is active. The <a href='connector.html'>connector deep dive</a> explains the design — multi-stream, async, ~5ms launch hidden under compute. The numbers say the design is not delivering. Either the design is wrong, or the design isn't running as written." data-zh="在 H100 上跑 SimpleCPUOffloadConnector + FCFS scheduling 的 production run 中，<strong>decode-only 步驟在有 bulk H2D + D2H DMA 同時跑時比沒 DMA 時慢 2.8×</strong>(p50)、<strong>6×</strong>(p99)。<a href='connector.html'>Connector 深度解析</a>說明了設計意圖：multi-stream、async、~5ms launch 藏在 compute 之下。但實際數字說設計沒在交付。要嘛設計錯了，要嘛設計沒按寫的方式跑。">In production runs of the SimpleCPUOffloadConnector with FCFS scheduling on H100, <strong>decode-only steps slow down 2.8×</strong> (p50) and <strong>6×</strong> (p99) when bulk H2D + D2H DMA fires concurrently versus when no DMA is active. The <a href='connector.html'>connector deep dive</a> explains the design — multi-stream, async, ~5ms launch hidden under compute. The numbers say the design is not delivering. Either the design is wrong, or the design isn't running as written.</span></p>
+
+  <h3><span class="i18n" data-en="The slowdown numbers from sched_trace" data-zh="sched_trace 看到的延遲倍率">The slowdown numbers from sched_trace</span></h3>
+
+  <table>
+    <thead>
+      <tr><th><span class="i18n" data-en="Composition" data-zh="step 組成">Composition</span></th>
+          <th><span class="i18n" data-en="DMA class" data-zh="DMA 類別">DMA class</span></th>
+          <th>p50 ms</th><th>p90 ms</th><th>p99 ms</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>decode-only</td><td>no DMA</td><td>15.0</td><td>18.5</td><td>22.8</td></tr>
+      <tr><td>decode-only</td><td>load only</td><td>24.1</td><td>51.0</td><td>88.0</td></tr>
+      <tr><td>decode-only</td><td>load + store</td><td><strong style="color:#ef5350">41.9</strong></td><td><strong style="color:#ef5350">95.4</strong></td><td><strong style="color:#ef5350">137.9</strong></td></tr>
+    </tbody>
+  </table>
+
+  <p><span class="i18n" data-en="Initial hypothesis: H100 has 3 TB/s HBM. Bulk H2D writes pinned-host → HBM at PCIe Gen5 speeds. FlashAttn reads KV from HBM at compute speeds. If both compete for the same memory subsystem at the same time, attention runs at degraded effective bandwidth → kernel duration grows → step elongates. This is the classic memory-contention story." data-zh="初始假說：H100 HBM 頻寬 3 TB/s。Bulk H2D 把 pinned host 記憶體以 PCIe Gen5 速度寫入 HBM。FlashAttn 從 HBM 讀 KV 走 compute 速度。如果兩者同時競爭同一個 memory subsystem，attention 拿到的有效頻寬降低 → kernel 變慢 → step 拉長。這是經典的 memory contention 故事。">Initial hypothesis: H100 has 3 TB/s HBM. Bulk H2D writes pinned-host → HBM at PCIe Gen5 speeds. FlashAttn reads KV from HBM at compute speeds. If both compete for the same memory subsystem at the same time, attention runs at degraded effective bandwidth → kernel duration grows → step elongates. This is the classic memory-contention story.</span></p>
+
+  <p><span class="i18n" data-en="Profiling with nsys lets us check it directly: GPU SM/Tensor/DRAM utilization counters at 100 Hz, plus per-event CUPTI traces with stream attribution." data-zh="用 nsys profile 可以直接驗證：100 Hz 的 GPU SM/Tensor/DRAM utilization counter，加上 per-event CUPTI trace 含 stream attribution。">Profiling with nsys lets us check it directly: GPU SM/Tensor/DRAM utilization counters at 100 Hz, plus per-event CUPTI traces with stream attribution.</span></p>
+</div>
+
+<!-- ==================== 2. GPU METRICS ==================== -->
+<div class="section" id="metrics">
+  <span class="section-label"><span class="i18n" data-en="Evidence &middot; GPU counters" data-zh="證據 &middot; GPU 計數器">Evidence &middot; GPU counters</span></span>
+  <h2><span class="i18n" data-en="2. What the GPU was actually doing" data-zh="2. GPU 實際在做什麼">2. What the GPU was actually doing</span></h2>
+
+  <p><span class="i18n" data-en="The H100 trace contains 2.55 M GPU metric samples at 100 Hz across 850 s. Bucketing 68 k samples in the steady-state window (170 s … 850 s) by which activity is in flight at the sample timestamp:" data-zh="H100 trace 含 2.55M 個 100Hz GPU metric sample，覆蓋 850 秒。在 steady-state 窗口(170s … 850s) 取 68k 個 sample，依該時間點正在跑的活動分桶：">The H100 trace contains 2.55 M GPU metric samples at 100 Hz across 850 s. Bucketing 68 k samples in the steady-state window (170 s … 850 s) by which activity is in flight at the sample timestamp:</span></p>
+
+  <div class="statbox">
+    <div class="box"><div class="v">68k</div><div class="l"><span class="i18n" data-en="GPU metric samples analyzed" data-zh="分析的 GPU metric sample">GPU metric samples analyzed</span></div></div>
+    <div class="box"><div class="v">3</div><div class="l"><span class="i18n" data-en="Activity classes (mutually exclusive)" data-zh="活動類別 (互斥)">Activity classes (mutually exclusive)</span></div></div>
+    <div class="box"><div class="v red">0</div><div class="l"><span class="i18n" data-en="Samples with H2D + FA both active" data-zh="H2D + FA 同時 active 的 sample 數">Samples with H2D + FA both active</span></div></div>
+    <div class="box"><div class="v">100Hz</div><div class="l"><span class="i18n" data-en="Sampling rate" data-zh="取樣頻率">Sampling rate</span></div></div>
+  </div>
+
+  <h3><span class="i18n" data-en="DRAM Read Bandwidth, SM Active, Tensor Active per regime" data-zh="三個活動類別的 DRAM Read Bandwidth、SM Active、Tensor Active">DRAM Read Bandwidth, SM Active, Tensor Active per regime</span></h3>
+
+  <div class="metric-block">
+    <h4>DRAM Read Bandwidth <span class="scale">(% of peak HBM read bandwidth)</span></h4>
+    <div class="metric-row"><div class="label">IDLE (n=32 098)</div><div class="bar-wrap"><div class="bar idle" style="width:26%">p50 26%</div></div><div class="val">26.0</div></div>
+    <div class="metric-row"><div class="label">FLASH_ATTN (n=4 469)</div><div class="bar-wrap"><div class="bar fa" style="width:30%">p50 30%</div></div><div class="val">30.0</div></div>
+    <div class="metric-row"><div class="label">BULK_H2D (n=31 478)</div><div class="bar-wrap"><div class="bar h2d" style="width:1%"></div></div><div class="val">1.0</div></div>
+    <div class="metric-legend">
+      <span><span class="dot idle"></span><span class="i18n" data-en="IDLE = no FA, no bulk H2D — other kernels (GEMM, layernorm)" data-zh="IDLE = 沒 FA、沒 bulk H2D — 其他 kernel(GEMM, layernorm)">IDLE = no FA, no bulk H2D — other kernels (GEMM, layernorm)</span></span>
+      <span><span class="dot fa"></span><span class="i18n" data-en="FLASH_ATTN = FlashAttnFwdSm90 in flight" data-zh="FLASH_ATTN = FlashAttnFwdSm90 正在跑">FLASH_ATTN = FlashAttnFwdSm90 in flight</span></span>
+      <span><span class="dot h2d"></span><span class="i18n" data-en="BULK_H2D = H2D memcpy &gt;10MB in flight" data-zh="BULK_H2D = H2D memcpy &gt;10MB 正在跑">BULK_H2D = H2D memcpy &gt;10MB in flight</span></span>
+    </div>
+  </div>
+
+  <div class="metric-block">
+    <h4>SM Active <span class="scale">(% of cycles at least one warp running)</span></h4>
+    <div class="metric-row"><div class="label">IDLE</div><div class="bar-wrap"><div class="bar idle" style="width:57%">p50 57%</div></div><div class="val">57.0</div></div>
+    <div class="metric-row"><div class="label">FLASH_ATTN</div><div class="bar-wrap"><div class="bar fa" style="width:93%">p50 93%</div></div><div class="val">93.0</div></div>
+    <div class="metric-row"><div class="label">BULK_H2D</div><div class="bar-wrap"><div class="bar h2d" style="width:0.5%"></div></div><div class="val">0.0</div></div>
+  </div>
+
+  <div class="metric-block">
+    <h4>Tensor Active <span class="scale">(% of cycles tensor cores executing)</span></h4>
+    <div class="metric-row"><div class="label">IDLE</div><div class="bar-wrap"><div class="bar idle" style="width:39%">p50 39%</div></div><div class="val">39.0</div></div>
+    <div class="metric-row"><div class="label">FLASH_ATTN</div><div class="bar-wrap"><div class="bar fa" style="width:75%">p50 75%</div></div><div class="val">75.0</div></div>
+    <div class="metric-row"><div class="label">BULK_H2D</div><div class="bar-wrap"><div class="bar h2d" style="width:0.5%"></div></div><div class="val">0.0</div></div>
+  </div>
+
+  <div class="callout red">
+    <strong><span class="i18n" data-en="The contention hypothesis predicts an overlap regime. There is none." data-zh="Contention 假說預期有重疊區段。實測沒有。">The contention hypothesis predicts an overlap regime. There is none.</span></strong>
+    <span class="i18n" data-en=" If H2D were 'stealing' HBM bandwidth from FlashAttn, we would expect a fourth bucket: (H2D + FA both in-flight) with <em>depressed</em> DRAM Read BW vs FA-alone. Instead, that bucket is empty across 68 k samples. The three regimes are mutually exclusive in time — they do not compete for the same HBM cycle." data-zh=" 如果 H2D 真的「偷」FlashAttn 的 HBM 頻寬，應該看到第四個 bucket：(H2D + FA 同時 in-flight) 且 DRAM Read BW <em>低於</em> FA-alone。實際上 68k 個 sample 中這個 bucket 完全是空的。三個 regime 在時間上互斥 — 它們從不競爭同一個 HBM cycle。"></span>
+  </div>
+</div>
+
+<!-- ==================== 3. SOURCE CODE STREAM PATH ==================== -->
+<div class="section" id="codepath">
+  <span class="section-label"><span class="i18n" data-en="Source &middot; What the code says" data-zh="原始碼 &middot; 程式碼怎麼寫的">Source &middot; What the code says</span></span>
+  <h2><span class="i18n" data-en="3. The stream handle's full code path" data-zh="3. Stream handle 的完整程式碼路徑">3. The stream handle's full code path</span></h2>
+
+  <p><span class="i18n" data-en="If H2D really runs on a dedicated stream, GPU metrics should sometimes show H2D and FA co-active (concurrent kernels on different streams). Before drawing conclusions from the metrics, let's check what the code actually does. The path from <code>torch.cuda.Stream</code> to the CUDA driver call is short — four files, ~10 lines:" data-zh="如果 H2D 真的跑在專屬 stream 上，GPU metric 應該偶爾看到 H2D + FA 同時 active(不同 stream 的 concurrent kernels)。在從 metric 下結論之前，先確認程式碼實際做什麼。從 <code>torch.cuda.Stream</code> 到 CUDA driver call 的路徑很短 — 四個檔案、約 10 行：">If H2D really runs on a dedicated stream, GPU metrics should sometimes show H2D and FA co-active (concurrent kernels on different streams). Before drawing conclusions from the metrics, let's check what the code actually does. The path from <code>torch.cuda.Stream</code> to the CUDA driver call is short — four files, ~10 lines:</span></p>
+
+  <div class="codepath">
+    <h4><span class="i18n" data-en="From SimpleCPUOffloadWorker.__init__ to cuMemcpyBatchAsync" data-zh="從 SimpleCPUOffloadWorker.__init__ 到 cuMemcpyBatchAsync">From SimpleCPUOffloadWorker.__init__ to cuMemcpyBatchAsync</span></h4>
+
+    <div class="cp-step">
+      <div class="num">1</div>
+      <div class="file">vllm/v1/simple_kv_offload/<br>worker.py:189-192</div>
+      <div class="desc"><strong><span class="i18n" data-en="Two dedicated streams created" data-zh="建立兩條專屬 stream">Two dedicated streams created</span></strong><br>
+        <code>low_pri, _ = torch.cuda.Stream.priority_range()</code><br>
+        <code>self.load_stream = torch.cuda.Stream(priority=low_pri)</code><br>
+        <code>self.store_stream = torch.cuda.Stream(priority=low_pri)</code>
+      </div>
+    </div>
+    <div class="cp-arrow">↓</div>
+
+    <div class="cp-step">
+      <div class="num">2</div>
+      <div class="file">copy_backend.py:46-48</div>
+      <div class="desc"><strong><span class="i18n" data-en="Streams flow into params builders" data-zh="Stream 流進 params builder">Streams flow into params builders</span></strong><br>
+        <code>self._store_params = build_params(gpu, cpu, store_stream)</code><br>
+        <code>self._load_params = build_params(cpu, gpu, load_stream)</code><br>
+        <span class="i18n" data-en="A daemon thread polls a queue and dispatches copies." data-zh="一個 daemon thread 從 queue 取出工作並 dispatch copy。">A daemon thread polls a queue and dispatches copies.</span>
+      </div>
+    </div>
+    <div class="cp-arrow">↓</div>
+
+    <div class="cp-step">
+      <div class="num">3</div>
+      <div class="file">cuda_mem_ops.py:113</div>
+      <div class="desc"><strong><span class="i18n" data-en="Stream handle captured into BatchMemcpyParams" data-zh="Stream handle 存進 BatchMemcpyParams">Stream handle captured into BatchMemcpyParams</span></strong><br>
+        <code>stream_handle=stream.cuda_stream &nbsp;# raw cudaStream_t / CUstream</code><br>
+        <span class="i18n" data-en="The C-level stream pointer is stored in the params struct." data-zh="C 層的 stream pointer 存進 params struct。">The C-level stream pointer is stored in the params struct.</span>
+      </div>
+    </div>
+    <div class="cp-arrow">↓</div>
+
+    <div class="cp-step">
+      <div class="num">4</div>
+      <div class="file">copy_backend.py:97-101</div>
+      <div class="desc"><strong><span class="i18n" data-en="Events recorded on the dedicated stream" data-zh="Event 記錄在專屬 stream 上">Events recorded on the dedicated stream</span></strong><br>
+        <code>start_event.record(stream)</code><br>
+        <code>copy_blocks(src_blocks, dst_blocks, params)</code><br>
+        <code>end_event.record(stream)</code>
+      </div>
+    </div>
+    <div class="cp-arrow">↓</div>
+
+    <div class="cp-step">
+      <div class="num">5</div>
+      <div class="file">cuda_mem_ops.py:139-149</div>
+      <div class="desc"><strong><span class="i18n" data-en="cuMemcpyBatchAsync invoked with the stream handle" data-zh="cuMemcpyBatchAsync 用該 stream handle 呼叫">cuMemcpyBatchAsync invoked with the stream handle</span></strong><br>
+        <code>err = _batch_memcpy_fn(dst, src, sizes, n,</code><br>
+        <code>&nbsp;&nbsp;ctypes.addressof(params.attrs), ..., params.stream_handle)</code><br>
+        <span class="i18n" data-en="The driver-level call gets the dedicated stream — not the default." data-zh="Driver-level call 拿到的是專屬 stream — 不是 default。">The driver-level call gets the dedicated stream — not the default.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout green">
+    <strong><span class="i18n" data-en="Code-level conclusion: the multi-stream design is real." data-zh="程式碼層結論：multi-stream 設計是真的。">Code-level conclusion: the multi-stream design is real.</span></strong>
+    <span class="i18n" data-en=" The dedicated stream handle is threaded all the way to the CUDA driver. There is no fallback to the default stream, no implicit synchronization in the path. As written, H2D and compute should be free to overlap." data-zh=" 專屬 stream handle 一路被傳到 CUDA driver。路徑上沒有 fallback 到 default stream、也沒有隱式 synchronization。按程式碼寫的，H2D 跟 compute 應該可以自由並行。"></span>
+  </div>
+</div>
+
+<!-- ==================== 4. STREAM USAGE PARADOX ==================== -->
+<div class="section" id="streams">
+  <span class="section-label"><span class="i18n" data-en="Paradox &middot; Code vs nsys" data-zh="矛盾 &middot; 原始碼 vs nsys">Paradox &middot; Code vs nsys</span></span>
+  <h2><span class="i18n" data-en="4. The stream attribution paradox" data-zh="4. Stream attribution 的矛盾">4. The stream attribution paradox</span></h2>
+
+  <p><span class="i18n" data-en="nsys's <code>TARGET_INFO_CUDA_STREAM</code> table confirms the CUDA context created <strong>135 streams</strong> at runtime, including the priority-0 NON_BLOCKING streams that should hold <code>load_stream</code>/<code>store_stream</code>. But when we look at <em>which streams actually carry traffic</em>:" data-zh="nsys 的 <code>TARGET_INFO_CUDA_STREAM</code> 表確認 CUDA context 在執行期創了 <strong>135 個 stream</strong>，包含應該裝 <code>load_stream</code>/<code>store_stream</code> 的 priority-0 NON_BLOCKING streams。但看<em>實際有流量的 stream</em>：">nsys's <code>TARGET_INFO_CUDA_STREAM</code> table confirms the CUDA context created <strong>135 streams</strong> at runtime, including the priority-0 NON_BLOCKING streams that should hold <code>load_stream</code>/<code>store_stream</code>. But when we look at <em>which streams actually carry traffic</em>:</span></p>
+
+  <table>
+    <thead><tr><th>streamId</th><th><span class="i18n" data-en="type / priority" data-zh="類型 / 優先級">type / priority</span></th><th><span class="i18n" data-en="kernels" data-zh="kernel 數">kernels</span></th><th><span class="i18n" data-en="memcpys" data-zh="memcpy 數">memcpys</span></th><th><span class="i18n" data-en="role" data-zh="角色">role</span></th></tr></thead>
+    <tbody>
+      <tr><td>7</td><td>NULL / prio=0</td><td><strong style="color:#ef5350">1,169,146</strong></td><td><strong style="color:#ef5350">119,394</strong> (16.5 GB)</td><td><span class="i18n" data-en="all compute + all H2D" data-zh="所有 compute + 所有 H2D">all compute + all H2D</span></td></tr>
+      <tr><td>17</td><td>NON_BLOCKING / prio=0</td><td>0</td><td>2,881 (~0 GB)</td><td><span class="i18n" data-en="small D2H metadata only" data-zh="只有小 D2H metadata">small D2H metadata only</span></td></tr>
+      <tr><td>6, 8-16, 18-140<br>(133 streams)</td><td>various</td><td>0</td><td>0</td><td><span class="i18n" data-en="created but completely idle" data-zh="建好了但完全閒置">created but completely idle</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="stream-viz">
+    <h4><span class="i18n" data-en="Stream usage map — every CUDA stream in the trace, colored by traffic" data-zh="Stream 使用地圖 — trace 中每個 CUDA stream 依流量上色">Stream usage map — every CUDA stream in the trace, colored by traffic</span></h4>
+    <div class="stream-grid" id="stream-grid"></div>
+    <div class="stream-legend">
+      <span><span class="dot busy-major"></span><span class="i18n" data-en="all kernel + bulk H2D traffic" data-zh="所有 kernel + bulk H2D 流量">all kernel + bulk H2D traffic</span> (stream 7)</span>
+      <span><span class="dot busy-minor"></span><span class="i18n" data-en="small D2H metadata only" data-zh="只有小 D2H metadata">small D2H metadata only</span> (stream 17)</span>
+      <span><span class="dot idle-zero"></span><span class="i18n" data-en="created but zero events" data-zh="建好了但 0 events">created but zero events</span> (133 streams)</span>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="The 73 H2D events ≥ 100 MB totaling 9.5 GB in steady-state — exactly what we'd expect connector bulk loads to look like — all live on stream 7. The dedicated <code>load_stream</code>/<code>store_stream</code> the source code creates are not visibly active." data-zh="Steady-state 期間 73 個 H2D 事件 ≥ 100 MB、總計 9.5 GB — 正是 connector bulk load 該有的樣子 — 全部跑在 stream 7。原始碼建立的專屬 <code>load_stream</code>/<code>store_stream</code> 在 nsys 中看不到任何活動。">The 73 H2D events ≥ 100 MB totaling 9.5 GB in steady-state — exactly what we'd expect connector bulk loads to look like — all live on stream 7. The dedicated <code>load_stream</code>/<code>store_stream</code> the source code creates are not visibly active.</span></p>
+
+  <h3><span class="i18n" data-en="Three explanations, ranked by likelihood" data-zh="三種解釋，按可能性排序">Three explanations, ranked by likelihood</span></h3>
+
+  <div class="hypothesis likely">
+    <span class="htag">MOST LIKELY</span>
+    <h4>(A) <span class="i18n" data-en="nsys CUPTI doesn't attribute cuMemcpyBatchAsync correctly" data-zh="nsys CUPTI 對 cuMemcpyBatchAsync 的 attribution 不正確">nsys CUPTI doesn't attribute cuMemcpyBatchAsync correctly</span></h4>
+    <p><span class="i18n" data-en="<code>cuMemcpyBatchAsync</code> is a CUDA 12.8 driver API. CUPTI's per-event activity records may not correctly tag its individual segment copies with the user-supplied <code>stream_handle</code>, defaulting them to the CUDA context's NULL stream. nsys 2025.3.2 was released before CUDA 12.8 stabilized — vendor-side gaps are plausible." data-zh="<code>cuMemcpyBatchAsync</code> 是 CUDA 12.8 driver API。CUPTI 的 per-event activity record 可能沒正確把它的個別 segment copy 標到使用者傳入的 <code>stream_handle</code>，而是默認到 CUDA context 的 NULL stream。nsys 2025.3.2 發布時 CUDA 12.8 還沒穩定 — 廠商端的支援缺口是合理的。"></span></p>
+  </div>
+
+  <div class="hypothesis refuted">
+    <span class="htag">PLAUSIBLE BUT WEAKER</span>
+    <h4>(B) <span class="i18n" data-en="The daemon thread loses CUDA context association" data-zh="Daemon thread 失去 CUDA context 關聯">The daemon thread loses CUDA context association</span></h4>
+    <p><span class="i18n" data-en="The copy loop runs in a daemon thread (<code>copy_backend.py:51-56</code>). The thread sets the device but does not bind itself to any current PyTorch stream. Driver-level calls with explicit <code>stream_handle</code> <em>should</em> still target that stream, but CUPTI may use the thread's current stream as a fallback identifier when batch APIs are involved." data-zh="Copy loop 跑在 daemon thread (<code>copy_backend.py:51-56</code>)。該 thread 設了 device 但沒綁任何 PyTorch current stream。Driver-level call 帶顯式 <code>stream_handle</code> <em>應該</em>還是會 target 該 stream，但 CUPTI 在處理 batch API 時可能用 thread 的 current stream 作為 fallback identifier。"></span></p>
+  </div>
+
+  <div class="hypothesis refuted">
+    <span class="htag">UNLIKELY</span>
+    <h4>(C) <span class="i18n" data-en="GPU metric sampling perturbs CUPTI" data-zh="GPU metric sampling 干擾 CUPTI">GPU metric sampling perturbs CUPTI</span></h4>
+    <p><span class="i18n" data-en="<code>--gpu-metrics-frequency=100</code> has known CUPTI quirks on some sm_80/sm_90 driver combos. But it would not redirect attribution wholesale — at most, a few events here and there." data-zh="<code>--gpu-metrics-frequency=100</code> 在某些 sm_80/sm_90 driver 組合上有已知 CUPTI quirk。但它不會大規模 redirect attribution — 頂多影響零星的 event。"></span></p>
+  </div>
+
+  <div class="callout warn">
+    <strong><span class="i18n" data-en="Important: nsys SQL ≠ ground truth for stream concurrency." data-zh="重要：nsys SQL ≠ stream 並行的真相。">Important: nsys SQL ≠ ground truth for stream concurrency.</span></strong>
+    <span class="i18n" data-en=" Per-event stream attribution can be wrong, but the <strong>GPU SM/Tensor/DRAM hardware counters do not lie</strong>. Those counters read directly from on-die SM scheduler registers. So even if the CUPTI events are mis-attributed, the SM=0% / DRAM=1% during BULK_H2D is real hardware state — the GPU truly was idle." data-zh=" Per-event stream attribution 可能是錯的，但 <strong>GPU SM/Tensor/DRAM 硬體 counter 不會撒謊</strong>。這些 counter 直接從 on-die SM scheduler register 讀。所以即使 CUPTI event attribution 是錯的，BULK_H2D 期間 SM=0% / DRAM=1% 是真實的硬體狀態 — GPU 真的就是閒置。"></span>
+  </div>
+</div>
+
+<!-- ==================== 5. RECONCILIATION ==================== -->
+<div class="section" id="reconcile">
+  <span class="section-label"><span class="i18n" data-en="Synthesis &middot; Why both can be true" data-zh="綜合 &middot; 為何兩者都成立">Synthesis &middot; Why both can be true</span></span>
+  <h2><span class="i18n" data-en="5. Reconciling the two pieces of evidence" data-zh="5. 整合兩邊的證據">5. Reconciling the two pieces of evidence</span></h2>
+
+  <p><span class="i18n" data-en="There is one critical piece of source code that makes everything consistent. From <code>worker.py:213-217</code>:" data-zh="有一段關鍵的原始碼讓一切變得自洽。<code>worker.py:213-217</code>：">There is one critical piece of source code that makes everything consistent. From <code>worker.py:213-217</code>:</span></p>
+
+  <pre><code><span class="kw">def</span> <span class="fn">start_load_kv</span>(<span class="va">self</span>) -&gt; <span class="ty">None</span>:
+    <span class="cm"># NOTE: we defer launching both load and store to get_finished(),</span>
+    <span class="cm"># which runs after model execution. This hides the CPU-side</span>
+    <span class="cm"># block copy op overhead (~5ms) behind GPU compute.</span>
+    <span class="kw">pass</span></code></pre>
+
+  <p><span class="i18n" data-en="<code>start_load_kv()</code> is the connector hook called <em>before</em> the model forward. It is intentionally a no-op. Both loads and stores are launched in <code>get_finished()</code>, which is called <em>after</em> the model forward returns. The 5 ms CPU launch overhead is amortized by overlapping with the previous step's GPU compute tail." data-zh="<code>start_load_kv()</code> 是 connector 在 model forward <em>之前</em>呼叫的 hook。它被刻意做成 no-op。Loads 跟 stores 都被排在 <code>get_finished()</code> 中發出，而 <code>get_finished()</code> 是在 model forward 結束<em>之後</em>才呼叫的。5 ms 的 CPU launch overhead 被攤銷在「跟上一步 GPU compute 尾端重疊」上。"></span></p>
+
+  <h3><span class="i18n" data-en="The actual per-step pipeline (with deferred launch)" data-zh="實際的 per-step pipeline (deferred launch)">The actual per-step pipeline (with deferred launch)</span></h3>
+
+  <div class="tline">
+    <h4><span class="i18n" data-en="Per-step ordering — current code (worker.py:213-217 deferred launch)" data-zh="Per-step 順序 — 目前的程式碼 (worker.py:213-217 deferred launch)">Per-step ordering — current code (worker.py:213-217 deferred launch)</span></h4>
+    <div class="lane">
+      <div class="lane-label">CPU</div>
+      <div class="lane-track">
+        <div class="seg cpu" style="flex:1.3">sched.schedule()</div>
+        <div class="seg empty" style="flex:6"></div>
+        <div class="seg cpu" style="flex:1.4">get_finished()<br>launch_copy</div>
+        <div class="seg empty" style="flex:0.5"></div>
+        <div class="seg cpu" style="flex:1.3">sched.schedule()</div>
+        <div class="seg empty" style="flex:5"></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label"><span class="i18n" data-en="Compute stream" data-zh="Compute stream">Compute stream</span></div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:1.3"></div>
+        <div class="seg fwd" style="flex:6">model.forward() — FA, GEMM, etc</div>
+        <div class="seg empty" style="flex:1.9"></div>
+        <div class="seg empty" style="flex:1.3"></div>
+        <div class="seg fwd" style="flex:5">model.forward()</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">load_stream</div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:8.7"></div>
+        <div class="seg dma" style="flex:1.4">cuMemcpyBatchAsync<br>(H2D)</div>
+        <div class="seg empty" style="flex:6.3"></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">SM hardware</div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:1.3"></div>
+        <div class="seg fwd" style="flex:6">SM Active = 93%</div>
+        <div class="seg idle" style="flex:0.5">idle</div>
+        <div class="seg idle" style="flex:1.4">SM = 0%</div>
+        <div class="seg idle" style="flex:0.5">idle</div>
+        <div class="seg fwd" style="flex:5">SM Active = 93%</div>
+      </div>
+    </div>
+    <div class="ts-cap">
+      <span class="i18n" data-en="Forward finishes → CPU calls get_finished → DMA enqueued → DMA runs alone → next forward enqueued. The dedicated load_stream is technically separate, but compute had nothing pending while DMA ran. SM idles, GPU metrics show 0%." data-zh="Forward 結束 → CPU 呼叫 get_finished → 排入 DMA → DMA 自己跑 → 排入下一個 forward。專屬 load_stream 在技術上是獨立的，但 DMA 跑時 compute 那邊沒東西 pending。SM 因此閒置，GPU metric 顯示 0%。">Forward finishes → CPU calls get_finished → DMA enqueued → DMA runs alone → next forward enqueued. The dedicated load_stream is technically separate, but compute had nothing pending while DMA ran. SM idles, GPU metrics show 0%.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="What we'd see if launch were moved before forward" data-zh="如果 launch 被移到 forward 之前的樣子">What we'd see if launch were moved before forward</span></h3>
+
+  <div class="tline">
+    <h4><span class="i18n" data-en="Hypothetical: launch_copy() moved to start_load_kv() (pre-forward)" data-zh="假設：launch_copy() 移到 start_load_kv() (forward 之前)">Hypothetical: launch_copy() moved to start_load_kv() (pre-forward)</span></h4>
+    <div class="lane">
+      <div class="lane-label">CPU</div>
+      <div class="lane-track">
+        <div class="seg cpu" style="flex:1.3">sched.schedule()</div>
+        <div class="seg cpu" style="flex:1.4">start_load_kv<br>launch_copy</div>
+        <div class="seg empty" style="flex:5.7"></div>
+        <div class="seg cpu" style="flex:1.3">sched.schedule()</div>
+        <div class="seg empty" style="flex:5.3"></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label"><span class="i18n" data-en="Compute stream" data-zh="Compute stream">Compute stream</span></div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:2.7"></div>
+        <div class="seg fwd" style="flex:5.7">model.forward()</div>
+        <div class="seg empty" style="flex:1.3"></div>
+        <div class="seg fwd" style="flex:5.3">model.forward()</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">load_stream</div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:2.7"></div>
+        <div class="seg dma" style="flex:1.4">H2D running concurrent</div>
+        <div class="seg empty" style="flex:11.9"></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-label">SM hardware</div>
+      <div class="lane-track">
+        <div class="seg empty" style="flex:2.7"></div>
+        <div class="seg fwd" style="flex:5.7"><span class="i18n" data-en="SM busy throughout — DMA hidden" data-zh="SM 全程 busy — DMA 被遮蔽">SM busy throughout — DMA hidden</span></div>
+        <div class="seg empty" style="flex:1.3"></div>
+        <div class="seg fwd" style="flex:5.3">SM busy</div>
+      </div>
+    </div>
+    <div class="ts-cap">
+      <span class="i18n" data-en="If H2D is enqueued on load_stream BEFORE forward, the GPU's copy engine and compute SMs run in parallel. The dedicated stream's purpose is fulfilled, the per-step gap disappears, and the 2.8× decode slowdown should collapse." data-zh="如果 H2D 在 forward <em>之前</em>被排上 load_stream，GPU 的 copy engine 跟 compute SM 就能並行。專屬 stream 的設計目的達成、per-step gap 消失、2.8× decode 變慢應該收斂。">If H2D is enqueued on load_stream BEFORE forward, the GPU's copy engine and compute SMs run in parallel. The dedicated stream's purpose is fulfilled, the per-step gap disappears, and the 2.8× decode slowdown should collapse.</span>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong><span class="i18n" data-en="The contention model was the wrong frame; the pipelining model fits all observations." data-zh="Contention 是錯的框架；Pipelining 模型符合所有觀察。">The contention model was the wrong frame; the pipelining model fits all observations.</span></strong>
+    <span class="i18n" data-en=" Forward duration is unchanged (no contention happens because nothing competes). What grows is the <em>inter-step gap</em>: forward → CPU latency → DMA → CPU latency → next forward. The 2.8× p50 / 6× p99 slowdown is gap inflation, not kernel slowdown. Whether nsys mis-attributes the stream or correctly attributes it, the structural cause is the same: the launch is deferred." data-zh=" Forward duration 沒變(沒有 contention，因為沒東西在競爭)。變長的是 <em>inter-step gap</em>：forward → CPU latency → DMA → CPU latency → next forward。2.8× p50 / 6× p99 變慢是 gap 膨脹，不是 kernel 變慢。無論 nsys 是 mis-attribute 還是 correctly attribute stream，結構性原因都一樣：launch 被延後了。"></span>
+  </div>
+</div>
+
+<!-- ==================== 6. FIX DIRECTION ==================== -->
+<div class="section" id="fix">
+  <span class="section-label"><span class="i18n" data-en="Action &middot; What to change" data-zh="行動 &middot; 該改什麼">Action &middot; What to change</span></span>
+  <h2><span class="i18n" data-en="6. Fix direction & ranking" data-zh="6. 修復方向與排序">6. Fix direction & ranking</span></h2>
+
+  <div class="compare">
+    <div class="compare-card bad">
+      <div class="ctitle"><span class="icon">×</span> <span class="i18n" data-en="Wrong directions to chase" data-zh="不該追的方向">Wrong directions to chase</span></div>
+      <ul>
+        <li><span class="i18n" data-en="Reducing H2D bytes per step — proportional but not addressing the gap" data-zh="降低每步 H2D bytes — 比例改善但沒解決 gap"></span></li>
+        <li><span class="i18n" data-en="Adding a separate copy engine — already designed in code" data-zh="加獨立 copy engine — 程式碼已經設計"></span></li>
+        <li><span class="i18n" data-en="Tuning HBM channel allocation — no contention to resolve" data-zh="調 HBM channel 分配 — 沒有 contention 可解"></span></li>
+        <li><span class="i18n" data-en="Bigger CPU pool to reduce miss rate — different (orthogonal) problem" data-zh="放大 CPU pool 降低 miss rate — 不同(正交)的問題"></span></li>
+      </ul>
+    </div>
+    <div class="compare-card good">
+      <div class="ctitle"><span class="icon">✓</span> <span class="i18n" data-en="What to actually try" data-zh="該實際試的方向">What to actually try</span></div>
+      <ul>
+        <li><strong><span class="i18n" data-en="Move launch_copy to start_load_kv" data-zh="把 launch_copy 移到 start_load_kv">Move launch_copy to start_load_kv</span></strong> — <span class="i18n" data-en="single highest-leverage change" data-zh="單一最高槓桿改動"></span></li>
+        <li><span class="i18n" data-en="Add cross-stream events so forward waits only on the slice of DMA it needs" data-zh="加 cross-stream event 讓 forward 只等它需要的那段 DMA"></span></li>
+        <li><span class="i18n" data-en="Profile with ncu instead of nsys to bypass the stream-attribution gap" data-zh="改用 ncu 而非 nsys 繞過 stream-attribution 缺口"></span></li>
+        <li><span class="i18n" data-en="Compare against H200 / A100 traces — different mechanisms may dominate per GPU" data-zh="拿 H200 / A100 trace 對照 — 不同 GPU 上主導機制可能不同"></span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="Validation plan for the proposed fix" data-zh="提議 fix 的驗證計畫">Validation plan for the proposed fix</span></h3>
+
+  <ol>
+    <li><span class="i18n" data-en="Patch <code>worker.py</code>: move <code>launch_copy()</code> body from <code>get_finished()</code> (lines 240-258) into <code>start_load_kv()</code> (line 213). Keep result reporting in <code>get_finished()</code>." data-zh="改 <code>worker.py</code>：把 <code>launch_copy()</code> body 從 <code>get_finished()</code> (line 240-258) 移到 <code>start_load_kv()</code> (line 213)。Result 報告留在 <code>get_finished()</code>。"></span></li>
+    <li><span class="i18n" data-en="Re-run the same FCFS+SimpleCPUOffload benchmark on H100 with sched_trace + DMA trace enabled." data-zh="同一個 FCFS+SimpleCPUOffload benchmark 在 H100 重跑，啟用 sched_trace + DMA trace。"></span></li>
+    <li><span class="i18n" data-en="Compute decode-only step duration buckets by DMA class. Hypothesis: 'load+store' p50 collapses from 41.9 ms toward 18-20 ms (close to 'no DMA' baseline)." data-zh="計算 decode-only step duration 分桶(依 DMA 類別)。假說：'load+store' p50 從 41.9 ms 收斂到 18-20 ms (接近 'no DMA' baseline)。"></span></li>
+    <li><span class="i18n" data-en="If p50 doesn't collapse, the deferred launch isn't the only mechanism — investigate next candidate (likely cross-stream synchronization)." data-zh="如果 p50 沒收斂，deferred launch 不是唯一機制 — 調查下一個候選(很可能是 cross-stream sync)。"></span></li>
+  </ol>
+</div>
+
+<!-- ==================== 7. OPEN QUESTIONS ==================== -->
+<div class="section" id="open">
+  <span class="section-label"><span class="i18n" data-en="Open issues &middot; Follow-ups" data-zh="未解問題 &middot; 後續">Open issues &middot; Follow-ups</span></span>
+  <h2><span class="i18n" data-en="7. Open questions" data-zh="7. 未解問題">7. Open questions</span></h2>
+
+  <div class="callout purple">
+    <strong>Q1.</strong> <span class="i18n" data-en="Is the nsys 2025.3.2 attribution gap for cuMemcpyBatchAsync confirmed? Standalone microbenchmark needed: issue cuMemcpyBatchAsync on a known non-default stream, check whether nsys SQL records the correct streamId. If broken, file vendor bug + switch profiling to ncu." data-zh="nsys 2025.3.2 對 cuMemcpyBatchAsync 的 attribution 缺口確定嗎？需要獨立 microbenchmark：在已知 non-default stream 上發 cuMemcpyBatchAsync，看 nsys SQL 記錄的 streamId 是否正確。若壞了，回報廠商 + profiling 改用 ncu。"></span>
+  </div>
+
+  <div class="callout purple">
+    <strong>Q2.</strong> <span class="i18n" data-en="A100-40GB shows much larger fcfs+cpuoff penalty than H200 (+143% p99 vs +9% p99). If the mechanism is structural pipeline gap, A100 should show similar gap inflation. The amplification likely comes from PCIe Gen4 bandwidth (~25 GB/s) vs Gen5 (~50 GB/s) making the DMA segment longer — worth confirming via PCIe BW counters." data-zh="A100-40GB 上 fcfs+cpuoff 的 penalty 比 H200 大很多 (+143% p99 vs +9% p99)。如果機制是結構性 pipeline gap，A100 應該有類似的 gap 膨脹。放大效應很可能來自 PCIe Gen4 頻寬(~25 GB/s) vs Gen5(~50 GB/s) 讓 DMA segment 變長 — 用 PCIe BW counter 驗證。"></span>
+  </div>
+
+  <div class="callout purple">
+    <strong>Q3.</strong> <span class="i18n" data-en="D2H (store) traffic is also <em>supposed</em> to use store_stream, but nsys shows the only D2H activity is on stream 17 with tiny payloads (4 B – 400 B). Where do the connector's per-step store transfers actually go? Same attribution issue, or stores are getting batched differently?" data-zh="D2H (store) <em>應該</em>用 store_stream，但 nsys 顯示唯一的 D2H 活動在 stream 17 且 payload 極小 (4 B – 400 B)。Connector 每步的 store transfer 實際跑去哪？同一個 attribution 問題，還是 store 被 batch 得不一樣？"></span>
+  </div>
+</div>
+
+<!-- ==================== 8. REPRO ==================== -->
+<div class="section" id="repro">
+  <span class="section-label"><span class="i18n" data-en="Reproduction &middot; Scripts &amp; data" data-zh="重現 &middot; 腳本與資料">Reproduction &middot; Scripts &amp; data</span></span>
+  <h2><span class="i18n" data-en="8. Reproduction" data-zh="8. 重現">8. Reproduction</span></h2>
+
+  <h3>Trace</h3>
+  <pre><code><span class="cm"># Source nsys-rep on PACE</span>
+/storage/scratch1/1/hlin464/swe_smith/results/nsys_swe_h100_jps10_dram64_fcfs_cpuoff/nsys_h100.nsys-rep
+
+<span class="cm"># SQLite export on lab (366 MB)</span>
+/tmp/nsys_analyze/nsys_h100.sqlite
+
+<span class="cm"># Bench: Llama-3.1-8B-Instruct, 100 jobs, jobs_100_pinjab.json</span>
+<span class="cm"># Connector: SimpleCPUOffloadConnector, CPU pool = 64 GB</span>
+<span class="cm"># Scheduling: FCFS</span></code></pre>
+
+  <h3>Analysis scripts</h3>
+
+  <table>
+    <thead><tr><th><span class="i18n" data-en="Script" data-zh="腳本">Script</span></th>
+      <th><span class="i18n" data-en="Output" data-zh="輸出">Output</span></th></tr></thead>
+    <tbody>
+      <tr><td><code>/tmp/dram_bw_during_dma.py</code></td>
+        <td><span class="i18n" data-en="DRAM Read BW%, SM Active%, Tensor Active% bucketed by (BULK_H2D, FLASH_ATTN) co-activity" data-zh="DRAM Read BW%、SM Active%、Tensor Active% 依 (BULK_H2D, FLASH_ATTN) 共活躍狀態分桶">DRAM Read BW%, SM Active%, Tensor Active% bucketed by (BULK_H2D, FLASH_ATTN) co-activity</span></td></tr>
+      <tr><td><code>/tmp/verify_streams.py</code></td>
+        <td><span class="i18n" data-en="Per-stream kernel + memcpy event counts; cross-validate with TARGET_INFO_CUDA_STREAM" data-zh="每個 stream 的 kernel + memcpy event 數量；對照 TARGET_INFO_CUDA_STREAM">Per-stream kernel + memcpy event counts; cross-validate with TARGET_INFO_CUDA_STREAM</span></td></tr>
+      <tr><td><code>/tmp/verify_streams2.py</code></td>
+        <td><span class="i18n" data-en="Steady-state per-stream memcpy size buckets (filter cold-start init copies)" data-zh="Steady-state per-stream memcpy size 分桶 (過濾 cold-start init copy)">Steady-state per-stream memcpy size buckets (filter cold-start init copies)</span></td></tr>
+      <tr><td><code>/tmp/verify_streams3.py</code></td>
+        <td><span class="i18n" data-en="Cross-reference all 135 streams with their priority and traffic" data-zh="135 個 stream 全表交叉比對 priority 跟流量">Cross-reference all 135 streams with their priority and traffic</span></td></tr>
+      <tr><td><code>/tmp/analyze_flashattn.py</code></td>
+        <td><span class="i18n" data-en="FlashAttn kernel duration with/without H2D temporal overlap" data-zh="FlashAttn kernel duration 在有 / 沒有 H2D 時間重疊下的差異">FlashAttn kernel duration with/without H2D temporal overlap</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Source code</h3>
+  <pre><code><span class="cm"># PACE editable install</span>
+/storage/project/r-rs275-0/hlin464/vllm-agent-kvcache/vllm/v1/simple_kv_offload/
+├── worker.py          <span class="cm"># SimpleCPUOffloadWorker; lines 189-217 critical</span>
+├── copy_backend.py    <span class="cm"># DmaCopyBackend, _copy_loop daemon thread</span>
+├── cuda_mem_ops.py    <span class="cm"># cuMemcpyBatchAsync invocation, line 148</span>
+└── manager.py         <span class="cm"># scheduler-side admission logic</span>
+
+<span class="cm"># Findings doc on PACE</span>
+/storage/project/r-rs275-0/hlin464/agent-kvcache/nsys_h100_dma_findings.md</code></pre>
+</div>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Diagnostic page · Sibling of <a href='connector.html'>vLLM KV Connector deep dive</a>" data-zh="診斷頁 · <a href='connector.html'>vLLM KV Connector 深度解析</a> 的姊妹頁">Diagnostic page · Sibling of <a href="connector.html">vLLM KV Connector deep dive</a></span></p>
+  <p><span class="i18n" data-en="Generated 2026-04-27 from nsys 2025.3.2 trace nsys_swe_h100_jps10_dram64_fcfs_cpuoff" data-zh="2026-04-27 產生，資料來自 nsys 2025.3.2 trace nsys_swe_h100_jps10_dram64_fcfs_cpuoff">Generated 2026-04-27 from nsys 2025.3.2 trace nsys_swe_h100_jps10_dram64_fcfs_cpuoff</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l])e.innerHTML=e.dataset[l]
+  });
+  document.getElementById('lang-en').classList.toggle('active',l==='en');
+  document.getElementById('lang-zh').classList.toggle('active',l==='zh');
+  localStorage.setItem('lang',l)
+}
+(function(){var l=localStorage.getItem('lang');if(l)setLang(l)})();
+
+// Render the 135-stream usage map
+(function(){
+  var grid = document.getElementById('stream-grid');
+  if(!grid) return;
+  // Stream 7 = NULL stream, holds all kernels + bulk H2D
+  // Stream 17 = NON_BLOCKING prio=0, small D2H only
+  // Streams 6, 8-140 = idle (with priority encoding from TARGET_INFO_CUDA_STREAM)
+  // Build a 7×20 = 140 cell grid showing stream IDs 1..140
+  var cells = '';
+  for(var i=1; i<=140; i++){
+    var cls = 'idle-zero';
+    var label = i;
+    if(i === 7){ cls = 'busy-major'; label = '7'; }
+    else if(i === 17){ cls = 'busy-minor'; label = '17'; }
+    cells += '<div class="stream-cell ' + cls + '" title="streamId ' + i + '">' + label + '</div>';
+  }
+  grid.innerHTML = cells;
+})();
+</script>
+
+</body>
+</html>
