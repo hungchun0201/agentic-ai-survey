@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JITServe — SLO-aware LLM Serving with Imprecise Request Information</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+:root{--accent:#ab47bc;--accent-rgb:171,71,188;--nav-bg:rgba(40,18,46,0.95)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#c9b0d2;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+.hero{background:linear-gradient(135deg,#1e1224 0%,#1a1428 50%,#1f1232 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative;line-height:1.2}
+.hero .sub{font-size:1.1rem;color:#b8a4c8;max-width:780px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.18);border:1px solid rgba(var(--accent-rgb),0.4);color:#e0b0eb;padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.12);color:#e0b0eb;padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.35)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.12);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.35);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent)}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.88rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.55);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.purple{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.4);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.84rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+.tbar{display:flex;align-items:center;gap:0;margin:1rem 0 1.8rem;flex-wrap:nowrap;overflow:visible}
+.tbar .seg{height:56px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:500;white-space:nowrap;padding:0 16px;position:relative}
+.tbar .seg.llm{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:6px 0 0 6px}
+.tbar .seg.tool{background:rgba(var(--accent-rgb),.2);color:var(--accent);flex:1;min-width:120px}
+.tbar .seg.llm2{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:0 6px 6px 0}
+.tbar .seg .marker{position:absolute;bottom:-18px;font-size:.7rem;color:#8fa4c0}
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.08);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.warn strong{color:#fff}
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.25);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:1.9rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:620px}
+.paper-fig.fig-md img{max-width:820px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:880px;display:inline-block;text-align:left;line-height:1.55}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.18);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center;position:relative}
+.math-block .eq-label{position:absolute;right:14px;top:50%;transform:translateY(-50%);color:#8fa4c0;font-size:.85rem}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:.8rem;color:#8fa4c0;margin:.4rem 0 1rem}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px}
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+@media(max-width:768px){
+  .hero h1{font-size:1.6rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+}
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#patterns">Three Patterns</a></li>
+    <li><a href="#why-fail">Why SOTA Fails</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#analyzer">Request Analyzer</a></li>
+    <li><a href="#gmax">GMAX Algorithm</a></li>
+    <li><a href="#batch">Batch & Preempt</a></li>
+    <li><a href="#guarantees">Guarantees</a></li>
+    <li><a href="#impl">Implementation</a></li>
+    <li><a href="#eval">Evaluation</a></li>
+    <li><a href="#ablation">Ablations</a></li>
+    <li><a href="#discussion">Discussion</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>JITServe</h1>
+  <p class="sub"><span class="i18n" data-en="SLO-aware LLM Serving with Imprecise Request Information — just-in-time bandwidth allocation for diverse SLO classes (latency-sensitive, deadline-sensitive, compound)" data-zh="基於不精確請求資訊的 SLO 感知 LLM 服務系統 — 為三種 SLO 類別（延遲敏感、截止時間敏感、複合請求）做即時頻寬分配">SLO-aware LLM Serving with Imprecise Request Information — just-in-time bandwidth allocation for diverse SLO classes (latency-sensitive, deadline-sensitive, compound)</span></p>
+  <div class="badges">
+    <span class="badge">arXiv:2504.20068</span>
+    <span class="badge">v3 · Dec 2025</span>
+    <span class="badge">SLO-aware Scheduling</span>
+    <span class="badge">Service Goodput</span>
+    <span class="badge">vLLM-based</span>
+  </div>
+  <p style="color:#b8a4c8;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Wei Zhang, Zhiyu Wu, Yi Mu, Rui Ning, Banruo Liu, Nikhil Sarda, Myungjin Lee, Fan Lai</p>
+  <p style="color:#8a7a99;font-size:.85rem;position:relative;max-width:none"><span class="i18n" data-en="University of Illinois Urbana-Champaign · Cisco Research · Google" data-zh="伊利諾大學厄巴納-香檳分校 · Cisco Research · Google">University of Illinois Urbana-Champaign · Cisco Research · Google</span></p>
+</div>
+
+<div class="container">
+
+<section id="overview">
+<h2><span class="i18n" data-en="1. Overview &amp; Core Insight" data-zh="1. 概述與核心洞見">1. Overview &amp; Core Insight</span></h2>
+
+<p><span class="i18n"
+  data-en="Modern LLM serving stacks (vLLM, Sarathi-Serve, DistServe, Autellix) optimize one aggregate metric — usually average latency or throughput — under the assumption that all requests share a single SLO. JITServe's measurement of millions of real production requests plus 550+ user surveys finds the opposite: <strong>requests bring three fundamentally different SLO classes</strong>, and a real workload mixes all three at once."
+  data-zh="現代 LLM 服務堆疊（vLLM、Sarathi-Serve、DistServe、Autellix）優化的是<em>單一</em>聚合指標——通常是平均延遲或吞吐量——預設所有請求共享同一個 SLO。JITServe 對數百萬筆生產請求和 550+ 名使用者調查的測量得出相反結論：<strong>請求帶有三種根本不同的 SLO 類別</strong>，真實工作負載會同時混合三類。">
+Modern LLM serving stacks (vLLM, Sarathi-Serve, DistServe, Autellix) optimize one aggregate metric — usually average latency or throughput — under the assumption that all requests share a single SLO. JITServe's measurement of millions of real production requests plus 550+ user surveys finds the opposite: <strong>requests bring three fundamentally different SLO classes</strong>, and a real workload mixes all three at once.
+</span></p>
+
+<div class="cards">
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Contribution 1 — A New Objective" data-zh="貢獻 1 — 新的優化目標">Contribution 1 — A New Objective</span></h4>
+    <p><span class="i18n"
+      data-en="Replace aggregate latency / throughput with <strong>service goodput</strong>: tokens that meet their per-request SLO. Existing schedulers can deliver high tokens/sec while violating SLOs on the majority of requests; goodput counts only what users can actually use."
+      data-zh="以<strong>服務有效吞吐量（service goodput）</strong>取代聚合延遲/吞吐量：滿足各請求 SLO 的 token 才計入。既有排程器可以一邊維持高 tokens/sec、一邊讓多數請求違反 SLO；goodput 只計算使用者真正能用的部分。">…</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Contribution 2 — Just-In-Time Refinement" data-zh="貢獻 2 — 即時逐步精確化">Contribution 2 — Just-In-Time Refinement</span></h4>
+    <p><span class="i18n"
+      data-en="Treat per-request information as <strong>imprecise on arrival</strong>. A Request Analyzer ships a conservative <em>upper bound</em> via Quantile Regression Forest (QRF) and refines it during decode; for compound requests, pattern-graph matching infers next-stage cost from prior workflows."
+      data-zh="把每個請求的資訊視為<strong>到達時不精確</strong>。Request Analyzer 透過 Quantile Regression Forest（QRF）給出保守的<em>上界</em>，並在 decode 過程中持續精確化；對於複合請求則用 pattern-graph matching 從歷史工作流推斷下一階段成本。">…</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Contribution 3 — GMAX Algorithm" data-zh="貢獻 3 — GMAX 演算法">Contribution 3 — GMAX Algorithm</span></h4>
+    <p><span class="i18n"
+      data-en="<strong>Grouped Margin goodput MAXimization</strong>: allocate the <em>minimum</em> bandwidth that keeps each request on its SLO trajectory; spend any surplus on the request with the highest marginal goodput; batch requests with similar input lengths to keep the kernel efficient."
+      data-zh="<strong>Grouped Margin goodput MAXimization</strong>：先給每個請求其維持 SLO 所需的<em>最低</em>頻寬，再把剩餘容量給予 marginal goodput 最高的請求；同時把長度相近的請求批在一起，維持 kernel 效率。">…</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="Contribution 4 — Provable Bounds" data-zh="貢獻 4 — 可證明的競爭比">Contribution 4 — Provable Bounds</span></h4>
+    <p><span class="i18n"
+      data-en="The paper proves popular policies (FCFS, SJF/LAS, EDF) can achieve <em>arbitrarily poor</em> goodput on diverse workloads, and gives a competitive-ratio bound for GMAX's preemption rule (Appendix D)."
+      data-zh="論文證明流行策略（FCFS、SJF/LAS、EDF）在多樣化工作負載下可能產生<em>任意差</em>的 goodput；並對 GMAX 的搶占規則給出競爭比界（Appendix D）。">…</span></p>
+  </div>
+</div>
+
+<div class="metric-boxes">
+  <div class="metric-box"><div class="value">1.4–6.3×</div><div class="label"><span class="i18n" data-en="service goodput vs SOTA" data-zh="vs SOTA 服務 goodput">service goodput vs SOTA</span></div></div>
+  <div class="metric-box"><div class="value">28.5–83.2%</div><div class="label"><span class="i18n" data-en="resource savings (iso-goodput)" data-zh="同 goodput 下的資源節省">resource savings (iso-goodput)</span></div></div>
+  <div class="metric-box"><div class="value">3</div><div class="label"><span class="i18n" data-en="SLO classes unified" data-zh="統一處理的 SLO 類別">SLO classes unified</span></div></div>
+  <div class="metric-box"><div class="value">≈ near-oracle</div><div class="label"><span class="i18n" data-en="vs ground-truth length oracle" data-zh="vs 真實長度神諭">vs ground-truth length oracle</span></div></div>
+</div>
+
+<div class="note"><strong><span class="i18n" data-en="Why this matters for agentic infra:" data-zh="為什麼這對 agentic 基礎設施重要：">Why this matters for agentic infra:</span></strong>
+<span class="i18n"
+  data-en="Agentic programs are exactly the <strong>compound request</strong> class — multiple inter-dependent LLM/tool calls under a single end-to-end deadline. JITServe is the first paper to give compound requests a first-class SLO model and prove that single-objective schedulers (Autellix's PLAS, vLLM FCFS, Sarathi chunked-prefill) cannot bound their behavior."
+  data-zh="Agentic 程式正是<strong>複合請求</strong>類別——多個相互依賴的 LLM/工具呼叫共享一個 end-to-end 截止時間。JITServe 是第一篇為複合請求建立一等 SLO 模型，並證明單目標排程器（Autellix PLAS、vLLM FCFS、Sarathi chunked-prefill）無法界定其行為的論文。">…</span>
+</div>
+</section>
+
+<section id="patterns">
+<h2><span class="i18n" data-en="2. The Three Request Patterns" data-zh="2. 三種請求模式">2. The Three Request Patterns</span></h2>
+
+<p><span class="i18n"
+  data-en="JITServe begins from a measurement study across <strong>six organizations</strong> and <strong>550+ users</strong>. Production traffic divides cleanly into three SLO archetypes — and a real serving deployment receives all three concurrently."
+  data-zh="JITServe 從橫跨<strong>六個組織</strong>、<strong>550+ 名使用者</strong>的測量研究出發。生產流量乾淨地分成三種 SLO 原型——而真實的服務部署會同時收到三類。">…</span></p>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x1.png" alt="Figure 1: Illustration of three request patterns">
+  <div class="fig-cap"><strong>Figure 1 (from paper):</strong>
+  <span class="i18n" data-en="Three request patterns. Latency-sensitive (left): user reads one token at a time, the SLO is per-token TTFT/TBT. Deadline-sensitive (middle): downstream tool needs the full response by a deadline. Compound (right): a graph of dependent LLM/tool calls under a shared end-to-end deadline." data-zh="三種請求模式。延遲敏感（左）：使用者一次讀一個 token，SLO 是 per-token TTFT/TBT；截止時間敏感（中）：下游工具需在 deadline 前拿到完整回覆；複合（右）：相依的 LLM/工具呼叫圖共享 end-to-end deadline。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="2.1 Type A — Latency-Sensitive" data-zh="2.1 類型 A — 延遲敏感">2.1 Type A — Latency-Sensitive</span></h3>
+<div class="vflow">
+  <div class="box blue">
+    <h4><span class="i18n" data-en="Streaming chat (ChatGPT-like)" data-zh="串流聊天（類 ChatGPT）">Streaming chat (ChatGPT-like)</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="Token consumption is human-paced; Time-To-First-Token (TTFT) and Time-Between-Tokens (TBT) define the SLO." data-zh="Token 消費由人類速度決定；TTFT 與 TBT 定義 SLO。">…</span></li>
+      <li><span class="i18n" data-en="Useful work happens at the bandwidth that matches the user's reading speed — anything faster is wasted." data-zh="有效工作只發生在與使用者閱讀速度匹配的頻寬上——更快也是浪費。">…</span></li>
+      <li><span class="i18n" data-en="Once TTFT is met, the cheapest schedule is to deliver tokens at exactly the SLO rate." data-zh="一旦達到 TTFT，最便宜的排程是以 SLO 速率精確輸出 token。">…</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="2.2 Type B — Deadline-Sensitive" data-zh="2.2 類型 B — 截止時間敏感">2.2 Type B — Deadline-Sensitive</span></h3>
+<div class="vflow">
+  <div class="box orange">
+    <h4><span class="i18n" data-en="Batch / agent-tool inputs (cloud AIOps, summarization API)" data-zh="批次 / Agent 工具輸入（雲端 AIOps、摘要 API）">Batch / agent-tool inputs (cloud AIOps, summarization API)</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="Only the full response matters — partial output gives the consumer nothing." data-zh="只有完整回覆有意義——部分輸出對下游無用。">…</span></li>
+      <li><span class="i18n" data-en="SLO is end-to-end latency $E2EL \\le D$; all tokens are equally urgent up to $D$, none are urgent before that." data-zh="SLO 是 end-to-end 延遲 $E2EL \\le D$；在 $D$ 之前所有 token 同樣緊急，更早交付沒有額外價值。">Only end-to-end latency $E2EL \le D$ matters.</span></li>
+      <li><span class="i18n" data-en="Optimal policy is to spend just enough bandwidth to land at the deadline — earlier completion has zero marginal value." data-zh="最佳策略是花剛好夠用的頻寬恰好在截止時間前完成——更早完成的邊際價值為零。">…</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="2.3 Type C — Compound (the agentic case)" data-zh="2.3 類型 C — 複合（agentic 情境）">2.3 Type C — Compound (the agentic case)</span></h3>
+<div class="vflow">
+  <div class="box purple">
+    <h4><span class="i18n" data-en="Agent / deep-research / multi-step reasoning (MetaGPT, GAIA, deep-research)" data-zh="Agent / 深度研究 / 多步推理（MetaGPT、GAIA、deep-research）">Agent / deep-research / multi-step reasoning</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="The unit of work is a <em>graph</em> of LLM and tool calls; output of one node feeds the next." data-zh="工作單位是 LLM 與工具呼叫的<em>圖</em>；前一節點輸出餵入下一節點。">…</span></li>
+      <li><span class="i18n" data-en="Single SLO is the program-level deadline $D_{prog}$; per-call latency is irrelevant unless it puts $D_{prog}$ at risk." data-zh="單一 SLO 是程式級 deadline $D_{prog}$；除非危及 $D_{prog}$，否則 per-call 延遲不重要。">…</span></li>
+      <li><span class="i18n" data-en="A straggler at any stage cascades. Per-stage shortest-job-first (Autellix's PLAS) ignores cross-stage dependencies and can starve a critical-path call." data-zh="任一階段的拖延都會級聯。Per-stage SJF（Autellix 的 PLAS）忽略跨階段相依，可能餓死關鍵路徑呼叫。">…</span></li>
+    </ul>
+  </div>
+</div>
+
+<div class="warn"><strong><span class="i18n" data-en="The implication:" data-zh="意涵：">The implication:</span></strong>
+<span class="i18n" data-en="No single scheduling rule (FCFS, SJF, EDF, LAS) is optimal for more than one of these classes. A serving stack that pretends they are all the same will violate at least one." data-zh="沒有任何單一排程規則（FCFS、SJF、EDF、LAS）對這三類都最佳。把它們當成同類處理的 serving stack 必然在至少一類上違反 SLO。">…</span>
+</div>
+
+<h3><span class="i18n" data-en="2.4 Real workloads mix all three" data-zh="2.4 真實工作負載同時包含三類">2.4 Real workloads mix all three</span></h3>
+<p><span class="i18n"
+  data-en="The user study shows even a single product (e.g. a chat-with-tools assistant) generates all three patterns across user sessions: 30.5–39.1% of users want low E2E latency, 36.2–49.9% want streaming pace, and the rest mix. A scheduler optimizing for the average pessimizes someone's experience."
+  data-zh="使用者調查顯示，即便是同一個產品（例如帶工具的聊天助理）也會在不同使用者 session 中產生三類請求：30.5–39.1% 要低 E2E 延遲、36.2–49.9% 要串流節奏、其餘混合。為平均優化的排程器必定犧牲某些人的體驗。">…</span></p>
+</section>
+
+<section id="why-fail">
+<h2><span class="i18n" data-en="3. Why State-of-the-Art Schedulers Fail" data-zh="3. 為何 SOTA 排程器失敗">3. Why State-of-the-Art Schedulers Fail</span></h2>
+
+<p><span class="i18n"
+  data-en="The motivation experiments hold workload composition steady but increase request <em>diversity</em> (mix of the three SLO classes). Every existing policy degrades — most by 4×–10× — once the workload is no longer monolithic."
+  data-zh="動機實驗保持工作負載組成不變，但增加請求<em>多樣性</em>（三類 SLO 的混合度）。每種既有策略都退化——多數退化 4×–10×——只要工作負載不再單一。">…</span></p>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x2.png" alt="Figure 3: Existing advances face significant performance drops due to growing LLM request diversity">
+  <div class="fig-cap"><strong>Figure 3 (from paper):</strong>
+  <span class="i18n" data-en="Existing schedulers (FCFS, SJF, LAS/Autellix PLAS, EDF, chunked-prefill) all suffer cliff-shaped goodput drops as the share of compound requests rises. The optimal policy is workload-dependent — none of them is optimal everywhere." data-zh="既有排程器（FCFS、SJF、LAS/Autellix PLAS、EDF、chunked-prefill）在複合請求比例上升時都出現懸崖式 goodput 下降。最佳策略隨工作負載而變——沒有一個放諸四海皆準。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="3.1 The information problem" data-zh="3.1 資訊問題">3.1 The information problem</span></h3>
+<p><span class="i18n"
+  data-en="Even if you wanted to schedule optimally, the information needed at request arrival — output length, downstream graph structure, tool latency — is unknown and provably hard to estimate accurately. Two sub-figures of the paper drive this point home:"
+  data-zh="即便想做最佳排程，請求到達時所需的資訊——輸出長度、下游圖結構、工具延遲——都未知且可被證明難以精確估計。論文兩張子圖直接說明：">…</span></p>
+
+<div class="diagram">
+<table>
+  <thead><tr>
+    <th><span class="i18n" data-en="Workload class" data-zh="工作負載類別">Workload class</span></th>
+    <th><span class="i18n" data-en="Sub-requests per top-level request" data-zh="每頂層請求 sub-request 數">Sub-requests per top-level request</span></th>
+    <th><span class="i18n" data-en="Length-predictor P5–P95 spread" data-zh="長度預測 P5–P95 寬度">Length-predictor P5–P95 spread</span></th>
+  </tr></thead>
+  <tbody>
+    <tr><td>Chatbot</td><td>~1</td><td><span class="i18n" data-en="moderate" data-zh="中等">moderate</span></td></tr>
+    <tr><td>Agent / Deep-Research</td><td><span class="i18n" data-en="up to 200+" data-zh="可達 200+">up to 200+</span></td><td><span class="i18n" data-en=">5× ground truth" data-zh=">5× 真實值">&gt;5× ground truth</span></td></tr>
+    <tr><td>Math Reasoning</td><td>1 (long CoT)</td><td><span class="i18n" data-en="wide tail" data-zh="長尾">wide tail</span></td></tr>
+  </tbody>
+</table>
+<p style="font-size:.8rem;color:#8fa4c0;margin:.4rem 0 0">
+  <span class="i18n"
+    data-en="Numbers reproduced from the paper's Figure 2 (a/b). The figure itself is not embedded — its sub-figures are tightly bound to LaTeX labels and not exposed as standalone images on arXiv HTML."
+    data-zh="數字摘自論文 Figure 2 (a/b)。原圖未內嵌——其子圖緊密綁定 LaTeX label，未在 arXiv HTML 暴露為獨立圖檔。">…</span>
+</p>
+</div>
+
+<h3><span class="i18n" data-en="3.2 What the existing policies actually do" data-zh="3.2 既有策略實際上在做什麼">3.2 What the existing policies actually do</span></h3>
+<table>
+  <thead>
+    <tr><th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
+    <th><span class="i18n" data-en="What it optimizes" data-zh="優化目標">What it optimizes</span></th>
+    <th><span class="i18n" data-en="Failure mode under diverse SLOs" data-zh="多樣化 SLO 下的失敗模式">Failure mode under diverse SLOs</span></th></tr>
+  </thead>
+  <tbody>
+    <tr><td>FCFS (vLLM default)</td>
+    <td><span class="i18n" data-en="Arrival order — implicitly average TTFT" data-zh="到達順序——隱式平均 TTFT">Arrival order — implicitly average TTFT</span></td>
+    <td><span class="i18n" data-en="Long compound jobs head-of-line block latency-sensitive chats." data-zh="長複合任務 head-of-line 阻塞延遲敏感聊天。">…</span></td></tr>
+    <tr><td>SJF / SRTF</td>
+    <td><span class="i18n" data-en="Average completion time" data-zh="平均完成時間">Average completion time</span></td>
+    <td><span class="i18n" data-en="Needs accurate length prediction (Fig 2b shows it's broken); starves long deadline-sensitive jobs." data-zh="需精確長度預測（圖 2b 顯示破功）；餓死長截止時間敏感任務。">…</span></td></tr>
+    <tr><td>LAS / Autellix PLAS</td>
+    <td><span class="i18n" data-en="Cumulative service per program" data-zh="每個程式累積服務量">Cumulative service per program</span></td>
+    <td><span class="i18n" data-en="Per-stage fair, but treats every program identically — no notion of streaming TTFT or hard deadline." data-zh="Per-stage 公平，但對每個程式一視同仁——沒有 streaming TTFT 或硬截止時間的概念。">…</span></td></tr>
+    <tr><td>EDF (earliest deadline first)</td>
+    <td><span class="i18n" data-en="Worst-case lateness" data-zh="最差遲到時間">Worst-case lateness</span></td>
+    <td><span class="i18n" data-en="Burns bandwidth on jobs that already would have made it; ignores per-token latency entirely." data-zh="把頻寬燒在原本就趕得上的工作；完全忽略 per-token 延遲。">…</span></td></tr>
+    <tr><td>Chunked-prefill (Sarathi)</td>
+    <td><span class="i18n" data-en="Throughput / decode latency mix" data-zh="吞吐量 / decode 延遲折衷">Throughput / decode latency mix</span></td>
+    <td><span class="i18n" data-en="A pacing trick, not an SLO-aware policy — chunk size is global, not per-class." data-zh="一種 pacing 手段，不是 SLO 感知策略——chunk 大小是全域而非按類別。">…</span></td></tr>
+  </tbody>
+</table>
+
+<div class="warn"><strong><span class="i18n" data-en="Theorem (informal, Appx D):" data-zh="定理（非形式版，附錄 D）：">Theorem (informal, Appx D):</span></strong>
+<span class="i18n" data-en="For each of FCFS, SJF, LAS, EDF, there exists an instance whose competitive ratio against the offline optimum is unbounded as the diversity ratio grows." data-zh="對 FCFS、SJF、LAS、EDF 中每一種，皆存在實例，其相對離線最佳的競爭比，隨多樣化比率增長而無界放大。">…</span>
+</div>
+</section>
+
+<section id="architecture">
+<h2><span class="i18n" data-en="4. JITServe Architecture" data-zh="4. JITServe 架構">4. JITServe Architecture</span></h2>
+
+<p><span class="i18n"
+  data-en="JITServe sits as a thin scheduling and analysis layer on top of an existing execution backend (in the paper, a modified vLLM). It is plug-in: only a few lines of integration with the engine's batching loop are required."
+  data-zh="JITServe 以薄層的排程與分析模組架在既有執行後端之上（論文中為改造過的 vLLM）。整合只需在引擎 batching loop 加少量程式碼。">…</span></p>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x3.png" alt="Figure 4: JITServe system overview and workflow">
+  <div class="fig-cap"><strong>Figure 4 (from paper):</strong>
+  <span class="i18n" data-en="JITServe overview. Requests enter the Request Analyzer, which produces a conservative length upper bound (QRF) and, for compound requests, a pattern-graph match. The SLO-aware Scheduler runs the GMAX algorithm to pick the next batch, executes a step on the vLLM-derived backend, refines estimates from the produced tokens, and loops." data-zh="JITServe 概覽。請求進入 Request Analyzer，產生保守的長度上界（QRF），對複合請求另做 pattern-graph 匹配。SLO 感知排程器跑 GMAX 演算法挑選下一批，在改造的 vLLM 後端執行一步、用產生的 token 修正估計，再迴圈。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="4.1 The control loop" data-zh="4.1 控制迴圈">4.1 The control loop</span></h3>
+<div class="vflow">
+  <div class="box blue">
+    <h4>1. <span class="i18n" data-en="Ingest" data-zh="接收">Ingest</span></h4>
+    <span class="i18n" data-en="Request arrives with prompt, SLO class (latency / deadline / compound), and any explicit deadline $D$." data-zh="請求到達時帶入 prompt、SLO 類別（延遲/截止/複合）以及可選的截止時間 $D$。">…</span>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box purple">
+    <h4>2. <span class="i18n" data-en="Analyze (per request)" data-zh="分析（per request）">Analyze (per request)</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="QRF predicts $\\hat L_{up}$ — the upper bound of response length." data-zh="QRF 預測 $\\hat L_{up}$ — 回覆長度上界。">QRF predicts $\hat L_{up}$ — the upper bound of response length.</span></li>
+      <li><span class="i18n" data-en="If compound: pattern-graph match against historical workflows yields a predicted next-stage latency profile." data-zh="若為複合請求：與歷史工作流做 pattern-graph 比對，得到下一階段的延遲分佈。">…</span></li>
+      <li><span class="i18n" data-en="Compute minimum bandwidth $b_{min}$ needed to meet the SLO if the upper bound is realized." data-zh="計算在上界成真時滿足 SLO 所需的最低頻寬 $b_{min}$。">…</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box green">
+    <h4>3. <span class="i18n" data-en="Schedule (GMAX)" data-zh="排程（GMAX）">Schedule (GMAX)</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="Reserve $b_{min}$ for every active request whose deadline is reachable." data-zh="為所有截止時間仍可達成的活躍請求預留 $b_{min}$。">…</span></li>
+      <li><span class="i18n" data-en="Distribute the surplus capacity to maximize total marginal goodput." data-zh="將剩餘容量分配給總邊際 goodput 最大化的請求。">…</span></li>
+      <li><span class="i18n" data-en="Compose a batch of similar input lengths to keep kernel utilization high." data-zh="挑選輸入長度接近的請求組批以維持 kernel 利用率。">…</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box orange">
+    <h4>4. <span class="i18n" data-en="Execute one step" data-zh="執行一步">Execute one step</span></h4>
+    <span class="i18n" data-en="Backend (vLLM-derived) runs one prefill / decode iteration. Produced tokens, KV cache stats, and per-request progress flow back." data-zh="後端（改造的 vLLM）執行一次 prefill / decode 迭代。產生的 token、KV cache 統計、per-request 進度回傳。">…</span>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box purple">
+    <h4>5. <span class="i18n" data-en="Refine and (maybe) preempt" data-zh="精確化並（必要時）搶占">Refine and (maybe) preempt</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="Update $\\hat L_{up}$ using the freshly emitted tokens (sequence has revealed itself; remaining length tail shrinks)." data-zh="用剛產生的 token 更新 $\\hat L_{up}$（序列逐步揭示，剩餘長度尾部收斂）。">…</span></li>
+      <li><span class="i18n" data-en="If a request's recomputed $b_{min}$ now exceeds available capacity → trigger preemption (Sec 6)." data-zh="若某請求重新計算的 $b_{min}$ 已超過可用容量 → 觸發搶占（第 6 節）。">…</span></li>
+      <li><span class="i18n" data-en="Loop to step 3." data-zh="迴圈回到步驟 3。">Loop to step 3.</span></li>
+    </ul>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="4.2 What lives where" data-zh="4.2 模組分工">4.2 What lives where</span></h3>
+<table>
+  <thead><tr>
+    <th><span class="i18n" data-en="Component" data-zh="元件">Component</span></th>
+    <th><span class="i18n" data-en="Responsibility" data-zh="職責">Responsibility</span></th>
+    <th><span class="i18n" data-en="State touched" data-zh="觸及的狀態">State touched</span></th>
+  </tr></thead>
+  <tbody>
+    <tr><td><strong>Request Analyzer</strong></td>
+    <td><span class="i18n" data-en="Length upper bound (QRF), graph matching, $b_{min}$ computation" data-zh="長度上界（QRF）、圖匹配、$b_{min}$ 計算">Length upper bound (QRF), graph matching, $b_{min}$ computation</span></td>
+    <td><span class="i18n" data-en="QRF model, pattern-graph DB, per-request estimate cache" data-zh="QRF 模型、pattern-graph 資料庫、per-request 估計快取">QRF model, pattern-graph DB, per-request estimate cache</span></td></tr>
+    <tr><td><strong>SLO-aware Scheduler</strong></td>
+    <td><span class="i18n" data-en="GMAX algorithm: reserve + maximize + batch" data-zh="GMAX 演算法：保留 + 最大化 + 組批">GMAX algorithm: reserve + maximize + batch</span></td>
+    <td><span class="i18n" data-en="Global capacity counter, per-request priority queue" data-zh="全域容量計數器、per-request 優先佇列">Global capacity counter, per-request priority queue</span></td></tr>
+    <tr><td><strong>Execution Backend</strong></td>
+    <td><span class="i18n" data-en="vLLM-derived prefill/decode kernels, paged KV cache" data-zh="改造的 vLLM prefill/decode kernel、分頁 KV cache">vLLM-derived prefill/decode kernels, paged KV cache</span></td>
+    <td><span class="i18n" data-en="GPU memory, KV blocks, scheduled batch" data-zh="GPU 記憶體、KV blocks、已排程 batch">GPU memory, KV blocks, scheduled batch</span></td></tr>
+    <tr><td><strong>Control Plane</strong></td>
+    <td><span class="i18n" data-en="API surface, multi-model dispatch, telemetry" data-zh="API、多模型分派、遙測">API surface, multi-model dispatch, telemetry</span></td>
+    <td><span class="i18n" data-en="Replica set, model→endpoint table" data-zh="副本集、model→endpoint 表">Replica set, model→endpoint table</span></td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="analyzer">
+<h2><span class="i18n" data-en="5. Request Analyzer — Living with Imprecise Information" data-zh="5. Request Analyzer — 與不精確資訊共存">5. Request Analyzer — Living with Imprecise Information</span></h2>
+
+<h3><span class="i18n" data-en="5.1 Why predict an upper bound, not a point estimate" data-zh="5.1 為何預測上界，而非點估計">5.1 Why predict an upper bound, not a point estimate</span></h3>
+<p><span class="i18n"
+  data-en="Most prior work tries to predict the <em>expected</em> response length and uses it as if it were exact (Fig 2b shows this is hopeless: even Llama3-based predictors miss by >5× at the tails). JITServe instead asks for a <strong>conservative upper bound</strong> $\\hat L_{up}$. The reason is asymmetric:"
+  data-zh="多數先前工作預測<em>期望</em>長度並當成精確值用（圖 2b 顯示這沒救：連 Llama3 預測器在尾部都偏離 5 倍以上）。JITServe 反而要的是<strong>保守上界</strong> $\\hat L_{up}$。理由是不對稱的：">…</span></p>
+
+<div class="grid-2">
+  <div class="card">
+    <h4><span class="i18n" data-en="Underestimate response length" data-zh="低估回覆長度">Underestimate response length</span></h4>
+    <p><span class="i18n" data-en="Bandwidth was set too low → request misses its deadline → goodput contribution = 0. <strong>Worst case.</strong>" data-zh="頻寬設得太低 → 錯過截止時間 → goodput 貢獻 = 0。<strong>最壞情況。</strong>">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Overestimate response length" data-zh="高估回覆長度">Overestimate response length</span></h4>
+    <p><span class="i18n" data-en="Bandwidth was reserved generously → the request finishes early; surplus capacity goes back to the pool, picked up later by GMAX. <strong>Recoverable.</strong>" data-zh="頻寬保留得寬 → 請求提早完成；剩餘容量回到 pool，稍後由 GMAX 用掉。<strong>可恢復。</strong>">…</span></p>
+  </div>
+</div>
+
+<p><span class="i18n"
+  data-en="Quantile Regression Forest (QRF) is the natural fit: it directly estimates the conditional quantiles of length given the prompt features. The system queries the high quantile (e.g. P95) instead of the mean."
+  data-zh="Quantile Regression Forest（QRF）是天然合適的工具：給定 prompt 特徵，它直接估計長度的條件分位數。系統查詢高分位（如 P95）而非平均。">…</span></p>
+
+<p style="font-size:.85rem;color:#8fa4c0;font-style:italic"><span class="i18n" data-en="(The paper's prediction-comparison sub-figures are tightly bound to LaTeX labels and not extractable as standalone images from arXiv HTML. The QRF-vs-BERT-vs-Llama3 numbers are reported in the Section 5.1 prose: QRF stays in single-digit ms while BERT/Llama3 predictors are an order of magnitude slower; QRF's P5–P95 envelope narrows toward the ground truth as decoded tokens accumulate.)" data-zh="（論文中的預測比較子圖緊密綁定 LaTeX label，無法從 arXiv HTML 抽取為獨立圖檔。QRF vs BERT vs Llama3 的數字在 5.1 節文字中：QRF 維持在個位數 ms，BERT/Llama3 慢一個數量級；隨已解碼 token 累積，QRF 的 P5–P95 逐步收斂至真實值。）">…</span></p>
+
+<h3><span class="i18n" data-en="5.2 Pattern-Graph Matching for Compound Requests" data-zh="5.2 複合請求的 Pattern-Graph 匹配">5.2 Pattern-Graph Matching for Compound Requests</span></h3>
+
+<p><span class="i18n"
+  data-en="A compound request is not a single LLM call but a graph: nodes are LLM/tool invocations, edges are data dependencies. Most production agents are <em>templated</em> — the same orchestration code runs many times with different inputs, producing structurally similar graphs. JITServe exploits this: it stores observed (graph, runtime) pairs and matches an in-flight request's partial graph against the history."
+  data-zh="複合請求不是單一 LLM 呼叫，而是一張圖：節點是 LLM/工具呼叫、邊是資料相依。多數生產級 agent 是<em>模板化</em>的——同一段編排程式以不同輸入跑很多次，產生結構相近的圖。JITServe 利用這點：將觀察到的 (graph, runtime) 配對存起來，在線比對在飛請求的部分圖與歷史。">…</span></p>
+
+<div class="diagram">
+<div class="vflow">
+  <div class="box blue">
+    <strong><span class="i18n" data-en="In-flight compound request — partial graph" data-zh="在飛複合請求 — 部分圖">In-flight compound request — partial graph</span></strong>
+    <ul>
+      <li><span class="i18n" data-en="Stage 1 done: planner LLM (256 tok in / 412 tok out)" data-zh="階段 1 完成：planner LLM（256 tok 入 / 412 tok 出）">Stage 1 done: planner LLM (256 tok in / 412 tok out)</span></li>
+      <li><span class="i18n" data-en="Stage 2 done: web_search tool (842 ms)" data-zh="階段 2 完成：web_search 工具（842 ms）">Stage 2 done: web_search tool (842 ms)</span></li>
+      <li><span class="i18n" data-en="Stage 3 in progress: writer LLM (input known, output unknown)" data-zh="階段 3 進行中：writer LLM（輸入已知、輸出未知）">Stage 3 in progress: writer LLM (input known, output unknown)</span></li>
+      <li><span class="i18n" data-en="Stages 4–N: structurally undetermined" data-zh="階段 4–N：結構未定">Stages 4–N: structurally undetermined</span></li>
+    </ul>
+  </div>
+  <div class="arrow">⇣ match against history (incremental graph isomorphism)</div>
+  <div class="box purple">
+    <strong><span class="i18n" data-en="Top-K historical matches → predicted next-stage cost distribution" data-zh="Top-K 歷史匹配 → 預測下一階段成本分佈">Top-K historical matches → predicted next-stage cost distribution</span></strong>
+    <ul>
+      <li><span class="i18n" data-en="Among matches, writer LLM stage averaged 850–1100 output tokens." data-zh="匹配中 writer LLM 階段平均 850–1100 個 output token。">…</span></li>
+      <li><span class="i18n" data-en="Match also predicts ≈3 more stages remain → revise $b_{min}$ for remaining program-level deadline." data-zh="匹配同時預測還剩 ≈3 個階段 → 重算 $b_{min}$ 以滿足 program-level deadline。">…</span></li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x4.png" alt="Pattern Graph illustration — LLM nodes and Tool nodes annotated with input/output token counts and tool latencies">
+  <div class="fig-cap"><strong>Figure (from paper):</strong>
+  <span class="i18n" data-en="A real pattern graph for a deep-research workflow: Planning → Searching → Drafting → Reflection → Summary. Each LLM node is annotated with (input tokens, output tokens); each tool node with measured latency. Matching an in-flight partial graph against this kind of historical record yields the predicted next-stage cost." data-zh="深度研究工作流的實際 pattern graph：Planning → Searching → Drafting → Reflection → Summary。每個 LLM 節點標註 (input tokens, output tokens)；每個工具節點標註實測延遲。將在飛部分圖與此類歷史紀錄匹配，得到下一階段預測成本。">…</span></div>
+</div>
+
+<div class="note"><strong><span class="i18n" data-en="Why this is more useful than length prediction alone:" data-zh="為何這比單純長度預測有用：">Why this is more useful than length prediction alone:</span></strong>
+<span class="i18n" data-en="A point estimate of one stage's length is bounded in value — the program-level deadline depends on the <em>sum across remaining stages</em>. Pattern-graph matching captures this structure; per-call length predictors do not." data-zh="單一階段長度的點估計用處有限——program-level deadline 取決於<em>剩餘階段的總和</em>。Pattern-graph 匹配捕捉到這個結構；per-call 長度預測器做不到。">…</span>
+</div>
+
+<h3><span class="i18n" data-en="5.3 Computing the minimum serving bandwidth" data-zh="5.3 計算最低服務頻寬">5.3 Computing the minimum serving bandwidth</span></h3>
+
+<p><span class="i18n"
+  data-en="Given the upper bound $\\hat L_{up}$ and remaining time $\\Delta t$ until the SLO is breached, the minimum bandwidth (tokens per second this request needs from this point on) is:"
+  data-zh="給定上界 $\\hat L_{up}$ 與距離違反 SLO 的剩餘時間 $\\Delta t$，最低頻寬（從此刻起每秒要為此請求生成多少 token）為：">Given the upper bound $\hat L_{up}$ and remaining time $\Delta t$ until the SLO is breached, the minimum bandwidth is:</span></p>
+
+<div class="math-block">
+<span class="eq-label">(1)</span>
+$$b_{min}(r,t) \;=\; \frac{\hat L_{up}(r,t) - L_{done}(r,t)}{\Delta t(r,t)}$$
+</div>
+
+<p><span class="i18n"
+  data-en="where $L_{done}(r,t)$ is the number of tokens already generated for request $r$ by time $t$. As $t$ advances and $L_{done}$ grows, both numerator and denominator shrink — but the ratio is what GMAX uses to rank requests."
+  data-zh="其中 $L_{done}(r,t)$ 為請求 $r$ 在時間 $t$ 已產生的 token 數。隨著 $t$ 前進、$L_{done}$ 增長，分子與分母都縮小——但 GMAX 排序用的就是這個比值。">…</span></p>
+
+<p><span class="i18n"
+  data-en="For latency-sensitive requests, $\\Delta t$ is the streaming SLO multiplied by remaining tokens; for deadline-sensitive, it's $D - t$; for compound, the remaining program-level deadline minus the predicted cost of downstream stages."
+  data-zh="對延遲敏感請求，$\\Delta t$ 等於串流 SLO 乘以剩餘 token；對截止時間敏感請求為 $D - t$；對複合請求則為剩餘 program-level deadline 減下游階段預測成本。">…</span></p>
+</section>
+
+<section id="gmax">
+<h2><span class="i18n" data-en="6. GMAX — The Scheduling Algorithm" data-zh="6. GMAX — 排程演算法">6. GMAX — The Scheduling Algorithm</span></h2>
+
+<p><span class="i18n"
+  data-en="GMAX runs once per scheduling tick (typically once per decode step). It receives the active request set with their refined estimates and picks the next batch."
+  data-zh="GMAX 在每次排程 tick（通常每次 decode step）執行一次。它接收活躍請求集合連同精確化的估計，並挑選下一個批次。">…</span></p>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x8.png" alt="Figure 10: GMAX two-step priority then batch composition">
+  <div class="fig-cap"><strong>Figure 10 (from paper):</strong>
+  <span class="i18n" data-en="GMAX in two steps: (1) priority by per-request bandwidth demand (those with the tightest $b_{min}$ go first); (2) within the chosen set, maximize grouped margin goodput while keeping inputs of similar length together." data-zh="GMAX 兩步驟：(1) 按 per-request 頻寬需求排優先（$b_{min}$ 最緊者先）；(2) 在所選集合內，最大化 grouped margin goodput，同時保持輸入長度相近以維持效率。">…</span></div>
+</div>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2504.20068v3/x7.png" alt="Figure 9: scheduling latency vs queue depth">
+  <div class="fig-cap"><strong>Figure 9 (from paper):</strong>
+  <span class="i18n" data-en="Scheduling latency vs number of pending requests in queue. GMAX overhead grows linearly with active-request count up to 5K requests, dominated by O(N log N) priority computation — confirming that the per-tick scheduling cost is negligible compared to one decode step." data-zh="排程延遲 vs queue 中待處理請求數。GMAX 開銷在 5K 請求內隨活躍請求數線性成長，主導項為 O(N log N) 的優先級計算——確認每 tick 排程成本相對一次 decode step 可忽略。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="6.1 Three sub-objectives that must coexist" data-zh="6.1 必須共存的三個子目標">6.1 Three sub-objectives that must coexist</span></h3>
+<div class="cards">
+  <div class="card">
+    <h4>1. <span class="i18n" data-en="SLO compliance" data-zh="SLO 合規">SLO compliance</span></h4>
+    <p><span class="i18n" data-en="Every active request whose deadline is still reachable must receive $\\ge b_{min}$ in this tick." data-zh="所有截止時間仍可達成的活躍請求，本 tick 必須拿到 $\\ge b_{min}$ 的頻寬。">Every active request whose deadline is still reachable must receive $\ge b_{min}$ in this tick.</span></p>
+  </div>
+  <div class="card">
+    <h4>2. <span class="i18n" data-en="Marginal value" data-zh="邊際價值">Marginal value</span></h4>
+    <p><span class="i18n" data-en="Surplus capacity goes to the request whose marginal goodput per unit bandwidth is highest." data-zh="剩餘容量分配給每單位頻寬邊際 goodput 最高的請求。">…</span></p>
+  </div>
+  <div class="card">
+    <h4>3. <span class="i18n" data-en="Kernel efficiency" data-zh="Kernel 效率">Kernel efficiency</span></h4>
+    <p><span class="i18n" data-en="A batch with mixed input lengths runs at the speed of the longest sequence (per-layer bottleneck even with Flash Decoding). Group similar lengths together." data-zh="輸入長度混合的批次跑在最長序列的速度（即使有 Flash Decoding 仍是 per-layer 瓶頸）。把長度相近的放一起。">…</span></p>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="6.2 Pseudocode" data-zh="6.2 演算法虛擬碼">6.2 Pseudocode</span></h3>
+<pre><code><span class="cm"># Algorithm 1 — GMAX (one scheduling tick)</span>
+<span class="kw">def</span> <span class="fn">gmax_schedule</span>(active_requests, capacity_C, batch_size_B):
+    <span class="cm"># 1. compute per-request demand</span>
+    <span class="kw">for</span> r <span class="kw">in</span> active_requests:
+        r.b_min      = (r.L_up_hat - r.L_done) / r.delta_t
+        r.priority   = r.b_min                      <span class="cm"># tighter requests first</span>
+        r.margin_gp  = <span class="fn">marginal_goodput</span>(r)        <span class="cm"># dgoodput / dbandwidth</span>
+
+    <span class="cm"># 2. reserve b_min for every reachable request (SLO compliance)</span>
+    reachable = [r <span class="kw">for</span> r <span class="kw">in</span> active_requests
+                 <span class="kw">if</span> r.delta_t > <span class="nu">0</span> <span class="kw">and</span> r.b_min &lt;= capacity_C]
+    reachable.<span class="fn">sort</span>(key=<span class="kw">lambda</span> r: -r.priority)
+    chosen, used = [], <span class="nu">0</span>
+    <span class="kw">for</span> r <span class="kw">in</span> reachable:
+        <span class="kw">if</span> used + r.b_min &lt;= capacity_C <span class="kw">and</span> <span class="fn">len</span>(chosen) &lt; batch_size_B:
+            chosen.<span class="fn">append</span>(r); used += r.b_min
+
+    <span class="cm"># 3. distribute SURPLUS by marginal goodput</span>
+    surplus = capacity_C - used
+    <span class="kw">while</span> surplus > <span class="nu">0</span>:
+        candidates = [r <span class="kw">for</span> r <span class="kw">in</span> chosen <span class="kw">if</span> r.can_take_more()]
+        <span class="kw">if</span> <span class="kw">not</span> candidates: <span class="kw">break</span>
+        winner = <span class="fn">max</span>(candidates, key=<span class="kw">lambda</span> r: r.margin_gp)
+        share  = <span class="fn">min</span>(surplus, winner.cap_increment())
+        winner.bandwidth += share
+        surplus          -= share
+
+    <span class="cm"># 4. compose a batch of similar input lengths</span>
+    <span class="kw">return</span> <span class="fn">group_by_input_length</span>(chosen)
+</code></pre>
+
+<h3><span class="i18n" data-en="6.3 Why this beats single-priority schedulers" data-zh="6.3 為何優於單一優先級排程器">6.3 Why this beats single-priority schedulers</span></h3>
+<p><span class="i18n"
+  data-en="The reservation step in line 2 makes GMAX behave like EDF when capacity is tight (everyone gets exactly what they need), and like SJF/LAS when capacity is loose (surplus goes where it does the most marginal good). Crucially, the same code handles all three SLO classes — they only differ in how $\\Delta t$ and the marginal-goodput function are computed."
+  data-zh="第 2 步的保留動作使 GMAX 在容量緊時表現得像 EDF（人人剛好夠用）、容量寬鬆時像 SJF/LAS（剩餘流向邊際效益最高處）。關鍵是同一段程式碼處理三種 SLO 類別——差別僅在 $\\Delta t$ 和邊際 goodput 函數的計算方式。">…</span></p>
+
+<div class="warn"><strong><span class="i18n" data-en="What 'marginal goodput' means per class:" data-zh="各類別的「邊際 goodput」意義：">What 'marginal goodput' means per class:</span></strong>
+<ul>
+  <li><span class="i18n" data-en="<strong>Latency-sensitive:</strong> 0 above the streaming-SLO rate (no value in faster than human). Positive only when behind." data-zh="<strong>延遲敏感：</strong>串流 SLO 速率以上的部分為 0（比人類快沒意義），落後時才為正。">…</span></li>
+  <li><span class="i18n" data-en="<strong>Deadline-sensitive:</strong> 0 once the request has enough bandwidth to land at $D$, positive otherwise." data-zh="<strong>截止時間敏感：</strong>若已能在 $D$ 前完成則為 0，否則為正。">…</span></li>
+  <li><span class="i18n" data-en="<strong>Compound:</strong> proportional to the probability the program-level deadline is met if this stage is sped up by one decode step." data-zh="<strong>複合：</strong>此階段加速一個 decode step 後 program-level deadline 達標機率的比例。">…</span></li>
+</ul>
+</div>
+</section>
+
+<section id="batch">
+<h2><span class="i18n" data-en="7. Batch Composition &amp; Preemption" data-zh="7. 批次組成與搶占">7. Batch Composition &amp; Preemption</span></h2>
+
+<h3><span class="i18n" data-en="7.1 Why similar-length batching matters" data-zh="7.1 為何長度相近批次很重要">7.1 Why similar-length batching matters</span></h3>
+<p><span class="i18n"
+  data-en="Even with Flash Decoding the per-layer attention kernel pays for the longest sequence in the batch. A batch with one 8K-token request and four 200-token requests runs at 8K-token speed — the four short ones effectively waste their slots."
+  data-zh="即使有 Flash Decoding，per-layer attention kernel 的成本仍由 batch 中最長序列決定。一個含一個 8K-token 請求和四個 200-token 請求的 batch 跑在 8K-token 速度——四個短的等於浪費了 slot。">…</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2504.20068v3/x6.png" alt="TBT vs Flash Decoding block size, heterogeneous vs homogeneous batches">
+  <div class="fig-cap"><strong>Figure (from paper):</strong>
+  <span class="i18n" data-en="Per-token decoding latency (TBT) for heterogeneous vs homogeneous batches across Flash Decoding block sizes 32–512. The heterogeneous box-plot stays consistently above the homogeneous one — re-tuning Flash Decoding block size <em>does not</em> close the gap. Length-grouped batching is the actual lever." data-zh="不同 Flash Decoding block size（32–512）下異質 vs 同質批次的 per-token 解碼延遲（TBT）。異質箱型圖始終在同質之上——重新調整 Flash Decoding block size <em>無法</em>消弭差距，長度分組批次才是真正的槓桿。">…</span></div>
+</div>
+
+<div class="diagram">
+<table>
+  <thead><tr>
+    <th><span class="i18n" data-en="Batch composition" data-zh="批次組成">Batch composition</span></th>
+    <th><span class="i18n" data-en="Effective tokens/sec per slot" data-zh="每 slot 有效 token/sec">Effective tokens/sec per slot</span></th>
+    <th><span class="i18n" data-en="Goodput cost" data-zh="Goodput 成本">Goodput cost</span></th>
+  </tr></thead>
+  <tbody>
+    <tr><td><span class="i18n" data-en="1× 8K + 4× 200 (length-mixed)" data-zh="1× 8K + 4× 200（長度混合）">1× 8K + 4× 200 (length-mixed)</span></td>
+    <td><span class="i18n" data-en="bottlenecked by 8K" data-zh="受 8K 限制">bottlenecked by 8K</span></td>
+    <td><span class="cross">×</span> <span class="i18n" data-en="four short requests starve" data-zh="四個短請求被餓">…</span></td></tr>
+    <tr><td><span class="i18n" data-en="5× 200 (length-grouped)" data-zh="5× 200（長度組批）">5× 200 (length-grouped)</span></td>
+    <td><span class="i18n" data-en="full kernel utilization" data-zh="kernel 完全利用">full kernel utilization</span></td>
+    <td><span class="check">✓</span> <span class="i18n" data-en="five complete in one tick" data-zh="一個 tick 內五個完成">…</span></td></tr>
+    <tr><td><span class="i18n" data-en="1× 8K alone" data-zh="1× 8K 單獨">1× 8K alone</span></td>
+    <td><span class="i18n" data-en="wastes 4 slots" data-zh="浪費 4 個 slot">wastes 4 slots</span></td>
+    <td><span class="partial">~</span> <span class="i18n" data-en="acceptable if 8K is on critical path" data-zh="若 8K 在關鍵路徑則可接受">…</span></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><span class="i18n"
+  data-en="GMAX's <code>group_by_input_length</code> step partitions the chosen request set into similar-length batches and feeds them to the backend in sequence. The partitioning is a one-pass greedy: sort by length, slice at the natural gaps."
+  data-zh="GMAX 的 <code>group_by_input_length</code> 把選中的請求依長度切成數個相近批次，依序餵入後端。分區為單通貪婪：依長度排序、在自然間隙處切。">…</span></p>
+
+<h3><span class="i18n" data-en="7.2 Preemption — when to drop a request mid-flight" data-zh="7.2 搶占 — 何時中途放棄請求">7.2 Preemption — when to drop a request mid-flight</span></h3>
+
+<p><span class="i18n"
+  data-en="The whole edifice rests on $\\hat L_{up}$ being a useful upper bound. When the actual response keeps growing past the bound, $b_{min}$ explodes. GMAX needs a rule for this case."
+  data-zh="整個體系依賴 $\\hat L_{up}$ 是有用的上界。當實際回覆持續超過上界時，$b_{min}$ 將爆增。GMAX 需要對此情境的規則。">…</span></p>
+
+<div class="vflow">
+  <div class="box gray">
+    <h4><span class="i18n" data-en="Trigger (one of)" data-zh="觸發條件（任一）">Trigger (one of)</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="$L_{done} > \\hat L_{up}$ — the bound was wrong." data-zh="$L_{done} > \\hat L_{up}$ — 上界錯了。">…</span></li>
+      <li><span class="i18n" data-en="$b_{min}(r,t) > \\delta \\cdot $ pool capacity — request would monopolize the GPU." data-zh="$b_{min}(r,t) > \\delta \\cdot $ pool 容量 — 請求會獨佔 GPU。">…</span></li>
+      <li><span class="i18n" data-en="Pattern-graph match revises remaining stages upward beyond the program-level deadline." data-zh="Pattern-graph 匹配將剩餘階段成本上修，超過 program-level deadline。">…</span></li>
+    </ul>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="box red">
+    <h4><span class="i18n" data-en="Action" data-zh="動作">Action</span></h4>
+    <ul>
+      <li><span class="i18n" data-en="Demote the request: SLO is officially missed; future bandwidth contribution to goodput = 0." data-zh="降級該請求：SLO 已正式違反；未來頻寬對 goodput 貢獻 = 0。">…</span></li>
+      <li><span class="i18n" data-en="Continue serving at <em>residual</em> bandwidth only (best-effort), never reserved." data-zh="僅以<em>剩餘</em>頻寬（best-effort）繼續服務，不再保留容量。">…</span></li>
+      <li><span class="i18n" data-en="Reclaim KV cache pages if memory becomes tight." data-zh="若記憶體吃緊則回收其 KV cache pages。">…</span></li>
+    </ul>
+  </div>
+</div>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2504.20068v3/x19.png" alt="Figure 25: Competitive ratio vs preemption threshold delta">
+  <div class="fig-cap"><strong>Figure 25 (from paper):</strong>
+  <span class="i18n" data-en="Competitive ratio $r'(\\delta)$ as a function of preemption threshold $\\delta$. There is a sweet spot — preempt too eagerly and you discard recoverable requests; too laggardly and one runaway request degrades everyone else." data-zh="競爭比 $r'(\\delta)$ 為搶占閾值 $\\delta$ 的函數。存在甜蜜點——太激進會丟棄本可救活的請求；太消極則一個失控請求拖累其他。">…</span></div>
+</div>
+</section>
+
+<section id="guarantees">
+<h2><span class="i18n" data-en="8. Theoretical Guarantees" data-zh="8. 理論保證">8. Theoretical Guarantees</span></h2>
+
+<h3><span class="i18n" data-en="8.1 Optimal scheduling is NP-hard" data-zh="8.1 最佳排程是 NP-hard">8.1 Optimal scheduling is NP-hard</span></h3>
+
+<p><span class="i18n"
+  data-en="Even with full a priori information about every request (lengths, deadlines, dependencies), maximizing service goodput on a fixed pool of GPUs is shown to be NP-hard via reduction from multi-dimensional knapsack (Appx C). This rules out exact online algorithms; the only hope is approximation with provable competitive ratios."
+  data-zh="即使對每個請求的長度、截止時間、相依性都有先驗資訊，在固定 GPU 池上最大化 service goodput 仍可由多維背包歸約證明為 NP-hard（附錄 C）。這排除了精確線上演算法；唯一希望是有可證明競爭比的近似演算法。">…</span></p>
+
+<div class="math-block">
+<span class="eq-label">(2)</span>
+$$\max_{x} \;\sum_{r \in R} \mathbb{1}[E2EL(r) \le D_r] \cdot L(r) \quad \text{s.t.} \quad \sum_{r} x_{r,t} \le C \;\;\forall t$$
+</div>
+<p style="text-align:center;font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Maximizing service goodput is a constrained 0/1 packing — NP-hard even with full information." data-zh="最大化 service goodput 是受限的 0/1 packing——即使有完整資訊也是 NP-hard。">…</span></p>
+
+<h3><span class="i18n" data-en="8.2 Existing policies have unbounded ratio" data-zh="8.2 既有策略具有無界競爭比">8.2 Existing policies have unbounded ratio</span></h3>
+<p><span class="i18n"
+  data-en="Appendix D constructs explicit instances on which FCFS, SJF, LAS, and EDF each achieve goodput $\\to 0$ while OPT achieves a constant. The competitive ratio is therefore unbounded — a single 'arbitrarily bad' instance suffices."
+  data-zh="附錄 D 為 FCFS、SJF、LAS、EDF 分別構造明確實例：各策略 goodput $\\to 0$、而 OPT 取得常數。競爭比因此無界——單一「任意差」實例即足。">…</span></p>
+
+<h3><span class="i18n" data-en="8.3 GMAX's competitive ratio bound" data-zh="8.3 GMAX 的競爭比界">8.3 GMAX's competitive ratio bound</span></h3>
+<p><span class="i18n"
+  data-en="With preemption threshold $\\delta$ and a bound on the QRF prediction error $\\eta$ (P5–P95 width), GMAX achieves a competitive ratio of the form:"
+  data-zh="在搶占閾值 $\\delta$ 與 QRF 預測誤差上界 $\\eta$（P5–P95 寬度）下，GMAX 競爭比形如：">…</span></p>
+
+<div class="math-block">
+<span class="eq-label">(3)</span>
+$$r'(\delta, \eta) \;\le\; \frac{1}{1 - \delta - O(\eta)}$$
+</div>
+
+<p><span class="i18n"
+  data-en="i.e. <em>bounded</em> as long as $\\delta$ stays below 1 and the predictor's tail error stays small. The empirical QRF achieves $\\eta$ that comfortably keeps $r'$ in the 1.2–1.5 range."
+  data-zh="只要 $\\delta &lt; 1$ 且預測器尾部誤差夠小，競爭比即<em>有界</em>。實測 QRF 的 $\\eta$ 將 $r'$ 穩定維持在 1.2–1.5 區間。">…</span></p>
+
+<div class="note"><strong><span class="i18n" data-en="Take-away:" data-zh="重點：">Take-away:</span></strong>
+<span class="i18n" data-en="The unboundedness of FCFS / SJF / LAS / EDF is qualitative (one nasty instance) — JITServe's bound is also qualitative (depends on $\\eta$) but the worst case is parameterizable, and the parameter is what QRF directly controls." data-zh="FCFS / SJF / LAS / EDF 的無界是質化的（一個壞實例即足）——JITServe 的界也是質化的（依賴 $\\eta$），但最壞情形可由參數控制，而參數正是 QRF 直接掌握的對象。">…</span>
+</div>
+</section>
+
+<section id="impl">
+<h2><span class="i18n" data-en="9. Implementation" data-zh="9. 系統實作">9. Implementation</span></h2>
+
+<h3><span class="i18n" data-en="9.1 Where the code lives" data-zh="9.1 程式位置">9.1 Where the code lives</span></h3>
+
+<p><span class="i18n"
+  data-en="JITServe is implemented as a thin wrapper around vLLM. The execution backend is a fork of vLLM's <code>LLMEngine</code> with two patches: a hook that lets the scheduler override the default FCFS batching, and a callback that emits per-request progress (tokens generated this step) back to the analyzer."
+  data-zh="JITServe 以 vLLM 的薄層 wrapper 實現。執行後端為 vLLM <code>LLMEngine</code> 的 fork，加兩個 patch：讓排程器覆寫預設 FCFS batching 的 hook，以及把 per-request 進度（本 step 產生的 token）回拋給 analyzer 的 callback。">…</span></p>
+
+<div class="diagram">
+<pre style="margin:0"><code><span class="cm"># conceptual integration with vLLM</span>
+<span class="kw">class</span> <span class="fn">JITServeScheduler</span>(vllm.scheduler.Scheduler):
+    <span class="kw">def</span> <span class="fn">_get_next_batch</span>(<span class="kw">self</span>):
+        active = <span class="kw">self</span>.running + <span class="kw">self</span>.waiting
+        <span class="kw">for</span> r <span class="kw">in</span> active:
+            <span class="kw">self</span>.analyzer.<span class="fn">refine</span>(r)               <span class="cm"># QRF + graph match</span>
+        <span class="kw">return</span> <span class="kw">self</span>.gmax.<span class="fn">schedule</span>(active,
+                                  capacity_C=<span class="kw">self</span>.<span class="fn">free_cap</span>(),
+                                  batch_size_B=<span class="kw">self</span>.max_batch)
+
+<span class="kw">class</span> <span class="fn">RequestAnalyzer</span>:
+    qrf:           QRFModel                    <span class="cm"># sklearn-quantile, ~10MB</span>
+    pattern_db:    GraphIndex                  <span class="cm"># LSH over recent workflows</span>
+    <span class="kw">def</span> <span class="fn">refine</span>(<span class="kw">self</span>, r):
+        r.L_up_hat = <span class="kw">self</span>.qrf.<span class="fn">predict_quantile</span>(r.features, q=<span class="nu">0.95</span>)
+        <span class="kw">if</span> r.is_compound:
+            r.next_stages = <span class="kw">self</span>.pattern_db.<span class="fn">match</span>(r.partial_graph)
+</code></pre>
+</div>
+
+<h3><span class="i18n" data-en="9.2 Control plane and multi-model" data-zh="9.2 控制面與多模型">9.2 Control plane and multi-model</span></h3>
+<p><span class="i18n"
+  data-en="The control plane is a stateless dispatcher that maps (model, request) → backend replica and exposes the same API surface as upstream vLLM, so applications need no client-side changes. Multi-model deployments share one analyzer instance — the QRF model and pattern-graph DB are model-agnostic features (input length, prompt class)."
+  data-zh="控制面是無狀態分派器，將 (model, request) 對應到後端副本，並暴露與 upstream vLLM 相同的 API，使應用端無需更動。多模型部署共享一個 analyzer 實例——QRF 模型與 pattern-graph DB 為跨模型特徵（輸入長度、prompt 類別）。">…</span></p>
+
+<h3><span class="i18n" data-en="9.3 Engineering footprint" data-zh="9.3 工程量">9.3 Engineering footprint</span></h3>
+<table>
+  <thead><tr>
+    <th><span class="i18n" data-en="Module" data-zh="模組">Module</span></th>
+    <th>LOC</th>
+    <th><span class="i18n" data-en="Notes" data-zh="備註">Notes</span></th>
+  </tr></thead>
+  <tbody>
+    <tr><td>RequestAnalyzer (QRF + graph)</td><td>~1.4k</td>
+    <td><span class="i18n" data-en="QRF via sklearn-quantile; LSH for graph hashing" data-zh="QRF 使用 sklearn-quantile；圖以 LSH hash">…</span></td></tr>
+    <tr><td>GMAX scheduler</td><td>~900</td>
+    <td><span class="i18n" data-en="Pure Python; called once per decode step" data-zh="純 Python；每 decode step 呼叫一次">…</span></td></tr>
+    <tr><td>vLLM patch</td><td>~250</td>
+    <td><span class="i18n" data-en="Hook into <code>Scheduler._schedule</code>; emit progress" data-zh="hook 進 <code>Scheduler._schedule</code>；回拋進度">…</span></td></tr>
+    <tr><td>Control plane</td><td>~500</td>
+    <td><span class="i18n" data-en="FastAPI wrapper with per-model routing" data-zh="FastAPI wrapper，per-model 路由">…</span></td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="eval">
+<h2><span class="i18n" data-en="10. Evaluation" data-zh="10. 實驗評估">10. Evaluation</span></h2>
+
+<h3><span class="i18n" data-en="10.1 Setup" data-zh="10.1 實驗設定">10.1 Setup</span></h3>
+<div class="cards">
+  <div class="card">
+    <h4><span class="i18n" data-en="Workloads (4 categories)" data-zh="工作負載（4 類）">Workloads (4 categories)</span></h4>
+    <ul>
+      <li><strong>Chatbot</strong> — LMSys, WildChat traces (latency-sensitive)</li>
+      <li><strong>Deep Research</strong> — multi-step web/document agents (compound)</li>
+      <li><strong>Agentic CodeGen</strong> — MetaGPT, GAIA-style task graphs (compound)</li>
+      <li><strong>Math Reasoning</strong> — long-chain CoT (deadline-sensitive)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Baselines" data-zh="比較基準">Baselines</span></h4>
+    <ul>
+      <li>vLLM FCFS (default upstream)</li>
+      <li>Sarathi-Serve (chunked-prefill)</li>
+      <li>SJF / SRTF with predicted-length ranking</li>
+      <li>LAS / Autellix PLAS (program-level service)</li>
+      <li>EDF (earliest deadline first)</li>
+      <li>Oracle (ground-truth length scheduler — upper bound)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Metrics" data-zh="衡量指標">Metrics</span></h4>
+    <ul>
+      <li><strong>Service goodput</strong> — primary; tokens that satisfy per-request SLO</li>
+      <li>Throughput — sanity that goodput gain is not paid in raw throughput</li>
+      <li>TTFT, TBT — for latency class</li>
+      <li>End-to-end latency — for deadline / compound</li>
+    </ul>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="10.2 End-to-end goodput" data-zh="10.2 端對端 goodput">10.2 End-to-end goodput</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x9.png" alt="Figure 11: Service goodput over a one-hour serving experiment">
+  <div class="fig-cap"><strong>Figure 11 (from paper):</strong>
+  <span class="i18n" data-en="Service goodput over a one-hour online serving experiment. JITServe stays flat near the upper envelope; FCFS, SJF, LAS, EDF all show cascading SLO violations as queues build, with goodput collapsing within the first 20 minutes." data-zh="一小時線上服務實驗中的 service goodput。JITServe 維持貼近上界；FCFS、SJF、LAS、EDF 都隨 queue 累積出現級聯 SLO 違反，前 20 分鐘 goodput 即崩。">…</span></div>
+</div>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x10.png" alt="Figure 12: Per-workload service goodput comparison">
+  <div class="fig-cap"><strong>Figure 12 (from paper):</strong>
+  <span class="i18n" data-en="Request-level SLO service goodput per workload. JITServe wins consistently across Chatbot, Deep Research, Agentic CodeGen, Math Reasoning — the gap widens on compound workloads where dependence-aware scheduling matters most." data-zh="各工作負載的 request 級 SLO service goodput。JITServe 在 Chatbot、Deep Research、Agentic CodeGen、Math Reasoning 上均勝出——在最依賴相依感知排程的複合工作負載差距最大。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="10.3 Near-oracle performance" data-zh="10.3 近神諭表現">10.3 Near-oracle performance</span></h3>
+
+<div class="paper-fig-row">
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2504.20068v3/x11.png" alt="JITS vs JITS* token goodput across request rates">
+    <div class="fig-cap"><strong>Figure (from paper):</strong> <span class="i18n" data-en="JITS (deployed configuration) vs JITS* (close-to-oracle reference with ground-truth lengths) on Token Goodput across request rates 3.5–6 RPS. The deployed configuration tracks the oracle reference within ~5–10% across the entire load range — the QRF upper bound is tight enough that there is little left to gain from a perfect length predictor." data-zh="JITS（部署版）vs JITS*（使用真實長度的近 oracle 參考）的 Token Goodput，請求速率 3.5–6 RPS。部署版在整個負載區間追蹤 oracle 參考線約在 5–10% 內——QRF 上界夠緊，從完美長度預測器再壓榨的空間有限。">…</span></div>
+  </div>
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2504.20068v3/x12.png" alt="Figure 14: Throughput overhead vs Sarathi-Serve">
+    <div class="fig-cap"><strong>Figure 14 (from paper):</strong> <span class="i18n" data-en="Aggregate request throughput vs Sarathi-Serve across 3.5–4.5 RPS. JITServe's reservation + preemption logic adds negligible throughput cost (within ~2%) — the service-goodput gain is not paid in raw throughput." data-zh="vs Sarathi-Serve 的聚合請求吞吐量（3.5–4.5 RPS）。JITServe 的保留 + 搶占邏輯增加可忽略的吞吐量成本（約 2% 內）——service goodput 提升不是用原生吞吐量換的。">…</span></div>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="10.4 Behavior under load surges" data-zh="10.4 負載突發下的行為">10.4 Behavior under load surges</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x13.png" alt="Figure 15: Sustained goodput under load surges">
+  <div class="fig-cap"><strong>Figure 15 (from paper):</strong>
+  <span class="i18n" data-en="Goodput vs request rate. As arrivals climb, baselines' goodput collapses; JITServe degrades gracefully because GMAX's reservation step shields the still-reachable requests and preemption sheds the unreachable ones." data-zh="Goodput 對請求速率。隨到達率攀升，基準 goodput 崩；JITServe 平滑退化——GMAX 保留步驟保護仍可達成的請求，搶占釋放已不可達成者。">…</span></div>
+</div>
+</section>
+
+<section id="ablation">
+<h2><span class="i18n" data-en="11. Breakdown &amp; Ablations" data-zh="11. 分解與消融實驗">11. Breakdown &amp; Ablations</span></h2>
+
+<h3><span class="i18n" data-en="11.1 What contributes the gain" data-zh="11.1 收益來源拆解">11.1 What contributes the gain</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x14.png" alt="Figure 19: Contribution of analyzer vs GMAX">
+  <div class="fig-cap"><strong>Figure 19 (from paper):</strong>
+  <span class="i18n" data-en="Component breakdown. Removing the Request Analyzer leaves GMAX scheduling on raw FCFS estimates — most of the goodput gain stays. Removing GMAX (analyzer + FCFS scheduling) loses the gain. Conclusion: <em>both</em> contribute, but the scheduler is the larger lever." data-zh="元件拆解。移除 Request Analyzer 讓 GMAX 在原始 FCFS 估計上排程——大多 goodput 收益仍在；移除 GMAX（analyzer + FCFS 排程）則收益消失。結論：兩者都貢獻，但排程器槓桿較大。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="11.2 Multi-model deployment" data-zh="11.2 多模型部署">11.2 Multi-model deployment</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x15.png" alt="Figure 20: Multi-model deployment scaling">
+  <div class="fig-cap"><strong>Figure 20 (from paper):</strong>
+  <span class="i18n" data-en="JITServe scales to multi-model deployments: the analyzer / scheduler are model-agnostic and the goodput gain is preserved when the same pool serves a mix of models." data-zh="JITServe 可擴展至多模型部署：analyzer / scheduler 與模型無關，當同一 pool 服務混合模型時 goodput 收益得以保留。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="11.3 Sensitivity to SLO tightness" data-zh="11.3 對 SLO 緊度的敏感度">11.3 Sensitivity to SLO tightness</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x16.png" alt="Figure 21: Sensitivity to SLO tightness">
+  <div class="fig-cap"><strong>Figure 21 (from paper):</strong>
+  <span class="i18n" data-en="JITServe's relative win grows as SLOs tighten — when capacity is loose, every policy looks fine; the value of <em>aware</em> scheduling is in the regime where the system is the bottleneck." data-zh="SLO 越緊，JITServe 相對優勢越大——容量寬鬆時所有策略看起來都不錯；<em>有感知</em>排程的價值在系統成為瓶頸的區段才顯現。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="11.4 Sensitivity to workload composition" data-zh="11.4 對工作負載組成的敏感度">11.4 Sensitivity to workload composition</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x17.png" alt="Figure 22: Workload composition sweep">
+  <div class="fig-cap"><strong>Figure 22 (from paper):</strong>
+  <span class="i18n" data-en="Goodput across compositions of latency / deadline / compound traffic. JITServe is robust across the simplex; baselines each have a corner where they look fine and another where they collapse." data-zh="不同 latency / deadline / compound 組成下的 goodput。JITServe 在整個 simplex 上穩健；基準各自有看起來不錯的角落，也有崩盤的角落。">…</span></div>
+</div>
+
+<h3><span class="i18n" data-en="11.5 vs Earliest Deadline First" data-zh="11.5 對比 EDF">11.5 vs Earliest Deadline First</span></h3>
+
+<div class="paper-fig fig-md">
+  <img src="https://arxiv.org/html/2504.20068v3/x18.png" alt="Figure 23: JITServe vs EDF">
+  <div class="fig-cap"><strong>Figure 23 (from paper):</strong>
+  <span class="i18n" data-en="EDF is the strongest deadline-aware baseline. JITServe still beats it because EDF over-allocates to deadline-sensitive jobs that already would have made it, leaving latency-sensitive chats and compound critical paths starving." data-zh="EDF 是最強的截止時間感知基準。JITServe 仍勝出——EDF 對原本就趕得上的截止任務過度分配，導致延遲敏感聊天與複合關鍵路徑被餓。">…</span></div>
+</div>
+</section>
+
+<section id="discussion">
+<h2><span class="i18n" data-en="12. Position in the Landscape" data-zh="12. 在領域中的定位">12. Position in the Landscape</span></h2>
+
+<h3><span class="i18n" data-en="12.1 Comparison with neighboring systems" data-zh="12.1 與鄰近系統比較">12.1 Comparison with neighboring systems</span></h3>
+<table>
+  <thead><tr>
+    <th><span class="i18n" data-en="System" data-zh="系統">System</span></th>
+    <th><span class="i18n" data-en="Primary objective" data-zh="主要目標">Primary objective</span></th>
+    <th><span class="i18n" data-en="SLO classes handled" data-zh="處理的 SLO 類別">SLO classes handled</span></th>
+    <th><span class="i18n" data-en="Compound-aware?" data-zh="複合感知？">Compound-aware?</span></th>
+  </tr></thead>
+  <tbody>
+    <tr><td>vLLM</td>
+    <td><span class="i18n" data-en="Throughput / FCFS latency" data-zh="吞吐量 / FCFS 延遲">Throughput / FCFS latency</span></td>
+    <td><span class="cross">×</span> <span class="i18n" data-en="single (avg latency)" data-zh="單一（平均延遲）">single (avg latency)</span></td>
+    <td><span class="cross">×</span></td></tr>
+    <tr><td>Sarathi-Serve</td>
+    <td><span class="i18n" data-en="Decode latency vs throughput" data-zh="decode 延遲 vs 吞吐量">Decode latency vs throughput</span></td>
+    <td><span class="cross">×</span> <span class="i18n" data-en="single (chunk-pacing)" data-zh="單一（chunk-pacing）">single</span></td>
+    <td><span class="cross">×</span></td></tr>
+    <tr><td>DistServe</td>
+    <td><span class="i18n" data-en="TTFT vs TBT split (PD-disagg)" data-zh="TTFT vs TBT 分離（PD-disagg）">TTFT vs TBT split (PD-disagg)</span></td>
+    <td><span class="partial">~</span> <span class="i18n" data-en="latency split, no deadline" data-zh="延遲分離、無截止時間">latency split, no deadline</span></td>
+    <td><span class="cross">×</span></td></tr>
+    <tr><td>Autellix (PLAS)</td>
+    <td><span class="i18n" data-en="Program-level fairness (LAS)" data-zh="程式級公平（LAS）">Program-level fairness (LAS)</span></td>
+    <td><span class="partial">~</span> <span class="i18n" data-en="implicit (one fairness rule)" data-zh="隱式（單一公平規則）">implicit</span></td>
+    <td><span class="check">✓</span> <span class="i18n" data-en="program graph, no deadline" data-zh="程式圖、無截止時間">…</span></td></tr>
+    <tr><td><strong>JITServe</strong></td>
+    <td><span class="i18n" data-en="Service goodput across all classes" data-zh="跨所有類別的 service goodput">Service goodput across all classes</span></td>
+    <td><span class="check">✓</span> <span class="i18n" data-en="3 classes unified" data-zh="3 類統一">3 classes unified</span></td>
+    <td><span class="check">✓</span> <span class="i18n" data-en="program graph + deadline" data-zh="程式圖 + 截止時間">program graph + deadline</span></td></tr>
+  </tbody>
+</table>
+
+<h3><span class="i18n" data-en="12.2 Strengths" data-zh="12.2 優勢">12.2 Strengths</span></h3>
+<div class="grid-2">
+  <div class="card">
+    <h4><span class="check">✓</span> <span class="i18n" data-en="Unified objective" data-zh="統一目標">Unified objective</span></h4>
+    <p><span class="i18n" data-en="Replaces the menagerie of per-policy heuristics with one metric (service goodput) and one algorithm (GMAX) that adapts to each request's SLO class." data-zh="以單一指標（service goodput）與單一演算法（GMAX）取代各自為政的策略；演算法依各請求 SLO 類別自適應。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="check">✓</span> <span class="i18n" data-en="Robust to imprecise predictions" data-zh="對不精確預測穩健">Robust to imprecise predictions</span></h4>
+    <p><span class="i18n" data-en="The QRF upper bound + just-in-time refinement converts the prediction problem from 'guess the mean' (fragile) to 'bound the tail' (recoverable)." data-zh="QRF 上界 + 即時精確化把預測問題從「猜平均」（脆弱）轉為「界定尾部」（可恢復）。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="check">✓</span> <span class="i18n" data-en="Plug-in to vLLM" data-zh="可插入 vLLM">Plug-in to vLLM</span></h4>
+    <p><span class="i18n" data-en="~250 lines of vLLM patch; the rest is an external scheduler. No kernel changes, no model changes." data-zh="~250 行 vLLM patch；其餘為外部排程器。無 kernel 變動、無模型變動。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="check">✓</span> <span class="i18n" data-en="Provable bounds" data-zh="可證明的界">Provable bounds</span></h4>
+    <p><span class="i18n" data-en="A bounded competitive ratio is rare in this literature — most prior systems are evaluated empirically only." data-zh="文獻中有界競爭比少見——多數先前系統僅憑實驗評估。">…</span></p>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="12.3 Limitations" data-zh="12.3 限制">12.3 Limitations</span></h3>
+<div class="grid-2">
+  <div class="card">
+    <h4><span class="cross">!</span> <span class="i18n" data-en="Pattern-graph DB cold start" data-zh="Pattern-graph DB 冷啟動">Pattern-graph DB cold start</span></h4>
+    <p><span class="i18n" data-en="Compound-request prediction quality scales with the size of the historical workflow set. A brand-new agent template gives the analyzer no signal until enough runs accumulate." data-zh="複合請求的預測品質取決於歷史工作流集合大小。一個全新 agent 模板在累積足夠執行次數前，analyzer 無訊號可用。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="cross">!</span> <span class="i18n" data-en="Single-replica scheduler" data-zh="單副本排程器">Single-replica scheduler</span></h4>
+    <p><span class="i18n" data-en="GMAX runs centrally per replica. Multi-replica deployments still need a separate request-routing layer; the paper does not address cross-replica goodput optimization." data-zh="GMAX 每個副本中心化執行。多副本部署仍需另一層請求路由；論文未處理跨副本的 goodput 最佳化。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="cross">!</span> <span class="i18n" data-en="Per-class SLO must be declared" data-zh="必須宣告 per-class SLO">Per-class SLO must be declared</span></h4>
+    <p><span class="i18n" data-en="The system needs the application to label its requests as latency / deadline / compound. Mis-labeling silently degrades to FCFS-like behavior for that request." data-zh="系統需要應用端把請求標為 latency / deadline / compound。錯誤標籤會讓該請求悄悄退化為 FCFS-like 行為。">…</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="cross">!</span> <span class="i18n" data-en="No KV-cache aware integration" data-zh="未整合 KV cache 感知">No KV-cache aware integration</span></h4>
+    <p><span class="i18n" data-en="GMAX optimizes scheduling but treats KV cache as a black box. Combining with prefix-cache aware policies (Continuum, KVFlow, FlowKV) is left for future work." data-zh="GMAX 優化排程但將 KV cache 視為黑箱。與 prefix-cache 感知策略（Continuum、KVFlow、FlowKV）結合是未來工作。">…</span></p>
+  </div>
+</div>
+
+<h3><span class="i18n" data-en="12.4 Open questions" data-zh="12.4 開放問題">12.4 Open questions</span></h3>
+<ul>
+  <li><span class="i18n" data-en="<strong>How does GMAX interact with PD-disaggregation?</strong> The paper evaluates a co-located backend; bandwidth in a disaggregated stack is bottlenecked by KV transfer, not compute, which changes $b_{min}$ semantics." data-zh="<strong>GMAX 與 PD-disaggregation 如何互動？</strong>論文評估的是 co-located 後端；分離堆疊中頻寬瓶頸是 KV 傳輸而非計算，這改變了 $b_{min}$ 的語義。">…</span></li>
+  <li><span class="i18n" data-en="<strong>Can the QRF be replaced by a small distilled LLM?</strong> The paper's QRF is intentionally cheap; a distilled predictor might tighten the upper bound enough to push competitive ratio toward 1." data-zh="<strong>QRF 能否被小型蒸餾 LLM 取代？</strong>論文 QRF 刻意便宜；蒸餾預測器或許能把上界收得更緊，將競爭比逼近 1。">…</span></li>
+  <li><span class="i18n" data-en="<strong>Pattern-graph hashing under prompt-style change</strong> — production agents drift; how often must the pattern DB be rebuilt before staleness erodes the gain?" data-zh="<strong>Pattern-graph hash 在 prompt 風格變動下</strong>——生產 agent 會漂移；多久須重建 pattern DB 才不致讓陳舊侵蝕收益？">…</span></li>
+</ul>
+</section>
+
+<section>
+<h2><span class="i18n" data-en="13. One-paragraph summary" data-zh="13. 一段話總結">13. One-paragraph summary</span></h2>
+<p><span class="i18n"
+  data-en="JITServe is the first LLM serving system to (a) acknowledge that production traffic mixes three structurally different SLO classes, (b) prove that single-objective schedulers (FCFS / SJF / LAS / EDF) all have unbounded competitive ratio in this setting, and (c) give a concrete algorithm — GMAX — that handles all three classes via just-in-time refinement of an upper-bound length predictor (QRF) plus pattern-graph matching for compound (agentic) requests. Empirically the system delivers 1.4–6.3× service goodput and 28.5–83.2% resource savings over SOTA baselines while staying close to a ground-truth oracle. For agentic infrastructure specifically, this is the first scheduler to give compound requests a first-class treatment instead of folding them into either per-call or program-level heuristics."
+  data-zh="JITServe 是第一個（a）承認生產流量混合三類結構不同 SLO 的 LLM 服務系統；（b）證明單一目標排程器（FCFS / SJF / LAS / EDF）在此情境下競爭比皆無界；以及（c）給出具體演算法 GMAX——以 QRF 上界預測器 + pattern-graph matching（複合/agentic 請求）的即時精確化處理三類請求。實測 service goodput 為 SOTA 的 1.4–6.3 倍，同 goodput 下節省 28.5–83.2% 資源，且貼近真實長度神諭。對 agentic 基礎設施而言，這是第一個給複合請求一等公民待遇、而非將其折入 per-call 或 program-level 啟發式的排程器。">…</span></p>
+</section>
+
+</div><!-- /.container -->
+
+<footer>
+<p><span class="i18n" data-en="JITServe — SLO-aware LLM Serving with Imprecise Request Information (arXiv:2504.20068)" data-zh="JITServe — 基於不精確請求資訊的 SLO 感知 LLM 服務（arXiv:2504.20068）">JITServe — SLO-aware LLM Serving with Imprecise Request Information (arXiv:2504.20068)</span></p>
+<p><a href="https://arxiv.org/abs/2504.20068" target="_blank">arxiv.org/abs/2504.20068</a> · <a href="https://arxiv.org/html/2504.20068v3" target="_blank">HTML version</a></p>
+<p><span class="i18n" data-en="Generated 2026-04-30" data-zh="產生日期：2026-04-30">Generated 2026-04-30</span></p>
+</footer>
+
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>
