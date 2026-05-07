@@ -509,33 +509,190 @@ The paper's design starts from accepting these two facts: <strong>scheduling can
 </span></p>
 
 <h3><span class="i18n" data-en="3.3 What the existing policies actually do" data-zh="3.3 既有策略實際上在做什麼">3.3 What the existing policies actually do</span></h3>
+
+<p><span class="i18n"
+  data-en="Each policy below was a reasonable choice for the workload it was originally designed for. None of them is a bad scheduling rule on its own; the failure is that the production workload of 2025 no longer matches the workload these systems were validated on. The table is a quick comparison; the per-policy deep-dives below the table are where the geometric structure of each failure becomes visible. JITServe's evaluation (§6.2) deploys all six against the same trace on the same hardware (16× A100s, 4 LLM families)."
+  data-zh="下表每個策略對其原始設計的工作負載而言都是合理選擇。問題不是規則本身有錯，而是 2025 年的生產工作負載已經不符合它們當初被驗證的 workload。表格是快速比較;表格下方的逐項深掘才能看出失敗的幾何結構。JITServe 評估（§6.2）在同樣硬體（16× A100、4 個 LLM 家族）上把這六者跑在同一條 trace 上。">
+Each policy below was a reasonable choice for the workload it was originally designed for. None of them is a bad scheduling rule on its own; the failure is that the production workload of 2025 no longer matches the workload these systems were validated on. The table is a quick comparison; the per-policy deep-dives below the table are where the geometric structure of each failure becomes visible. JITServe's evaluation (§6.2) deploys all six against the same trace on the same hardware (16× A100s, 4 LLM families).
+</span></p>
+
 <table>
   <thead>
-    <tr><th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
-    <th><span class="i18n" data-en="What it optimizes" data-zh="優化目標">What it optimizes</span></th>
-    <th><span class="i18n" data-en="Failure mode under diverse SLOs" data-zh="多樣化 SLO 下的失敗模式">Failure mode under diverse SLOs</span></th></tr>
+    <tr>
+      <th><span class="i18n" data-en="Policy" data-zh="策略">Policy</span></th>
+      <th><span class="i18n" data-en="What it optimizes" data-zh="優化目標">What it optimizes</span></th>
+      <th><span class="i18n" data-en="Sweet spot (workload it was built for)" data-zh="甜蜜點（原始設計的工作負載）">Sweet spot</span></th>
+      <th><span class="i18n" data-en="Failure mode on a 3-class queue" data-zh="三類混合佇列下的失敗模式">Failure mode on a 3-class queue</span></th>
+    </tr>
   </thead>
   <tbody>
-    <tr><td>FCFS (vLLM default)</td>
-    <td><span class="i18n" data-en="Arrival order — implicitly average TTFT" data-zh="到達順序——隱式平均 TTFT">Arrival order — implicitly average TTFT</span></td>
-    <td><span class="i18n" data-en="Long compound jobs head-of-line block latency-sensitive chats." data-zh="長複合任務 head-of-line 阻塞延遲敏感聊天。">…</span></td></tr>
-    <tr><td>SJF / SRTF</td>
-    <td><span class="i18n" data-en="Average completion time" data-zh="平均完成時間">Average completion time</span></td>
-    <td><span class="i18n" data-en="Needs accurate length prediction (Fig 2b shows it's broken); starves long deadline-sensitive jobs." data-zh="需精確長度預測（圖 2b 顯示破功）；餓死長截止時間敏感任務。">…</span></td></tr>
-    <tr><td>LAS / Autellix PLAS</td>
-    <td><span class="i18n" data-en="Cumulative service per program" data-zh="每個程式累積服務量">Cumulative service per program</span></td>
-    <td><span class="i18n" data-en="Per-stage fair, but treats every program identically — no notion of streaming TTFT or hard deadline." data-zh="Per-stage 公平，但對每個程式一視同仁——沒有 streaming TTFT 或硬截止時間的概念。">…</span></td></tr>
-    <tr><td>EDF (earliest deadline first)</td>
-    <td><span class="i18n" data-en="Worst-case lateness" data-zh="最差遲到時間">Worst-case lateness</span></td>
-    <td><span class="i18n" data-en="Burns bandwidth on jobs that already would have made it; ignores per-token latency entirely." data-zh="把頻寬燒在原本就趕得上的工作；完全忽略 per-token 延遲。">…</span></td></tr>
-    <tr><td>Chunked-prefill (Sarathi)</td>
-    <td><span class="i18n" data-en="Throughput / decode latency mix" data-zh="吞吐量 / decode 延遲折衷">Throughput / decode latency mix</span></td>
-    <td><span class="i18n" data-en="A pacing trick, not an SLO-aware policy — chunk size is global, not per-class." data-zh="一種 pacing 手段，不是 SLO 感知策略——chunk 大小是全域而非按類別。">…</span></td></tr>
+    <tr>
+      <td><strong>FCFS</strong> (vLLM default)</td>
+      <td><span class="i18n" data-en="Arrival order — implicit fairness; trivially preserves throughput" data-zh="到達順序——隱式公平;吞吐量不打折">Arrival order — implicit fairness</span></td>
+      <td><span class="i18n" data-en="Single-class chatbot serving with similar response lengths (the 2022–2023 norm)" data-zh="單一類別聊天服務、回覆長度相近（2022–2023 常態）">Single-class chatbot serving</span></td>
+      <td><span class="i18n" data-en="Long compound jobs HOL-block streaming chats (see §3 trace, t = 2s); cascading SLO violations grow over time" data-zh="長複合任務 head-of-line 阻塞串流聊天（見 §3 trace, t = 2s）;隨時間級聯 SLO 違反">Long compound jobs HOL-block streaming chats; cascading violations</span></td>
+    </tr>
+    <tr>
+      <td><strong>SJF / SRTF</strong> (classical)</td>
+      <td><span class="i18n" data-en="Average completion time, given exact length oracle" data-zh="給定精確長度神諭時的平均完成時間">Average completion time</span></td>
+      <td><span class="i18n" data-en="Workloads with reliable length information and a single mean-latency target" data-zh="長度資訊可靠、目標僅為平均延遲的工作負載">Reliable length, single mean-latency target</span></td>
+      <td><span class="i18n" data-en="Length oracle is unavailable (predictor P5–P95 spread &gt;5× true on agent traces); even with exact lengths, starves long deadline-sensitive jobs that have plenty of slack" data-zh="長度神諭在實務上不存在（agent trace 上預測 P5–P95 寬度超過真實值 5 倍）;即便長度精確，仍餓死本來有充裕餘裕的長截止時間敏感任務">Predictor unavailable; even with oracle, starves long deadline-sensitive jobs</span></td>
+    </tr>
+    <tr>
+      <td><strong>LTR</strong> (Length-To-Run; QRF / BERT / Llama variants)</td>
+      <td><span class="i18n" data-en="SJF-style ordering + a learned length predictor on the request's critical path" data-zh="SJF 排序 + 在請求關鍵路徑上的學習式長度預測器">SJF + learned length predictor</span></td>
+      <td><span class="i18n" data-en="Pure deadline-sensitive workloads where prediction error is small" data-zh="純截止時間敏感、預測誤差小的工作負載">Pure deadline-sensitive workloads</span></td>
+      <td><span class="i18n" data-en="<strong>Best baseline overall (1.3–1.7× behind JITServe, Fig 11)</strong> — but oversubscribes bandwidth to deadline-sensitive at the cost of streaming TTFT and compound program deadlines" data-zh="<strong>整體最佳 baseline（落後 JITServe 1.3–1.7×，圖 11）</strong>——但對 deadline-sensitive 過度配置頻寬，犧牲串流 TTFT 與複合 program deadline">Best baseline overall (1.3–1.7× gap); over-allocates to deadline class</span></td>
+    </tr>
+    <tr>
+      <td><strong>LAS / Autellix PLAS</strong> (arXiv'25)</td>
+      <td><span class="i18n" data-en="Program-level Least Attained Service — equalize cumulative service across programs" data-zh="Program 級最小已得服務——在程式間均衡累積服務">Cumulative service per program</span></td>
+      <td><span class="i18n" data-en="Long programs with similar shape, where stage count dominates cost" data-zh="長度與形狀相近的長程式、階段數主導成本">Long programs of similar shape</span></td>
+      <td><span class="i18n" data-en="<strong>Worst baseline overall (5.3–6.1× behind JITServe, Fig 11)</strong> — per-stage fairness ignores program deadline AND per-token TBT; a chat (1 stage) and a 100-stage agent get equal cumulative service, neither's SLO is honored" data-zh="<strong>整體最差 baseline（落後 JITServe 5.3–6.1×，圖 11）</strong>——per-stage 公平既看不到 program deadline 也看不到 per-token TBT;聊天（1 階段）和 100 階段 agent 拿到等量累積服務,兩者 SLO 都沒守住">Worst baseline (5.3–6.1× gap); per-stage fairness blind to deadline and TBT</span></td>
+    </tr>
+    <tr>
+      <td><strong>EDF</strong> (earliest deadline first)</td>
+      <td><span class="i18n" data-en="Worst-case lateness, assuming every job carries a deadline" data-zh="最差遲到時間，假設每個 job 都有 deadline">Worst-case lateness</span></td>
+      <td><span class="i18n" data-en="Hard real-time systems (avionics, industrial control) where every job has a deadline" data-zh="硬即時系統（航電、工業控制）每個 job 都有 deadline">Hard real-time, every job has deadline</span></td>
+      <td><span class="i18n" data-en="Streaming chats have TBT bounds, NOT deadlines — different SLO shape entirely; compound deadlines are not directly comparable to per-call deadlines. Burns bandwidth on jobs that already would have made it on slack alone." data-zh="串流聊天有 TBT 限制，沒有 deadline——SLO 形狀完全不同;複合 deadline 也無法直接與 per-call deadline 比較。把頻寬燒在憑餘裕原本就趕得上的工作上。">Streaming chats lack deadlines (TBT-bound, different SLO shape)</span></td>
+    </tr>
+    <tr>
+      <td><strong>Chunked-prefill</strong> (Sarathi-Serve OSDI'24)</td>
+      <td><span class="i18n" data-en="Throughput + low TBT, by interleaving prefill chunks with decode" data-zh="以 prefill 切塊與 decode 交錯,兼顧吞吐量與低 TBT">Throughput + low TBT</span></td>
+      <td><span class="i18n" data-en="Latency-sensitive streaming chat workloads at high concurrency" data-zh="高併發的延遲敏感串流聊天">High-concurrency streaming chat</span></td>
+      <td><span class="i18n" data-en="Not a scheduling policy — a pacing technique. Chunk size is global, not per-SLO-class. JITServe matches its raw throughput at 96–98% (Fig 14) but Sarathi has high TTLT violations on the deadline-sensitive class." data-zh="這不是排程策略——而是 pacing 技術。Chunk 大小是全域、非 per-SLO。JITServe 在純吞吐量上達 96–98%（圖 14），但 Sarathi 在 deadline-sensitive 類別上 TTLT 違反高。">Pacing technique, not SLO-aware; high TTLT on deadline class</span></td>
+    </tr>
   </tbody>
 </table>
 
-<div class="warn"><strong><span class="i18n" data-en="Theorem (informal, Appx D):" data-zh="定理（非形式版，附錄 D）：">Theorem (informal, Appx D):</span></strong>
-<span class="i18n" data-en="For each of FCFS, SJF, LAS, EDF, there exists an instance whose competitive ratio against the offline optimum is unbounded as the diversity ratio grows." data-zh="對 FCFS、SJF、LAS、EDF 中每一種，皆存在實例，其相對離線最佳的競爭比，隨多樣化比率增長而無界放大。">…</span>
+<h4 style="color:#ffb74d;margin-top:1.8rem"><span class="i18n" data-en="Per-policy deep dive — when each was a sensible choice and where it cracks today" data-zh="逐項深掘——各策略過去合理之處、今日的破口">Per-policy deep dive — when each was a sensible choice and where it cracks today</span></h4>
+
+<div class="cards">
+  <div class="card">
+    <h4>FCFS (vLLM default, SOSP'23)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> serve requests strictly in arrival order; admission throttled by the paged-attention KV-cache budget; no preemption."
+      data-zh="<strong>決策規則：</strong>嚴格按到達順序服務;由 paged-attention 的 KV cache 預算限制 admission;無搶占。">
+    <strong>Decision rule:</strong> serve requests strictly in arrival order; admission throttled by the paged-attention KV-cache budget; no preemption.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it was a fine choice in 2022–2023:</strong> production traffic was overwhelmingly chatbot streaming. Most requests had similar output length distribution; arrival order roughly equaled SLO-fairness. Throughput was the only metric anyone tracked, and FCFS gives optimal throughput because there is no priority inversion overhead."
+      data-zh="<strong>為什麼這在 2022–2023 是好選擇：</strong>生產流量幾乎全是聊天串流。多數請求輸出長度分佈相近,到達順序大致等於 SLO 公平。當時唯一追蹤的指標是吞吐量,FCFS 因無優先級反轉開銷而給出最佳吞吐量。">
+    <strong>Why it was a fine choice in 2022–2023:</strong> production traffic was overwhelmingly chatbot streaming. Most requests had similar output length distribution; arrival order roughly equaled SLO-fairness. Throughput was the only metric anyone tracked, and FCFS gives optimal throughput because there is no priority inversion overhead.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> the head of the queue can be a 7-second batch summary while 47 streaming chats wait behind it. The chats' TTFT is breached at $t = 2s$, before FCFS has even looked at them. No FCFS parameter — admission rate, KV-block budget, max batch size — can fix this; the policy itself is structurally SLO-blind. The §3 trace above shows this at the granularity of seconds; in long deployments (paper §6.2) the cascading violations grow over time."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>隊首可能是一個 7 秒的批次摘要,後方 47 個串流聊天等著。聊天在 $t = 2s$ 時 TTFT 違反——FCFS 連看都還沒看到它們。FCFS 任何參數——admission rate、KV-block 預算、最大批次大小——都救不了;策略本身結構性地 SLO-盲。上方 §3 trace 在秒粒度展示這點;長期部署中（論文 §6.2）級聯違反隨時間累積。">
+    <strong>Why it cracks on a 3-class queue:</strong> the head of the queue can be a 7-second batch summary while 47 streaming chats wait behind it. The chats' TTFT is breached at $t = 2s$, before FCFS has even looked at them. No FCFS parameter — admission rate, KV-block budget, max batch size — can fix this; the policy itself is structurally SLO-blind. The §3 trace above shows this at the granularity of seconds; in long deployments (paper §6.2) the cascading violations grow over time.
+    </span></p>
+  </div>
+
+  <div class="card">
+    <h4>SJF / SRTF (classical)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> at each scheduling tick, pick the request with the shortest predicted (or known) remaining response length; preempt longer running requests if a shorter one arrives."
+      data-zh="<strong>決策規則：</strong>每個排程 tick,挑選預測（或已知）剩餘回覆長度最短者;若有更短者到達,搶占較長者。">
+    <strong>Decision rule:</strong> at each scheduling tick, pick the request with the shortest predicted (or known) remaining response length; preempt longer running requests if a shorter one arrives.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>The classical guarantee:</strong> SJF is provably optimal for mean response time when lengths are known exactly and the only objective is to minimize mean completion time. This is one of the foundational results of scheduling theory."
+      data-zh="<strong>古典保證：</strong>當長度精確已知、唯一目標是平均完成時間時,SJF 可證明最佳。這是排程理論的基石結果之一。">
+    <strong>The classical guarantee:</strong> SJF is provably optimal for mean response time when lengths are known exactly and the only objective is to minimize mean completion time. This is one of the foundational results of scheduling theory.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> two reasons. First, length is not knowable — the paper measures predictor P5–P95 spread &gt;5× the true length on agent and deep-research traces (§3.1 above). Second, even with a perfect oracle, SJF is SLO-blind: a 30-second deadline-sensitive job with 30 seconds of slack is repeatedly bumped by a stream of 1-second chats and ends up missing the deadline. Compound jobs are worst hit because they're long by definition and accumulate slack-loss across stages. Appendix D.1 of the paper proves the competitive ratio is unbounded as workload diversity grows."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>兩個原因。第一,長度無法已知——論文測量 agent 與 deep-research trace 上的預測 P5–P95 寬度超過真實值 5 倍（§3.1）。第二,即便有完美神諭,SJF 仍是 SLO-盲:一個有 30 秒餘裕的 30 秒 deadline-sensitive 任務,被一連串 1 秒聊天反覆插隊,最終 miss deadline。複合任務最慘,因為它們本就長,且跨階段累積餘裕損失。論文附錄 D.1 證明工作負載多樣性增加時競爭比無界。">
+    <strong>Why it cracks on a 3-class queue:</strong> two reasons. First, length is not knowable — the paper measures predictor P5–P95 spread &gt;5× the true length on agent and deep-research traces (§3.1 above). Second, even with a perfect oracle, SJF is SLO-blind: a 30-second deadline-sensitive job with 30 seconds of slack is repeatedly bumped by a stream of 1-second chats and ends up missing the deadline. Compound jobs are worst hit because they're long by definition and accumulate slack-loss across stages. Appendix D.1 of the paper proves the competitive ratio is unbounded as workload diversity grows.
+    </span></p>
+  </div>
+
+  <div class="card">
+    <h4>LTR (Length-To-Run; QRF / BERT / Llama-3.1 variants)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> a learned length predictor (Quantile Regression Forest, fine-tuned BERT, or Llama-3.1-as-oracle) ranks pending requests; the scheduler runs them in shortest-predicted-first order."
+      data-zh="<strong>決策規則：</strong>用學習式長度預測器（Quantile Regression Forest、fine-tuned BERT,或 Llama-3.1 當神諭）對待處理請求排序;排程器按預測最短先跑。">
+    <strong>Decision rule:</strong> a learned length predictor (Quantile Regression Forest, fine-tuned BERT, or Llama-3.1-as-oracle) ranks pending requests; the scheduler runs them in shortest-predicted-first order.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it was a fine choice for deadline-sensitive workloads:</strong> if all jobs are deadline-sensitive and prediction error is bounded, LTR converges toward SJF-with-oracle behavior. The paper notes (§6.3) that LTR is competitive with JITServe on the deadline-sensitive class alone."
+      data-zh="<strong>為什麼這對 deadline-sensitive 工作負載是好選擇：</strong>若所有任務都 deadline-sensitive 且預測誤差有界,LTR 會收斂到帶神諭的 SJF 行為。論文 §6.3 提到,僅看 deadline-sensitive 類別,LTR 與 JITServe 競爭力相當。">
+    <strong>Why it was a fine choice for deadline-sensitive workloads:</strong> if all jobs are deadline-sensitive and prediction error is bounded, LTR converges toward SJF-with-oracle behavior. The paper notes (§6.3) that LTR is competitive with JITServe on the deadline-sensitive class alone.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> LTR is the <strong>best baseline in the paper's evaluation (1.3–1.7× behind JITServe, Fig 11)</strong> — but it loses on diverse workloads because it oversubscribes bandwidth to deadline-sensitive at the cost of streaming TTFT and compound program-level deadlines. Two structural problems: (1) the predictor itself sits on the request's critical path — running an 8B forward pass to estimate a single request's length costs an order of magnitude more than the kernels that would just <em>start producing</em> the response; (2) per-call length is the wrong target — the binding constraint for compound is the sum across remaining stages, not any single call."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>LTR 是<strong>論文評估中最佳 baseline（落後 JITServe 1.3–1.7×，圖 11）</strong>——但在多樣化工作負載上輸,因為對 deadline-sensitive 過度配置頻寬,代價是串流 TTFT 與複合 program 級 deadline。兩個結構問題:(1) 預測器本身位於請求關鍵路徑上——跑 8B forward pass 來估計一個請求的長度,成本比直接<em>開始產生</em>回覆的 kernel 高一個數量級;(2) per-call 長度是錯的目標——複合請求的綁束條件是剩餘階段的總和,而非任一單一呼叫。">
+    <strong>Why it cracks on a 3-class queue:</strong> LTR is the <strong>best baseline in the paper's evaluation (1.3–1.7× behind JITServe, Fig 11)</strong> — but it loses on diverse workloads because it oversubscribes bandwidth to deadline-sensitive at the cost of streaming TTFT and compound program-level deadlines. Two structural problems: (1) the predictor itself sits on the request's critical path — running an 8B forward pass to estimate a single request's length costs an order of magnitude more than the kernels that would just <em>start producing</em> the response; (2) per-call length is the wrong target — the binding constraint for compound is the sum across remaining stages, not any single call.
+    </span></p>
+  </div>
+
+  <div class="card">
+    <h4>LAS / Autellix PLAS (arXiv'25)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> Program-level Least Attained Service — at each tick, give the next slot to the program (top-level request) that has received the smallest total compute so far. Imitates SJF but at program granularity instead of request granularity."
+      data-zh="<strong>決策規則：</strong>Program 級最小已得服務——每個 tick 把下一個 slot 給予累積得到的計算最少的 program(頂層請求)。模仿 SJF 但在 program 粒度,而非 request 粒度。">
+    <strong>Decision rule:</strong> Program-level Least Attained Service — at each tick, give the next slot to the program (top-level request) that has received the smallest total compute so far. Imitates SJF but at program granularity instead of request granularity.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it was a fine choice for the agentic-only setting:</strong> if every program is a multi-call agent of similar shape, Autellix's LAS-of-programs is fair and approximately minimizes mean program completion time. It was the first system to make scheduling program-aware rather than request-aware."
+      data-zh="<strong>為什麼這對純 agentic 設定是好選擇：</strong>若每個 program 都是相似形狀的多呼叫 agent,Autellix 的 program 級 LAS 公平且近似最小化平均 program 完成時間。它是第一個讓排程做到 program-aware 而非 request-aware 的系統。">
+    <strong>Why it was a fine choice for the agentic-only setting:</strong> if every program is a multi-call agent of similar shape, Autellix's LAS-of-programs is fair and approximately minimizes mean program completion time. It was the first system to make scheduling program-aware rather than request-aware.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> PLAS is the <strong>worst baseline in the paper's evaluation (5.3–6.1× behind JITServe, Fig 11)</strong>. Per-stage fairness is the wrong proxy for everything except programs of similar shape. A 1-stage streaming chat and a 100-stage deep-research agent receive equal cumulative service — but the chat needs only ~50 tok/s of TBT while the agent needs ~100× more compute total, so neither's SLO is honored: the chat's TBT is starved (PLAS gives it just 1/N of decode bandwidth), and the agent's program deadline is missed (PLAS doesn't see it). PLAS has no notion of streaming TTFT/TBT, no notion of hard deadline, no notion of program-stage criticality."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>PLAS 是<strong>論文評估中最差 baseline（落後 JITServe 5.3–6.1×，圖 11）</strong>。Per-stage 公平除了形狀相近的 program 之外是錯的代理目標。1 階段串流聊天與 100 階段 deep-research agent 拿到等量累積服務——但聊天只需要 ~50 tok/s 的 TBT,agent 總共需要 ~100× 更多計算,結果兩者 SLO 都沒守住:聊天 TBT 被餓死（PLAS 只給它 1/N decode 頻寬）,agent 的 program deadline 也 miss（PLAS 看不到）。PLAS 沒有串流 TTFT/TBT 概念,沒有硬截止時間概念,沒有 program 階段關鍵性概念。">
+    <strong>Why it cracks on a 3-class queue:</strong> PLAS is the <strong>worst baseline in the paper's evaluation (5.3–6.1× behind JITServe, Fig 11)</strong>. Per-stage fairness is the wrong proxy for everything except programs of similar shape. A 1-stage streaming chat and a 100-stage deep-research agent receive equal cumulative service — but the chat needs only ~50 tok/s of TBT while the agent needs ~100× more compute total, so neither's SLO is honored: the chat's TBT is starved (PLAS gives it just 1/N of decode bandwidth), and the agent's program deadline is missed (PLAS doesn't see it). PLAS has no notion of streaming TTFT/TBT, no notion of hard deadline, no notion of program-stage criticality.
+    </span></p>
+  </div>
+
+  <div class="card">
+    <h4>EDF (earliest deadline first, classical real-time)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> at each tick, pick the request whose deadline is closest in absolute time. Liu and Layland (1973) proved EDF is optimal for hard real-time systems."
+      data-zh="<strong>決策規則：</strong>每個 tick,挑選 deadline 在絕對時間上最近者。Liu 與 Layland(1973)證明 EDF 對硬即時系統最佳。">
+    <strong>Decision rule:</strong> at each tick, pick the request whose deadline is closest in absolute time. Liu and Layland (1973) proved EDF is optimal for hard real-time systems.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it was a fine choice in real-time scheduling:</strong> EDF achieves 100% schedulable utilization on uniprocessors when every job carries an explicit deadline, and is the canonical answer for avionics, industrial control, and similar hard real-time domains."
+      data-zh="<strong>為什麼這在即時排程是好選擇：</strong>EDF 在每個 job 都帶明確 deadline 的單處理器系統上達 100% 可排程利用率,是航電、工業控制等硬即時領域的標準解。">
+    <strong>Why it was a fine choice in real-time scheduling:</strong> EDF achieves 100% schedulable utilization on uniprocessors when every job carries an explicit deadline, and is the canonical answer for avionics, industrial control, and similar hard real-time domains.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> the assumption breaks. <strong>Streaming chats have no deadline at all</strong> — they have a TBT bound (per-token rate), which is a fundamentally different SLO shape; you cannot order a chat against a batch summary by &lsquo;deadline&rsquo;. Compound program deadlines exist but are not directly comparable to per-call deadlines: a 240s program deadline does not become 12× more urgent than a 20s batch deadline just because it expires later. EDF also burns bandwidth on jobs that already would have made it on slack alone, instead of redistributing that capacity to the streaming chats who would have used it at their TBT rate. Appendix D.1 proves an unbounded competitive ratio."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>假設破產。<strong>串流聊天根本沒有 deadline</strong>——它們有 TBT 限制(per-token 速率),那是完全不同形狀的 SLO;你無法用『deadline』把聊天對齊到批次摘要。複合 program deadline 確實存在,但無法直接與 per-call deadline 比較:240s program deadline 不會因為更晚到期就比 20s batch deadline 緊急 12 倍。EDF 還會把頻寬燒在憑餘裕原本就趕得上的工作上,而不是把那容量重分配給能以 TBT 速率使用它的串流聊天。附錄 D.1 證明競爭比無界。">
+    <strong>Why it cracks on a 3-class queue:</strong> the assumption breaks. <strong>Streaming chats have no deadline at all</strong> — they have a TBT bound (per-token rate), which is a fundamentally different SLO shape; you cannot order a chat against a batch summary by &lsquo;deadline&rsquo;. Compound program deadlines exist but are not directly comparable to per-call deadlines: a 240s program deadline does not become 12× more urgent than a 20s batch deadline just because it expires later. EDF also burns bandwidth on jobs that already would have made it on slack alone, instead of redistributing that capacity to the streaming chats who would have used it at their TBT rate. Appendix D.1 proves an unbounded competitive ratio.
+    </span></p>
+  </div>
+
+  <div class="card">
+    <h4>Chunked-prefill (Sarathi-Serve, OSDI'24)</h4>
+    <p><span class="i18n"
+      data-en="<strong>Decision rule:</strong> not really a scheduling policy — a pacing technique. Split each request's prefill into chunks and interleave them with decode steps so prefill no longer blocks decode latency. Coupled with FIFO admission for ordering."
+      data-zh="<strong>決策規則：</strong>嚴格說不是排程策略——而是 pacing 技術。把每個請求的 prefill 切塊,與 decode 步驟交錯,讓 prefill 不再阻塞 decode 延遲。配合 FIFO admission 做排序。">
+    <strong>Decision rule:</strong> not really a scheduling policy — a pacing technique. Split each request's prefill into chunks and interleave them with decode steps so prefill no longer blocks decode latency. Coupled with FIFO admission for ordering.
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it was the right answer for streaming chat:</strong> Sarathi-Serve's chunked-prefill achieves the lowest TBT of any production system — that's its design objective. For a chatbot-only workload, low TBT translates almost directly into goodput. JITServe's evaluation confirms Sarathi's throughput is essentially optimal: JITServe matches it at 96–98% (Fig 14)."
+      data-zh="<strong>為什麼這是串流聊天的正解：</strong>Sarathi-Serve 的 chunked-prefill 在所有生產系統中達到最低 TBT——那正是它的設計目標。對純聊天工作負載,低 TBT 幾乎直接等同 goodput。JITServe 評估確認 Sarathi 的吞吐量基本最佳:JITServe 達 96–98%(圖 14)。">
+    <strong>Why it was the right answer for streaming chat:</strong> Sarathi-Serve's chunked-prefill achieves the lowest TBT of any production system — that's its design objective. For a chatbot-only workload, low TBT translates almost directly into goodput. JITServe's evaluation confirms Sarathi's throughput is essentially optimal: JITServe matches it at 96–98% (Fig 14).
+    </span></p>
+    <p><span class="i18n"
+      data-en="<strong>Why it cracks on a 3-class queue:</strong> chunk size is a global parameter, not per-SLO-class. A chunk size tuned for streaming chat (say 64 tokens) is too small for a deadline-sensitive batch summary that needs to finish prefill in one shot to land at its E2EL deadline — Sarathi spreads its prefill across many decode steps, inflating TTLT (Time-To-Last-Token) and breaching deadline-sensitive SLOs. The paper's Fig 3 shows Sarathi achieving low TBT but high TTLT violations. JITServe argues this is fundamental: any single chunk size optimizes one class at the expense of another."
+      data-zh="<strong>為何在三類佇列上崩掉：</strong>chunk 大小是全域參數,不是 per-SLO-class。為串流聊天調的 chunk 大小（比方 64 token）對 deadline-sensitive 批次摘要而言太小——後者需要一次完成 prefill 才能在 E2EL deadline 著陸,Sarathi 把 prefill 散到很多 decode steps,膨脹 TTLT(Time-To-Last-Token)而違反 deadline-sensitive SLO。論文圖 3 顯示 Sarathi TBT 低但 TTLT 違反高。JITServe 主張這是根本問題:任一單一 chunk 大小都犧牲一類來優化另一類。">
+    <strong>Why it cracks on a 3-class queue:</strong> chunk size is a global parameter, not per-SLO-class. A chunk size tuned for streaming chat (say 64 tokens) is too small for a deadline-sensitive batch summary that needs to finish prefill in one shot to land at its E2EL deadline — Sarathi spreads its prefill across many decode steps, inflating TTLT (Time-To-Last-Token) and breaching deadline-sensitive SLOs. The paper's Fig 3 shows Sarathi achieving low TBT but high TTLT violations. JITServe argues this is fundamental: any single chunk size optimizes one class at the expense of another.
+    </span></p>
+  </div>
+</div>
+
+<p style="margin-top:1.5rem"><span class="i18n"
+  data-en="Notice the pattern: every policy above is a <em>local optimum</em>. FCFS optimizes against the assumption that arrival order encodes priority. SJF and LTR optimize against the assumption that length is knowable (or at least usefully predictable on the request's critical path). PLAS optimizes against the assumption that program-stage fairness is the right proxy for program deadline. EDF optimizes against the assumption that every job has a deadline. Chunked-prefill optimizes against the assumption that throughput uniformly translates into goodput. <strong>None of these five assumptions holds simultaneously on a 2025 production workload</strong> — and a single scheduler can satisfy at most one of them at a time. JITServe's design (§4 onward) is built around <em>rejecting</em> all five assumptions and replacing them with a per-request, per-second goodput-margin computation that admits genuine uncertainty rather than trying to engineer it away."
+  data-zh="觀察一下這個 pattern:上述每個策略都是<em>局部最佳</em>。FCFS 假設到達順序代表優先級;SJF 與 LTR 假設長度可知（或至少可在請求關鍵路徑上有用地預測）;PLAS 假設 program 階段公平是 program deadline 的好代理;EDF 假設每個 job 都有 deadline;chunked-prefill 假設吞吐量等同 goodput。<strong>在 2025 年的生產工作負載上,這五個假設沒有任何兩個能同時成立</strong>——單一排程器一次只能守一個。JITServe(§4 起)的設計則是<em>拒絕</em>這五個假設,代之以 per-request、per-second 的 goodput-margin 計算,接受真實的不確定性而不是試圖工程化掉它。">
+Notice the pattern: every policy above is a <em>local optimum</em>. FCFS optimizes against the assumption that arrival order encodes priority. SJF and LTR optimize against the assumption that length is knowable (or at least usefully predictable on the request's critical path). PLAS optimizes against the assumption that program-stage fairness is the right proxy for program deadline. EDF optimizes against the assumption that every job has a deadline. Chunked-prefill optimizes against the assumption that throughput uniformly translates into goodput. <strong>None of these five assumptions holds simultaneously on a 2025 production workload</strong> — and a single scheduler can satisfy at most one of them at a time. JITServe's design (§4 onward) is built around <em>rejecting</em> all five assumptions and replacing them with a per-request, per-second goodput-margin computation that admits genuine uncertainty rather than trying to engineer it away.
+</span></p>
+
+<div class="warn"><strong><span class="i18n" data-en="Theorem (informal, Appendix D.1):" data-zh="定理（非形式版，附錄 D.1）：">Theorem (informal, Appendix D.1):</span></strong>
+<span class="i18n" data-en="For each of FCFS, SJF, LAS, EDF, there exists an instance whose competitive ratio against the offline optimum is unbounded as the diversity ratio grows. The proof constructs adversarial mixes of the three SLO classes; the lower bound is matched empirically by the goodput collapse observed in Figure 11 of the paper." data-zh="對 FCFS、SJF、LAS、EDF 中每一種,皆存在實例,其相對離線最佳的競爭比,隨多樣化比率增長而無界放大。證明用三類 SLO 的對抗性混合構造;此下界由論文圖 11 觀察到的 goodput 崩潰實證對應。">
+For each of FCFS, SJF, LAS, EDF, there exists an instance whose competitive ratio against the offline optimum is unbounded as the diversity ratio grows. The proof constructs adversarial mixes of the three SLO classes; the lower bound is matched empirically by the goodput collapse observed in Figure 11 of the paper.
+</span>
 </div>
 </section>
 
