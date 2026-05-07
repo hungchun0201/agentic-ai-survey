@@ -1,0 +1,224 @@
+diff --git a/jitserve/request_analyzer/graph_context.py b/jitserve/request_analyzer/graph_context.py
+index 21a2fac..2d5a916 100644
+--- a/jitserve/request_analyzer/graph_context.py
++++ b/jitserve/request_analyzer/graph_context.py
+@@ -1,3 +1,5 @@
++"""Pattern-graph matcher for compound requests. Paper §4.2 "How compound requests are handled"."""
++
+ from __future__ import annotations
+ 
+ from typing import Dict, List, Optional, Set, Tuple
+@@ -83,13 +85,24 @@ class GraphMatchContext:
+                               is_deepresearch: bool = False,
+                               stage_id: int = 0,
+                               accumulate_stage_ratio: float = 0.0) -> float:
++        # KEY DESIGN: this is the entry point GMAX calls every tick to
++        # learn what FRACTION of the program-level deadline the current
++        # stage is allowed to consume. Per-call length prediction alone
++        # does not answer that question; only the aggregate of remaining
++        # stages does. Everything below trades prediction quality
++        # against per-tick cost.
+         if self.use_total_deadline:
+-            return 1.0
++            return 1.0   # degenerate: whole program budget for this stage
+ 
+         default_ratio = self._default_ratio(is_deepresearch, stage_id)
+         if self.graph_matching_mode == "none":
++            # No historical match -- fall back to a hard-coded prior
++            # (Default_DeepResearch / Default_ToT pattern). Cheapest mode,
++            # blind to which workflow this actually is.
+             return default_ratio
+         if self.graph_matching_mode == "precise":
++            # An oracle ratio was passed in (e.g., for the JITServe* upper-bound
++            # variant in §6.2). Used only in evaluation, not in deployment.
+             if is_deepresearch and accumulate_stage_ratio > 0.0:
+                 logger.info(
+                     f"Using precise accumulate_stage_ratio: {accumulate_stage_ratio}"
+@@ -97,10 +110,16 @@ class GraphMatchContext:
+                 return accumulate_stage_ratio
+             return default_ratio
+         if self.graph_matching_mode == "static":
++            # KEY DESIGN: match ONCE at admission and reuse the prediction
++            # across all stages. Cheap (one LSH lookup per program) but
++            # cannot react if the actual graph diverges from the match.
+             return self._static_ratio(num_stages, requests_per_stage, prompt,
+                                       collection_id, is_deepresearch, stage_id,
+                                       default_ratio)
+         if self.graph_matching_mode == "online":
++            # KEY DESIGN: re-match at EVERY stage as the partial graph grows.
++            # The match becomes more accurate as more of the graph is observed,
++            # at the cost of one LSH lookup per tick per active compound request.
+             return self._online_ratio(num_stages, requests_per_stage, prompt,
+                                       collection_id, is_deepresearch, stage_id)
+ 
+@@ -214,6 +233,9 @@ class GraphMatchContext:
+             collection_id]
+         unfinished_graph = deepresearch_structure.convert_to_unfinished_graph(
+             self._encode_prompt_len(prompt), None)
++        # LSH retrieval against the historical (graph_pattern, runtime) database.
++        # Returns the closest finished workflow whose execution graph matches
++        # the prefix observed so far for this in-progress compound request.
+         best_match = self.dynamic_clustering.find_best_match(unfinished_graph)
+         logger.info(
+             f"DeepResearch collection_id: {collection_id}, stage_id: {stage_id}, best_match: {best_match}"
+@@ -222,6 +244,12 @@ class GraphMatchContext:
+             ratio_1 = sum(best_match.times[:stage_id]) / sum(best_match.times)
+             ratio_2 = sum(Default_DeepResearch_Requests_Pattern[:stage_id]) / sum(
+                 Default_DeepResearch_Requests_Pattern)
++            # KEY DESIGN: take the LARGER of the historical ratio and the
++            # default prior -- same asymmetry principle as L_up. If the
++            # historical match underestimates the current stage's cost,
++            # the fallback prior protects against an irrecoverable miss;
++            # if the prior under-estimates instead, the historical match
++            # corrects upward. Always biased toward over-reservation.
+             return max(ratio_1, ratio_2)
+         return sum(Default_DeepResearch_Requests_Pattern[:stage_id]) / sum(
+             Default_DeepResearch_Requests_Pattern)
+diff --git a/jitserve/request_analyzer/prediction.py b/jitserve/request_analyzer/prediction.py
+index 6b14f38..ecf9838 100644
+--- a/jitserve/request_analyzer/prediction.py
++++ b/jitserve/request_analyzer/prediction.py
+@@ -1,3 +1,5 @@
++"""QRF backend that produces L_up_hat. Paper §4.2 "How L_up is estimated"."""
++
+ import asyncio
+ import socket
+ import numpy as np
+@@ -15,16 +17,29 @@ def load_model(model_path: str, tokenizer_path: str) -> Tuple:
+         raise Exception("Model or tokenizer not found")
+     return model, tokenizer
+ 
+-# Perform prediction on the input using the loaded model and vectorizer
+ def predict(vectorizer, model, input):
+     X_test_vec = vectorizer.transform(input)
++    # KEY DESIGN: ask for the P95 quantile, not the mean. The two error
++    # directions are asymmetric -- underestimating L_up causes insufficient
++    # bandwidth reservation and an irrecoverable SLO miss; overestimating
++    # only produces a brief over-reservation that the scheduler reclaims
++    # on the next tick. A high quantile is therefore strictly preferable
++    # even when the mean would be more "accurate" on average.
+     y_pred_i: np.array = model.predict(X_test_vec.toarray(), quantiles=[0.95])
+     return [int(element) for element in y_pred_i]
+ 
+-# Asynchronous function to handle prediction and return result
++
+ async def async_predict(vectorizer, model, input, request_info: RequestInfo) -> None:
++    # KEY DESIGN: QRF runs in single-digit ms but is still wrapped in an
++    # asyncio executor so it can never block the scheduler tick. Compare
++    # with using a Llama-3-class LLM as a length oracle, which would
++    # itself be slower than just decoding the response -- the cost of
++    # being right would equal the cost of being wrong. QRF is cheap
++    # enough that the wrapping is precaution, not necessity.
+     loop = asyncio.get_event_loop()
+     result = await loop.run_in_executor(None, predict, vectorizer, model, input)
++    # The scheduler reads L_up_hat from RequestInfo.output_len on the next
++    # tick. This is the only place L_up enters shared state.
+     request_info.output_len = result[0]
+ 
+ 
+diff --git a/jitserve/scheduler/policy.py b/jitserve/scheduler/policy.py
+index 1a569d9..e44c943 100644
+--- a/jitserve/scheduler/policy.py
++++ b/jitserve/scheduler/policy.py
+@@ -1,3 +1,5 @@
++"""GMAX scheduler (SLOPolicy) and the §3.3 baselines. Paper §4.2 b_min, §6.3 marginal goodput."""
++
+ import time
+ from abc import ABC, abstractmethod
+ from collections import deque
+@@ -249,8 +251,21 @@ class SLOPolicy(BasePolicy):
+ 
+     def _compute_remain_time(self, seq_group: SequenceGroup, remain_len: int,
+                              unit_time: float) -> float:
++        # KEY DESIGN: this is where the per-class delta_t of paper §4.2 enters.
++        # The same formula b_min = (L_up - L_done) / delta_t is used everywhere;
++        # only delta_t differs.
+         if seq_group.request_type == RequestType.COLLECTIVE:
++            # Compound (multi-call) request: delta_t for the CURRENT call is
++            # the program-level deadline reduced by the predicted aggregate
++            # cost of all DOWNSTREAM stages. allocation_control() walks the
++            # collection's siblings and sums their predicted remaining time;
++            # what is left is the budget for this stage.
+             return max(self.allocation_control(seq_group), 1e-6)
++        # Single-call (latency-sensitive or deadline-sensitive): delta_t is
++        # local. unit_time is the average scheduler-tick interval, so this
++        # is "predicted wall-clock to finish remain_len tokens at the
++        # current scheduling rate" -- a finish-time estimate, equivalent
++        # to b_min's denominator after a change of variables.
+         return max(unit_time * remain_len, 1e-6)
+ 
+     def _estimate_latency_reward(self, seq_group: SequenceGroup, input_len: int,
+@@ -286,8 +301,15 @@ class SLOPolicy(BasePolicy):
+     def reward_estimation(self, seq_group: SequenceGroup) -> Tuple[float, float]:
+         cur_time = time.time()
+         input_len = seq_group.seqs[0].get_prompt_len()
+-        decode_len = seq_group.seqs[0].get_decode_len()
+-        predict_output_len = seq_group.request_info.output_len
++        decode_len = seq_group.seqs[0].get_decode_len()                  # = L_done
++        predict_output_len = seq_group.request_info.output_len           # = L_up_hat from QRF
++        # KEY DESIGN: this is the numerator of paper equation (1):
++        #     b_min = (L_up_hat - L_done) / delta_t
++        # remain_len shrinks every tick as decode_len grows; if the actual
++        # response approaches L_up_hat, remain_len -> 0 and the request
++        # naturally drops off the priority queue. If the actual response
++        # OVERSHOOTS L_up_hat, remain_len goes negative -- handled by the
++        # preemption rule (paper §7.2) which fires when the bound was wrong.
+         remain_len = predict_output_len - decode_len
+ 
+         unit_time = self._get_interval_time()
+@@ -320,6 +342,13 @@ class SLOPolicy(BasePolicy):
+         
+         if seq_group.request_type == RequestType.LATENCY or seq_group.request_type == RequestType.THROUGHPUT:
+             reward, remain_time = self.reward_estimation(seq_group)
++            # KEY DESIGN: density = reward / remain_time = MARGINAL GOODPUT
++            # PER UNIT TIME. This is the operational form of b_min from
++            # paper §4.2 -- a request whose remain_time is shrinking
++            # (whose b_min is therefore rising) gets a proportionally
++            # larger priority next tick. Negated because Python's heap
++            # is min-heap; the request with the LARGEST density floats
++            # to the front of the GMAX priority queue.
+             density = reward / remain_time
+             slo_priority = (-density, remain_time)
+             self.seq_group_slo_dict[seq_group.request_id] = slo_priority
+diff --git a/jitserve/slo_tracker/slo_tracker.py b/jitserve/slo_tracker/slo_tracker.py
+index e852825..1531738 100644
+--- a/jitserve/slo_tracker/slo_tracker.py
++++ b/jitserve/slo_tracker/slo_tracker.py
+@@ -1,3 +1,5 @@
++"""Per-tick service-gain tracker. Feeds GMAX reward; paper §6.3 marginal goodput per SLO class."""
++
+ import time
+ 
+ from typing import Iterable, Optional, TYPE_CHECKING
+@@ -85,7 +87,16 @@ class SLOTracker:
+             if desire_decode_len <= 0:
+                 service += delta_output
+             else:
++                # decode_ratio < 1 means the request is BEHIND its rate target.
+                 decode_ratio = self._clamp_ratio(output_len, desire_decode_len)
++                # KEY DESIGN: raise to penalty_factor. A small lag in decode
++                # rate produces a small reduction in service gain, but a
++                # large lag produces a much larger reduction -- next-tick
++                # density (= reward / remain_time) drops disproportionately,
++                # so the request's GMAX priority falls. This is what makes
++                # the system shed irrecoverable requests gracefully under
++                # load (paper §10.4, Fig 15) instead of letting one
++                # struggling request pull everyone else down.
+                 service += decode_ratio**self.penalty_factor * delta_output * RequestPhaseWeight.DECODE.value
+ 
+         return service
+@@ -109,6 +120,14 @@ class SLOTracker:
+ 
+     def _desired_decode_len(self, seq_group: "SequenceGroup",
+                             cur_time: float) -> float:
++        # KEY DESIGN: this IS the latency-class b_min, expressed inversely.
++        # Instead of "tokens per second I must produce", we ask "how many
++        # tokens should I have produced by now to honour the TBT_constraint
++        # rate target?" The denominator is TBT_constraint = the contracted
++        # time per token; the numerator is elapsed time since first token.
++        # _latency_service_gain compares this with the actual output_len
++        # below and penalises any shortfall, which is the per-tick
++        # mechanism that escalates a falling-behind request in priority.
+         metrics = seq_group.concord_metrics
+         if metrics.TTFT is None:
+             return 0.0
