@@ -1,0 +1,203 @@
+diff --git a/jitserve/request_analyzer/graph_context.py b/jitserve/request_analyzer/graph_context.py
+index 21a2fac..0906ec5 100644
+--- a/jitserve/request_analyzer/graph_context.py
++++ b/jitserve/request_analyzer/graph_context.py
+@@ -1,3 +1,54 @@
++"""Pattern-graph matcher for compound (multi-call) requests.
++
++Architectural role (paper §4.2 "How compound requests are handled"):
++
++    A compound request is not a single LLM call but a graph of LLM and
++    tool invocations linked by data dependencies, of which only a prefix
++    has executed at the moment a scheduling decision must be made.
++    Per-call length prediction is therefore not the binding constraint;
++    what matters is whether the sum of costs across all remaining stages
++    will fit within the program-level deadline.
++
++    JITServe addresses this by maintaining a database of historical
++    (graph pattern, observed runtime) pairs, indexed for fast retrieval
++    via locality-sensitive hashing in DynamicClustering (see
++    similarity.py). At every scheduling tick, the partial execution graph
++    of each in-progress compound request is matched against the
++    historical record. The match returns two values:
++
++        (1) the predicted cost of the immediately next stage, which
++            informs L_up_hat for the current call; and
++
++        (2) the predicted aggregate cost of all the stages that remain,
++            which is subtracted from the program-level deadline to
++            produce the time budget actually available to the current
++            stage -- i.e., the delta_t that ultimately enters b_min in
++            the scheduling formula.
++
++    Without this aggregate prediction, a per-call length bound would
++    tell the scheduler nothing about whether the program as a whole will
++    meet its deadline.
++
++Implementation notes:
++
++    - GraphMatchContext (class below): owns the historical (graph, runtime)
++      database (collection_graph_set) and the unfinished-graph trackers
++      for both ToT-style and DeepResearch-style compound workloads.
++
++    - calculate_stage_ratio() (below): the entry point that GMAX calls
++      every tick. Returns the fraction of program budget that should be
++      attributed to the current stage. Internally branches on
++      graph_matching_mode in {"none", "precise", "static", "online"}:
++      static and online both invoke dynamic_clustering.find_best_match
++      to identify the closest historical (graph, runtime) record.
++
++    - track_collection_completion() (below): incrementally extends the
++      historical (graph, runtime) database as compound programs finish.
++      A finished structure is converted to a Graph, added to
++      collection_graph_set, and registered with the LSH-style
++      DynamicClustering retriever.
++"""
++
+ from __future__ import annotations
+ 
+ from typing import Dict, List, Optional, Set, Tuple
+diff --git a/jitserve/request_analyzer/prediction.py b/jitserve/request_analyzer/prediction.py
+index 6b14f38..5723374 100644
+--- a/jitserve/request_analyzer/prediction.py
++++ b/jitserve/request_analyzer/prediction.py
+@@ -1,3 +1,41 @@
++"""Quantile Regression Forest (QRF) backend for the response-length upper bound.
++
++Architectural role (paper §4.2 "How L_up is estimated"):
++
++    Rather than predicting the expected response length and treating that
++    estimate as exact, JITServe asks a Quantile Regression Forest to provide
++    a conservative upper bound L_up_hat -- typically the P95 of the
++    conditional length distribution, given the prompt features (prompt token
++    count, model identity, and lexical signatures derived from the prompt).
++    The QRF executes in single-digit milliseconds and is therefore
++    inexpensive enough to remain on the request's critical path; an
++    8B-parameter LLM used as a length oracle would itself be slower than
++    starting to produce the response. The bound is refined at each
++    subsequent scheduling tick as additional decoded tokens reveal the
++    trajectory of the actual response, which causes the P5-P95 envelope to
++    contract toward the ground truth.
++
++    The asymmetry of this design is deliberate: an underestimate of length
++    leads to insufficient reserved bandwidth and an irrecoverable SLO
++    violation, whereas an overestimate produces only a brief over-reservation,
++    the surplus from which is returned to the capacity pool on the next tick.
++
++Implementation notes:
++
++    - predict() (below): the actual QRF call; returns the P95 quantile of
++      the conditional output-length distribution given the input prompt.
++      The model.predict(..., quantiles=[0.95]) call is the literal source
++      of L_up_hat referenced throughout the rest of the system.
++
++    - async_predict() (below): asynchronous wrapper that updates
++      RequestInfo.output_len after the QRF returns, so the scheduler can
++      consume the upper bound on the next tick without blocking.
++
++    - The QRF model and vectorizer are loaded once at startup
++      (load_model()) and kept resident; the assets/qrf/ directory in the
++      repo holds pre-trained QRF models per (dataset, target LLM) pair.
++"""
++
+ import asyncio
+ import socket
+ import numpy as np
+diff --git a/jitserve/scheduler/policy.py b/jitserve/scheduler/policy.py
+index 1a569d9..007bc18 100644
+--- a/jitserve/scheduler/policy.py
++++ b/jitserve/scheduler/policy.py
+@@ -1,3 +1,53 @@
++"""Scheduling-policy implementations -- the GMAX scheduler and its baselines.
++
++This module contains both JITServe's own scheduling rule (SLOPolicy below,
++named "concord" / "jitserve" / "slo" in the policy registry) and the
++single-objective baselines compared against in §3.3 of the paper:
++
++    - FCFSPolicy   -- vLLM-style first-come-first-served (paper §3.3 row 1)
++    - SJFPolicy    -- shortest-job-first using QRF length prediction;
++                       referenced in the paper as "LTR" (Length-To-Run),
++                       the strongest non-JITServe baseline (§3.3 row 3)
++    - SRTFPolicy   -- shortest-remaining-time, deadline-driven variant
++    - LASPolicy    -- program-level Least Attained Service (Autellix's
++                       PLAS, paper §3.3 row 4)
++    - SLOPolicy    -- JITServe's GMAX scheduler
++
++Architectural role of SLOPolicy (paper §4.2 "The meaning of b_min" and §6
++"GMAX -- The Scheduling Algorithm"):
++
++    The minimum-serving-bandwidth formula given in the paper
++
++            b_min(r, t) = (L_up_hat(r, t) - L_done(r, t)) / delta_t(r, t)
++
++    is implemented here as a finish-time predictor combined with a
++    deadline-ratio penalty rather than as a literal bandwidth variable.
++    The mathematics is equivalent: for each request, SLOPolicy computes
++
++        remain_len  = predict_output_len - decode_len           # = L_up - L_done
++        remain_time = unit_time * remain_len                     # predicted wall-clock to finish at current rate
++        predict_finish = serve_time + remain_time                # when the request will actually complete
++        ratio       = deadline / predict_finish                  # >1 means comfortable, <1 means late
++
++    and then weights the request's reward (the marginal-goodput function
++    in §6.3) by ratio raised to penalty_factor. A request with shrinking
++    slack receives an exponentially larger priority, which is the
++    just-in-time semantics described in §4.2: b_min is recomputed every
++    tick because L_done grows and remain_time shrinks, so a request that
++    began with comfortable slack may be promoted to high priority later
++    if its actual response is approaching the QRF upper bound.
++
++    The same get_priority() handles all three SLO classes (LATENCY,
++    THROUGHPUT, COLLECTIVE in this codebase, corresponding to
++    latency-sensitive, deadline-sensitive, and compound in the paper).
++    The only per-class difference is in how delta_t is constructed --
++    handled by _compute_remain_time() below, which calls
++    allocation_control() for COLLECTIVE / compound requests so that the
++    delta_t available to the current stage already accounts for the
++    predicted aggregate cost of downstream stages, as supplied by
++    GraphMatchContext (see request_analyzer/graph_context.py).
++"""
++
+ import time
+ from abc import ABC, abstractmethod
+ from collections import deque
+diff --git a/jitserve/slo_tracker/slo_tracker.py b/jitserve/slo_tracker/slo_tracker.py
+index e852825..55b039c 100644
+--- a/jitserve/slo_tracker/slo_tracker.py
++++ b/jitserve/slo_tracker/slo_tracker.py
+@@ -1,3 +1,35 @@
++"""Per-tick service-gain tracker -- feeds GMAX's marginal-goodput function.
++
++Architectural role (paper §4.2 b_min book-keeping and §6.3 "marginal
++goodput per SLO class"):
++
++    Service gain quantifies how much each scheduling tick contributes to
++    a request's eventual goodput, given its SLO class. The values
++    computed here become the per-request "reward" used by SLOPolicy in
++    scheduler/policy.py to derive the GMAX priority on the next tick.
++
++    For latency-sensitive requests (_latency_service_gain below):
++    contribution accumulates as the sum of a TTFT-bounded prefill term --
++    penalised by the ratio (TTFT_constraint / realised_TTFT) raised to
++    penalty_factor when the actual TTFT overruns the SLO -- and a decode
++    term, penalised by the ratio (output_len_so_far / desired_decode_len)
++    when the realised decode rate falls behind the per-token rate target
++    set by TBT_constraint. _desired_decode_len() implements that
++    per-token rate target directly: it converts the TBT_constraint and
++    elapsed time into the number of tokens the request *should* have
++    produced by now, which is the same rate target b_min in §4.2.
++
++    For deadline-sensitive and compound requests (_throughput_service_gain
++    below): contribution is weighted by min(1, deadline / TTLT) raised to
++    penalty_factor, so a request that has already overshot its deadline
++    contributes a vanishing service gain; a comfortable request
++    contributes its full prefill + decode tokens.
++
++    The "concord_metrics" attached to each SequenceGroup is the canonical
++    record of TTFT, TBT samples, and the running service_gain that
++    SLOPolicy queries through reward_estimation().
++"""
++
+ import time
+ 
+ from typing import Iterable, Optional, TYPE_CHECKING
