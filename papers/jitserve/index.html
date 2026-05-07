@@ -677,9 +677,9 @@ JITServe sits as a thin scheduling and analysis layer on top of an existing exec
 </span></p>
 
 <p><span class="i18n"
-  data-en="The three architectural concepts developed in §4.2 below are each anchored to specific files in the public reference implementation at <a href='https://github.com/UIUC-MLSys/JITServe' target='_blank'>UIUC-MLSys/JITServe</a>. Each subsection therefore carries a concrete source citation so that a reader can move directly from the conceptual narrative to the line of code that implements it. The same module-level docstrings appear at the top of each cited file in the local fork accompanying this analysis."
-  data-zh="§4.2 中所述的三個架構概念，皆對應到公開參考實作 <a href='https://github.com/UIUC-MLSys/JITServe' target='_blank'>UIUC-MLSys/JITServe</a> 中具體的檔案位置。下方每一個小節皆附上對應的源碼引用，使讀者得以由概念敘述直接跳至實作之程式碼行；同樣的 module-level docstring 亦已加註於本分析所伴隨之本地副本中各對應檔案。">
-The three architectural concepts developed in §4.2 below are each anchored to specific files in the public reference implementation at <a href="https://github.com/UIUC-MLSys/JITServe" target="_blank">UIUC-MLSys/JITServe</a>. Each subsection therefore carries a concrete source citation so that a reader can move directly from the conceptual narrative to the line of code that implements it. The same module-level docstrings appear at the top of each cited file in the local fork accompanying this analysis.
+  data-en="Each of the three architectural concepts developed in §4.2 below is followed by the actual source excerpt that implements it, drawn from the public reference implementation at github.com/UIUC-MLSys/JITServe. The same explanatory text has additionally been inserted as a module docstring at the top of each cited file in the local fork accompanying this analysis."
+  data-zh="§4.2 所述的三個架構概念，於下方每一個小節之後皆直接附上實作該概念的源碼片段，取自公開參考實作 github.com/UIUC-MLSys/JITServe。相同的說明文字亦以 module docstring 形式加註於本分析所伴隨之本地副本各對應檔案頂端。">
+Each of the three architectural concepts developed in §4.2 below is followed by the actual source excerpt that implements it, drawn from the public reference implementation at github.com/UIUC-MLSys/JITServe. The same explanatory text has additionally been inserted as a module docstring at the top of each cited file in the local fork accompanying this analysis.
 </span></p>
 
 <div class="paper-fig fig-md">
@@ -744,14 +744,33 @@ At every scheduling tick, JITServe computes three quantities for each active req
 Rather than predicting the expected response length and treating that estimate as exact, JITServe asks a Quantile Regression Forest (QRF) to provide a conservative upper bound — typically the P95 of the conditional length distribution, given the prompt features (token count, model identity, and lexical signatures of the prompt). The QRF executes in single-digit milliseconds and is therefore inexpensive enough to remain on the request's critical path; an 8B-parameter LLM used as a length oracle, by contrast, would itself be slower than starting to produce the response. The bound is refined at each subsequent tick as additional decoded tokens reveal the trajectory of the actual response, which causes the P5–P95 envelope to contract toward the ground truth. The asymmetry of this design is deliberate: an underestimate of length leads to insufficient reserved bandwidth and an irrecoverable SLO violation, whereas an overestimate merely produces a brief over-reservation, the surplus from which is returned to the capacity pool on the next tick.
 </span></p>
 
-<div class="note" style="font-size:.88rem">
-  <strong><span class="i18n" data-en="In the reference implementation:" data-zh="於參考實作中：">In the reference implementation:</span></strong>
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:1rem;margin-bottom:.4rem">
+  <strong><code>jitserve/request_analyzer/prediction.py</code></strong>
+  &middot; <span class="i18n" data-en="the QRF call that produces $\hat L_{up}$" data-zh="產生 $\hat L_{up}$ 的 QRF 呼叫">the QRF call that produces $\hat L_{up}$</span>
+</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">predict</span>(vectorizer, model, input):
+    X_test_vec = vectorizer.<span class="fn">transform</span>(input)
+    y_pred_i: np.array = model.<span class="fn">predict</span>(
+        X_test_vec.<span class="fn">toarray</span>(),
+        quantiles=[<span class="nu">0.95</span>])    <span class="cm"># P95 of the conditional length distribution = L_up_hat</span>
+    <span class="kw">return</span> [<span class="fn">int</span>(element) <span class="kw">for</span> element <span class="kw">in</span> y_pred_i]
+
+<span class="kw">async def</span> <span class="fn">async_predict</span>(vectorizer, model, input,
+                        request_info: RequestInfo) -> <span class="kw">None</span>:
+    loop = asyncio.<span class="fn">get_event_loop</span>()
+    result = <span class="kw">await</span> loop.<span class="fn">run_in_executor</span>(<span class="kw">None</span>, predict,
+                                          vectorizer, model, input)
+    request_info.output_len = result[<span class="nu">0</span>]   <span class="cm"># scheduler reads L_up_hat from here on next tick</span>
+</code></pre>
+
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
   <span class="i18n"
-    data-en="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/prediction.py' target='_blank'><code>jitserve/request_analyzer/prediction.py</code></a> — the function <code>predict()</code> at line 19 is the literal QRF call that materializes $\hat L_{up}$, invoking <code>model.predict(..., quantiles=[0.95])</code> on the loaded forest model. <code>async_predict()</code> at line 25 wraps that call in an asyncio executor and writes the resulting upper bound back into <code>RequestInfo.output_len</code>, where the scheduler reads it on the next tick. The QRF model and vectorizer are loaded from <code>assets/qrf/</code> at server startup."
-    data-zh="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/prediction.py' target='_blank'><code>jitserve/request_analyzer/prediction.py</code></a>——第 19 行的 <code>predict()</code> 函式即為產生 $\hat L_{up}$ 的 QRF 呼叫，其於已載入的 forest model 上呼叫 <code>model.predict(..., quantiles=[0.95])</code>。第 25 行的 <code>async_predict()</code> 將該呼叫包入 asyncio executor，並把所得上界寫回 <code>RequestInfo.output_len</code>；排程器於下一個 tick 由此處讀取。QRF 模型與 vectorizer 於伺服器啟動時自 <code>assets/qrf/</code> 載入。">
-  <a href="https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/prediction.py" target="_blank"><code>jitserve/request_analyzer/prediction.py</code></a> — the function <code>predict()</code> at line 19 is the literal QRF call that materializes $\hat L_{up}$, invoking <code>model.predict(..., quantiles=[0.95])</code> on the loaded forest model. <code>async_predict()</code> at line 25 wraps that call in an asyncio executor and writes the resulting upper bound back into <code>RequestInfo.output_len</code>, where the scheduler reads it on the next tick. The QRF model and vectorizer are loaded from <code>assets/qrf/</code> at server startup.
+    data-en="The single line that materialises the upper bound is the <code>quantiles=[0.95]</code> argument passed to <code>model.predict()</code>; everything else in this file is plumbing — async dispatch, model loading from <code>assets/qrf/</code>, and a TCP socket server for cases where the QRF runs in a separate process. The output is written into <code>RequestInfo.output_len</code>, which the scheduler consults on the next tick when it computes $b_{min}$."
+    data-zh="產生上界的關鍵僅一行——傳入 <code>model.predict()</code> 的 <code>quantiles=[0.95]</code> 參數；本檔案其餘部分皆為周邊管線：非同步分派、由 <code>assets/qrf/</code> 載入模型、以及 QRF 執行於獨立行程時所需的 TCP socket 伺服器。輸出寫入 <code>RequestInfo.output_len</code>，排程器於下一個 tick 由此計算 $b_{min}$。">
+  The single line that materialises the upper bound is the <code>quantiles=[0.95]</code> argument passed to <code>model.predict()</code>; everything else in this file is plumbing — async dispatch, model loading from <code>assets/qrf/</code>, and a TCP socket server for cases where the QRF runs in a separate process. The output is written into <code>RequestInfo.output_len</code>, which the scheduler consults on the next tick when it computes $b_{min}$.
   </span>
-</div>
+</p>
 
 <h4><span class="i18n" data-en="How compound requests are handled" data-zh="複合請求如何處理">How compound requests are handled</span></h4>
 
@@ -761,14 +780,45 @@ Rather than predicting the expected response length and treating that estimate a
 A compound request is not a single LLM call but a graph of LLM and tool invocations linked by data dependencies, of which only a prefix has executed at the moment a scheduling decision must be made. Per-call length prediction is therefore not the binding constraint; the binding constraint is whether the sum of costs across all remaining stages will fit within the program-level deadline. JITServe addresses this by maintaining a database of historical (graph pattern, observed runtime) pairs, indexed by locality-sensitive hashing for fast retrieval. At every tick, the partial execution graph of each in-progress compound request is matched against the historical record. The match returns two values: the predicted cost of the immediately next stage, and the predicted aggregate cost of all the stages that remain. The first informs $\hat L_{up}$ for the current call. The second is subtracted from the program-level deadline to produce the time budget actually available to the current stage, which is the quantity that ultimately enters $b_{min}$. Without this aggregate prediction, a per-call length bound would tell the scheduler nothing about whether the program as a whole will meet its deadline.
 </span></p>
 
-<div class="note" style="font-size:.88rem">
-  <strong><span class="i18n" data-en="In the reference implementation:" data-zh="於參考實作中：">In the reference implementation:</span></strong>
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:1rem;margin-bottom:.4rem">
+  <strong><code>jitserve/request_analyzer/graph_context.py</code></strong>
+  &middot; <span class="i18n" data-en="the entry point GMAX calls each tick to obtain $\Delta t$ for a compound stage" data-zh="GMAX 於每 tick 為複合請求取得 $\Delta t$ 的進入點">the entry point GMAX calls each tick to obtain $\Delta t$ for a compound stage</span>
+</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">calculate_stage_ratio</span>(<span class="kw">self</span>, num_stages, requests_per_stage, prompt,
+                          collection_id, *, is_deepresearch=<span class="kw">False</span>,
+                          stage_id=<span class="nu">0</span>, accumulate_stage_ratio=<span class="nu">0.0</span>):
+    <span class="kw">if</span> <span class="kw">self</span>.use_total_deadline:
+        <span class="kw">return</span> <span class="nu">1.0</span>                                <span class="cm"># whole program budget for this stage</span>
+    default_ratio = <span class="kw">self</span>.<span class="fn">_default_ratio</span>(is_deepresearch, stage_id)
+    <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"none"</span>:
+        <span class="kw">return</span> default_ratio                          <span class="cm"># no historical match used</span>
+    <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"static"</span>:
+        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_static_ratio</span>(...)                <span class="cm"># match once at stage 0, reuse</span>
+    <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"online"</span>:
+        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_online_ratio</span>(...)                <span class="cm"># re-match every stage</span>
+    <span class="kw">return</span> default_ratio
+
+<span class="kw">def</span> <span class="fn">_online_ratio</span>(<span class="kw">self</span>, ..., is_deepresearch, stage_id):
+    deepresearch_structure = <span class="kw">self</span>.collection_deepresearch_unfinished_dict[collection_id]
+    unfinished_graph = deepresearch_structure.<span class="fn">convert_to_unfinished_graph</span>(
+        <span class="kw">self</span>.<span class="fn">_encode_prompt_len</span>(prompt), <span class="kw">None</span>)
+    best_match = <span class="kw">self</span>.dynamic_clustering.<span class="fn">find_best_match</span>(unfinished_graph)   <span class="cm"># LSH retrieval</span>
+    <span class="kw">if</span> best_match <span class="kw">and</span> best_match.times <span class="kw">and</span> stage_id &lt; <span class="fn">len</span>(best_match.times):
+        ratio_observed = <span class="fn">sum</span>(best_match.times[:stage_id]) / <span class="fn">sum</span>(best_match.times)
+        ratio_default  = <span class="fn">sum</span>(Default_DeepResearch_Requests_Pattern[:stage_id]) / <span class="fn">sum</span>(
+                          Default_DeepResearch_Requests_Pattern)
+        <span class="kw">return</span> <span class="fn">max</span>(ratio_observed, ratio_default)   <span class="cm"># conservative: take the larger fraction</span>
+    ...
+</code></pre>
+
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
   <span class="i18n"
-    data-en="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/graph_context.py' target='_blank'><code>jitserve/request_analyzer/graph_context.py</code></a> — the entry point GMAX calls each scheduling tick is <code>GraphMatchContext.calculate_stage_ratio()</code> at line 77, which returns the fraction of the program-level budget attributable to the current stage. Internally it dispatches on a <code>graph_matching_mode</code> setting, with the two interesting cases being <code>_static_ratio()</code> at line 156 and <code>_online_ratio()</code> at line 191; both invoke <code>dynamic_clustering.find_best_match()</code> on the partial execution graph (the LSH retriever lives in <code>similarity.py</code>). The historical (graph pattern, runtime) database is incrementally extended by <code>track_collection_completion()</code> at line 109, which converts a finished compound program to a <code>Graph</code> object and registers it with <code>DynamicClustering</code>."
-    data-zh="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/graph_context.py' target='_blank'><code>jitserve/request_analyzer/graph_context.py</code></a>——GMAX 於每一個排程 tick 呼叫的進入點為第 77 行的 <code>GraphMatchContext.calculate_stage_ratio()</code>，其返回值為當前階段對程式級預算的占比。內部依 <code>graph_matching_mode</code> 設定分派；兩個值得注意的分支為第 156 行的 <code>_static_ratio()</code> 與第 191 行的 <code>_online_ratio()</code>，皆會在部分執行圖上呼叫 <code>dynamic_clustering.find_best_match()</code>（LSH 檢索器位於 <code>similarity.py</code>）。歷史（graph 樣式, 執行時間）資料庫由第 109 行的 <code>track_collection_completion()</code> 漸進擴增——複合程式完成後轉為 <code>Graph</code> 物件並登記至 <code>DynamicClustering</code>。">
-  <a href="https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/request_analyzer/graph_context.py" target="_blank"><code>jitserve/request_analyzer/graph_context.py</code></a> — the entry point GMAX calls each scheduling tick is <code>GraphMatchContext.calculate_stage_ratio()</code> at line 77, which returns the fraction of the program-level budget attributable to the current stage. Internally it dispatches on a <code>graph_matching_mode</code> setting, with the two interesting cases being <code>_static_ratio()</code> at line 156 and <code>_online_ratio()</code> at line 191; both invoke <code>dynamic_clustering.find_best_match()</code> on the partial execution graph (the LSH retriever lives in <code>similarity.py</code>). The historical (graph pattern, runtime) database is incrementally extended by <code>track_collection_completion()</code> at line 109, which converts a finished compound program to a <code>Graph</code> object and registers it with <code>DynamicClustering</code>.
+    data-en="The dispatcher returns the fraction of the program-level deadline that the current stage is allowed to consume; the rest is reserved for the downstream stages whose costs were predicted by <code>find_best_match</code>. The matching modes implement the trade-off described in §4.2: <code>static</code> matches once at admission and reuses the prediction across all stages, while <code>online</code> re-matches at every stage as the partial execution graph grows, at the cost of running an LSH lookup on every tick. The historical database is extended by <code>track_collection_completion()</code> when a compound program finishes, which converts the recorded (graph, runtime) into a <code>Graph</code> object and registers it with <code>DynamicClustering</code>."
+    data-zh="此分派器返回當前階段可使用的程式級 deadline 比例；其餘預算保留給 <code>find_best_match</code> 預測之下游階段。各匹配模式對應於 §4.2 所述之取捨：<code>static</code> 於 admission 時匹配一次並對所有階段重用其預測，<code>online</code> 則於每一階段隨部分執行圖增長重新匹配，代價是每 tick 皆執行一次 LSH 查找。當複合程式完成時，<code>track_collection_completion()</code> 會把所紀錄之（graph, 執行時間）轉為 <code>Graph</code> 物件並登記至 <code>DynamicClustering</code>，以擴增歷史資料庫。">
+  The dispatcher returns the fraction of the program-level deadline that the current stage is allowed to consume; the rest is reserved for the downstream stages whose costs were predicted by <code>find_best_match</code>. The matching modes implement the trade-off described in §4.2: <code>static</code> matches once at admission and reuses the prediction across all stages, while <code>online</code> re-matches at every stage as the partial execution graph grows, at the cost of running an LSH lookup on every tick. The historical database is extended by <code>track_collection_completion()</code> when a compound program finishes, which converts the recorded (graph, runtime) into a <code>Graph</code> object and registers it with <code>DynamicClustering</code>.
   </span>
-</div>
+</p>
 
 <h4><span class="i18n" data-en="The meaning of the minimum serving bandwidth $b_{min}$" data-zh="最低服務頻寬 $b_{min}$ 的意義">The meaning of the minimum serving bandwidth $b_{min}$</span></h4>
 
@@ -794,14 +844,72 @@ The interpretation of $\Delta t$ is what differs across the three SLO classes, a
 $b_{min}$ is a rate target rather than an absolute reservation. GMAX guarantees that every active request whose deadline remains reachable receives at least $b_{min}$ during the current tick, but capacity that exceeds the sum of all such reservations is then redistributed to whichever requests yield the largest marginal goodput. Because $L_{done}$ grows and $\Delta t$ shrinks each tick, $b_{min}$ is recomputed continuously, and a request that began with a comfortable bandwidth requirement may rise to demand more capacity later if its actual response is approaching the QRF upper bound. This per-tick recomputation is the precise sense in which scheduling decisions are made just-in-time rather than at admission time.
 </span></p>
 
-<div class="note" style="font-size:.88rem">
-  <strong><span class="i18n" data-en="In the reference implementation:" data-zh="於參考實作中：">In the reference implementation:</span></strong>
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:1rem;margin-bottom:.4rem">
+  <strong><code>jitserve/scheduler/policy.py</code></strong>
+  &middot; <span class="i18n" data-en="$b_{min}$ as a finish-time predictor combined with a deadline-ratio penalty" data-zh="以「完成時間預測 × deadline 比值懲罰」表達 $b_{min}$">$b_{min}$ as a finish-time predictor combined with a deadline-ratio penalty</span>
+</p>
+
+<pre><code><span class="kw">class</span> <span class="fn">SLOPolicy</span>(BasePolicy):
+
+    <span class="kw">def</span> <span class="fn">reward_estimation</span>(<span class="kw">self</span>, seq_group):
+        cur_time           = time.<span class="fn">time</span>()
+        decode_len         = seq_group.seqs[<span class="nu">0</span>].<span class="fn">get_decode_len</span>()
+        predict_output_len = seq_group.request_info.output_len     <span class="cm"># L_up_hat from QRF</span>
+        remain_len         = predict_output_len - decode_len       <span class="cm"># L_up - L_done</span>
+
+        unit_time   = <span class="kw">self</span>.<span class="fn">_get_interval_time</span>()
+        remain_time = <span class="kw">self</span>.<span class="fn">_compute_remain_time</span>(seq_group, remain_len, unit_time)
+        serve_time  = cur_time - seq_group.arrival_time
+
+        <span class="cm"># reward weighted by (deadline / predict_finish)^penalty_factor</span>
+        <span class="kw">if</span> seq_group.request_type == RequestType.LATENCY:
+            reward = <span class="kw">self</span>.<span class="fn">_estimate_latency_reward</span>(...)
+        <span class="kw">elif</span> seq_group.request_type <span class="kw">in</span> (RequestType.THROUGHPUT, RequestType.COLLECTIVE):
+            reward = <span class="kw">self</span>.<span class="fn">_estimate_throughput_reward</span>(...)
+        <span class="kw">return</span> reward, remain_time
+
+    <span class="kw">def</span> <span class="fn">_compute_remain_time</span>(<span class="kw">self</span>, seq_group, remain_len, unit_time):
+        <span class="kw">if</span> seq_group.request_type == RequestType.COLLECTIVE:
+            <span class="kw">return</span> <span class="fn">max</span>(<span class="kw">self</span>.<span class="fn">allocation_control</span>(seq_group), <span class="nu">1e-6</span>)   <span class="cm"># compound: subtract downstream</span>
+        <span class="kw">return</span> <span class="fn">max</span>(unit_time * remain_len, <span class="nu">1e-6</span>)                  <span class="cm"># single-call delta_t</span>
+
+    <span class="kw">def</span> <span class="fn">get_priority</span>(<span class="kw">self</span>, seq_group):
+        reward, remain_time = <span class="kw">self</span>.<span class="fn">reward_estimation</span>(seq_group)
+        density = reward / remain_time          <span class="cm"># marginal goodput per unit delta_t</span>
+        <span class="kw">return</span> (-density, remain_time)
+</code></pre>
+
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
   <span class="i18n"
-    data-en="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/scheduler/policy.py' target='_blank'><code>jitserve/scheduler/policy.py</code></a> — the $b_{min}$ formula appears in mathematically equivalent but numerically different form. Rather than computing tokens-per-second directly, the code expresses the same just-in-time semantics as a finish-time predictor combined with a deadline ratio. <code>SLOPolicy._compute_remain_time()</code> at line 250 sets the per-class $\Delta t$ (calling <code>allocation_control()</code> at line 239 for compound requests, so that downstream-stage costs are subtracted as described above). <code>SLOPolicy.reward_estimation()</code> at line 286 computes per-tick reward with a <code>(deadline / predict_finish)</code> ratio raised to <code>penalty_factor</code>; <code>get_priority()</code> at line 312 then divides reward by remain_time to derive the GMAX scheduling priority. Per-tick service-gain accounting that feeds the next-tick reward — the TTFT/TBT-aware bookkeeping behind the marginal-goodput function of §6.3 — lives in <a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/slo_tracker/slo_tracker.py' target='_blank'><code>jitserve/slo_tracker/slo_tracker.py</code></a>, with <code>_desired_decode_len()</code> at line 110 implementing the per-token rate target derived from <code>TBT_constraint</code>."
-    data-zh="<a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/scheduler/policy.py' target='_blank'><code>jitserve/scheduler/policy.py</code></a>——上述 $b_{min}$ 公式於程式中以數學等價但數值表達不同的形式呈現：程式並未直接計算 tokens-per-second，而是以「完成時間預測搭配 deadline 比值」表達相同的 just-in-time 語意。第 250 行的 <code>SLOPolicy._compute_remain_time()</code> 設定各類別之 $\Delta t$（複合請求另呼叫第 239 行的 <code>allocation_control()</code>，使下游階段成本如前述被扣除）。第 286 行的 <code>SLOPolicy.reward_estimation()</code> 計算每 tick 的 reward，其權重為 <code>(deadline / predict_finish)</code> 取 <code>penalty_factor</code> 次方；第 312 行的 <code>get_priority()</code> 再以 reward 除以 remain_time 得出 GMAX 排程優先級。以 TTFT/TBT 為基礎、提供 §6.3 邊際 goodput 函數所需資訊的每 tick service-gain 記帳，位於 <a href='https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/slo_tracker/slo_tracker.py' target='_blank'><code>jitserve/slo_tracker/slo_tracker.py</code></a>，第 110 行的 <code>_desired_decode_len()</code> 由 <code>TBT_constraint</code> 衍生 per-token 速率目標。">
-  <a href="https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/scheduler/policy.py" target="_blank"><code>jitserve/scheduler/policy.py</code></a> — the $b_{min}$ formula appears in mathematically equivalent but numerically different form. Rather than computing tokens-per-second directly, the code expresses the same just-in-time semantics as a finish-time predictor combined with a deadline ratio. <code>SLOPolicy._compute_remain_time()</code> at line 250 sets the per-class $\Delta t$ (calling <code>allocation_control()</code> at line 239 for compound requests, so that downstream-stage costs are subtracted as described above). <code>SLOPolicy.reward_estimation()</code> at line 286 computes per-tick reward with a <code>(deadline / predict_finish)</code> ratio raised to <code>penalty_factor</code>; <code>get_priority()</code> at line 312 then divides reward by remain_time to derive the GMAX scheduling priority. Per-tick service-gain accounting that feeds the next-tick reward — the TTFT/TBT-aware bookkeeping behind the marginal-goodput function of §6.3 — lives in <a href="https://github.com/UIUC-MLSys/JITServe/blob/main/jitserve/slo_tracker/slo_tracker.py" target="_blank"><code>jitserve/slo_tracker/slo_tracker.py</code></a>, with <code>_desired_decode_len()</code> at line 110 implementing the per-token rate target derived from <code>TBT_constraint</code>.
+    data-en="The code does not store $b_{min}$ as an explicit variable; instead it computes the equivalent ratio in two halves. <code>remain_len = L_up_hat &minus; L_done</code> is the numerator of equation (1) above, and <code>remain_time</code> from <code>_compute_remain_time</code> is its denominator. <code>get_priority</code> divides reward by <code>remain_time</code>, so a request whose remaining time is shrinking — that is, whose $b_{min}$ is rising — receives a proportionally larger priority on the next tick. <code>_compute_remain_time</code> is also where the per-class behaviour of $\Delta t$ enters: for compound (COLLECTIVE) requests the call to <code>allocation_control()</code> subtracts the predicted aggregate cost of the downstream stages, exactly the operation described in §4.2."
+    data-zh="程式中並未明確儲存 $b_{min}$，而是將等價比值拆為兩半計算。<code>remain_len = L_up_hat &minus; L_done</code> 為公式 (1) 的分子，<code>_compute_remain_time</code> 所返回的 <code>remain_time</code> 則為其分母。<code>get_priority</code> 以 reward 除以 <code>remain_time</code>，因此一個剩餘時間縮減中——亦即 $b_{min}$ 上升中——的請求，下一 tick 將取得相應更大的優先級。<code>_compute_remain_time</code> 也是各類別 $\Delta t$ 行為差異匯入之處：對複合（COLLECTIVE）請求，<code>allocation_control()</code> 會扣除下游階段的預測累積成本，恰即 §4.2 所述操作。">
+  The code does not store $b_{min}$ as an explicit variable; instead it computes the equivalent ratio in two halves. <code>remain_len = L_up_hat &minus; L_done</code> is the numerator of equation (1) above, and <code>remain_time</code> from <code>_compute_remain_time</code> is its denominator. <code>get_priority</code> divides reward by <code>remain_time</code>, so a request whose remaining time is shrinking — that is, whose $b_{min}$ is rising — receives a proportionally larger priority on the next tick. <code>_compute_remain_time</code> is also where the per-class behaviour of $\Delta t$ enters: for compound (COLLECTIVE) requests the call to <code>allocation_control()</code> subtracts the predicted aggregate cost of the downstream stages, exactly the operation described in §4.2.
   </span>
-</div>
+</p>
+
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:1rem;margin-bottom:.4rem">
+  <strong><code>jitserve/slo_tracker/slo_tracker.py</code></strong>
+  &middot; <span class="i18n" data-en="the per-token rate target that the latency-class $b_{min}$ converges to" data-zh="延遲類 $b_{min}$ 所收斂之 per-token 速率目標">the per-token rate target that the latency-class $b_{min}$ converges to</span>
+</p>
+
+<pre><code><span class="kw">def</span> <span class="fn">_desired_decode_len</span>(<span class="kw">self</span>, seq_group, cur_time):
+    metrics = seq_group.concord_metrics
+    <span class="kw">if</span> metrics.TTFT <span class="kw">is</span> <span class="kw">None</span>:
+        <span class="kw">return</span> <span class="nu">0.0</span>
+    req_ttft = <span class="fn">min</span>(metrics.TTFT, seq_group.TTFT_constraint)
+    <span class="kw">return</span> (cur_time - req_ttft -
+            seq_group.arrival_time) / seq_group.TBT_constraint
+    <span class="cm"># tokens the request "should" have produced by now,</span>
+    <span class="cm"># given its TBT_constraint = the per-token rate target the latency-class b_min represents</span>
+</code></pre>
+
+<p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
+  <span class="i18n"
+    data-en="For latency-sensitive requests, $b_{min}$ is most naturally read as the per-token rate target set by <code>TBT_constraint</code>. <code>_desired_decode_len</code> implements this target directly: given the elapsed time since first token, divided by <code>TBT_constraint</code>, it returns the number of decoded tokens the request should have produced by now in order to remain on its SLO trajectory. The latency-reward path in <code>SLOPolicy</code> compares this target with the actual <code>output_len</code> and penalises any shortfall, which is the per-tick mechanism by which a falling-behind latency request is escalated in priority."
+    data-zh="對延遲敏感請求，$b_{min}$ 最自然的詮釋即為 <code>TBT_constraint</code> 所設之 per-token 速率目標。<code>_desired_decode_len</code> 直接實作此目標：給定首 token 後的經過時間，除以 <code>TBT_constraint</code>，即得請求為維持其 SLO 軌跡，至此刻應已產生的 token 數。<code>SLOPolicy</code> 中的延遲類 reward 計算路徑將此目標與實際 <code>output_len</code> 比較並對落後者懲罰，正是延遲類請求在每 tick 內被提升優先級的具體機制。">
+  For latency-sensitive requests, $b_{min}$ is most naturally read as the per-token rate target set by <code>TBT_constraint</code>. <code>_desired_decode_len</code> implements this target directly: given the elapsed time since first token, divided by <code>TBT_constraint</code>, it returns the number of decoded tokens the request should have produced by now in order to remain on its SLO trajectory. The latency-reward path in <code>SLOPolicy</code> compares this target with the actual <code>output_len</code> and penalises any shortfall, which is the per-tick mechanism by which a falling-behind latency request is escalated in priority.
+  </span>
+</p>
 
 <h3><span class="i18n" data-en="4.3 What lives where" data-zh="4.3 模組分工">4.3 What lives where</span></h3>
 
