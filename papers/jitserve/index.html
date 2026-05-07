@@ -675,17 +675,28 @@ Rather than predicting the expected response length and treating that estimate a
 
 <pre><code><span class="kw">def</span> <span class="fn">predict</span>(vectorizer, model, input):
     X_test_vec = vectorizer.<span class="fn">transform</span>(input)
-    y_pred_i: np.array = model.<span class="fn">predict</span>(
-        X_test_vec.<span class="fn">toarray</span>(),
-        quantiles=[<span class="nu">0.95</span>])    <span class="cm"># P95 of the conditional length distribution = L_up_hat</span>
+    <span class="cm"># KEY DESIGN: ask for the P95 quantile, not the mean. The two error</span>
+    <span class="cm"># directions are asymmetric -- underestimating L_up causes insufficient</span>
+    <span class="cm"># bandwidth reservation and an irrecoverable SLO miss; overestimating</span>
+    <span class="cm"># only produces a brief over-reservation that the scheduler reclaims</span>
+    <span class="cm"># on the next tick. A high quantile is therefore strictly preferable</span>
+    <span class="cm"># even when the mean would be more "accurate" on average.</span>
+    y_pred_i: np.array = model.<span class="fn">predict</span>(X_test_vec.<span class="fn">toarray</span>(), quantiles=[<span class="nu">0.95</span>])
     <span class="kw">return</span> [<span class="fn">int</span>(element) <span class="kw">for</span> element <span class="kw">in</span> y_pred_i]
 
-<span class="kw">async def</span> <span class="fn">async_predict</span>(vectorizer, model, input,
-                        request_info: RequestInfo) -> <span class="kw">None</span>:
+
+<span class="kw">async def</span> <span class="fn">async_predict</span>(vectorizer, model, input, request_info: RequestInfo) -> <span class="kw">None</span>:
+    <span class="cm"># KEY DESIGN: QRF runs in single-digit ms but is still wrapped in an</span>
+    <span class="cm"># asyncio executor so it can never block the scheduler tick. Compare</span>
+    <span class="cm"># with using a Llama-3-class LLM as a length oracle, which would</span>
+    <span class="cm"># itself be slower than just decoding the response -- the cost of</span>
+    <span class="cm"># being right would equal the cost of being wrong. QRF is cheap</span>
+    <span class="cm"># enough that the wrapping is precaution, not necessity.</span>
     loop = asyncio.<span class="fn">get_event_loop</span>()
-    result = <span class="kw">await</span> loop.<span class="fn">run_in_executor</span>(<span class="kw">None</span>, predict,
-                                          vectorizer, model, input)
-    request_info.output_len = result[<span class="nu">0</span>]   <span class="cm"># scheduler reads L_up_hat from here on next tick</span>
+    result = <span class="kw">await</span> loop.<span class="fn">run_in_executor</span>(<span class="kw">None</span>, predict, vectorizer, model, input)
+    <span class="cm"># The scheduler reads L_up_hat from RequestInfo.output_len on the next</span>
+    <span class="cm"># tick. This is the only place L_up enters shared state.</span>
+    request_info.output_len = result[<span class="nu">0</span>]
 </code></pre>
 
 <p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
@@ -712,27 +723,52 @@ A compound request is not a single LLM call but a graph of LLM and tool invocati
 <pre><code><span class="kw">def</span> <span class="fn">calculate_stage_ratio</span>(<span class="kw">self</span>, num_stages, requests_per_stage, prompt,
                           collection_id, *, is_deepresearch=<span class="kw">False</span>,
                           stage_id=<span class="nu">0</span>, accumulate_stage_ratio=<span class="nu">0.0</span>):
+    <span class="cm"># KEY DESIGN: this is the entry point GMAX calls every tick to</span>
+    <span class="cm"># learn what FRACTION of the program-level deadline the current</span>
+    <span class="cm"># stage is allowed to consume. Per-call length prediction alone</span>
+    <span class="cm"># does not answer that question; only the aggregate of remaining</span>
+    <span class="cm"># stages does. Everything below trades prediction quality</span>
+    <span class="cm"># against per-tick cost.</span>
     <span class="kw">if</span> <span class="kw">self</span>.use_total_deadline:
-        <span class="kw">return</span> <span class="nu">1.0</span>                                <span class="cm"># whole program budget for this stage</span>
+        <span class="kw">return</span> <span class="nu">1.0</span>   <span class="cm"># degenerate: whole program budget for this stage</span>
+
     default_ratio = <span class="kw">self</span>.<span class="fn">_default_ratio</span>(is_deepresearch, stage_id)
     <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"none"</span>:
-        <span class="kw">return</span> default_ratio                          <span class="cm"># no historical match used</span>
+        <span class="cm"># No historical match -- fall back to a hard-coded prior.</span>
+        <span class="cm"># Cheapest mode, blind to which workflow this actually is.</span>
+        <span class="kw">return</span> default_ratio
     <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"static"</span>:
-        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_static_ratio</span>(...)                <span class="cm"># match once at stage 0, reuse</span>
+        <span class="cm"># KEY DESIGN: match ONCE at admission and reuse the prediction</span>
+        <span class="cm"># across all stages. Cheap (one LSH lookup per program) but</span>
+        <span class="cm"># cannot react if the actual graph diverges from the match.</span>
+        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_static_ratio</span>(...)
     <span class="kw">if</span> <span class="kw">self</span>.graph_matching_mode == <span class="st">"online"</span>:
-        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_online_ratio</span>(...)                <span class="cm"># re-match every stage</span>
+        <span class="cm"># KEY DESIGN: re-match at EVERY stage as the partial graph grows.</span>
+        <span class="cm"># The match becomes more accurate as more of the graph is observed,</span>
+        <span class="cm"># at the cost of one LSH lookup per tick per active compound request.</span>
+        <span class="kw">return</span> <span class="kw">self</span>.<span class="fn">_online_ratio</span>(...)
     <span class="kw">return</span> default_ratio
+
 
 <span class="kw">def</span> <span class="fn">_online_ratio</span>(<span class="kw">self</span>, ..., is_deepresearch, stage_id):
     deepresearch_structure = <span class="kw">self</span>.collection_deepresearch_unfinished_dict[collection_id]
     unfinished_graph = deepresearch_structure.<span class="fn">convert_to_unfinished_graph</span>(
         <span class="kw">self</span>.<span class="fn">_encode_prompt_len</span>(prompt), <span class="kw">None</span>)
-    best_match = <span class="kw">self</span>.dynamic_clustering.<span class="fn">find_best_match</span>(unfinished_graph)   <span class="cm"># LSH retrieval</span>
+    <span class="cm"># LSH retrieval against the historical (graph_pattern, runtime) database.</span>
+    <span class="cm"># Returns the closest finished workflow whose execution graph matches</span>
+    <span class="cm"># the prefix observed so far for this in-progress compound request.</span>
+    best_match = <span class="kw">self</span>.dynamic_clustering.<span class="fn">find_best_match</span>(unfinished_graph)
     <span class="kw">if</span> best_match <span class="kw">and</span> best_match.times <span class="kw">and</span> stage_id &lt; <span class="fn">len</span>(best_match.times):
         ratio_observed = <span class="fn">sum</span>(best_match.times[:stage_id]) / <span class="fn">sum</span>(best_match.times)
         ratio_default  = <span class="fn">sum</span>(Default_DeepResearch_Requests_Pattern[:stage_id]) / <span class="fn">sum</span>(
                           Default_DeepResearch_Requests_Pattern)
-        <span class="kw">return</span> <span class="fn">max</span>(ratio_observed, ratio_default)   <span class="cm"># conservative: take the larger fraction</span>
+        <span class="cm"># KEY DESIGN: take the LARGER of the historical ratio and the</span>
+        <span class="cm"># default prior -- same asymmetry principle as L_up. If the</span>
+        <span class="cm"># historical match underestimates the current stage's cost,</span>
+        <span class="cm"># the fallback prior protects against an irrecoverable miss;</span>
+        <span class="cm"># if the prior under-estimates instead, the historical match</span>
+        <span class="cm"># corrects upward. Always biased toward over-reservation.</span>
+        <span class="kw">return</span> <span class="fn">max</span>(ratio_observed, ratio_default)
     ...
 </code></pre>
 
@@ -777,15 +813,21 @@ $b_{min}$ is a rate target rather than an absolute reservation. GMAX guarantees 
 
     <span class="kw">def</span> <span class="fn">reward_estimation</span>(<span class="kw">self</span>, seq_group):
         cur_time           = time.<span class="fn">time</span>()
-        decode_len         = seq_group.seqs[<span class="nu">0</span>].<span class="fn">get_decode_len</span>()
-        predict_output_len = seq_group.request_info.output_len     <span class="cm"># L_up_hat from QRF</span>
-        remain_len         = predict_output_len - decode_len       <span class="cm"># L_up - L_done</span>
+        decode_len         = seq_group.seqs[<span class="nu">0</span>].<span class="fn">get_decode_len</span>()         <span class="cm"># = L_done</span>
+        predict_output_len = seq_group.request_info.output_len           <span class="cm"># = L_up_hat from QRF</span>
+        <span class="cm"># KEY DESIGN: this is the numerator of paper equation (1):</span>
+        <span class="cm">#     b_min = (L_up_hat - L_done) / delta_t</span>
+        <span class="cm"># remain_len shrinks every tick as decode_len grows; if the actual</span>
+        <span class="cm"># response approaches L_up_hat, remain_len -&gt; 0 and the request</span>
+        <span class="cm"># naturally drops off the priority queue. If the actual response</span>
+        <span class="cm"># OVERSHOOTS L_up_hat, remain_len goes negative -- handled by the</span>
+        <span class="cm"># preemption rule (paper §7.2) which fires when the bound was wrong.</span>
+        remain_len = predict_output_len - decode_len
 
         unit_time   = <span class="kw">self</span>.<span class="fn">_get_interval_time</span>()
         remain_time = <span class="kw">self</span>.<span class="fn">_compute_remain_time</span>(seq_group, remain_len, unit_time)
         serve_time  = cur_time - seq_group.arrival_time
 
-        <span class="cm"># reward weighted by (deadline / predict_finish)^penalty_factor</span>
         <span class="kw">if</span> seq_group.request_type == RequestType.LATENCY:
             reward = <span class="kw">self</span>.<span class="fn">_estimate_latency_reward</span>(...)
         <span class="kw">elif</span> seq_group.request_type <span class="kw">in</span> (RequestType.THROUGHPUT, RequestType.COLLECTIVE):
@@ -793,13 +835,33 @@ $b_{min}$ is a rate target rather than an absolute reservation. GMAX guarantees 
         <span class="kw">return</span> reward, remain_time
 
     <span class="kw">def</span> <span class="fn">_compute_remain_time</span>(<span class="kw">self</span>, seq_group, remain_len, unit_time):
+        <span class="cm"># KEY DESIGN: this is where the per-class delta_t of paper §4.2 enters.</span>
+        <span class="cm"># The same formula b_min = (L_up - L_done) / delta_t is used everywhere;</span>
+        <span class="cm"># only delta_t differs.</span>
         <span class="kw">if</span> seq_group.request_type == RequestType.COLLECTIVE:
-            <span class="kw">return</span> <span class="fn">max</span>(<span class="kw">self</span>.<span class="fn">allocation_control</span>(seq_group), <span class="nu">1e-6</span>)   <span class="cm"># compound: subtract downstream</span>
-        <span class="kw">return</span> <span class="fn">max</span>(unit_time * remain_len, <span class="nu">1e-6</span>)                  <span class="cm"># single-call delta_t</span>
+            <span class="cm"># Compound (multi-call) request: delta_t for the CURRENT call is</span>
+            <span class="cm"># the program-level deadline reduced by the predicted aggregate</span>
+            <span class="cm"># cost of all DOWNSTREAM stages. allocation_control() walks the</span>
+            <span class="cm"># collection's siblings and sums their predicted remaining time;</span>
+            <span class="cm"># what is left is the budget for this stage.</span>
+            <span class="kw">return</span> <span class="fn">max</span>(<span class="kw">self</span>.<span class="fn">allocation_control</span>(seq_group), <span class="nu">1e-6</span>)
+        <span class="cm"># Single-call (latency-sensitive or deadline-sensitive): delta_t is</span>
+        <span class="cm"># local. unit_time is the average scheduler-tick interval, so this</span>
+        <span class="cm"># is "predicted wall-clock to finish remain_len tokens at the</span>
+        <span class="cm"># current scheduling rate" -- a finish-time estimate, equivalent</span>
+        <span class="cm"># to b_min's denominator after a change of variables.</span>
+        <span class="kw">return</span> <span class="fn">max</span>(unit_time * remain_len, <span class="nu">1e-6</span>)
 
     <span class="kw">def</span> <span class="fn">get_priority</span>(<span class="kw">self</span>, seq_group):
         reward, remain_time = <span class="kw">self</span>.<span class="fn">reward_estimation</span>(seq_group)
-        density = reward / remain_time          <span class="cm"># marginal goodput per unit delta_t</span>
+        <span class="cm"># KEY DESIGN: density = reward / remain_time = MARGINAL GOODPUT</span>
+        <span class="cm"># PER UNIT TIME. This is the operational form of b_min from</span>
+        <span class="cm"># paper §4.2 -- a request whose remain_time is shrinking</span>
+        <span class="cm"># (whose b_min is therefore rising) gets a proportionally</span>
+        <span class="cm"># larger priority next tick. Negated because Python's heap</span>
+        <span class="cm"># is min-heap; the request with the LARGEST density floats</span>
+        <span class="cm"># to the front of the GMAX priority queue.</span>
+        density = reward / remain_time
         <span class="kw">return</span> (-density, remain_time)
 </code></pre>
 
@@ -817,14 +879,41 @@ $b_{min}$ is a rate target rather than an absolute reservation. GMAX guarantees 
 </p>
 
 <pre><code><span class="kw">def</span> <span class="fn">_desired_decode_len</span>(<span class="kw">self</span>, seq_group, cur_time):
+    <span class="cm"># KEY DESIGN: this IS the latency-class b_min, expressed inversely.</span>
+    <span class="cm"># Instead of "tokens per second I must produce", we ask "how many</span>
+    <span class="cm"># tokens should I have produced by now to honour the TBT_constraint</span>
+    <span class="cm"># rate target?" The denominator is TBT_constraint = the contracted</span>
+    <span class="cm"># time per token; the numerator is elapsed time since first token.</span>
+    <span class="cm"># _latency_service_gain compares this with the actual output_len</span>
+    <span class="cm"># below and penalises any shortfall, which is the per-tick</span>
+    <span class="cm"># mechanism that escalates a falling-behind request in priority.</span>
     metrics = seq_group.concord_metrics
     <span class="kw">if</span> metrics.TTFT <span class="kw">is</span> <span class="kw">None</span>:
         <span class="kw">return</span> <span class="nu">0.0</span>
     req_ttft = <span class="fn">min</span>(metrics.TTFT, seq_group.TTFT_constraint)
     <span class="kw">return</span> (cur_time - req_ttft -
             seq_group.arrival_time) / seq_group.TBT_constraint
-    <span class="cm"># tokens the request "should" have produced by now,</span>
-    <span class="cm"># given its TBT_constraint = the per-token rate target the latency-class b_min represents</span>
+
+
+<span class="kw">def</span> <span class="fn">_latency_service_gain</span>(<span class="kw">self</span>, seq_group, cur_time, ...):
+    ...
+    desire_decode_len = <span class="kw">self</span>.<span class="fn">_desired_decode_len</span>(seq_group, cur_time)
+    <span class="kw">if</span> delta_output &gt; <span class="nu">0</span>:
+        <span class="kw">if</span> desire_decode_len &lt;= <span class="nu">0</span>:
+            service += delta_output
+        <span class="kw">else</span>:
+            <span class="cm"># decode_ratio &lt; 1 means the request is BEHIND its rate target.</span>
+            decode_ratio = <span class="kw">self</span>.<span class="fn">_clamp_ratio</span>(output_len, desire_decode_len)
+            <span class="cm"># KEY DESIGN: raise to penalty_factor. A small lag in decode</span>
+            <span class="cm"># rate produces a small reduction in service gain, but a</span>
+            <span class="cm"># large lag produces a much larger reduction -- next-tick</span>
+            <span class="cm"># density (= reward / remain_time) drops disproportionately,</span>
+            <span class="cm"># so the request's GMAX priority falls. This is what makes</span>
+            <span class="cm"># the system shed irrecoverable requests gracefully under</span>
+            <span class="cm"># load (paper §10.4, Fig 15) instead of letting one</span>
+            <span class="cm"># struggling request pull everyone else down.</span>
+            service += decode_ratio**<span class="kw">self</span>.penalty_factor * delta_output * RequestPhaseWeight.DECODE.value
+    <span class="kw">return</span> service
 </code></pre>
 
 <p style="font-size:.85rem;color:#8fa4c0;margin-top:.4rem">
