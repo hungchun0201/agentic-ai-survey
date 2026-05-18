@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>vLLM V1 KV Connector &amp; SimpleCPUOffload - Deep Dive</title>
+<title>vLLM V1 KV Connector &amp; CPU Offload Backend - Deep Dive</title>
 <style>
 /* ===== RESET & BASE ===== */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -43,7 +43,7 @@ h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px
 .section h2{font-size:1.85rem;margin-bottom:1rem}
 h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
 h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
-/* Long Python identifiers (SimpleCPUOffloadScheduler.__init__, get_num_new_matched_tokens) wrap on narrow viewports. overflow-wrap:anywhere only breaks when needed to prevent overflow — avoid break-all which mangles table cells into one-char columns. */
+/* Long Python identifiers (OffloadingConnectorScheduler, get_num_new_matched_tokens) wrap on narrow viewports. overflow-wrap:anywhere only breaks when needed to prevent overflow — avoid break-all which mangles table cells into one-char columns. */
 h1,h2,h3,h4,h5{overflow-wrap:anywhere;word-break:normal}
 p,li,td{overflow-wrap:anywhere;word-break:normal}
 .ds-box h5,.role-col h4,.card h4,.mode-col h4,.colflow .box h5,.step-item h4{overflow-wrap:anywhere;word-break:normal}
@@ -270,11 +270,11 @@ footer a{color:#6ec6ff;text-decoration:none}
 <!-- ==================== HERO ==================== -->
 <div class="hero">
   <div class="badge"><span class="i18n" data-en="vLLM V1 Internals (v0.19.x) - Source Code Deep Dive" data-zh="vLLM V1 內部機制 (v0.19.x) - 原始碼深入剖析">vLLM V1 Internals (v0.19.x) - Source Code Deep Dive</span></div>
-  <h1><span class="i18n" data-en="The <span class=&quot;accent&quot;>KV Connector</span> &amp; SimpleCPUOffload" data-zh="<span class=&quot;accent&quot;>KV 連接器</span>與 SimpleCPUOffload">The <span class="accent">KV Connector</span> &amp; SimpleCPUOffload</span></h1>
+  <h1><span class="i18n" data-en="The <span class=&quot;accent&quot;>KV Connector</span> &amp; CPU Offload Backend" data-zh="<span class=&quot;accent&quot;>KV 連接器</span>與 CPU Offload 後端">The <span class="accent">KV Connector</span> &amp; CPU Offload Backend</span></h1>
   <p class="subtitle">
-    <span class="i18n" data-en="How vLLM V1 plugs in remote KV stores, disaggregated prefill hosts, and DRAM offload tiers through a single scheduler/worker split interface -- plus a line-by-line walk of PR #37160's 1,354-line SimpleCPUOffloadConnector: cursor-driven lazy offload, eager per-request scan, async CUDA streams, and TP-aware store accounting." data-zh="vLLM V1 如何透過一個「scheduler/worker 對半切」的介面把遠端 KV store、prefill/decode 解耦主機、以及 DRAM offload 層接進排程迴圈 -- 並逐行走讀 PR #37160 中 1,354 行的 SimpleCPUOffloadConnector：游標驅動的 lazy offload、以請求為單位的 eager 掃描、非同步 CUDA stream、以及 TP-aware 的 store 帳本。">How vLLM V1 plugs in remote KV stores, disaggregated prefill hosts, and DRAM offload tiers through a single scheduler/worker split interface -- plus a line-by-line walk of PR #37160's 1,354-line SimpleCPUOffloadConnector: cursor-driven lazy offload, eager per-request scan, async CUDA streams, and TP-aware store accounting.</span>
+    <span class="i18n" data-en="How vLLM V1 plugs in remote KV stores, disaggregated prefill hosts, and DRAM offload tiers through a single scheduler/worker split interface -- plus a deep dive of the modern OffloadingConnector and its vllm/v1/kv_offload backend: the connector/spec layer split, a pluggable LRU/ARC eviction policy, reuse-frequency gating, deferred offload, and the explicit-DMA KV transfer path." data-zh="vLLM V1 如何透過一個「scheduler/worker 對半切」的介面把遠端 KV store、prefill/decode 解耦主機、以及 DRAM offload 層接進排程迴圈 -- 並深入走讀現代的 OffloadingConnector 及其 vllm/v1/kv_offload 後端：connector/spec 分層、可插拔的 LRU/ARC 淘汰策略、重用頻率門檻、延遲 offload、以及顯式 DMA 的 KV 傳輸路徑。">How vLLM V1 plugs in remote KV stores, disaggregated prefill hosts, and DRAM offload tiers through a single scheduler/worker split interface -- plus a deep dive of the modern OffloadingConnector and its vllm/v1/kv_offload backend: the connector/spec layer split, a pluggable LRU/ARC eviction policy, reuse-frequency gating, deferred offload, and the explicit-DMA KV transfer path.</span>
   </p>
-  <div class="file-ref">vllm/distributed/kv_transfer/kv_connector/v1/{base,factory,simple_cpu_offload_connector}.py<br>vllm/v1/simple_kv_offload/{manager,worker,metadata,cuda_mem_ops,copy_backend}.py</div>
+  <div class="file-ref">vllm/distributed/kv_transfer/kv_connector/v1/{base,offloading_connector}.py + offloading/{scheduler,worker}.py<br>vllm/v1/kv_offload/{abstract,spec,factory,reuse_manager}.py + cpu/{spec,manager,policies}.py + worker/{worker,cpu_gpu}.py</div>
 </div>
 
 <div class="container">
@@ -330,18 +330,13 @@ footer a{color:#6ec6ff;text-decoration:none}
   <p><span class="i18n" data-en="The factory (<code class=&quot;inline-code&quot;>KVConnectorFactory.create_connector</code>) is called <strong>twice</strong> -- once with <code class=&quot;inline-code&quot;>role=SCHEDULER</code> in the scheduler process, once with <code class=&quot;inline-code&quot;>role=WORKER</code> in every worker process. Both sides see the same connector class, but the constructor branches and only instantiates the half that is needed." data-zh="Factory（<code class=&quot;inline-code&quot;>KVConnectorFactory.create_connector</code>）會被呼叫<strong>兩次</strong>——一次在排程器程序以 <code class=&quot;inline-code&quot;>role=SCHEDULER</code>，一次在每個 worker 程序以 <code class=&quot;inline-code&quot;>role=WORKER</code>。兩邊看到同一個 connector class，但建構子會 branch，只實體化需要的那一半。">The factory (<code class="inline-code">KVConnectorFactory.create_connector</code>) is called <strong>twice</strong> -- once with <code class="inline-code">role=SCHEDULER</code> in the scheduler process, once with <code class="inline-code">role=WORKER</code> in every worker process. Both sides see the same connector class, but the constructor branches and only instantiates the half that is needed.</span></p>
 
 <pre>
-<span class="cm"># vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py:98-108</span>
+<span class="cm"># vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py</span>
+spec = OffloadingSpecFactory.<span class="fn">create_spec</span>(vllm_config, kv_cache_config)
+
 <span class="kw">if</span> role == KVConnectorRole.SCHEDULER:
-    <span class="va">self</span>.scheduler_manager = SimpleCPUOffloadScheduler(
-        vllm_config,
-        kv_cache_config,
-        cpu_capacity_per_rank,
-        lazy_offload=lazy_offload,
-    )
+    <span class="va">self</span>.connector_scheduler = <span class="fn">OffloadingConnectorScheduler</span>(spec)
 <span class="kw">elif</span> role == KVConnectorRole.WORKER:
-    <span class="va">self</span>.worker_handler = SimpleCPUOffloadWorker(
-        vllm_config, kv_cache_config, cpu_capacity_per_rank
-    )
+    <span class="va">self</span>.connector_worker = <span class="fn">OffloadingConnectorWorker</span>(spec)
 </pre>
 </div>
 
@@ -399,7 +394,7 @@ footer a{color:#6ec6ff;text-decoration:none}
     </div>
     <div class="ds-box green">
       <h5>get_finished(req_ids) &rarr; (sent, recv)</h5>
-      <p><span class="i18n" data-en="The workhorse. Called after model execution. Returns which requests finished async sends / receives this step. SimpleCPUOffload uses this moment to launch copies and poll completions." data-zh="主要工作方法。Model 執行後被呼叫。回傳本步完成非同步發送 / 接收的 request。SimpleCPUOffload 利用這個時機 launch 複製、輪詢完成。">The workhorse. Called after model execution. Returns which requests finished async sends / receives this step. SimpleCPUOffload uses this moment to launch copies and poll completions.</span></p>
+      <p><span class="i18n" data-en="The workhorse. Called after model execution. Returns which requests finished async sends / receives this step. OffloadingConnector uses this moment to poll CUDA events and report completed transfers." data-zh="主要工作方法。Model 執行後被呼叫。回傳本步完成非同步發送 / 接收的 request。OffloadingConnector 利用這個時機輪詢 CUDA event、回報完成的傳輸。">The workhorse. Called after model execution. Returns which requests finished async sends / receives this step. OffloadingConnector uses this moment to poll CUDA events and report completed transfers.</span></p>
     </div>
     <div class="ds-box green">
       <h5>handle_preemptions(meta)</h5>
@@ -424,7 +419,7 @@ footer a{color:#6ec6ff;text-decoration:none}
 
   <div class="diagram-container">
     <div class="colflow">
-      <div class="box sched"><h5>scheduler.__init__ <span class="src-ref">sched/scheduler.py:237-242</span></h5><span class="i18n" data-en="Opt-in hook: after <code class=&quot;inline-code&quot;>kv_cache_manager</code> is built, the scheduler duck-type-checks for <code class=&quot;inline-code&quot;>bind_gpu_block_pool</code> and binds the GPU block pool into the connector. Only SimpleCPUOffloadConnector uses this -- base class does not declare it." data-zh="選配 hook：<code class=&quot;inline-code&quot;>kv_cache_manager</code> 建好後，排程器用 duck-type 檢查 <code class=&quot;inline-code&quot;>bind_gpu_block_pool</code> 是否存在，並把 GPU block pool 綁進 connector。目前只有 SimpleCPUOffloadConnector 用——base class 並未宣告。">Opt-in hook: after <code class="inline-code">kv_cache_manager</code> is built, the scheduler duck-type-checks for <code class="inline-code">bind_gpu_block_pool</code> and binds the GPU block pool into the connector. Only SimpleCPUOffloadConnector uses this -- base class does not declare it.</span></div>
+      <div class="box sched"><h5>connector built by factory <span class="src-ref">KVConnectorFactory.create_connector</span></h5><span class="i18n" data-en="Once per role at startup, the factory builds the connector. <code class=&quot;inline-code&quot;>OffloadingConnector.__init__</code> creates the <code class=&quot;inline-code&quot;>OffloadingSpec</code> and instantiates only its scheduler-side or worker-side half. The worker half then calls <code class=&quot;inline-code&quot;>register_kv_caches</code> to canonicalize the GPU KV layout." data-zh="開機時每個角色一次，factory 建出 connector。<code class=&quot;inline-code&quot;>OffloadingConnector.__init__</code> 建立 <code class=&quot;inline-code&quot;>OffloadingSpec</code>，並只實體化 scheduler 端或 worker 端那一半。Worker 那一半接著呼叫 <code class=&quot;inline-code&quot;>register_kv_caches</code> 正規化 GPU KV 佈局。">Once per role at startup, the factory builds the connector. <code class="inline-code">OffloadingConnector.__init__</code> creates the <code class="inline-code">OffloadingSpec</code> and instantiates only its scheduler-side or worker-side half. The worker half then calls <code class="inline-code">register_kv_caches</code> to canonicalize the GPU KV layout.</span></div>
       <div class="arrow">&darr;</div>
       <div class="box meta">per schedule() tick &mdash;&mdash;&mdash;&mdash;&mdash;</div>
       <div class="arrow">&darr;</div>
@@ -434,7 +429,7 @@ footer a{color:#6ec6ff;text-decoration:none}
       <div class="arrow">&darr;<span class="lbl">end of schedule() tick</span></div>
       <div class="box sched"><h5>build_connector_meta <span class="src-ref">sched/scheduler.py:1027</span></h5><span class="i18n" data-en="Attached to <code class=&quot;inline-code&quot;>scheduler_output.kv_connector_metadata</code>. This flows through IPC to every worker process." data-zh="掛在 <code class=&quot;inline-code&quot;>scheduler_output.kv_connector_metadata</code>。這會透過 IPC 流向每個 worker 程序。">Attached to <code class="inline-code">scheduler_output.kv_connector_metadata</code>. This flows through IPC to every worker process.</span></div>
       <div class="arrow">&darr;<span class="lbl">IPC &rarr; worker forward pass</span></div>
-      <div class="box worker"><h5>worker.get_finished() <span class="src-ref">simple_kv_offload/worker.py:203-259</span></h5><span class="i18n" data-en="Worker launches actual async CUDA memcpys here on dedicated low-priority streams, then polls event completion and builds reverse metadata." data-zh="Worker 在這裡用獨立的低優先權 stream 實際 launch 非同步 CUDA memcpy，然後輪詢 event 完成、建立反向 metadata。">Worker launches actual async CUDA memcpys here on dedicated low-priority streams, then polls event completion and builds reverse metadata.</span></div>
+      <div class="box worker"><h5>worker.get_finished() <span class="src-ref">offloading/worker.py</span></h5><span class="i18n" data-en="Worker submits async CUDA copies on dedicated per-transfer streams, then non-blockingly polls event completion and reports finished sends / receives back to the scheduler." data-zh="Worker 在每傳輸專屬的 stream 上提交非同步 CUDA 複製，然後非阻塞地輪詢 event 完成，把完成的發送 / 接收回報給排程器。">Worker submits async CUDA copies on dedicated per-transfer streams, then non-blockingly polls event completion and reports finished sends / receives back to the scheduler.</span></div>
       <div class="arrow">&darr;<span class="lbl">ModelRunnerOutput.kv_connector_output &rarr; scheduler</span></div>
       <div class="box sched"><h5>update_connector_output <span class="src-ref">sched/scheduler.py:2206-2218</span></h5><span class="i18n" data-en="Completion arrives back at the scheduler. Finished loads release GPU/CPU refs; finished stores promote CPU blocks into the prefix cache map." data-zh="完成事件回流到排程器。完成的 load 釋放 GPU/CPU ref；完成的 store 把 CPU block 升級進 prefix cache map。">Completion arrives back at the scheduler. Finished loads release GPU/CPU refs; finished stores promote CPU blocks into the prefix cache map.</span></div>
     </div>
@@ -442,8 +437,8 @@ footer a{color:#6ec6ff;text-decoration:none}
   </div>
 
   <div class="callout warn">
-    <strong><span class="i18n" data-en="Why duck-typed bind_gpu_block_pool?" data-zh="為什麼要用 duck-type 的 bind_gpu_block_pool？">Why duck-typed bind_gpu_block_pool?</span></strong>
-    <span class="i18n" data-en=" The scheduler uses <code class=&quot;inline-code&quot;>hasattr(self.connector, &quot;bind_gpu_block_pool&quot;)</code> rather than calling it unconditionally. This keeps the base interface thin -- remote-only connectors (Mooncake, NIXL) never touch the GPU block pool's LRU, so forcing them to implement a stub would pollute the base class. Only tiers that piggy-back on GPU eviction events (SimpleCPUOffload lazy mode) opt in." data-zh="排程器用 <code class=&quot;inline-code&quot;>hasattr(self.connector, &quot;bind_gpu_block_pool&quot;)</code>，不是直接呼叫。這樣 base interface 維持很薄——純遠端 connector（Mooncake、NIXL）根本不碰 GPU block pool 的 LRU，硬逼它們實作空 stub 會污染 base class。只有會搭便車用 GPU 淘汰事件的層（SimpleCPUOffload lazy 模式）才 opt in。"> The scheduler uses <code class="inline-code">hasattr(self.connector, "bind_gpu_block_pool")</code> rather than calling it unconditionally. This keeps the base interface thin -- remote-only connectors (Mooncake, NIXL) never touch the GPU block pool's LRU, so forcing them to implement a stub would pollute the base class. Only tiers that piggy-back on GPU eviction events (SimpleCPUOffload lazy mode) opt in.</span>
+    <strong><span class="i18n" data-en="Where does the worker learn the KV layout?" data-zh="Worker 從哪裡得知 KV 佈局？">Where does the worker learn the KV layout?</span></strong>
+    <span class="i18n" data-en=" At worker startup, <code class=&quot;inline-code&quot;>register_kv_caches</code> probes each attention backend's <code class=&quot;inline-code&quot;>get_kv_cache_shape</code> and sorts tensor strides to discover which physical dimension is <code class=&quot;inline-code&quot;>num_blocks</code>. This is what lets a single offload backend serve FlashAttention, Mamba, and cross-layer layouts without any layout knowledge baked into the scheduler -- the worker hands the spec layer a uniform <code class=&quot;inline-code&quot;>CanonicalKVCaches</code> view. Details in &sect;12." data-zh="Worker 開機時，<code class=&quot;inline-code&quot;>register_kv_caches</code> 探測每個 attention backend 的 <code class=&quot;inline-code&quot;>get_kv_cache_shape</code>，並排序 tensor stride 找出哪個實體維度是 <code class=&quot;inline-code&quot;>num_blocks</code>。正是這點讓單一 offload 後端能服務 FlashAttention、Mamba、cross-layer 佈局，而排程器完全不需內建任何佈局知識——worker 交給 spec 層一個統一的 <code class=&quot;inline-code&quot;>CanonicalKVCaches</code> 視圖。細節見 &sect;12。"> At worker startup, <code class="inline-code">register_kv_caches</code> probes each attention backend's <code class="inline-code">get_kv_cache_shape</code> and sorts tensor strides to discover which physical dimension is <code class="inline-code">num_blocks</code>. This is what lets a single offload backend serve FlashAttention, Mamba, and cross-layer layouts without any layout knowledge baked into the scheduler -- the worker hands the spec layer a uniform <code class="inline-code">CanonicalKVCaches</code> view. Details in &sect;12.</span>
   </div>
 
 <pre>
@@ -536,11 +531,11 @@ footer a{color:#6ec6ff;text-decoration:none}
       <td>MoRI I/O</td>
       <td><span class="bg-group"><span class="tag remote">remote</span></span></td>
     </tr>
-    <tr>
-      <td><code class="inline-code">OffloadingConnector</code><br><span style="font-size:.72rem;color:#6c7086">offloading_connector.py</span></td>
-      <td><span class="i18n" data-en="Original DRAM offload backend. Uses <code class=&quot;inline-code&quot;>offloading/</code> subpackage with a pluggable <code class=&quot;inline-code&quot;>OffloadingManager</code>. Richer but heavier than SimpleCPUOffload." data-zh="原始的 DRAM offload 後端。使用 <code class=&quot;inline-code&quot;>offloading/</code> 子套件加可插拔的 <code class=&quot;inline-code&quot;>OffloadingManager</code>。功能比 SimpleCPUOffload 豐富但較重。">Original DRAM offload backend. Uses <code class="inline-code">offloading/</code> subpackage with a pluggable <code class="inline-code">OffloadingManager</code>. Richer but heavier than SimpleCPUOffload.</span></td>
+    <tr style="background:rgba(233,69,96,0.04)">
+      <td><code class="inline-code">OffloadingConnector</code><br><span style="font-size:.72rem;color:#6c7086">offloading_connector.py</span><br><span style="font-size:.7rem;color:#e94560">&nbsp;&nbsp;&nbsp;&larr; Part 2 focus</span></td>
+      <td><span class="i18n" data-en="The modern DRAM offload path. A thin connector layer over a pluggable <code class=&quot;inline-code&quot;>OffloadingSpec</code> backend (<code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code>): LRU/ARC eviction policy, optional reuse-frequency gating, deferred offload. Extensible to new tiers via the spec factory." data-zh="現代的 DRAM offload 路徑。一個薄 connector 層，套在可插拔的 <code class=&quot;inline-code&quot;>OffloadingSpec</code> 後端（<code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code>）上：LRU/ARC 淘汰策略、選配的重用頻率門檻、延遲 offload。可透過 spec factory 擴充到新層級。">The modern DRAM offload path. A thin connector layer over a pluggable <code class="inline-code">OffloadingSpec</code> backend (<code class="inline-code">vllm/v1/kv_offload/</code>): LRU/ARC eviction policy, optional reuse-frequency gating, deferred offload. Extensible to new tiers via the spec factory.</span></td>
       <td>CPU DRAM</td>
-      <td><span class="bg-group"><span class="tag dram">dram</span></span></td>
+      <td><span class="bg-group"><span class="tag dram">dram</span><span class="tag async">async</span></span></td>
     </tr>
     <tr>
       <td><code class="inline-code">DecodeBenchConnector</code><br><span style="font-size:.72rem;color:#6c7086">decode_bench_connector.py</span></td>
@@ -560,11 +555,11 @@ footer a{color:#6ec6ff;text-decoration:none}
       <td>CPU + SSD + Remote</td>
       <td><span class="bg-group"><span class="tag dram">dram</span><span class="tag remote">remote</span></span></td>
     </tr>
-    <tr style="background:rgba(233,69,96,0.04)">
-      <td><code class="inline-code">SimpleCPUOffloadConnector</code><br><span style="font-size:.72rem;color:#6c7086">simple_cpu_offload_connector.py</span><br><span style="font-size:.7rem;color:#e94560">&nbsp;&nbsp;&nbsp;&larr; Part 2 focus</span></td>
-      <td><span class="i18n" data-en="Minimal pinned-DRAM tier introduced by <a href=&quot;https://github.com/vllm-project/vllm/pull/37160&quot; target=&quot;_blank&quot;>PR #37160</a>. Uses <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> on a dedicated stream, piggy-backs on the GPU <code class=&quot;inline-code&quot;>BlockPool</code> LRU for its own cache map, and offers both eager and lazy offload modes." data-zh="由 <a href=&quot;https://github.com/vllm-project/vllm/pull/37160&quot; target=&quot;_blank&quot;>PR #37160</a> 引入的輕量 pinned-DRAM 層。用獨立 stream 上的 <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code>，搭便車使用 GPU <code class=&quot;inline-code&quot;>BlockPool</code> 的 LRU 做自己的 cache map，支援 eager 與 lazy 兩種 offload 模式。">Minimal pinned-DRAM tier introduced by <a href="https://github.com/vllm-project/vllm/pull/37160" target="_blank">PR #37160</a>. Uses <code class="inline-code">cuMemcpyBatchAsync</code> on a dedicated stream, piggy-backs on the GPU <code class="inline-code">BlockPool</code> LRU for its own cache map, and offers both eager and lazy offload modes.</span></td>
+    <tr>
+      <td><code class="inline-code">SimpleCPUOffloadConnector</code><br><span style="font-size:.72rem;color:#6c7086">simple_cpu_offload_connector.py</span></td>
+      <td><span class="i18n" data-en="Lighter single-file pinned-DRAM tier. Bakes its offload logic into one module and piggy-backs on the GPU <code class=&quot;inline-code&quot;>BlockPool</code> LRU for its cache map. Still registered, but superseded by OffloadingConnector for extensible work." data-zh="較輕的單檔 pinned-DRAM 層。把 offload 邏輯寫死在一個 module 裡，並搭便車使用 GPU <code class=&quot;inline-code&quot;>BlockPool</code> 的 LRU 做 cache map。仍註冊著，但在需要擴充的工作上已被 OffloadingConnector 取代。">Lighter single-file pinned-DRAM tier. Bakes its offload logic into one module and piggy-backs on the GPU <code class="inline-code">BlockPool</code> LRU for its cache map. Still registered, but superseded by OffloadingConnector for extensible work.</span></td>
       <td>Pinned DRAM</td>
-      <td><span class="bg-group"><span class="tag dram">dram</span><span class="tag hma">HMA</span><span class="tag async">async</span></span></td>
+      <td><span class="bg-group"><span class="tag dram">dram</span></span></td>
     </tr>
   </table>
   </div>
@@ -576,677 +571,361 @@ footer a{color:#6ec6ff;text-decoration:none}
 </div>
 
 <!-- ==================== PART 2 INTRO ==================== -->
-<div class="section" id="scoffload-intro">
+<div class="section" id="offload-arch">
   <span class="section-label">Part 2 &middot; Deep Dive</span>
-  <h2><span class="i18n" data-en="5. SimpleCPUOffloadConnector -- PR #37160 in Detail" data-zh="5. SimpleCPUOffloadConnector —— 深入 PR #37160">5. SimpleCPUOffloadConnector -- PR #37160 in Detail</span></h2>
-  <p><span class="i18n" data-en="PR #37160 introduced a second, deliberately minimal, DRAM offload connector. Total non-test code: <strong>1,354 lines</strong> across seven files. The claim &quot;we only touched 1,400 lines&quot; is accurate -- the bulk is a scheduler-side manager that reuses the existing <code class=&quot;inline-code&quot;>BlockPool</code> infrastructure instead of building a parallel cache." data-zh="PR #37160 引入了第二個、刻意極小化的 DRAM offload connector。非測試程式碼總數：<strong>1,354 行</strong>，分散在七個檔案。「只改了 1,400 行」這個說法是準的——大頭是一個 scheduler-side manager，它重用現有的 <code class=&quot;inline-code&quot;>BlockPool</code> 基礎建設，而不是另起爐灶做一個平行 cache。">PR #37160 introduced a second, deliberately minimal, DRAM offload connector. Total non-test code: <strong>1,354 lines</strong> across seven files. The claim "we only touched 1,400 lines" is accurate -- the bulk is a scheduler-side manager that reuses the existing <code class="inline-code">BlockPool</code> infrastructure instead of building a parallel cache.</span></p>
+  <h2><span class="i18n" data-en="5. The Modern CPU Offload Stack -- Two Layers" data-zh="5. 現代 CPU Offload 堆疊 —— 兩層架構">5. The Modern CPU Offload Stack -- Two Layers</span></h2>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>OffloadingConnector</code> is the production DRAM-offload path in vLLM V1. Unlike the older single-file <code class=&quot;inline-code&quot;>SimpleCPUOffloadConnector</code>, it is split into two cleanly separated layers connected by one seam -- the <code class=&quot;inline-code&quot;>OffloadingSpec</code>. The connector layer knows the <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code> contract but nothing about pinned memory; the spec/backend layer knows pinned memory and CUDA but nothing about the scheduler. This is what makes a new tier (disk, remote DRAM, a smarter eviction policy) a drop-in rather than a fork." data-zh="<code class=&quot;inline-code&quot;>OffloadingConnector</code> 是 vLLM V1 正式的 DRAM offload 路徑。不像舊的單檔 <code class=&quot;inline-code&quot;>SimpleCPUOffloadConnector</code>，它被切成兩個乾淨分離的層，靠一個接縫——<code class=&quot;inline-code&quot;>OffloadingSpec</code>——連起來。Connector 層懂 <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code> 契約，但完全不碰 pinned memory；spec/backend 層懂 pinned memory 和 CUDA，但完全不碰排程器。正是這點讓「新增一層」（磁碟、遠端 DRAM、更聰明的淘汰策略）變成插件，而不是 fork。"><code class="inline-code">OffloadingConnector</code> is the production DRAM-offload path in vLLM V1. Unlike the older single-file <code class="inline-code">SimpleCPUOffloadConnector</code>, it is split into two cleanly separated layers connected by one seam -- the <code class="inline-code">OffloadingSpec</code>. The connector layer knows the <code class="inline-code">KVConnectorBase_V1</code> contract but nothing about pinned memory; the spec/backend layer knows pinned memory and CUDA but nothing about the scheduler. This is what makes a new tier (disk, remote DRAM, a smarter eviction policy) a drop-in rather than a fork.</span></p>
+
+  <div class="role-split">
+    <div class="role-col sched">
+      <span class="role-tag">CONNECTOR LAYER</span>
+      <h4><span class="i18n" data-en="kv_connector/v1/offloading_connector.py + offloading/" data-zh="kv_connector/v1/offloading_connector.py + offloading/">kv_connector/v1/offloading_connector.py + offloading/</span></h4>
+      <p style="font-size:.86rem;margin:0"><span class="i18n" data-en="Implements <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code>. Pure plumbing into the scheduler/worker loop. Holds no offload policy of its own." data-zh="實作 <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code>。純粹接進 scheduler/worker 迴圈的管線。本身不持有任何 offload 策略。">Implements <code class="inline-code">KVConnectorBase_V1</code>. Pure plumbing into the scheduler/worker loop. Holds no offload policy of its own.</span></p>
+      <ul>
+        <li><code class="inline-code">OffloadingConnector</code> &mdash; facade</li>
+        <li><code class="inline-code">OffloadingConnectorScheduler</code></li>
+        <li><code class="inline-code">OffloadingConnectorWorker</code></li>
+      </ul>
+    </div>
+    <div class="role-col worker">
+      <span class="role-tag">SPEC / BACKEND LAYER</span>
+      <h4><span class="i18n" data-en="vllm/v1/kv_offload/" data-zh="vllm/v1/kv_offload/">vllm/v1/kv_offload/</span></h4>
+      <p style="font-size:.86rem;margin:0"><span class="i18n" data-en="The actual offload logic. Selected by <code class=&quot;inline-code&quot;>OffloadingSpecFactory</code>. Knows pinned DRAM, eviction policy, and CUDA copies." data-zh="真正的 offload 邏輯。由 <code class=&quot;inline-code&quot;>OffloadingSpecFactory</code> 選定。懂 pinned DRAM、淘汰策略、CUDA 複製。">The actual offload logic. Selected by <code class="inline-code">OffloadingSpecFactory</code>. Knows pinned DRAM, eviction policy, and CUDA copies.</span></p>
+      <ul>
+        <li><code class="inline-code">CPUOffloadingSpec</code> &mdash; the seam</li>
+        <li><code class="inline-code">CPUOffloadingManager</code> + <code class="inline-code">CachePolicy</code></li>
+        <li><code class="inline-code">CpuGpuOffloadingHandlers</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="callout key">
+    <strong><span class="i18n" data-en="The seam" data-zh="接縫">The seam</span>:</strong>
+    <span class="i18n" data-en="<code class=&quot;inline-code&quot;>OffloadingConnector.__init__</code> calls <code class=&quot;inline-code&quot;>OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)</code>. The spec name comes from <code class=&quot;inline-code&quot;>kv_connector_extra_config[&quot;spec_name&quot;]</code> and defaults to <code class=&quot;inline-code&quot;>&quot;CPUOffloadingSpec&quot;</code>. The factory also accepts a <code class=&quot;inline-code&quot;>spec_module_path</code> for out-of-tree specs -- so a brand-new offload tier needs zero changes to the connector or the scheduler." data-zh="<code class=&quot;inline-code&quot;>OffloadingConnector.__init__</code> 呼叫 <code class=&quot;inline-code&quot;>OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)</code>。spec 名稱來自 <code class=&quot;inline-code&quot;>kv_connector_extra_config[&quot;spec_name&quot;]</code>，預設是 <code class=&quot;inline-code&quot;>&quot;CPUOffloadingSpec&quot;</code>。Factory 也接受 <code class=&quot;inline-code&quot;>spec_module_path</code> 載入樹外 spec——所以一個全新的 offload 層完全不需要改 connector 或排程器。"><code class="inline-code">OffloadingConnector.__init__</code> calls <code class="inline-code">OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)</code>. The spec name comes from <code class="inline-code">kv_connector_extra_config["spec_name"]</code> and defaults to <code class="inline-code">"CPUOffloadingSpec"</code>. The factory also accepts a <code class="inline-code">spec_module_path</code> for out-of-tree specs -- so a brand-new offload tier needs zero changes to the connector or the scheduler.</span>
+  </div>
 
   <h3><span class="i18n" data-en="5.1 File Layout" data-zh="5.1 檔案配置">5.1 File Layout</span></h3>
-  <div class="diagram-container">
-<pre style="background:transparent;border:none;padding:0;margin:0">
-<span class="cm"># Connector facade -- 247 lines</span>
-vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-
-<span class="cm"># Scheduler-side planner -- 739 lines (the biggest file)</span>
-vllm/v1/simple_kv_offload/manager.py
-    &mdash; class SimpleCPUOffloadScheduler
-
-<span class="cm"># Worker-side executor -- 305 lines</span>
-vllm/v1/simple_kv_offload/worker.py
-    &mdash; class SimpleCPUOffloadWorker
-
-<span class="cm"># Transfer recipe -- 97 lines</span>
-vllm/v1/simple_kv_offload/copy_backend.py
-    &mdash; class DmaCopyBackend
-
-<span class="cm"># Low-level CUDA helpers -- 153 lines</span>
-vllm/v1/simple_kv_offload/cuda_mem_ops.py
-    &mdash; cudaHostRegister pinning + cuMemcpyBatchAsync bindings
-
-<span class="cm"># Scheduler &harr; Worker data classes -- 60 lines</span>
-vllm/v1/simple_kv_offload/metadata.py
-    &mdash; SimpleCPUOffloadMetadata, SimpleCPUOffloadWorkerMetadata
-
-<span class="cm"># Registry hook -- 7 lines</span>
-vllm/distributed/kv_transfer/kv_connector/factory.py   (append only)
-
-<span class="cm"># Scheduler hook -- 7 lines</span>
-vllm/v1/core/sched/scheduler.py    (duck-typed bind_gpu_block_pool call)
-
-<span class="cm"># ---------------------------------------------- 1,354 total</span>
-</pre>
-    <div class="caption"><span class="i18n" data-en="Figure 2: The 1,354-line PR #37160 footprint. 77% is in manager.py + worker.py; the rest is glue." data-zh="圖 2：PR #37160 的 1,354 行足跡。77% 在 manager.py + worker.py，其餘是膠水。">Figure 2: The 1,354-line PR #37160 footprint. 77% is in manager.py + worker.py; the rest is glue.</span></div>
-  </div>
-
-  <h3><span class="i18n" data-en="5.2 Configuration Surface" data-zh="5.2 設定表面">5.2 Configuration Surface</span></h3>
-  <p><span class="i18n" data-en="Two equivalent entry points:" data-zh="兩個等價的啟用方式：">Two equivalent entry points:</span></p>
-
-  <div class="card highlight-orange">
-    <h4><span class="i18n" data-en="Direct kv_transfer_config" data-zh="直接指定 kv_transfer_config">Direct kv_transfer_config</span></h4>
 <pre>
-KVTransferConfig(
-    kv_connector=<span class="st">"SimpleCPUOffloadConnector"</span>,
-    kv_role=<span class="st">"kv_both"</span>,
-    kv_connector_extra_config={
-        <span class="st">"cpu_bytes_to_use"</span>: <span class="nu">40</span> &lt;&lt; <span class="nu">30</span>,          <span class="cm"># 40 GiB total</span>
-        <span class="cm"># "cpu_bytes_to_use_per_rank": ...  override per rank</span>
-        <span class="st">"lazy_offload"</span>: <span class="kw">True</span>,              <span class="cm"># default False</span>
-    },
-)
-</pre>
-  </div>
+<span class="cm"># Connector layer -- the KVConnectorBase_V1 implementation</span>
+vllm/distributed/kv_transfer/kv_connector/v1/
+    offloading_connector.py     <span class="cm"># OffloadingConnector (thin facade, ~171 lines)</span>
+    offloading/
+        scheduler.py            <span class="cm"># OffloadingConnectorScheduler</span>
+        worker.py               <span class="cm"># OffloadingConnectorWorker</span>
+        common.py               <span class="cm"># OffloadingConnectorMetadata</span>
+        metrics.py              <span class="cm"># Prometheus / stats</span>
 
-  <div class="card highlight-blue">
-    <h4><span class="i18n" data-en="Environment switch (via --kv-offloading-backend native)" data-zh="環境變數切換（搭配 --kv-offloading-backend native）">Environment switch (via --kv-offloading-backend native)</span></h4>
-<pre>
-<span class="cm"># vllm/config/vllm.py:660-666</span>
-<span class="kw">if</span> kv_offloading_backend == <span class="st">"native"</span>:
-    <span class="kw">if</span> envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
-        config_connector = <span class="st">"SimpleCPUOffloadConnector"</span>
-    <span class="kw">else</span>:
-        config_connector = <span class="st">"OffloadingConnector"</span>     <span class="cm"># legacy path</span>
-    <span class="va">self</span>.kv_transfer_config.kv_connector = config_connector
+<span class="cm"># Spec / backend layer -- the actual offload engine</span>
+vllm/v1/kv_offload/
+    abstract.py                 <span class="cm"># OffloadingManager ABC, LoadStoreSpec</span>
+    spec.py                     <span class="cm"># OffloadingSpec ABC, CanonicalKVCaches</span>
+    factory.py                  <span class="cm"># OffloadingSpecFactory</span>
+    mediums.py                  <span class="cm"># GPULoadStoreSpec / CPULoadStoreSpec</span>
+    reuse_manager.py            <span class="cm"># FilterReusedOffloadingManager (decorator)</span>
+    cpu/
+        spec.py                 <span class="cm"># CPUOffloadingSpec</span>
+        manager.py              <span class="cm"># CPUOffloadingManager</span>
+        policies/
+            abstract.py         <span class="cm"># CachePolicy ABC, BlockStatus</span>
+            lru.py              <span class="cm"># LRUCachePolicy</span>
+            arc.py              <span class="cm"># ARCCachePolicy</span>
+    worker/
+        worker.py               <span class="cm"># OffloadingWorker, OffloadingHandler ABC</span>
+        cpu_gpu.py              <span class="cm"># CpuGpuOffloadingHandlers + SingleDirectionOffloadingHandler</span>
 </pre>
-<pre>
-$ <span class="kw">export</span> VLLM_USE_SIMPLE_KV_OFFLOAD=<span class="nu">1</span>
-$ vllm serve &lt;model&gt; --kv-offloading-backend native \
-      --kv-offloading-size <span class="nu">40</span>     <span class="cm"># GiB, mapped to cpu_bytes_to_use</span>
-</pre>
-  </div>
-
-  <div class="callout red">
-    <strong><span class="i18n" data-en="Hard precondition" data-zh="硬性前提">Hard precondition</span>:</strong>
-    <span class="i18n" data-en=" the constructor returns early with a warning if <code class=&quot;inline-code&quot;>enable_prefix_caching</code> is False -- this connector cannot work without the hash-based block lookup that prefix caching provides." data-zh="建構子若看到 <code class=&quot;inline-code&quot;>enable_prefix_caching</code> 為 False 會直接印 warning 然後 return——沒有 prefix caching 提供的 hash-based block lookup，這個 connector 根本動不了。"> the constructor returns early with a warning if <code class="inline-code">enable_prefix_caching</code> is False -- this connector cannot work without the hash-based block lookup that prefix caching provides.</span>
-  </div>
+  <p><span class="i18n" data-en="The rest of Part 2 walks this stack top-down: the facade (&sect;6), the scheduler-side bookkeeping manager (&sect;7), its pluggable eviction policy (&sect;8), the reuse filter (&sect;9), then the per-step load path (&sect;10) and store path (&sect;11), and finally the worker that turns plans into CUDA copies (&sect;12)." data-zh="Part 2 接下來由上而下走讀這個堆疊：facade（&sect;6）、scheduler 端的帳本 manager（&sect;7）、可插拔的淘汰策略（&sect;8）、reuse 過濾器（&sect;9），接著是每步的 load path（&sect;10）與 store path（&sect;11），最後是把計畫變成 CUDA 複製的 worker（&sect;12）。">The rest of Part 2 walks this stack top-down: the facade (&sect;6), the scheduler-side bookkeeping manager (&sect;7), its pluggable eviction policy (&sect;8), the reuse filter (&sect;9), then the per-step load path (&sect;10) and store path (&sect;11), and finally the worker that turns plans into CUDA copies (&sect;12).</span></p>
 </div>
 
-<!-- ==================== SCHEDULER MANAGER INIT ==================== -->
-<div class="section" id="manager-init">
-  <span class="section-label">Part 2 &middot; Scheduler Manager</span>
-  <h2><span class="i18n" data-en="6. SimpleCPUOffloadScheduler.__init__" data-zh="6. SimpleCPUOffloadScheduler.__init__">6. SimpleCPUOffloadScheduler.__init__</span></h2>
-  <p><span class="i18n" data-en="The scheduler-side brain lives at <code class=&quot;inline-code&quot;>vllm/v1/simple_kv_offload/manager.py:67-155</code>. Its smartest move is that it <em>reuses the existing vLLM BlockPool / coordinator machinery</em> to manage the CPU tier rather than inventing a separate cache. The CPU side ends up with the same prefix-cache hash table, the same Merkle-chained block hashes, and the same LRU free queue -- just pointing at pinned-DRAM tensors instead of GPU tensors." data-zh="Scheduler 端的大腦在 <code class=&quot;inline-code&quot;>vllm/v1/simple_kv_offload/manager.py:67-155</code>。它最聰明的一招是：<em>重用既有的 vLLM BlockPool / coordinator 機制</em>來管 CPU 層，而不是另起爐灶做一個獨立 cache。結果 CPU 側得到了相同的 prefix cache 雜湊表、相同的 Merkle chain block hash、相同的 LRU free queue——只是指向 pinned DRAM tensor 而不是 GPU tensor。">The scheduler-side brain lives at <code class="inline-code">vllm/v1/simple_kv_offload/manager.py:67-155</code>. Its smartest move is that it <em>reuses the existing vLLM BlockPool / coordinator machinery</em> to manage the CPU tier rather than inventing a separate cache. The CPU side ends up with the same prefix-cache hash table, the same Merkle-chained block hashes, and the same LRU free queue -- just pointing at pinned-DRAM tensors instead of GPU tensors.</span></p>
-
-  <div class="ds-grid">
-    <div class="ds-box blue">
-      <h5>self.cpu_kv_cache_config</h5>
-      <p><span class="i18n" data-en="Built by <code class=&quot;inline-code&quot;>_derive_cpu_config</code> (line 156). Mirrors the GPU <code class=&quot;inline-code&quot;>KVCacheConfig</code> but scales <code class=&quot;inline-code&quot;>num_blocks</code> by the <em>cpu_bytes / gpu_bytes</em> ratio so the CPU pool has proportionally more blocks than GPU." data-zh="由 <code class=&quot;inline-code&quot;>_derive_cpu_config</code>（line 156）建立。鏡像 GPU 的 <code class=&quot;inline-code&quot;>KVCacheConfig</code>，但把 <code class=&quot;inline-code&quot;>num_blocks</code> 按 <em>cpu_bytes / gpu_bytes</em> 比例放大，讓 CPU pool 按比例擁有更多 block。">Built by <code class="inline-code">_derive_cpu_config</code> (line 156). Mirrors the GPU <code class="inline-code">KVCacheConfig</code> but scales <code class="inline-code">num_blocks</code> by the <em>cpu_bytes / gpu_bytes</em> ratio so the CPU pool has proportionally more blocks than GPU.</span></p>
-    </div>
-    <div class="ds-box blue">
-      <h5>self.cpu_coordinator</h5>
-      <p><span class="i18n" data-en="A real <code class=&quot;inline-code&quot;>KVCacheCoordinator</code> obtained via <code class=&quot;inline-code&quot;>get_kv_cache_coordinator(...)</code>. This is the same class the scheduler uses for its GPU tier, which means <code class=&quot;inline-code&quot;>find_longest_cache_hit</code> just works." data-zh="一個真正的 <code class=&quot;inline-code&quot;>KVCacheCoordinator</code>，透過 <code class=&quot;inline-code&quot;>get_kv_cache_coordinator(...)</code> 取得。這跟排程器 GPU 層用的是同一個 class，因此 <code class=&quot;inline-code&quot;>find_longest_cache_hit</code> 直接就可以用。">A real <code class="inline-code">KVCacheCoordinator</code> obtained via <code class="inline-code">get_kv_cache_coordinator(...)</code>. This is the same class the scheduler uses for its GPU tier, which means <code class="inline-code">find_longest_cache_hit</code> just works.</span></p>
-    </div>
-    <div class="ds-box blue">
-      <h5>self.cpu_block_pool: BlockPool</h5>
-      <p><span class="i18n" data-en="Extracted from the coordinator. Owns the LRU free queue, the <code class=&quot;inline-code&quot;>cached_block_hash_to_block</code> map, and all block metadata for the CPU tier." data-zh="從 coordinator 中取得。擁有 LRU free queue、<code class=&quot;inline-code&quot;>cached_block_hash_to_block</code> map，以及 CPU 層所有的 block metadata。">Extracted from the coordinator. Owns the LRU free queue, the <code class="inline-code">cached_block_hash_to_block</code> map, and all block metadata for the CPU tier.</span></p>
-    </div>
-    <div class="ds-box purple">
-      <h5>self._gpu_block_pool</h5>
-      <p><span class="i18n" data-en="Late-bound via <code class=&quot;inline-code&quot;>bind_gpu_block_pool</code>. Needed for <code class=&quot;inline-code&quot;>touch()</code> calls that prevent the scheduler from recycling GPU blocks while an async copy is still using them." data-zh="透過 <code class=&quot;inline-code&quot;>bind_gpu_block_pool</code> 延遲綁定。需要它來呼叫 <code class=&quot;inline-code&quot;>touch()</code>，避免非同步 copy 還在用 GPU block 時排程器就把它回收。">Late-bound via <code class="inline-code">bind_gpu_block_pool</code>. Needed for <code class="inline-code">touch()</code> calls that prevent the scheduler from recycling GPU blocks while an async copy is still using them.</span></p>
-    </div>
-    <div class="ds-box amber">
-      <h5>self._reqs_to_load / self._reqs_to_store</h5>
-      <p><span class="i18n" data-en="Per-request state tables. Load side remembers (GPU, CPU) block pairings for in-flight H2D transfers. Store side (eager only) tracks which blocks per request have already been scheduled for offload." data-zh="每個請求的狀態表。Load 端記錄正在飛行的 H2D 傳輸的 (GPU, CPU) block 對應。Store 端（僅 eager）追蹤每個請求已經被排入 offload 的 block。">Per-request state tables. Load side remembers (GPU, CPU) block pairings for in-flight H2D transfers. Store side (eager only) tracks which blocks per request have already been scheduled for offload.</span></p>
-    </div>
-    <div class="ds-box amber">
-      <h5>self._cursor: KVCacheBlock | None</h5>
-      <p><span class="i18n" data-en="<em>Lazy mode only.</em> Pointer into the GPU <code class=&quot;inline-code&quot;>free_block_queue</code> doubly-linked list. Each step walks forward from here, offloads any cached-but-not-yet-on-CPU blocks it finds, and advances." data-zh="<em>僅 lazy 模式。</em>指向 GPU <code class=&quot;inline-code&quot;>free_block_queue</code> 雙向鏈結串列中的一個節點。每步從這裡往前走，把遇到「已 cache 但還沒 offload 到 CPU」的 block 抓出來 offload，然後前進。"><em>Lazy mode only.</em> Pointer into the GPU <code class="inline-code">free_block_queue</code> doubly-linked list. Each step walks forward from here, offloads any cached-but-not-yet-on-CPU blocks it finds, and advances.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5>self._load_event_counter / _store_event_counter</h5>
-      <p><span class="i18n" data-en="Monotonic integer job IDs. Every batch of async transfers gets a fresh ID; workers report completions by ID so the scheduler doesn't need to know about individual blocks." data-zh="單調遞增的整數 job ID。每批非同步傳輸配一個新 ID；worker 回報完成時用 ID，排程器不必關心個別 block。">Monotonic integer job IDs. Every batch of async transfers gets a fresh ID; workers report completions by ID so the scheduler doesn't need to know about individual blocks.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5>self._store_event_pending_counts</h5>
-      <p><span class="i18n" data-en="For TP / PP. Each worker rank reports the same event_idx when it finishes its copy. The scheduler only commits the store (promotes CPU blocks into the prefix cache) when all <code class=&quot;inline-code&quot;>world_size</code> ranks have reported." data-zh="給 TP / PP 用。每個 worker rank 完成 copy 後會回報同一個 event_idx。排程器等所有 <code class=&quot;inline-code&quot;>world_size</code> 個 rank 都回報後才真正 commit（把 CPU block 升級進 prefix cache）。">For TP / PP. Each worker rank reports the same event_idx when it finishes its copy. The scheduler only commits the store (promotes CPU blocks into the prefix cache) when all <code class="inline-code">world_size</code> ranks have reported.</span></p>
-    </div>
-  </div>
+<!-- ==================== SECTION 6: FACADE ==================== -->
+<div class="section" id="connector-facade">
+  <span class="section-label">Part 2 &middot; Facade</span>
+  <h2><span class="i18n" data-en="6. OffloadingConnector -- the Thin Facade" data-zh="6. OffloadingConnector —— 薄殼 Facade">6. OffloadingConnector -- the Thin Facade</span></h2>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>offloading_connector.py</code> is only ~171 lines and almost every method is a one-line delegation. The connector is built twice (once per role); the constructor instantiates exactly one half and forwards each base-class method to it." data-zh="<code class=&quot;inline-code&quot;>offloading_connector.py</code> 只有約 171 行，幾乎每個方法都是一行委派。Connector 被建構兩次（每個角色一次）；建構子只實體化其中一半，並把每個 base class 方法轉發給它。"><code class="inline-code">offloading_connector.py</code> is only ~171 lines and almost every method is a one-line delegation. The connector is built twice (once per role); the constructor instantiates exactly one half and forwards each base-class method to it.</span></p>
 
 <pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 86-120</span>
-<span class="va">self</span>.cpu_kv_cache_config = <span class="va">self</span>.<span class="fn">_derive_cpu_config</span>(
-    kv_cache_config, cpu_capacity_bytes
-)
-<span class="va">self</span>.num_cpu_blocks = <span class="va">self</span>.cpu_kv_cache_config.num_blocks
+<span class="cm"># vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py</span>
+<span class="kw">class</span> <span class="cl">OffloadingConnector</span>(KVConnectorBase_V1):
+    <span class="nd">@property</span>
+    <span class="kw">def</span> <span class="fn">prefer_cross_layer_blocks</span>(<span class="va">self</span>) -&gt; <span class="ty">bool</span>:
+        <span class="kw">return</span> <span class="kw">True</span>          <span class="cm"># ask vLLM for a single cross-layer KV tensor when possible</span>
 
-<span class="cm"># Find the full-attention group index -- we only hit-match on full attention,</span>
-<span class="cm"># which matches how the scheduler's prefix cache itself works.</span>
-<span class="va">self</span>.fa_gidx = -<span class="nu">1</span>
-<span class="kw">for</span> g_idx, g <span class="kw">in</span> <span class="fn">enumerate</span>(<span class="va">self</span>.cpu_kv_cache_config.kv_cache_groups):
-    <span class="kw">if</span> <span class="fn">isinstance</span>(g.kv_cache_spec, FullAttentionSpec):
-        <span class="va">self</span>.fa_gidx = g_idx
-        <span class="kw">break</span>
-<span class="kw">assert</span> <span class="nu">0</span> &lt;= <span class="va">self</span>.fa_gidx &lt; <span class="fn">len</span>(<span class="va">self</span>.cpu_kv_cache_config.kv_cache_groups)
+    <span class="kw">def</span> <span class="fn">__init__</span>(<span class="va">self</span>, vllm_config, role, kv_cache_config=<span class="kw">None</span>):
+        <span class="fn">super</span>().<span class="fn">__init__</span>(vllm_config, role, kv_cache_config)
+        spec = OffloadingSpecFactory.<span class="fn">create_spec</span>(vllm_config, kv_cache_config)
 
-<span class="cm"># Reuse the regular coordinator -- same hit-matching logic as the GPU tier.</span>
-<span class="va">self</span>.cpu_coordinator: KVCacheCoordinator = <span class="fn">get_kv_cache_coordinator</span>(
-    kv_cache_config=<span class="va">self</span>.cpu_kv_cache_config,
-    max_model_len=vllm_config.model_config.max_model_len,
-    use_eagle=<span class="kw">False</span>,
-    enable_caching=<span class="kw">True</span>,
-    enable_kv_cache_events=<span class="va">self</span>.enable_kv_cache_events,
-    dcp_world_size=dcp_world_size,
-    pcp_world_size=pcp_world_size,
-    hash_block_size=<span class="va">self</span>.block_size,
-)
-<span class="va">self</span>.cpu_block_pool: BlockPool = <span class="va">self</span>.cpu_coordinator.block_pool
+        <span class="va">self</span>.connector_scheduler = <span class="kw">None</span>
+        <span class="va">self</span>.connector_worker = <span class="kw">None</span>
+        <span class="kw">if</span> role == KVConnectorRole.SCHEDULER:
+            <span class="va">self</span>.connector_scheduler = <span class="fn">OffloadingConnectorScheduler</span>(spec)
+        <span class="kw">elif</span> role == KVConnectorRole.WORKER:
+            <span class="va">self</span>.connector_worker = <span class="fn">OffloadingConnectorWorker</span>(spec)
 </pre>
 
-  <div class="callout key">
-    <strong><span class="i18n" data-en="Insight" data-zh="觀察">Insight</span>:</strong>
-    <span class="i18n" data-en=" by deriving a CPU <code class=&quot;inline-code&quot;>KVCacheConfig</code> that shares <code class=&quot;inline-code&quot;>kv_cache_groups</code> with the GPU config, the CPU coordinator uses the exact same block hashes. A GPU block hash that was computed once is valid for lookup in the CPU pool -- no re-hashing needed." data-zh="因為 CPU 的 <code class=&quot;inline-code&quot;>KVCacheConfig</code> 直接沿用 GPU 的 <code class=&quot;inline-code&quot;>kv_cache_groups</code>，CPU coordinator 用的 block hash 和 GPU 完全一致。一個 GPU block hash 算過一次，就可以直接拿去 CPU pool 查——不用重算。"> by deriving a CPU <code class="inline-code">KVCacheConfig</code> that shares <code class="inline-code">kv_cache_groups</code> with the GPU config, the CPU coordinator uses the exact same block hashes. A GPU block hash that was computed once is valid for lookup in the CPU pool -- no re-hashing needed.</span>
-  </div>
-</div>
-
-<!-- ==================== HIT CHECK ==================== -->
-<div class="section" id="hit-check">
-  <span class="section-label">Part 2 &middot; Load path</span>
-  <h2><span class="i18n" data-en="7. get_num_new_matched_tokens -- the DRAM Hit Lookup" data-zh="7. get_num_new_matched_tokens —— DRAM 命中查詢">7. get_num_new_matched_tokens -- the DRAM Hit Lookup</span></h2>
-  <p><span class="i18n" data-en="This is the first method the scheduler calls. Location: <code class=&quot;inline-code&quot;>manager.py:208-228</code>. Input: the request and how many tokens the GPU already has cached. Output: the number of additional tokens available in DRAM plus a flag saying whether fetching them requires an async wait." data-zh="這是排程器呼叫的第一個方法。位置：<code class=&quot;inline-code&quot;>manager.py:208-228</code>。輸入：request 和 GPU 已命中的 token 數。輸出：DRAM 額外可用的 token 數，加一個旗標說明抓回它們是否需要非同步等待。">This is the first method the scheduler calls. Location: <code class="inline-code">manager.py:208-228</code>. Input: the request and how many tokens the GPU already has cached. Output: the number of additional tokens available in DRAM plus a flag saying whether fetching them requires an async wait.</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 208-228</span>
-<span class="kw">def</span> <span class="fn">get_num_new_matched_tokens</span>(
-    <span class="va">self</span>, request: <span class="st">"Request"</span>, num_computed_tokens: <span class="nb">int</span>
-) -> <span class="nb">tuple</span>[<span class="nb">int</span> | <span class="kw">None</span>, <span class="nb">bool</span>]:
-    <span class="st">"""Return (num_new_tokens, is_async) from consecutive CPU cache hits."""</span>
-    skipped = num_computed_tokens // <span class="va">self</span>.block_size
-    remaining_hashes = request.block_hashes[skipped:]           <span class="cm"># 1</span>
-
-    <span class="kw">if not</span> remaining_hashes:
-        <span class="kw">return</span> <span class="nu">0</span>, <span class="kw">False</span>
-    <span class="cm"># Must recompute at least the last token, matching</span>
-    <span class="cm"># kv_cache_manager.get_computed_blocks()'s policy.</span>
-    max_hit_len = request.num_tokens - <span class="nu">1</span> - num_computed_tokens  <span class="cm"># 2</span>
-    <span class="kw">if</span> max_hit_len &lt;= <span class="nu">0</span>:
-        <span class="kw">return</span> <span class="nu">0</span>, <span class="kw">False</span>
-    _, hit_length = <span class="va">self</span>.cpu_coordinator.<span class="fn">find_longest_cache_hit</span>(
-        remaining_hashes, max_hit_len                           <span class="cm"># 3</span>
-    )
-
-    <span class="kw">if</span> hit_length &gt; <span class="nu">0</span>:
-        <span class="kw">return</span> hit_length, <span class="kw">True</span>                             <span class="cm"># 4</span>
-    <span class="kw">return</span> <span class="nu">0</span>, <span class="kw">False</span>
-</pre>
-
-  <div class="step-flow">
-    <div class="step-item blue">
-      <h4>1. Skip the blocks the GPU already has</h4>
-      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>skipped = num_computed_tokens // block_size</code>. We start matching at the first block the GPU did <em>not</em> already serve." data-zh="<code class=&quot;inline-code&quot;>skipped = num_computed_tokens // block_size</code>。我們從 GPU <em>沒</em>命中的第一個 block 開始對比。"><code class="inline-code">skipped = num_computed_tokens // block_size</code>. We start matching at the first block the GPU did <em>not</em> already serve.</span></p>
-    </div>
-    <div class="step-item orange">
-      <h4>2. Never match the final token</h4>
-      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>max_hit_len = num_tokens - 1 - num_computed_tokens</code>. vLLM's prefix cache refuses to serve the request entirely from cache -- at least one token must go through the model to produce logits. This mirrors <code class=&quot;inline-code&quot;>kv_cache_manager.get_computed_blocks</code>." data-zh="<code class=&quot;inline-code&quot;>max_hit_len = num_tokens - 1 - num_computed_tokens</code>。vLLM 的 prefix cache 拒絕「整個 request 都靠 cache 服務」——至少要有一個 token 走過模型產生 logits。這與 <code class=&quot;inline-code&quot;>kv_cache_manager.get_computed_blocks</code> 的策略一致。"><code class="inline-code">max_hit_len = num_tokens - 1 - num_computed_tokens</code>. vLLM's prefix cache refuses to serve the request entirely from cache -- at least one token must go through the model to produce logits. This mirrors <code class="inline-code">kv_cache_manager.get_computed_blocks</code>.</span></p>
-    </div>
-    <div class="step-item purple">
-      <h4>3. Reuse find_longest_cache_hit</h4>
-      <p><span class="i18n" data-en="The scheduler's own prefix-cache matcher is called -- but against <code class=&quot;inline-code&quot;>cpu_coordinator</code>. Same algorithm, same block-hash format, different storage tier." data-zh="這裡呼叫的是排程器自己的 prefix-cache matcher——只是對象是 <code class=&quot;inline-code&quot;>cpu_coordinator</code>。同演算法、同 block-hash 格式，只差在儲存層。">The scheduler's own prefix-cache matcher is called -- but against <code class="inline-code">cpu_coordinator</code>. Same algorithm, same block-hash format, different storage tier.</span></p>
-    </div>
-    <div class="step-item green">
-      <h4>4. Return hit_length with is_async = True</h4>
-      <p><span class="i18n" data-en="Any hit forces the request into <code class=&quot;inline-code&quot;>WAITING_FOR_REMOTE_KVS</code> on the scheduler side -- the request gets its GPU blocks reserved but is not actually scheduled to run compute until <code class=&quot;inline-code&quot;>get_finished()</code> reports the H2D load is done." data-zh="只要有命中，request 在排程器端會被切換到 <code class=&quot;inline-code&quot;>WAITING_FOR_REMOTE_KVS</code>——它會先拿到 GPU block，但要等 <code class=&quot;inline-code&quot;>get_finished()</code> 回報 H2D load 完成後才真正被排入 compute。">Any hit forces the request into <code class="inline-code">WAITING_FOR_REMOTE_KVS</code> on the scheduler side -- the request gets its GPU blocks reserved but is not actually scheduled to run compute until <code class="inline-code">get_finished()</code> reports the H2D load is done.</span></p>
-    </div>
-  </div>
-
-  <div class="callout green">
-    <strong><span class="i18n" data-en="Side-effect free" data-zh="無副作用">Side-effect free</span>:</strong>
-    <span class="i18n" data-en=" the base contract says this method may be called multiple times per request and must be idempotent. This implementation is -- it only reads from <code class=&quot;inline-code&quot;>cpu_coordinator</code>, never mutates anything." data-zh="Base 契約說這個方法一個 request 可能被呼叫多次，必須是 idempotent。這個實作符合——它只從 <code class=&quot;inline-code&quot;>cpu_coordinator</code> 讀資料，不改任何狀態。"> the base contract says this method may be called multiple times per request and must be idempotent. This implementation is -- it only reads from <code class="inline-code">cpu_coordinator</code>, never mutates anything.</span>
-  </div>
-</div>
-
-<!-- ==================== UPDATE STATE AFTER ALLOC ==================== -->
-<div class="section" id="pairing">
-  <span class="section-label">Part 2 &middot; Load path</span>
-  <h2><span class="i18n" data-en="8. update_state_after_alloc -- Pairing CPU Blocks with GPU Slots" data-zh="8. update_state_after_alloc —— 把 CPU block 配對到 GPU 位置">8. update_state_after_alloc -- Pairing CPU Blocks with GPU Slots</span></h2>
-  <p><span class="i18n" data-en="Once the scheduler has reserved GPU blocks via <code class=&quot;inline-code&quot;>kv_cache_manager.allocate_slots()</code>, it calls back here. Location: <code class=&quot;inline-code&quot;>manager.py:232-313</code>. Goal: figure out exactly which CPU blocks hold the matched prefix, decide which GPU blocks they should land in, and pin both sides so nothing evicts them mid-transfer." data-zh="當排程器透過 <code class=&quot;inline-code&quot;>kv_cache_manager.allocate_slots()</code> 配好 GPU block 後，會回呼這裡。位置：<code class=&quot;inline-code&quot;>manager.py:232-313</code>。目的：找出到底是哪些 CPU block 持有命中的 prefix，決定它們要落在哪些 GPU block，並把兩邊都 pin 住以免傳輸中途被淘汰。">Once the scheduler has reserved GPU blocks via <code class="inline-code">kv_cache_manager.allocate_slots()</code>, it calls back here. Location: <code class="inline-code">manager.py:232-313</code>. Goal: figure out exactly which CPU blocks hold the matched prefix, decide which GPU blocks they should land in, and pin both sides so nothing evicts them mid-transfer.</span></p>
-
-  <div class="diagram-container">
-    <div class="colflow">
-      <div class="box gpu"><h5>Inputs</h5><span class="i18n" data-en="<code class=&quot;inline-code&quot;>request</code>, <code class=&quot;inline-code&quot;>blocks</code> = newly-allocated GPU KVCacheBlocks across all groups, <code class=&quot;inline-code&quot;>num_external_tokens</code> = hit length reported in step 7." data-zh="<code class=&quot;inline-code&quot;>request</code>、<code class=&quot;inline-code&quot;>blocks</code> = 剛剛配出來的 GPU KVCacheBlocks（跨所有 group）、<code class=&quot;inline-code&quot;>num_external_tokens</code> = 第 7 節回報的命中長度。"><code class="inline-code">request</code>, <code class="inline-code">blocks</code> = newly-allocated GPU KVCacheBlocks across all groups, <code class="inline-code">num_external_tokens</code> = hit length reported in step 7.</span></div>
-      <div class="arrow">&darr;</div>
-      <div class="box sched"><h5>A. Eager-mode registration <span class="src-ref">line 245-250</span></h5><span class="i18n" data-en="In eager mode, register an empty <code class=&quot;inline-code&quot;>StoreRequestState</code> so future <code class=&quot;inline-code&quot;>build_connector_meta</code> calls can start appending newly-computed blocks for this request." data-zh="在 eager 模式下先建一個空的 <code class=&quot;inline-code&quot;>StoreRequestState</code>，之後每次 <code class=&quot;inline-code&quot;>build_connector_meta</code> 就能把這個 request 新算出來的 block 繼續往裡塞。">In eager mode, register an empty <code class="inline-code">StoreRequestState</code> so future <code class="inline-code">build_connector_meta</code> calls can start appending newly-computed blocks for this request.</span></div>
-      <div class="arrow">&darr;</div>
-      <div class="box cpu"><h5>B. Re-query CPU hit blocks <span class="src-ref">line 258-266</span></h5><span class="i18n" data-en="Compute <code class=&quot;inline-code&quot;>skipped</code> = blocks the GPU already held locally (by scanning <code class=&quot;inline-code&quot;>blocks.blocks[fa_gidx]</code> for hashes). Then call <code class=&quot;inline-code&quot;>cpu_coordinator.find_longest_cache_hit</code> again to retrieve the actual CPU <code class=&quot;inline-code&quot;>KVCacheBlock</code> objects." data-zh="算出 <code class=&quot;inline-code&quot;>skipped</code> = GPU 本地已經持有的 block 數（掃描 <code class=&quot;inline-code&quot;>blocks.blocks[fa_gidx]</code> 看哪幾個已經有 hash）。然後再呼叫一次 <code class=&quot;inline-code&quot;>cpu_coordinator.find_longest_cache_hit</code>，這次是要拿到實際的 CPU <code class=&quot;inline-code&quot;>KVCacheBlock</code> 物件。">Compute <code class="inline-code">skipped</code> = blocks the GPU already held locally (by scanning <code class="inline-code">blocks.blocks[fa_gidx]</code> for hashes). Then call <code class="inline-code">cpu_coordinator.find_longest_cache_hit</code> again to retrieve the actual CPU <code class="inline-code">KVCacheBlock</code> objects.</span></div>
-      <div class="arrow">&darr;</div>
-      <div class="box sched"><h5>C. Back-trace GPU targets per group <span class="src-ref">line 279-299</span></h5><span class="i18n" data-en="Hit blocks sit at the <em>tail</em> of the newly-allocated GPU range. For each kv_cache_group, compute <code class=&quot;inline-code&quot;>n_computed_g = cdiv(total_computed_tokens, group_block_size)</code> and take the last <code class=&quot;inline-code&quot;>n_ext_g</code> GPU block IDs. Skip null blocks (sliding-window / Mamba padding)." data-zh="命中 block 落在新配 GPU 範圍的<em>尾端</em>。對每個 kv_cache_group 算 <code class=&quot;inline-code&quot;>n_computed_g = cdiv(total_computed_tokens, group_block_size)</code>，取最後 <code class=&quot;inline-code&quot;>n_ext_g</code> 個 GPU block id。空 block 要跳過（sliding window / Mamba 的 padding）。">Hit blocks sit at the <em>tail</em> of the newly-allocated GPU range. For each kv_cache_group, compute <code class="inline-code">n_computed_g = cdiv(total_computed_tokens, group_block_size)</code> and take the last <code class="inline-code">n_ext_g</code> GPU block IDs. Skip null blocks (sliding-window / Mamba padding).</span></div>
-      <div class="arrow">&darr;</div>
-      <div class="box cpu"><h5>D. Touch both sides <span class="src-ref">line 301-308</span></h5><span class="i18n" data-en="<code class=&quot;inline-code&quot;>cpu_block_pool.touch(cpu_blocks)</code> bumps CPU ref_cnt so the CPU LRU can't evict them. <code class=&quot;inline-code&quot;>gpu_block_pool.touch(gpu_blocks)</code> does the same on GPU -- the scheduler can't accidentally free the target slots before the async H2D copy lands." data-zh="<code class=&quot;inline-code&quot;>cpu_block_pool.touch(cpu_blocks)</code> 把 CPU 的 ref_cnt++，讓 CPU LRU 不會把它們踢掉。<code class=&quot;inline-code&quot;>gpu_block_pool.touch(gpu_blocks)</code> 在 GPU 側做同一件事——排程器不能在非同步 H2D 還沒落地之前意外把目標位置釋放掉。"><code class="inline-code">cpu_block_pool.touch(cpu_blocks)</code> bumps CPU ref_cnt so the CPU LRU can't evict them. <code class="inline-code">gpu_block_pool.touch(gpu_blocks)</code> does the same on GPU -- the scheduler can't accidentally free the target slots before the async H2D copy lands.</span></div>
-      <div class="arrow">&darr;</div>
-      <div class="box meta"><h5>E. Record the plan <span class="src-ref">line 310-313</span></h5><span class="i18n" data-en="<code class=&quot;inline-code&quot;>self._reqs_to_load[req_id] = LoadRequestState(request, TransferMeta(gpu_block_ids, cpu_block_ids))</code>. Nothing launches yet -- the actual event_idx is assigned in step 9." data-zh="<code class=&quot;inline-code&quot;>self._reqs_to_load[req_id] = LoadRequestState(request, TransferMeta(gpu_block_ids, cpu_block_ids))</code>。還不 launch——實際的 event_idx 要到第 9 節才會分配。"><code class="inline-code">self._reqs_to_load[req_id] = LoadRequestState(request, TransferMeta(gpu_block_ids, cpu_block_ids))</code>. Nothing launches yet -- the actual event_idx is assigned in step 9.</span></div>
-    </div>
-    <div class="caption"><span class="i18n" data-en="Figure 3: update_state_after_alloc converts a hit count into a concrete (CPU block, GPU block) transfer list, paired across all kv_cache_groups." data-zh="圖 3：update_state_after_alloc 把一個命中 token 數轉換成具體的「(CPU block, GPU block) 搬運列表」，跨所有 kv_cache_group 配對。">Figure 3: update_state_after_alloc converts a hit count into a concrete (CPU block, GPU block) transfer list, paired across all kv_cache_groups.</span></div>
-  </div>
-
-  <div class="callout warn">
-    <strong><span class="i18n" data-en="Why call find_longest_cache_hit twice?" data-zh="為什麼 find_longest_cache_hit 要呼叫兩次？">Why call find_longest_cache_hit twice?</span></strong>
-    <span class="i18n" data-en=" Step 7 only needed a count. Step 8 needs the actual <code class=&quot;inline-code&quot;>KVCacheBlock</code> objects so it can build (GPU, CPU) pairs. Re-querying is cheap -- it's a hash-table walk -- and avoids smuggling state between the two calls (which would break the idempotency guarantee of step 7)." data-zh="第 7 節只需要「幾個 token」。第 8 節需要實際的 <code class=&quot;inline-code&quot;>KVCacheBlock</code> 物件才能配對 (GPU, CPU)。重新查很便宜——就是雜湊表走訪——而且避免在兩個呼叫之間偷偷藏狀態（那會破壞第 7 節的 idempotent 契約）。"> Step 7 only needed a count. Step 8 needs the actual <code class="inline-code">KVCacheBlock</code> objects so it can build (GPU, CPU) pairs. Re-querying is cheap -- it's a hash-table walk -- and avoids smuggling state between the two calls (which would break the idempotency guarantee of step 7).</span>
-  </div>
-</div>
-
-<!-- ==================== BUILD CONNECTOR META ==================== -->
-<div class="section" id="build-meta">
-  <span class="section-label">Part 2 &middot; Per-step packaging</span>
-  <h2><span class="i18n" data-en="9. build_connector_meta -- Packaging the Step's Transfers" data-zh="9. build_connector_meta —— 打包本步的搬運計畫">9. build_connector_meta -- Packaging the Step's Transfers</span></h2>
-  <p><span class="i18n" data-en="Called once per <code class=&quot;inline-code&quot;>schedule()</code> tick. Location: <code class=&quot;inline-code&quot;>manager.py:315-364</code>. Produces a <code class=&quot;inline-code&quot;>SimpleCPUOffloadMetadata</code> that is shipped via IPC to every worker and tells them what to copy." data-zh="每個 <code class=&quot;inline-code&quot;>schedule()</code> tick 呼叫一次。位置：<code class=&quot;inline-code&quot;>manager.py:315-364</code>。產出一個 <code class=&quot;inline-code&quot;>SimpleCPUOffloadMetadata</code>，透過 IPC 送到每個 worker，告訴它們要 copy 什麼。">Called once per <code class="inline-code">schedule()</code> tick. Location: <code class="inline-code">manager.py:315-364</code>. Produces a <code class="inline-code">SimpleCPUOffloadMetadata</code> that is shipped via IPC to every worker and tells them what to copy.</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/metadata.py  --  lines 15-38</span>
-<span class="dc">@dataclass</span>
-<span class="kw">class</span> <span class="cl">SimpleCPUOffloadMetadata</span>(KVConnectorMetadata):
-    <span class="cm">"""</span>
-    <span class="cm">Metadata passed from scheduler to worker for CPU offload operations.</span>
-    <span class="cm">The worker receives flat block lists keyed by a monotonic event_idx.</span>
-    <span class="cm">Job->req_id translation is handled by the scheduler-side manager</span>
-    <span class="cm">(via inverse maps), so the worker never knows about request identities.</span>
-    <span class="cm">"""</span>
-
-    <span class="cm"># Load event per step. -1 means no blocks to load this step.</span>
-    load_event: <span class="nb">int</span> = INVALID_JOB_ID
-    load_gpu_blocks: <span class="nb">list</span>[<span class="nb">int</span>] = field(default_factory=<span class="nb">list</span>)
-    load_cpu_blocks: <span class="nb">list</span>[<span class="nb">int</span>] = field(default_factory=<span class="nb">list</span>)
-    load_event_to_reqs: <span class="nb">dict</span>[<span class="nb">int</span>, <span class="nb">list</span>[<span class="nb">str</span>]] = field(default_factory=<span class="nb">dict</span>)
-
-    <span class="cm"># Store event per step. -1 means no blocks to store this step.</span>
-    store_event: <span class="nb">int</span> = INVALID_JOB_ID
-    store_gpu_blocks: <span class="nb">list</span>[<span class="nb">int</span>] = field(default_factory=<span class="nb">list</span>)
-    store_cpu_blocks: <span class="nb">list</span>[<span class="nb">int</span>] = field(default_factory=<span class="nb">list</span>)
-
-    <span class="cm"># Whether any requests were preempted this step -- worker must flush.</span>
-    need_flush: <span class="nb">bool</span> = <span class="kw">False</span>
-</pre>
-
-  <p><span class="i18n" data-en="Each tick builds at most one load event and one store event; both carry <em>flat</em> block lists. The <code class=&quot;inline-code&quot;>load_event_to_reqs</code> dict is the only piece of request identity that reaches the worker -- everything else is block IDs, so the worker can treat stores as identity-free." data-zh="每個 tick 最多打包一個 load event 和一個 store event；兩者都帶<em>扁平</em>的 block 列表。<code class=&quot;inline-code&quot;>load_event_to_reqs</code> 是唯一會傳到 worker 端的「誰是誰」資訊——其他都是 block id，worker 因此可以把 store 當作沒有身份的工作。">Each tick builds at most one load event and one store event; both carry <em>flat</em> block lists. The <code class="inline-code">load_event_to_reqs</code> dict is the only piece of request identity that reaches the worker -- everything else is block IDs, so the worker can treat stores as identity-free.</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 335-353</span>
-<span class="cm"># --- Loads ---</span>
-load_event = -<span class="nu">1</span>
-load_gpu: <span class="nb">list</span>[<span class="nb">int</span>] = []
-load_cpu: <span class="nb">list</span>[<span class="nb">int</span>] = []
-load_req_ids: <span class="nb">list</span>[<span class="nb">str</span>] = []
-<span class="kw">for</span> req_id, load_state <span class="kw">in</span> <span class="va">self</span>._reqs_to_load.<span class="fn">items</span>():
-    <span class="kw">if</span> load_state.load_event <span class="kw">is not None</span>:
-        <span class="kw">continue</span>                      <span class="cm"># already flushed in an earlier step</span>
-    <span class="kw">assert</span> load_state.transfer_meta <span class="kw">is not None</span>
-    load_gpu.<span class="fn">extend</span>(load_state.transfer_meta.gpu_block_ids)
-    load_cpu.<span class="fn">extend</span>(load_state.transfer_meta.cpu_block_ids)
-    load_req_ids.<span class="fn">append</span>(req_id)
-<span class="kw">if</span> load_req_ids:
-    load_event = <span class="va">self</span>._load_event_counter         <span class="cm"># assign this batch an ID</span>
-    <span class="va">self</span>._load_event_counter += <span class="nu">1</span>
-    <span class="kw">for</span> req_id <span class="kw">in</span> load_req_ids:
-        <span class="va">self</span>._reqs_to_load[req_id].load_event = load_event
-    <span class="va">self</span>._load_event_to_reqs[load_event] = load_req_ids
-</pre>
-
-  <div class="callout blue">
-    <strong><span class="i18n" data-en="Batching discipline" data-zh="批次紀律">Batching discipline</span>:</strong>
-    <span class="i18n" data-en=" all not-yet-launched loads across all requests are coalesced into <em>one</em> event this step. The worker then launches a single batched <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> covering every pair. This amortises the per-call overhead (~5 ms) across the whole batch." data-zh="本步所有還沒 launch 的 load，不分 request，全部合併成<em>一個</em> event。Worker 之後會針對這批發出一個 <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> 覆蓋所有配對。這樣每次 ~5 ms 的 per-call overhead 被整批分攤。"> all not-yet-launched loads across all requests are coalesced into <em>one</em> event this step. The worker then launches a single batched <code class="inline-code">cuMemcpyBatchAsync</code> covering every pair. This amortises the per-call overhead (~5 ms) across the whole batch.</span>
-  </div>
-</div>
-
-<!-- ==================== LAZY VS EAGER ==================== -->
-<div class="section" id="lazy-vs-eager">
-  <span class="section-label">Part 2 &middot; Store path</span>
-  <h2><span class="i18n" data-en="10. Two Store Modes -- Lazy Cursor vs Eager Scan" data-zh="10. 兩種 store 模式 —— Lazy 游標 vs Eager 掃描">10. Two Store Modes -- Lazy Cursor vs Eager Scan</span></h2>
-  <p><span class="i18n" data-en="The interesting half of the PR is how newly-computed blocks are decided to be offloaded <em>to</em> CPU. The connector supports two strategies, selected by <code class=&quot;inline-code&quot;>lazy_offload</code> in extra config. They have very different performance envelopes." data-zh="PR 有趣的另一半是「剛算出來的 block 何時被 offload 到 CPU」。Connector 支援兩種策略，由 extra config 裡的 <code class=&quot;inline-code&quot;>lazy_offload</code> 切換。兩者性能曲線差很大。">The interesting half of the PR is how newly-computed blocks are decided to be offloaded <em>to</em> CPU. The connector supports two strategies, selected by <code class="inline-code">lazy_offload</code> in extra config. They have very different performance envelopes.</span></p>
-
-  <div class="mode-grid">
-    <div class="mode-col eager">
-      <span class="mode-badge">EAGER</span>
-      <h4>_prepare_eager_store_specs</h4>
-      <p style="font-size:.9rem"><span class="i18n" data-en="Walk every running request, for every kv_cache_group, scan its block_ids from <code class=&quot;inline-code&quot;>num_stored_blocks[g]</code> up to <code class=&quot;inline-code&quot;>ready_blocks_g = confirmed_tokens // g_block_size</code>. Offload everything newly computed, stopping only if CPU pool runs out." data-zh="走訪每個 running request、每個 kv_cache_group，掃描其 block_ids，從 <code class=&quot;inline-code&quot;>num_stored_blocks[g]</code> 到 <code class=&quot;inline-code&quot;>ready_blocks_g = confirmed_tokens // g_block_size</code>。把所有剛算出來的 block 都 offload，只有 CPU pool 滿才停。">Walk every running request, for every kv_cache_group, scan its block_ids from <code class="inline-code">num_stored_blocks[g]</code> up to <code class="inline-code">ready_blocks_g = confirmed_tokens // g_block_size</code>. Offload everything newly computed, stopping only if CPU pool runs out.</span></p>
-      <h5 style="font-size:.82rem;color:#ffb74d;margin-top:.8rem">Trade-off</h5>
-      <ul style="font-size:.82rem">
-        <li><span class="check">+</span> <span class="i18n" data-en="Maximum coverage -- any block that could be useful later is saved." data-zh="覆蓋率最大——任何未來可能有用的 block 都會被保存。">Maximum coverage -- any block that could be useful later is saved.</span></li>
-        <li><span class="check">+</span> <span class="i18n" data-en="Predictable latency -- the store happens soon after compute finishes." data-zh="延遲可預期——compute 完不久後就 store。">Predictable latency -- the store happens soon after compute finishes.</span></li>
-        <li><span class="cross">&minus;</span> <span class="i18n" data-en="Wastes bandwidth on blocks that will never be reused (e.g. streaming workloads)." data-zh="把頻寬花在永遠不會被重用的 block 上（例如 streaming 工作負載）。">Wastes bandwidth on blocks that will never be reused (e.g. streaming workloads).</span></li>
-      </ul>
-    </div>
-    <div class="mode-col lazy">
-      <span class="mode-badge">LAZY</span>
-      <h4>_prepare_lazy_store_specs</h4>
-      <p style="font-size:.9rem"><span class="i18n" data-en="Walk the GPU <code class=&quot;inline-code&quot;>free_block_queue</code> starting from <code class=&quot;inline-code&quot;>self._cursor</code>. Each cached block the cursor passes over gets offloaded if it isn't already on CPU. Stops when <code class=&quot;inline-code&quot;>target_free</code> blocks are covered or CPU pool is full." data-zh="從 <code class=&quot;inline-code&quot;>self._cursor</code> 出發走訪 GPU <code class=&quot;inline-code&quot;>free_block_queue</code>。每經過一個「有 cache 但還沒在 CPU」的 block 就 offload。走到 <code class=&quot;inline-code&quot;>target_free</code> 個 block 或 CPU pool 滿就停。">Walk the GPU <code class="inline-code">free_block_queue</code> starting from <code class="inline-code">self._cursor</code>. Each cached block the cursor passes over gets offloaded if it isn't already on CPU. Stops when <code class="inline-code">target_free</code> blocks are covered or CPU pool is full.</span></p>
-      <h5 style="font-size:.82rem;color:#8bc34a;margin-top:.8rem">Trade-off</h5>
-      <ul style="font-size:.82rem">
-        <li><span class="check">+</span> <span class="i18n" data-en="Only offloads blocks that are about to be evicted -- bandwidth spent on blocks that actually matter." data-zh="只 offload 即將被踢掉的 block——頻寬花在真的值得的 block 上。">Only offloads blocks that are about to be evicted -- bandwidth spent on blocks that actually matter.</span></li>
-        <li><span class="check">+</span> <span class="i18n" data-en="Piggy-backs on the GPU pool's LRU ordering -- zero extra tracking state." data-zh="搭便車用 GPU pool 的 LRU 順序——零額外追蹤狀態。">Piggy-backs on the GPU pool's LRU ordering -- zero extra tracking state.</span></li>
-        <li><span class="cross">&minus;</span> <span class="i18n" data-en="May miss a block if the scheduler frees it faster than the cursor advances (worker launches after evict wins)." data-zh="如果排程器釋放 block 的速度比 cursor 前進快，可能錯過（evict 先贏了 launch）。">May miss a block if the scheduler frees it faster than the cursor advances (worker launches after evict wins).</span></li>
-      </ul>
-    </div>
-  </div>
-
-  <h3><span class="i18n" data-en="10.1 Lazy cursor -- the single-pass walk" data-zh="10.1 Lazy cursor —— 單次走訪">10.1 Lazy cursor -- the single-pass walk</span></h3>
-  <p><span class="i18n" data-en="Location: <code class=&quot;inline-code&quot;>manager.py:375-441</code>. The heart of lazy mode is a single pointer into the GPU free queue's doubly-linked list. Because vLLM's <code class=&quot;inline-code&quot;>FreeKVCacheBlockQueue</code> is in LRU order, walking forward from the head is walking from &quot;most likely to be evicted soon&quot; to &quot;least likely.&quot;" data-zh="位置：<code class=&quot;inline-code&quot;>manager.py:375-441</code>。Lazy 模式的核心是一個指向 GPU free queue 雙向鏈結串列的指標。因為 vLLM 的 <code class=&quot;inline-code&quot;>FreeKVCacheBlockQueue</code> 是 LRU 排序，從頭往前走等於從「最快被踢」走到「最不容易被踢」。">Location: <code class="inline-code">manager.py:375-441</code>. The heart of lazy mode is a single pointer into the GPU free queue's doubly-linked list. Because vLLM's <code class="inline-code">FreeKVCacheBlockQueue</code> is in LRU order, walking forward from the head is walking from "most likely to be evicted soon" to "least likely."</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 390-428</span>
-<span class="cm"># Validate cursor: stale if the block it points to was removed from free queue.</span>
-<span class="kw">if</span> <span class="va">self</span>._cursor <span class="kw">is not None and</span> <span class="va">self</span>._cursor.ref_cnt &gt; <span class="nu">0</span>:
-    <span class="va">self</span>._cursor = <span class="kw">None</span>
-
-<span class="cm"># Determine start node.</span>
-<span class="kw">if</span> <span class="va">self</span>._cursor <span class="kw">is None</span>:
-    node = free_queue.fake_free_list_head.next_free_block
-<span class="kw">else</span>:
-    node = <span class="va">self</span>._cursor.next_free_block
-
-tail = free_queue.fake_free_list_tail
-gpu_ids: <span class="nb">list</span>[<span class="nb">int</span>] = []
-block_hashes: <span class="nb">list</span>[<span class="nb">bytes</span>] = []
-covered = <span class="nu">0</span>
-last_visited = <span class="va">self</span>._cursor
-
-<span class="kw">while</span> (
-    node <span class="kw">is not None</span>                         <span class="cm"># not off the end</span>
-    <span class="kw">and</span> node <span class="kw">is not</span> tail                      <span class="cm"># not the sentinel tail</span>
-    <span class="kw">and</span> covered &lt; <span class="va">self</span>._target_free            <span class="cm"># budget not reached</span>
-    <span class="kw">and</span> <span class="fn">len</span>(gpu_ids) &lt; num_cpu_free            <span class="cm"># CPU pool has room</span>
-):
-    last_visited = node
-    bhash = node.block_hash
-
-    <span class="kw">if</span> (
-        bhash <span class="kw">is not None</span>                      <span class="cm"># block has a prefix hash</span>
-        <span class="kw">and not</span> node.is_null
-        <span class="kw">and</span> cpu_pool.cached_block_hash_to_block.<span class="fn">get_one_block</span>(bhash) <span class="kw">is None</span>
-        <span class="cm">#   ^ and it's not already cached on CPU</span>
-    ):
-        gpu_ids.<span class="fn">append</span>(node.block_id)
-        block_hashes.<span class="fn">append</span>(bhash)
-
-    covered += <span class="nu">1</span>
-    node = node.next_free_block
-
-<span class="va">self</span>._cursor = last_visited                 <span class="cm"># save for next step</span>
-</pre>
-
-  <div class="callout green">
-    <strong><span class="i18n" data-en="Cursor correctness" data-zh="Cursor 正確性">Cursor correctness</span>:</strong>
-    <span class="i18n" data-en=" when a request reclaims a cached block by incrementing its <code class=&quot;inline-code&quot;>ref_cnt</code>, that block is unlinked from the free queue. If the cursor happens to point at it, the next step sees <code class=&quot;inline-code&quot;>ref_cnt &gt; 0</code> and resets to the head -- no stale pointer chasing." data-zh="當某個 request 把一個 cached block 搶回來（把 ref_cnt++），它就會從 free queue 解鏈。若 cursor 剛好指著它，下一步看到 <code class=&quot;inline-code&quot;>ref_cnt &gt; 0</code> 就會 reset 到頭——不會追到爛指標。"> when a request reclaims a cached block by incrementing its <code class="inline-code">ref_cnt</code>, that block is unlinked from the free queue. If the cursor happens to point at it, the next step sees <code class="inline-code">ref_cnt &gt; 0</code> and resets to the head -- no stale pointer chasing.</span>
-  </div>
-
-  <h3><span class="i18n" data-en="10.2 Eager per-request scan" data-zh="10.2 Eager 逐請求掃描">10.2 Eager per-request scan</span></h3>
-  <p><span class="i18n" data-en="Location: <code class=&quot;inline-code&quot;>manager.py:443-579</code>. Iterates <code class=&quot;inline-code&quot;>yield_req_data(scheduler_output)</code> to get every running request's newly-written blocks. The &quot;confirmed_tokens&quot; guard is the subtle part: we cap the scan at blocks whose KV data is <em>actually</em> computed, not speculatively written by async scheduling." data-zh="位置：<code class=&quot;inline-code&quot;>manager.py:443-579</code>。透過 <code class=&quot;inline-code&quot;>yield_req_data(scheduler_output)</code> 走訪每個 running request 新寫的 block。「confirmed_tokens」這個 guard 是精妙處：只掃描 KV 資料<em>真的</em>算出來的 block，不碰 async scheduling 提前寫的投機 block。">Location: <code class="inline-code">manager.py:443-579</code>. Iterates <code class="inline-code">yield_req_data(scheduler_output)</code> to get every running request's newly-written blocks. The "confirmed_tokens" guard is the subtle part: we cap the scan at blocks whose KV data is <em>actually</em> computed, not speculatively written by async scheduling.</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 497-545</span>
-<span class="cm"># Confirmed tokens: KV data written and visible to all streams.</span>
-req = state.request
-confirmed_tokens = req.num_computed_tokens - req.num_output_placeholders
-
-<span class="kw">for</span> g <span class="kw">in</span> <span class="fn">range</span>(num_groups):
-    already_stored_g = state.num_stored_blocks[g]
-    group_gpu_ids = block_ids_by_group[g]
-
-    <span class="cm"># Cap to blocks with confirmed KV data.</span>
-    g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
-    ready_blocks_g = confirmed_tokens // g_block_size
-    scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
-
-    <span class="kw">for</span> gpu_block_id <span class="kw">in</span> scannable:
-        gpu_block = gpu_block_pool.blocks[gpu_block_id]
-        <span class="kw">if</span> gpu_block.is_null:
-            advanced_per_group[g] += <span class="nu">1</span>
-            <span class="kw">continue</span>
-
-        bhash_with_group = gpu_block.block_hash
-        <span class="kw">if</span> bhash_with_group <span class="kw">is None</span>:
-            <span class="kw">break</span>                                   <span class="cm"># not hashed yet, stop</span>
-
-        <span class="kw">if</span> (
-            gpu_block_id <span class="kw">in</span> gpu_blocks_this_step
-            <span class="kw">or</span> cpu_block_pool.cached_block_hash_to_block.<span class="fn">get_one_block</span>(
-                bhash_with_group
-            ) <span class="kw">is not None</span>
-        ):
-            advanced_per_group[g] += <span class="nu">1</span>
-            <span class="kw">continue</span>                                <span class="cm"># dedup: already scheduled or cached</span>
-
-        <span class="kw">if</span> num_free &lt;= <span class="nu">0</span>:
-            out_of_space = <span class="kw">True</span>                     <span class="cm"># CPU pool full</span>
-            <span class="kw">break</span>
-        num_free -= <span class="nu">1</span>
-
-        gpu_block_ids.<span class="fn">append</span>(gpu_block_id)
-        block_hashes_to_store.<span class="fn">append</span>(bhash_with_group)
-        advanced_per_group[g] += <span class="nu">1</span>
-</pre>
-
-  <div class="callout warn">
-    <strong><span class="i18n" data-en="The confirmed_tokens subtraction" data-zh="confirmed_tokens 扣減">The confirmed_tokens subtraction</span>:</strong>
-    <span class="i18n" data-en=" vLLM's async scheduler can optimistically advance <code class=&quot;inline-code&quot;>num_computed_tokens</code> before the GPU has actually finished those tokens. <code class=&quot;inline-code&quot;>num_output_placeholders</code> counts those in-flight tokens. Subtracting gives us a lower bound on what is <em>really</em> computed -- so we never offload a block whose KV data is still a CUDA graph placeholder." data-zh="vLLM 的 async scheduler 可能樂觀地在 GPU 尚未真的算完這些 token 前就把 <code class=&quot;inline-code&quot;>num_computed_tokens</code> 推進。<code class=&quot;inline-code&quot;>num_output_placeholders</code> 數的就是這些在飛的 token。相減才能拿到「真的算完」的下限——確保我們絕不會 offload 一個還是 CUDA graph placeholder 的 block。"> vLLM's async scheduler can optimistically advance <code class="inline-code">num_computed_tokens</code> before the GPU has actually finished those tokens. <code class="inline-code">num_output_placeholders</code> counts those in-flight tokens. Subtracting gives us a lower bound on what is <em>really</em> computed -- so we never offload a block whose KV data is still a CUDA graph placeholder.</span>
-  </div>
-</div>
-
-<!-- ==================== COMPLETION & UPDATE ==================== -->
-<div class="section" id="completion">
-  <span class="section-label">Part 2 &middot; Completion accounting</span>
-  <h2><span class="i18n" data-en="11. update_connector_output -- TP-Aware Completion" data-zh="11. update_connector_output —— TP-aware 的完成帳本">11. update_connector_output -- TP-Aware Completion</span></h2>
-  <p><span class="i18n" data-en="Location: <code class=&quot;inline-code&quot;>manager.py:581-648</code>. This is where the scheduler folds worker completion reports back into its state. Loads are simple -- a load is done when any one worker reports it. Stores are tricky because the same event_idx must be completed by <em>every</em> TP/PP rank before the scheduler can safely promote CPU blocks into the prefix cache." data-zh="位置：<code class=&quot;inline-code&quot;>manager.py:581-648</code>。這裡是排程器把 worker 回報的完成資訊折回自己狀態的地方。Load 簡單——任何一個 worker 回報就算完。Store 複雜，因為同一個 event_idx 要等<em>每一個</em> TP/PP rank 都完成，排程器才能安全地把 CPU block 升級進 prefix cache。">Location: <code class="inline-code">manager.py:581-648</code>. This is where the scheduler folds worker completion reports back into its state. Loads are simple -- a load is done when any one worker reports it. Stores are tricky because the same event_idx must be completed by <em>every</em> TP/PP rank before the scheduler can safely promote CPU blocks into the prefix cache.</span></p>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 593-603</span>
-<span class="cm"># --- Store completions ---</span>
-meta = connector_output.kv_connector_worker_meta
-<span class="kw">if not</span> <span class="fn">isinstance</span>(meta, SimpleCPUOffloadWorkerMetadata):
-    <span class="kw">return</span>
-<span class="kw">for</span> event_idx, count <span class="kw">in</span> meta.completed_store_events.<span class="fn">items</span>():
-    total = <span class="va">self</span>._store_event_pending_counts.<span class="fn">get</span>(event_idx, <span class="nu">0</span>) + count
-    <span class="kw">if</span> total &gt;= <span class="va">self</span>._expected_worker_count:
-        <span class="va">self</span>._store_event_pending_counts.<span class="fn">pop</span>(event_idx, <span class="kw">None</span>)
-        <span class="va">self</span>.<span class="fn">_process_store_event</span>(event_idx)       <span class="cm"># all ranks reported</span>
-    <span class="kw">else</span>:
-        <span class="va">self</span>._store_event_pending_counts[event_idx] = total
-</pre>
-
-  <h3><span class="i18n" data-en="11.1 What _process_store_event actually does" data-zh="11.1 _process_store_event 實際做什麼">11.1 What _process_store_event actually does</span></h3>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/manager.py  --  lines 625-648</span>
-<span class="kw">def</span> <span class="fn">_process_store_completion</span>(
-    <span class="va">self</span>, gpu_block_ids: <span class="nb">list</span>[<span class="nb">int</span>], cpu_block_ids: <span class="nb">list</span>[<span class="nb">int</span>]
-) -> <span class="kw">None</span>:
-    <span class="cm">"""Cache CPU blocks per-group and release GPU refs.</span>
-
-    <span class="cm">Block hashes were stamped on CPU blocks at allocation time. Here we</span>
-    <span class="cm">just register them in the cache map so they become discoverable by</span>
-    <span class="cm">the load path."""</span>
-    cpu_blocks = [<span class="va">self</span>.cpu_block_pool.blocks[bid] <span class="kw">for</span> bid <span class="kw">in</span> cpu_block_ids]
-    <span class="kw">for</span> cpu_block <span class="kw">in</span> cpu_blocks:
-        bhash = cpu_block.block_hash
-        <span class="kw">assert</span> bhash <span class="kw">is not None</span>
-        <span class="va">self</span>.cpu_block_pool.cached_block_hash_to_block.<span class="fn">insert</span>(
-            bhash, cpu_block
-        )
-    <span class="cm"># Release touch refs -- LRU resumes.</span>
-    <span class="va">self</span>.cpu_block_pool.<span class="fn">free_blocks</span>(cpu_blocks)
-    <span class="kw">assert</span> <span class="va">self</span>._gpu_block_pool <span class="kw">is not None</span>
-    <span class="va">self</span>._gpu_block_pool.<span class="fn">free_blocks</span>(
-        <span class="va">self</span>._gpu_block_pool.blocks[bid] <span class="kw">for</span> bid <span class="kw">in</span> gpu_block_ids
-    )
-</pre>
-
-  <div class="callout key">
-    <strong><span class="i18n" data-en="Hash stamping happens at store-prep time" data-zh="Hash 蓋章發生在 store-prep 時刻">Hash stamping happens at store-prep time</span>:</strong>
-    <span class="i18n" data-en=" when <code class=&quot;inline-code&quot;>_prepare_lazy_store_specs</code> or <code class=&quot;inline-code&quot;>_prepare_eager_store_specs</code> allocates the CPU blocks, it immediately writes the GPU block's hash onto the CPU block's <code class=&quot;inline-code&quot;>_block_hash</code> field (manager.py:434-435 and 552-553). The worker then runs the copy. When the scheduler hears &quot;store complete,&quot; it just inserts the pre-stamped hash into the lookup table -- no hashing work on the hot path." data-zh="當 <code class=&quot;inline-code&quot;>_prepare_lazy_store_specs</code> 或 <code class=&quot;inline-code&quot;>_prepare_eager_store_specs</code> 配出 CPU block 時，會立刻把 GPU block 的 hash 蓋到 CPU block 的 <code class=&quot;inline-code&quot;>_block_hash</code>（manager.py:434-435 和 552-553）。Worker 接著跑 copy。排程器收到「store 完成」時，只要把已蓋好的 hash 插進查找表——熱路徑上完全不需要重新 hash。"> when <code class="inline-code">_prepare_lazy_store_specs</code> or <code class="inline-code">_prepare_eager_store_specs</code> allocates the CPU blocks, it immediately writes the GPU block's hash onto the CPU block's <code class="inline-code">_block_hash</code> field (manager.py:434-435 and 552-553). The worker then runs the copy. When the scheduler hears "store complete," it just inserts the pre-stamped hash into the lookup table -- no hashing work on the hot path.</span>
-  </div>
-</div>
-
-<!-- ==================== WORKER ==================== -->
-<div class="section" id="worker">
-  <span class="section-label">Part 2 &middot; Worker side</span>
-  <h2><span class="i18n" data-en="12. Worker Counterpart -- Streams, Events, cuMemcpyBatchAsync" data-zh="12. Worker 端對照 —— Stream、Event、cuMemcpyBatchAsync">12. Worker Counterpart -- Streams, Events, cuMemcpyBatchAsync</span></h2>
-  <p><span class="i18n" data-en="The worker lives at <code class=&quot;inline-code&quot;>vllm/v1/simple_kv_offload/worker.py</code> (305 lines). It turns the declarative metadata produced by the scheduler into actual CUDA work." data-zh="Worker 端在 <code class=&quot;inline-code&quot;>vllm/v1/simple_kv_offload/worker.py</code>（305 行）。它把排程器產生的宣告式 metadata 轉成實際的 CUDA 工作。">The worker lives at <code class="inline-code">vllm/v1/simple_kv_offload/worker.py</code> (305 lines). It turns the declarative metadata produced by the scheduler into actual CUDA work.</span></p>
-
-  <div class="step-flow">
-    <div class="step-item cyan">
-      <h4>register_kv_caches() <span class="src-ref">worker.py:66-182</span></h4>
-      <p><span class="i18n" data-en="Startup. Inspects per-layer tensors, deduplicates shared storage, flattens into [num_blocks, block_bytes] views. Allocates a mirrored pinned CPU pool via <code class=&quot;inline-code&quot;>cudaHostRegister</code> (bypassing PyTorch's caching allocator that rounds up to the next power of 2). Spins up two low-priority CUDA streams so KV I/O yields to compute." data-zh="啟動階段。檢查每層 tensor、去重共享 storage、攤平成 [num_blocks, block_bytes] view。透過 <code class=&quot;inline-code&quot;>cudaHostRegister</code> 配對應的 pinned CPU pool（繞開 PyTorch 會把大小 round up 到下一個 2 次方的 caching allocator）。啟動兩條低優先權 CUDA stream，讓 KV I/O 自動讓路給計算。">Startup. Inspects per-layer tensors, deduplicates shared storage, flattens into [num_blocks, block_bytes] views. Allocates a mirrored pinned CPU pool via <code class="inline-code">cudaHostRegister</code> (bypassing PyTorch's caching allocator that rounds up to the next power of 2). Spins up two low-priority CUDA streams so KV I/O yields to compute.</span></p>
-    </div>
-    <div class="step-item purple">
-      <h4>bind_connector_metadata() <span class="src-ref">worker.py:184-189</span></h4>
-      <p><span class="i18n" data-en="At the start of every forward pass. Stores the <code class=&quot;inline-code&quot;>SimpleCPUOffloadMetadata</code> and records the pending load / store event indices so <code class=&quot;inline-code&quot;>get_finished()</code> knows what to poll." data-zh="每次 forward pass 開始時呼叫。存下 <code class=&quot;inline-code&quot;>SimpleCPUOffloadMetadata</code>，並記下待處理的 load / store event index，讓 <code class=&quot;inline-code&quot;>get_finished()</code> 知道要 poll 什麼。">At the start of every forward pass. Stores the <code class="inline-code">SimpleCPUOffloadMetadata</code> and records the pending load / store event indices so <code class="inline-code">get_finished()</code> knows what to poll.</span></p>
-    </div>
-    <div class="step-item green">
-      <h4>get_finished() <span class="src-ref">worker.py:203-259</span></h4>
-      <p><span class="i18n" data-en="The heart of the worker. Called after model execution. (1) Launches the batched H2D / D2H copies on dedicated streams. (2) Polls event queries (non-blocking) to advance the load / store high-water marks. (3) Returns finished request IDs to the scheduler; queues completed store event indices for the reverse metadata." data-zh="Worker 的核心。Model 執行後呼叫。(1) 在專屬 stream 上 launch 批次 H2D / D2H 複製。(2) 非阻塞地 poll event query，推進 load / store 的 high-water mark。(3) 把完成的 request id 回給排程器；把完成的 store event idx 排隊，等反向 metadata 帶走。">The heart of the worker. Called after model execution. (1) Launches the batched H2D / D2H copies on dedicated streams. (2) Polls event queries (non-blocking) to advance the load / store high-water marks. (3) Returns finished request IDs to the scheduler; queues completed store event indices for the reverse metadata.</span></p>
-    </div>
-    <div class="step-item red">
-      <h4>handle_preemptions() <span class="src-ref">worker.py:271-289</span></h4>
-      <p><span class="i18n" data-en="Barrier. If the scheduler told us <code class=&quot;inline-code&quot;>need_flush=True</code> (because some request was preempted and its blocks will be reused), synchronize every in-flight load and store event, then clear the tracking lists." data-zh="Barrier。若排程器告訴我們 <code class=&quot;inline-code&quot;>need_flush=True</code>（因為有 request 被搶佔、它的 block 即將被重用），就 synchronize 所有在飛的 load / store event，並清空追蹤列表。">Barrier. If the scheduler told us <code class="inline-code">need_flush=True</code> (because some request was preempted and its blocks will be reused), synchronize every in-flight load and store event, then clear the tracking lists.</span></p>
-    </div>
-    <div class="step-item blue">
-      <h4>build_connector_worker_meta() <span class="src-ref">worker.py:261-269</span></h4>
-      <p><span class="i18n" data-en="Reverse channel. Returns <code class=&quot;inline-code&quot;>SimpleCPUOffloadWorkerMetadata(completed_store_events={event_idx: 1})</code> for every store this rank finished since the last call. Each rank reports 1; the scheduler's <code class=&quot;inline-code&quot;>_store_event_pending_counts</code> sums across ranks until it hits <code class=&quot;inline-code&quot;>world_size</code>." data-zh="反向通道。回傳 <code class=&quot;inline-code&quot;>SimpleCPUOffloadWorkerMetadata(completed_store_events={event_idx: 1})</code>，列出自上次呼叫以來這個 rank 完成的所有 store。每個 rank 都回報 1；排程器的 <code class=&quot;inline-code&quot;>_store_event_pending_counts</code> 跨 rank 累計到 <code class=&quot;inline-code&quot;>world_size</code> 才 commit。">Reverse channel. Returns <code class="inline-code">SimpleCPUOffloadWorkerMetadata(completed_store_events={event_idx: 1})</code> for every store this rank finished since the last call. Each rank reports 1; the scheduler's <code class="inline-code">_store_event_pending_counts</code> sums across ranks until it hits <code class="inline-code">world_size</code>.</span></p>
-    </div>
-  </div>
-
-  <h3><span class="i18n" data-en="12.1 Why launches are deferred to get_finished()" data-zh="12.1 為什麼 launch 延到 get_finished() 才做">12.1 Why launches are deferred to get_finished()</span></h3>
-  <p><span class="i18n" data-en="The base class offers <code class=&quot;inline-code&quot;>start_load_kv()</code> and <code class=&quot;inline-code&quot;>save_kv_layer()</code> for per-layer overlap. SimpleCPUOffload makes them all no-ops. Instead, everything happens in <code class=&quot;inline-code&quot;>get_finished()</code>, which runs once per step on the dedicated streams. Reasoning:" data-zh="Base class 提供 <code class=&quot;inline-code&quot;>start_load_kv()</code> 和 <code class=&quot;inline-code&quot;>save_kv_layer()</code> 給逐層 overlap。SimpleCPUOffload 把它們都留空。所有事情都在 <code class=&quot;inline-code&quot;>get_finished()</code> 裡一次搞定，它每步跑一次，在專屬 stream 上執行。原因：">The base class offers <code class="inline-code">start_load_kv()</code> and <code class="inline-code">save_kv_layer()</code> for per-layer overlap. SimpleCPUOffload makes them all no-ops. Instead, everything happens in <code class="inline-code">get_finished()</code>, which runs once per step on the dedicated streams. Reasoning:</span></p>
-
-  <ul>
-    <li><span class="i18n" data-en="<strong>Batching wins over fine-grained overlap for DRAM.</strong> PCIe DMA's per-call overhead (~5 ms resolving the driver API, setting up descriptors) dominates small transfers. Batching 64 block copies into one <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> amortises this away." data-zh="<strong>對 DRAM 來說，批次勝過細粒度 overlap。</strong> PCIe DMA 的 per-call overhead（~5 ms，解 driver API、佈 descriptor）在小搬運上占比過高。把 64 個 block copy 合併成一個 <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> 就能分攤掉。"><strong>Batching wins over fine-grained overlap for DRAM.</strong> PCIe DMA's per-call overhead (~5 ms resolving the driver API, setting up descriptors) dominates small transfers. Batching 64 block copies into one <code class="inline-code">cuMemcpyBatchAsync</code> amortises this away.</span></li>
-    <li><span class="i18n" data-en="<strong>Dedicated low-priority streams already overlap with compute.</strong> Since <code class=&quot;inline-code&quot;>register_kv_caches</code> created <code class=&quot;inline-code&quot;>load_stream</code> and <code class=&quot;inline-code&quot;>store_stream</code> at the lowest CUDA priority, the GPU's scheduler runs them whenever the compute queue has idle SMs. The Python side doesn't need to orchestrate per-layer overlap -- CUDA does it." data-zh="<strong>專屬的低優先權 stream 本來就會和 compute overlap。</strong> 因為 <code class=&quot;inline-code&quot;>register_kv_caches</code> 用最低 CUDA 優先權建了 <code class=&quot;inline-code&quot;>load_stream</code> 和 <code class=&quot;inline-code&quot;>store_stream</code>，GPU scheduler 只要 compute queue 有 idle SM 就會跑它們。Python 端根本不必 orchestrate 逐層 overlap——CUDA 自己會。"><strong>Dedicated low-priority streams already overlap with compute.</strong> Since <code class="inline-code">register_kv_caches</code> created <code class="inline-code">load_stream</code> and <code class="inline-code">store_stream</code> at the lowest CUDA priority, the GPU's scheduler runs them whenever the compute queue has idle SMs. The Python side doesn't need to orchestrate per-layer overlap -- CUDA does it.</span></li>
-    <li><span class="i18n" data-en="<strong>Correctness is easier.</strong> Launching after compute means the KV data is definitely written. No need to insert cross-stream synchronization, no subtle data races." data-zh="<strong>正確性更簡單。</strong> 在 compute 之後 launch，代表 KV 資料肯定寫好了。不用插 cross-stream sync，也沒有微妙的 data race。"><strong>Correctness is easier.</strong> Launching after compute means the KV data is definitely written. No need to insert cross-stream synchronization, no subtle data races.</span></li>
-  </ul>
-
-<pre>
-<span class="cm"># vllm/v1/simple_kv_offload/worker.py  --  lines 217-238</span>
-<span class="cm"># (1) Submit transfers</span>
-metadata = <span class="va">self</span>._connector_metadata
-<span class="kw">if</span> metadata <span class="kw">is not None</span>:
-    <span class="cm"># Launch loads (CPU->GPU).</span>
-    <span class="kw">if</span> metadata.load_cpu_blocks:
-        <span class="va">self</span>._backend.<span class="fn">launch_copy</span>(
-            metadata.load_cpu_blocks,
-            metadata.load_gpu_blocks,
-            is_store=<span class="kw">False</span>,
-            event_idx=metadata.load_event,
-            events_list=<span class="va">self</span>._load_events,
-        )
-    <span class="cm"># Launch stores (GPU->CPU).</span>
-    <span class="kw">if</span> metadata.store_gpu_blocks:
-        <span class="va">self</span>._backend.<span class="fn">launch_copy</span>(
-            metadata.store_gpu_blocks,
-            metadata.store_cpu_blocks,
-            is_store=<span class="kw">True</span>,
-            event_idx=metadata.store_event,
-            events_list=<span class="va">self</span>._store_events,
-        )
-</pre>
-
-  <p><span class="i18n" data-en="The <code class=&quot;inline-code&quot;>DmaCopyBackend</code> (<code class=&quot;inline-code&quot;>copy_backend.py</code>, 97 lines) wraps <code class=&quot;inline-code&quot;>cuda_mem_ops.copy_blocks</code>, which resolves <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code> via <code class=&quot;inline-code&quot;>cuGetProcAddress</code> on first use and calls it with flat arrays of src/dst pointers." data-zh="<code class=&quot;inline-code&quot;>DmaCopyBackend</code>（<code class=&quot;inline-code&quot;>copy_backend.py</code>，97 行）包住 <code class=&quot;inline-code&quot;>cuda_mem_ops.copy_blocks</code>，後者第一次使用時透過 <code class=&quot;inline-code&quot;>cuGetProcAddress</code> 解出 <code class=&quot;inline-code&quot;>cuMemcpyBatchAsync</code>，然後以扁平的 src/dst 指標陣列呼叫。">The <code class="inline-code">DmaCopyBackend</code> (<code class="inline-code">copy_backend.py</code>, 97 lines) wraps <code class="inline-code">cuda_mem_ops.copy_blocks</code>, which resolves <code class="inline-code">cuMemcpyBatchAsync</code> via <code class="inline-code">cuGetProcAddress</code> on first use and calls it with flat arrays of src/dst pointers.</span></p>
-</div>
-
-<!-- ==================== SUMMARY ==================== -->
-<div class="section" id="summary">
-  <span class="section-label">Reference</span>
-  <h2><span class="i18n" data-en="13. Complete File Map" data-zh="13. 完整檔案對照">13. Complete File Map</span></h2>
-
+  <p><span class="i18n" data-en="The interesting wiring is which base-class hook maps to which inner method:" data-zh="值得注意的接線是：哪個 base class hook 對到哪個內部方法：">The interesting wiring is which base-class hook maps to which inner method:</span></p>
   <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
   <table>
-    <tr>
-      <th><span class="i18n" data-en="File" data-zh="檔案">File</span></th>
-      <th><span class="i18n" data-en="Lines" data-zh="行數">Lines</span></th>
-      <th><span class="i18n" data-en="Key Classes / Functions" data-zh="關鍵 class / 函式">Key Classes / Functions</span></th>
-      <th><span class="i18n" data-en="Responsibility" data-zh="職責">Responsibility</span></th>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/base.py</code></td>
-      <td>~400</td>
-      <td><code class="inline-code">KVConnectorBase_V1</code>, <code class="inline-code">SupportsHMA</code>, <code class="inline-code">KVConnectorMetadata</code></td>
-      <td><span class="i18n" data-en="Abstract contract for every connector. Docstring lines 1-41 describe the lifecycle." data-zh="所有 connector 的抽象契約。docstring 1-41 行描述生命週期。">Abstract contract for every connector. Docstring lines 1-41 describe the lifecycle.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/factory.py</code></td>
-      <td>222</td>
-      <td><code class="inline-code">KVConnectorFactory</code></td>
-      <td><span class="i18n" data-en="Lazy registry. create_connector() runs once per process, handles HMA compatibility check and old vs new __init__ signature." data-zh="延遲載入的 registry。create_connector() 每個 process 跑一次，處理 HMA 相容性檢查以及新舊 __init__ 簽章。">Lazy registry. create_connector() runs once per process, handles HMA compatibility check and old vs new __init__ signature.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_cpu_offload_connector.py</code></td>
-      <td>247</td>
-      <td><code class="inline-code">SimpleCPUOffloadConnector</code></td>
-      <td><span class="i18n" data-en="Thin facade. Delegates scheduler methods to SimpleCPUOffloadScheduler and worker methods to SimpleCPUOffloadWorker." data-zh="薄殼 facade。把 scheduler 端的方法委派給 SimpleCPUOffloadScheduler、worker 端的方法委派給 SimpleCPUOffloadWorker。">Thin facade. Delegates scheduler methods to SimpleCPUOffloadScheduler and worker methods to SimpleCPUOffloadWorker.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_kv_offload/manager.py</code></td>
-      <td>739</td>
-      <td><code class="inline-code">SimpleCPUOffloadScheduler</code></td>
-      <td><span class="i18n" data-en="The real scheduler-side brain. Hit matching, lazy cursor, eager scan, TP-aware completion, cleanup." data-zh="真正的 scheduler 端大腦。命中比對、lazy cursor、eager 掃描、TP-aware 完成、清理。">The real scheduler-side brain. Hit matching, lazy cursor, eager scan, TP-aware completion, cleanup.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_kv_offload/worker.py</code></td>
-      <td>305</td>
-      <td><code class="inline-code">SimpleCPUOffloadWorker</code></td>
-      <td><span class="i18n" data-en="Pinned memory allocation, stream lifecycle, batch copy launches, event polling, flush on preemption." data-zh="Pinned memory 配置、stream 生命週期、批次 copy launch、event 輪詢、被搶佔時的 flush。">Pinned memory allocation, stream lifecycle, batch copy launches, event polling, flush on preemption.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_kv_offload/copy_backend.py</code></td>
-      <td>97</td>
-      <td><code class="inline-code">DmaCopyBackend</code></td>
-      <td><span class="i18n" data-en="Keeps per-direction BatchMemcpyParams, exposes launch_copy() that records a CUDA event before returning." data-zh="持有每個方向的 BatchMemcpyParams，提供 launch_copy()，回傳前會 record 一個 CUDA event。">Keeps per-direction BatchMemcpyParams, exposes launch_copy() that records a CUDA event before returning.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_kv_offload/cuda_mem_ops.py</code></td>
-      <td>153</td>
-      <td><code class="inline-code">pin_tensor</code>, <code class="inline-code">build_params</code>, <code class="inline-code">copy_blocks</code></td>
-      <td><span class="i18n" data-en="Lowest layer -- ctypes bindings for cuMemcpyBatchAsync and cudaHostRegister. No vLLM abstraction here." data-zh="最底層——cuMemcpyBatchAsync 與 cudaHostRegister 的 ctypes bindings。沒有 vLLM 的抽象。">Lowest layer -- ctypes bindings for cuMemcpyBatchAsync and cudaHostRegister. No vLLM abstraction here.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/simple_kv_offload/metadata.py</code></td>
-      <td>60</td>
-      <td><code class="inline-code">SimpleCPUOffloadMetadata</code>, <code class="inline-code">SimpleCPUOffloadWorkerMetadata</code></td>
-      <td><span class="i18n" data-en="Pure dataclasses for IPC. Worker metadata has an aggregate() that sums per-rank counts." data-zh="純資料 class，用於 IPC。Worker metadata 有 aggregate() 做跨 rank 計數加總。">Pure dataclasses for IPC. Worker metadata has an aggregate() that sums per-rank counts.</span></td>
-    </tr>
-    <tr>
-      <td><code class="inline-code">v1/core/sched/scheduler.py</code></td>
-      <td>+7</td>
-      <td>duck-typed bind_gpu_block_pool call</td>
-      <td><span class="i18n" data-en="The only scheduler-core change PR #37160 makes: an optional bind after kv_cache_manager construction." data-zh="PR #37160 對排程器核心唯一的改動：kv_cache_manager 建好後一個選配的 bind。">The only scheduler-core change PR #37160 makes: an optional bind after kv_cache_manager construction.</span></td>
-    </tr>
+    <tr><th><span class="i18n" data-en="Base hook" data-zh="Base hook">Base hook</span></th><th><span class="i18n" data-en="Delegates to" data-zh="委派給">Delegates to</span></th><th><span class="i18n" data-en="Notes" data-zh="備註">Notes</span></th></tr>
+    <tr><td><code class="inline-code">get_num_new_matched_tokens</code></td><td><code class="inline-code">scheduler.get_num_new_matched_tokens</code></td><td><span class="i18n" data-en="DRAM prefix hit lookup." data-zh="DRAM prefix 命中查詢。">DRAM prefix hit lookup.</span></td></tr>
+    <tr><td><code class="inline-code">update_state_after_alloc</code></td><td><code class="inline-code">scheduler.update_state_after_alloc</code></td><td><span class="i18n" data-en="Plans a CPU&rarr;GPU load." data-zh="規劃一次 CPU&rarr;GPU load。">Plans a CPU&rarr;GPU load.</span></td></tr>
+    <tr><td><code class="inline-code">build_connector_meta</code></td><td><code class="inline-code">scheduler.build_connector_meta</code></td><td><span class="i18n" data-en="Packs loads + stores + flushes." data-zh="打包 loads + stores + flushes。">Packs loads + stores + flushes.</span></td></tr>
+    <tr><td><code class="inline-code">start_load_kv</code></td><td><code class="inline-code">worker.start_kv_transfers</code></td><td><span class="i18n" data-en="Submits load jobs (+ deferred stores)." data-zh="提交 load job（與延遲的 store）。">Submits load jobs (+ deferred stores).</span></td></tr>
+    <tr><td><code class="inline-code">wait_for_save</code></td><td><code class="inline-code">worker.prepare_store_kv</code></td><td><span class="i18n" data-en="Queues stores -- but does NOT submit yet (&sect;11)." data-zh="把 store 入列——但還不提交（&sect;11）。">Queues stores -- but does NOT submit yet (&sect;11).</span></td></tr>
+    <tr><td><code class="inline-code">save_kv_layer</code> / <code class="inline-code">wait_for_layer_load</code></td><td>&mdash; <span class="i18n" data-en="no-op" data-zh="空操作">no-op</span></td><td><span class="i18n" data-en="Per-layer overlap unused; transfers are block-granular." data-zh="不用逐層 overlap；傳輸以 block 為粒度。">Per-layer overlap unused; transfers are block-granular.</span></td></tr>
+    <tr><td><code class="inline-code">get_finished</code></td><td><code class="inline-code">worker.get_finished</code></td><td><span class="i18n" data-en="Polls CUDA events for done transfers." data-zh="輪詢 CUDA event 找完成的傳輸。">Polls CUDA events for done transfers.</span></td></tr>
+  </table>
+  </div>
+  <div class="callout">
+    <span class="i18n" data-en="<code class=&quot;inline-code&quot;>prefer_cross_layer_blocks = True</code> tells vLLM's KV cache allocator that this connector would rather receive one big <code class=&quot;inline-code&quot;>(num_blocks, num_layers&times;page)</code> tensor than one tensor per layer. That collapses an N-layer offload into a single contiguous DMA region -- see <code class=&quot;inline-code&quot;>register_cross_layers_kv_cache</code> in &sect;12." data-zh="<code class=&quot;inline-code&quot;>prefer_cross_layer_blocks = True</code> 告訴 vLLM 的 KV cache allocator：這個 connector 寧願拿到一個大的 <code class=&quot;inline-code&quot;>(num_blocks, num_layers&times;page)</code> tensor，而不是每層一個 tensor。這把 N 層 offload 收斂成單一連續的 DMA 區域——見 &sect;12 的 <code class=&quot;inline-code&quot;>register_cross_layers_kv_cache</code>。"><code class="inline-code">prefer_cross_layer_blocks = True</code> tells vLLM's KV cache allocator that this connector would rather receive one big <code class="inline-code">(num_blocks, num_layers&times;page)</code> tensor than one tensor per layer. That collapses an N-layer offload into a single contiguous DMA region -- see <code class="inline-code">register_cross_layers_kv_cache</code> in &sect;12.</span>
+  </div>
+</div>
+
+<!-- ==================== SECTION 7: MANAGER ==================== -->
+<div class="section" id="manager">
+  <span class="section-label">Part 2 &middot; Scheduler bookkeeping</span>
+  <h2><span class="i18n" data-en="7. CPUOffloadingManager -- the Block Ledger" data-zh="7. CPUOffloadingManager —— 區塊帳本">7. CPUOffloadingManager -- the Block Ledger</span></h2>
+  <p><span class="i18n" data-en="The scheduler-side brain is <code class=&quot;inline-code&quot;>CPUOffloadingManager</code> (<code class=&quot;inline-code&quot;>vllm/v1/kv_offload/cpu/manager.py</code>, ~208 lines). It runs entirely in the scheduler process, touches no tensors, and answers exactly one question: <em>which offloaded blocks exist, and where</em>. It owns the CPU block pool, ref-counting, and event emission -- but delegates the actual &quot;which block to keep / evict&quot; decision to a pluggable <code class=&quot;inline-code&quot;>CachePolicy</code> (&sect;8)." data-zh="Scheduler 端的大腦是 <code class=&quot;inline-code&quot;>CPUOffloadingManager</code>（<code class=&quot;inline-code&quot;>vllm/v1/kv_offload/cpu/manager.py</code>，約 208 行）。它完全跑在排程器程序內，不碰任何 tensor，只回答一個問題：<em>有哪些 offloaded block、它們在哪</em>。它持有 CPU block pool、ref-counting、事件發送——但把「保留/淘汰哪個 block」的實際決策委派給可插拔的 <code class=&quot;inline-code&quot;>CachePolicy</code>（&sect;8）。">The scheduler-side brain is <code class="inline-code">CPUOffloadingManager</code> (<code class="inline-code">vllm/v1/kv_offload/cpu/manager.py</code>, ~208 lines). It runs entirely in the scheduler process, touches no tensors, and answers exactly one question: <em>which offloaded blocks exist, and where</em>. It owns the CPU block pool, ref-counting, and event emission -- but delegates the actual "which block to keep / evict" decision to a pluggable <code class="inline-code">CachePolicy</code> (&sect;8).</span></p>
+
+  <h3><span class="i18n" data-en="7.1 BlockStatus -- the per-block record" data-zh="7.1 BlockStatus —— 每個 block 的紀錄">7.1 BlockStatus -- the per-block record</span></h3>
+<pre>
+<span class="cm"># vllm/v1/kv_offload/cpu/policies/abstract.py</span>
+<span class="kw">class</span> <span class="cl">BlockStatus</span>(ctypes.Structure):
+    _fields_ = [(<span class="st">"ref_cnt"</span>, ctypes.c_int32), (<span class="st">"block_id"</span>, ctypes.c_int64)]
+
+    <span class="cm"># ref_cnt == -1  -&gt; block allocated but data not yet written (NOT ready)</span>
+    <span class="cm"># ref_cnt ==  0  -&gt; data present, idle, eligible for eviction</span>
+    <span class="cm"># ref_cnt &gt;  0  -&gt; N in-flight loads are reading this block; pinned</span>
+    <span class="nd">@property</span>
+    <span class="kw">def</span> <span class="fn">is_ready</span>(<span class="va">self</span>) -&gt; <span class="ty">bool</span>:
+        <span class="kw">return</span> <span class="va">self</span>.ref_cnt &gt;= <span class="nu">0</span>
+</pre>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>block_id</code> is the index of the physical slot in the pinned-DRAM buffer. <code class=&quot;inline-code&quot;>ref_cnt</code> does triple duty: a sentinel for &quot;store in progress&quot;, an eviction guard, and an in-flight-read counter. Using a <code class=&quot;inline-code&quot;>ctypes.Structure</code> keeps the record at a fixed 12 bytes -- the manager may hold tens of thousands of these." data-zh="<code class=&quot;inline-code&quot;>block_id</code> 是 pinned-DRAM buffer 中實體 slot 的索引。<code class=&quot;inline-code&quot;>ref_cnt</code> 身兼三職：「store 進行中」的哨兵值、淘汰防護、以及飛行中讀取計數器。用 <code class=&quot;inline-code&quot;>ctypes.Structure</code> 讓每筆紀錄固定在 12 bytes——manager 可能同時持有數萬筆。"><code class="inline-code">block_id</code> is the index of the physical slot in the pinned-DRAM buffer. <code class="inline-code">ref_cnt</code> does triple duty: a sentinel for "store in progress", an eviction guard, and an in-flight-read counter. Using a <code class="inline-code">ctypes.Structure</code> keeps the record at a fixed 12 bytes -- the manager may hold tens of thousands of these.</span></p>
+
+  <h3><span class="i18n" data-en="7.2 The OffloadingManager primitives" data-zh="7.2 OffloadingManager 的原語">7.2 The OffloadingManager primitives</span></h3>
+  <div class="ds-grid">
+    <div class="ds-box blue">
+      <h5>lookup(block_hashes) &rarr; int|None</h5>
+      <p><span class="i18n" data-en="Counts the leading run of block hashes that are present AND <code class=&quot;inline-code&quot;>is_ready</code>. Stops at the first miss. This is the DRAM prefix-hit length." data-zh="計算開頭連續、存在且 <code class=&quot;inline-code&quot;>is_ready</code> 的 block hash 數量。遇到第一個 miss 就停。這就是 DRAM prefix 命中長度。">Counts the leading run of block hashes that are present AND <code class="inline-code">is_ready</code>. Stops at the first miss. This is the DRAM prefix-hit length.</span></p>
+    </div>
+    <div class="ds-box blue">
+      <h5>prepare_load(block_hashes) &rarr; LoadStoreSpec</h5>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>ref_cnt += 1</code> on every block (pins them against eviction during the in-flight copy), returns a <code class=&quot;inline-code&quot;>CPULoadStoreSpec</code> of physical block IDs." data-zh="對每個 block <code class=&quot;inline-code&quot;>ref_cnt += 1</code>（在飛行中複製期間把它們釘住、防止被淘汰），回傳一個由實體 block ID 組成的 <code class=&quot;inline-code&quot;>CPULoadStoreSpec</code>。"><code class="inline-code">ref_cnt += 1</code> on every block (pins them against eviction during the in-flight copy), returns a <code class="inline-code">CPULoadStoreSpec</code> of physical block IDs.</span></p>
+    </div>
+    <div class="ds-box amber">
+      <h5>prepare_store(block_hashes) &rarr; PrepareStoreOutput|None</h5>
+      <p><span class="i18n" data-en="Filters out already-stored hashes, evicts via the policy if the pool is full, allocates fresh slots, inserts them as NOT-ready. Returns the slots to write + the list of evicted hashes. <code class=&quot;inline-code&quot;>None</code> if eviction cannot free enough." data-zh="濾掉已存在的 hash，若 pool 滿則透過 policy 淘汰，配置新 slot 並以 NOT-ready 狀態插入。回傳要寫入的 slot + 被淘汰的 hash 清單。若淘汰無法騰出足夠空間則回傳 <code class=&quot;inline-code&quot;>None</code>。">Filters out already-stored hashes, evicts via the policy if the pool is full, allocates fresh slots, inserts them as NOT-ready. Returns the slots to write + the list of evicted hashes. <code class="inline-code">None</code> if eviction cannot free enough.</span></p>
+    </div>
+    <div class="ds-box green">
+      <h5>touch(block_hashes)</h5>
+      <p><span class="i18n" data-en="Marks blocks as recently used -- feeds the policy's recency / frequency state. Called for hit blocks even when no transfer is needed (GPU prefix cache covered them)." data-zh="把 block 標記為最近使用——餵給 policy 的 recency / frequency 狀態。即使不需要傳輸（GPU prefix cache 已涵蓋）也會對命中的 block 呼叫。">Marks blocks as recently used -- feeds the policy's recency / frequency state. Called for hit blocks even when no transfer is needed (GPU prefix cache covered them).</span></p>
+    </div>
+    <div class="ds-box green">
+      <h5>complete_load / complete_store</h5>
+      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>complete_load</code> does <code class=&quot;inline-code&quot;>ref_cnt -= 1</code> (unpins). <code class=&quot;inline-code&quot;>complete_store</code> flips <code class=&quot;inline-code&quot;>ref_cnt</code> from -1 to 0 (the block becomes loadable) or, on failure, frees the slot." data-zh="<code class=&quot;inline-code&quot;>complete_load</code> 做 <code class=&quot;inline-code&quot;>ref_cnt -= 1</code>（解除釘選）。<code class=&quot;inline-code&quot;>complete_store</code> 把 <code class=&quot;inline-code&quot;>ref_cnt</code> 從 -1 翻成 0（block 變成可載入），或在失敗時釋放 slot。"><code class="inline-code">complete_load</code> does <code class="inline-code">ref_cnt -= 1</code> (unpins). <code class="inline-code">complete_store</code> flips <code class="inline-code">ref_cnt</code> from -1 to 0 (the block becomes loadable) or, on failure, frees the slot.</span></p>
+    </div>
+    <div class="ds-box purple">
+      <h5>take_events() &rarr; Iterable[OffloadingEvent]</h5>
+      <p><span class="i18n" data-en="Drains BlockStored / BlockRemoved events for the KV-event observability stream, so external dashboards see the DRAM tier filling and evicting." data-zh="排出 BlockStored / BlockRemoved 事件給 KV-event 可觀測性串流，讓外部 dashboard 看到 DRAM 層的填充與淘汰。">Drains BlockStored / BlockRemoved events for the KV-event observability stream, so external dashboards see the DRAM tier filling and evicting.</span></p>
+    </div>
+  </div>
+
+  <div class="callout key">
+    <strong><span class="i18n" data-en="The ref_cnt lifecycle" data-zh="ref_cnt 生命週期">The ref_cnt lifecycle</span>:</strong>
+    <span class="i18n" data-en="<code class=&quot;inline-code&quot;>prepare_store</code> inserts a block at <code class=&quot;inline-code&quot;>-1</code> &rarr; the worker DMAs GPU&rarr;CPU &rarr; <code class=&quot;inline-code&quot;>complete_store</code> sets <code class=&quot;inline-code&quot;>0</code> (now <code class=&quot;inline-code&quot;>is_ready</code>, evictable). A later <code class=&quot;inline-code&quot;>prepare_load</code> bumps it to <code class=&quot;inline-code&quot;>1</code> so eviction can't pull the block out from under an in-flight copy; <code class=&quot;inline-code&quot;>complete_load</code> returns it to <code class=&quot;inline-code&quot;>0</code>. Eviction only ever considers <code class=&quot;inline-code&quot;>ref_cnt == 0</code> blocks." data-zh="<code class=&quot;inline-code&quot;>prepare_store</code> 以 <code class=&quot;inline-code&quot;>-1</code> 插入一個 block &rarr; worker DMA GPU&rarr;CPU &rarr; <code class=&quot;inline-code&quot;>complete_store</code> 設成 <code class=&quot;inline-code&quot;>0</code>（現在 <code class=&quot;inline-code&quot;>is_ready</code>、可淘汰）。之後的 <code class=&quot;inline-code&quot;>prepare_load</code> 把它加到 <code class=&quot;inline-code&quot;>1</code>，讓淘汰無法在飛行中複製底下把 block 抽走；<code class=&quot;inline-code&quot;>complete_load</code> 把它退回 <code class=&quot;inline-code&quot;>0</code>。淘汰只會考慮 <code class=&quot;inline-code&quot;>ref_cnt == 0</code> 的 block。"><code class="inline-code">prepare_store</code> inserts a block at <code class="inline-code">-1</code> &rarr; the worker DMAs GPU&rarr;CPU &rarr; <code class="inline-code">complete_store</code> sets <code class="inline-code">0</code> (now <code class="inline-code">is_ready</code>, evictable). A later <code class="inline-code">prepare_load</code> bumps it to <code class="inline-code">1</code> so eviction can't pull the block out from under an in-flight copy; <code class="inline-code">complete_load</code> returns it to <code class="inline-code">0</code>. Eviction only ever considers <code class="inline-code">ref_cnt == 0</code> blocks.</span>
+  </div>
+</div>
+
+<!-- ==================== SECTION 8: POLICIES ==================== -->
+<div class="section" id="policies">
+  <span class="section-label">Part 2 &middot; Eviction</span>
+  <h2><span class="i18n" data-en="8. Pluggable Eviction -- LRU vs ARC" data-zh="8. 可插拔淘汰策略 —— LRU vs ARC">8. Pluggable Eviction -- LRU vs ARC</span></h2>
+  <p><span class="i18n" data-en="The manager never decides eviction itself. It holds a <code class=&quot;inline-code&quot;>CachePolicy</code> chosen at construction from a tiny registry, keyed by the <code class=&quot;inline-code&quot;>eviction_policy</code> config string:" data-zh="Manager 自己從不決定淘汰。它持有一個 <code class=&quot;inline-code&quot;>CachePolicy</code>，在建構時從一個小 registry 依 <code class=&quot;inline-code&quot;>eviction_policy</code> 設定字串選出：">The manager never decides eviction itself. It holds a <code class="inline-code">CachePolicy</code> chosen at construction from a tiny registry, keyed by the <code class="inline-code">eviction_policy</code> config string:</span></p>
+<pre>
+<span class="cm"># vllm/v1/kv_offload/cpu/manager.py</span>
+_CACHE_POLICIES = {<span class="st">"lru"</span>: LRUCachePolicy, <span class="st">"arc"</span>: ARCCachePolicy}
+</pre>
+  <p><span class="i18n" data-en="Both implement the same five-method <code class=&quot;inline-code&quot;>CachePolicy</code> ABC: <code class=&quot;inline-code&quot;>get</code>, <code class=&quot;inline-code&quot;>insert</code>, <code class=&quot;inline-code&quot;>remove</code>, <code class=&quot;inline-code&quot;>touch</code>, <code class=&quot;inline-code&quot;>evict</code>. The ABC's docstring is explicit that organization and replacement cannot be cleanly separated -- ARC's ghost lists live at the intersection -- so the policy owns both the data structure and the decision." data-zh="兩者都實作同一個五方法的 <code class=&quot;inline-code&quot;>CachePolicy</code> ABC：<code class=&quot;inline-code&quot;>get</code>、<code class=&quot;inline-code&quot;>insert</code>、<code class=&quot;inline-code&quot;>remove</code>、<code class=&quot;inline-code&quot;>touch</code>、<code class=&quot;inline-code&quot;>evict</code>。ABC 的 docstring 明說：組織方式與替換決策無法乾淨地分離——ARC 的 ghost list 正落在交界處——所以 policy 同時擁有資料結構與決策。">Both implement the same five-method <code class="inline-code">CachePolicy</code> ABC: <code class="inline-code">get</code>, <code class="inline-code">insert</code>, <code class="inline-code">remove</code>, <code class="inline-code">touch</code>, <code class="inline-code">evict</code>. The ABC's docstring is explicit that organization and replacement cannot be cleanly separated -- ARC's ghost lists live at the intersection -- so the policy owns both the data structure and the decision.</span></p>
+
+  <div class="mode-grid">
+    <div class="mode-col lazy">
+      <span class="mode-badge">lru.py</span>
+      <h4><span class="i18n" data-en="LRUCachePolicy" data-zh="LRUCachePolicy">LRUCachePolicy</span></h4>
+      <p style="font-size:.88rem"><span class="i18n" data-en="One <code class=&quot;inline-code&quot;>OrderedDict</code>. <code class=&quot;inline-code&quot;>touch</code> = <code class=&quot;inline-code&quot;>move_to_end</code>. <code class=&quot;inline-code&quot;>evict(n)</code> walks from the front, skipping any block with <code class=&quot;inline-code&quot;>ref_cnt != 0</code> or in the <code class=&quot;inline-code&quot;>protected</code> set, collecting the first n -- and returns <code class=&quot;inline-code&quot;>None</code> without mutating anything if it can't find n. ~46 lines." data-zh="一個 <code class=&quot;inline-code&quot;>OrderedDict</code>。<code class=&quot;inline-code&quot;>touch</code> = <code class=&quot;inline-code&quot;>move_to_end</code>。<code class=&quot;inline-code&quot;>evict(n)</code> 從頭走訪，跳過 <code class=&quot;inline-code&quot;>ref_cnt != 0</code> 或在 <code class=&quot;inline-code&quot;>protected</code> 集合的 block，收集前 n 個——若找不到 n 個就回傳 <code class=&quot;inline-code&quot;>None</code> 且不改任何狀態。約 46 行。">One <code class="inline-code">OrderedDict</code>. <code class="inline-code">touch</code> = <code class="inline-code">move_to_end</code>. <code class="inline-code">evict(n)</code> walks from the front, skipping any block with <code class="inline-code">ref_cnt != 0</code> or in the <code class="inline-code">protected</code> set, collecting the first n -- and returns <code class="inline-code">None</code> without mutating anything if it can't find n. ~46 lines.</span></p>
+    </div>
+    <div class="mode-col eager">
+      <span class="mode-badge">arc.py</span>
+      <h4><span class="i18n" data-en="ARCCachePolicy" data-zh="ARCCachePolicy">ARCCachePolicy</span></h4>
+      <p style="font-size:.88rem"><span class="i18n" data-en="Adaptive Replacement Cache. <code class=&quot;inline-code&quot;>T1</code> (seen once) + <code class=&quot;inline-code&quot;>T2</code> (seen 2+) real lists, plus <code class=&quot;inline-code&quot;>B1</code>/<code class=&quot;inline-code&quot;>B2</code> ghost lists of recently-evicted hashes. A hit in a ghost list nudges <code class=&quot;inline-code&quot;>target_t1_size</code>, self-tuning the recency-vs-frequency balance. ~156 lines." data-zh="Adaptive Replacement Cache。<code class=&quot;inline-code&quot;>T1</code>（看過一次）+ <code class=&quot;inline-code&quot;>T2</code>（看過 2+ 次）為真實清單，外加 <code class=&quot;inline-code&quot;>B1</code>/<code class=&quot;inline-code&quot;>B2</code> 記錄最近被淘汰 hash 的 ghost list。在 ghost list 命中會推動 <code class=&quot;inline-code&quot;>target_t1_size</code>，自我調整 recency 對 frequency 的平衡。約 156 行。">Adaptive Replacement Cache. <code class="inline-code">T1</code> (seen once) + <code class="inline-code">T2</code> (seen 2+) real lists, plus <code class="inline-code">B1</code>/<code class="inline-code">B2</code> ghost lists of recently-evicted hashes. A hit in a ghost list nudges <code class="inline-code">target_t1_size</code>, self-tuning the recency-vs-frequency balance. ~156 lines.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="ARC's adaptive rule, straight from the source: a <code class=&quot;inline-code&quot;>touch</code> that lands in the <code class=&quot;inline-code&quot;>B1</code> ghost list means &quot;we evicted a recency block too soon&quot; &rarr; grow <code class=&quot;inline-code&quot;>target_t1_size</code>; a hit in <code class=&quot;inline-code&quot;>B2</code> means &quot;we evicted a frequency block too soon&quot; &rarr; shrink it. <code class=&quot;inline-code&quot;>evict</code> then drains T1 or T2 depending on whether T1 currently exceeds that adaptive target. Both policies' <code class=&quot;inline-code&quot;>evict</code> are atomic: candidates are gathered first, and the structures are mutated only once all n are confirmed available." data-zh="ARC 的自適應規則，直接取自原始碼：落在 <code class=&quot;inline-code&quot;>B1</code> ghost list 的 <code class=&quot;inline-code&quot;>touch</code> 代表「我們太早淘汰了一個 recency block」&rarr; 增大 <code class=&quot;inline-code&quot;>target_t1_size</code>；命中 <code class=&quot;inline-code&quot;>B2</code> 代表「太早淘汰了一個 frequency block」&rarr; 縮小它。<code class=&quot;inline-code&quot;>evict</code> 接著依 T1 目前是否超過該自適應目標，從 T1 或 T2 抽取。兩種 policy 的 <code class=&quot;inline-code&quot;>evict</code> 都是原子的：先蒐集候選，確認 n 個全部可用後才一次改動結構。">ARC's adaptive rule, straight from the source: a <code class="inline-code">touch</code> that lands in the <code class="inline-code">B1</code> ghost list means "we evicted a recency block too soon" &rarr; grow <code class="inline-code">target_t1_size</code>; a hit in <code class="inline-code">B2</code> means "we evicted a frequency block too soon" &rarr; shrink it. <code class="inline-code">evict</code> then drains T1 or T2 depending on whether T1 currently exceeds that adaptive target. Both policies' <code class="inline-code">evict</code> are atomic: candidates are gathered first, and the structures are mutated only once all n are confirmed available.</span></p>
+
+  <div class="callout blue">
+    <strong><span class="i18n" data-en="Research hook" data-zh="研究切入點">Research hook</span>:</strong>
+    <span class="i18n" data-en="That upstream ships both LRU and ARC is itself an admission that LRU is not optimal for KV reuse. A new policy -- SLO-aware, request-priority-aware, or workload-adaptive -- is a single class implementing the 5-method <code class=&quot;inline-code&quot;>CachePolicy</code> ABC plus one line in <code class=&quot;inline-code&quot;>_CACHE_POLICIES</code>. No connector, scheduler, or worker change." data-zh="上游同時提供 LRU 與 ARC，這本身就承認了 LRU 對 KV 重用並非最佳。一個新策略——SLO-aware、request-priority-aware、或 workload-adaptive——只是一個實作 5 方法 <code class=&quot;inline-code&quot;>CachePolicy</code> ABC 的 class，加上 <code class=&quot;inline-code&quot;>_CACHE_POLICIES</code> 裡一行。不動 connector、scheduler、worker。">That upstream ships both LRU and ARC is itself an admission that LRU is not optimal for KV reuse. A new policy -- SLO-aware, request-priority-aware, or workload-adaptive -- is a single class implementing the 5-method <code class="inline-code">CachePolicy</code> ABC plus one line in <code class="inline-code">_CACHE_POLICIES</code>. No connector, scheduler, or worker change.</span>
+  </div>
+</div>
+
+<!-- ==================== SECTION 9: REUSE FILTER ==================== -->
+<div class="section" id="reuse-filter">
+  <span class="section-label">Part 2 &middot; Admission control</span>
+  <h2><span class="i18n" data-en="9. FilterReusedOffloadingManager -- Reuse Gating" data-zh="9. FilterReusedOffloadingManager —— 重用門檻">9. FilterReusedOffloadingManager -- Reuse Gating</span></h2>
+  <p><span class="i18n" data-en="Offloading a block costs a GPU&rarr;CPU PCIe copy and a CPU slot. If that block is never read back, the cost was pure waste. <code class=&quot;inline-code&quot;>FilterReusedOffloadingManager</code> (<code class=&quot;inline-code&quot;>reuse_manager.py</code>, ~120 lines) is an optional decorator around any <code class=&quot;inline-code&quot;>OffloadingManager</code> that refuses to store a block until it has been <em>seen</em> enough times." data-zh="Offload 一個 block 要付一次 GPU&rarr;CPU PCIe 複製和一個 CPU slot。若該 block 從未被讀回，這成本就是純浪費。<code class=&quot;inline-code&quot;>FilterReusedOffloadingManager</code>（<code class=&quot;inline-code&quot;>reuse_manager.py</code>，約 120 行）是套在任何 <code class=&quot;inline-code&quot;>OffloadingManager</code> 外的選配 decorator，它在一個 block 被<em>看到</em>足夠次數前拒絕存它。">Offloading a block costs a GPU&rarr;CPU PCIe copy and a CPU slot. If that block is never read back, the cost was pure waste. <code class="inline-code">FilterReusedOffloadingManager</code> (<code class="inline-code">reuse_manager.py</code>, ~120 lines) is an optional decorator around any <code class="inline-code">OffloadingManager</code> that refuses to store a block until it has been <em>seen</em> enough times.</span></p>
+
+  <div class="step-flow">
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Intercept lookup() -- count sightings" data-zh="攔截 lookup() —— 累計目擊次數">Intercept lookup() -- count sightings</span></h4>
+      <p><span class="i18n" data-en="Every block hash passed to <code class=&quot;inline-code&quot;>lookup</code> is recorded in an internal LRU <code class=&quot;inline-code&quot;>OrderedDict[BlockHash, int]</code> counter, capped at <code class=&quot;inline-code&quot;>max_tracker_size</code> (default 64,000). Then the call is delegated to the backing manager unchanged." data-zh="每個傳給 <code class=&quot;inline-code&quot;>lookup</code> 的 block hash 都記進一個內部 LRU <code class=&quot;inline-code&quot;>OrderedDict[BlockHash, int]</code> 計數器，上限為 <code class=&quot;inline-code&quot;>max_tracker_size</code>（預設 64,000）。接著原封不動委派給底層 manager。">Every block hash passed to <code class="inline-code">lookup</code> is recorded in an internal LRU <code class="inline-code">OrderedDict[BlockHash, int]</code> counter, capped at <code class="inline-code">max_tracker_size</code> (default 64,000). Then the call is delegated to the backing manager unchanged.</span></p>
+    </div>
+    <div class="step-item">
+      <h4><span class="i18n" data-en="Intercept prepare_store() -- filter below threshold" data-zh="攔截 prepare_store() —— 過濾未達門檻者">Intercept prepare_store() -- filter below threshold</span></h4>
+      <p><span class="i18n" data-en="Before delegating, it keeps only hashes whose count has reached <code class=&quot;inline-code&quot;>store_threshold</code>. Blocks below threshold are dropped <em>before</em> the backing manager runs, so they never consume CPU offload capacity." data-zh="委派前，只保留計數已達 <code class=&quot;inline-code&quot;>store_threshold</code> 的 hash。未達門檻的 block 在底層 manager 執行<em>之前</em>就被丟棄，因此完全不佔用 CPU offload 容量。">Before delegating, it keeps only hashes whose count has reached <code class="inline-code">store_threshold</code>. Blocks below threshold are dropped <em>before</em> the backing manager runs, so they never consume CPU offload capacity.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="It is wired in by <code class=&quot;inline-code&quot;>CPUOffloadingSpec.get_manager()</code>: when <code class=&quot;inline-code&quot;>extra_config[&quot;store_threshold&quot;] &gt;= 2</code>, the plain <code class=&quot;inline-code&quot;>CPUOffloadingManager</code> is wrapped in the filter; otherwise the filter is skipped entirely (threshold 0 or 1 = no gating). All other primitives -- <code class=&quot;inline-code&quot;>prepare_load</code>, <code class=&quot;inline-code&quot;>touch</code>, <code class=&quot;inline-code&quot;>complete_*</code>, <code class=&quot;inline-code&quot;>take_events</code> -- pass straight through." data-zh="它由 <code class=&quot;inline-code&quot;>CPUOffloadingSpec.get_manager()</code> 接上：當 <code class=&quot;inline-code&quot;>extra_config[&quot;store_threshold&quot;] &gt;= 2</code> 時，純 <code class=&quot;inline-code&quot;>CPUOffloadingManager</code> 被包進 filter；否則完全略過 filter（門檻 0 或 1 = 不過濾）。其他所有原語——<code class=&quot;inline-code&quot;>prepare_load</code>、<code class=&quot;inline-code&quot;>touch</code>、<code class=&quot;inline-code&quot;>complete_*</code>、<code class=&quot;inline-code&quot;>take_events</code>——直接穿透。">It is wired in by <code class="inline-code">CPUOffloadingSpec.get_manager()</code>: when <code class="inline-code">extra_config["store_threshold"] &gt;= 2</code>, the plain <code class="inline-code">CPUOffloadingManager</code> is wrapped in the filter; otherwise the filter is skipped entirely (threshold 0 or 1 = no gating). All other primitives -- <code class="inline-code">prepare_load</code>, <code class="inline-code">touch</code>, <code class="inline-code">complete_*</code>, <code class="inline-code">take_events</code> -- pass straight through.</span></p>
+</div>
+
+<!-- ==================== SECTION 10: LOAD PATH ==================== -->
+<div class="section" id="load-path">
+  <span class="section-label">Part 2 &middot; Load path</span>
+  <h2><span class="i18n" data-en="10. The Load Path -- CPU &rarr; GPU" data-zh="10. Load Path —— CPU &rarr; GPU">10. The Load Path -- CPU &rarr; GPU</span></h2>
+  <p><span class="i18n" data-en="A load is planned across two scheduler-side calls in <code class=&quot;inline-code&quot;>offloading/scheduler.py</code>. First a fact about block sizes: the offloaded block can be larger than a GPU block. <code class=&quot;inline-code&quot;>offloaded_block_size = gpu_block_size &times; block_size_factor</code>, so one CPU block mirrors <code class=&quot;inline-code&quot;>block_size_factor</code> contiguous GPU blocks. All hashing arithmetic in this section steps in units of the larger offloaded block." data-zh="一次 load 由 <code class=&quot;inline-code&quot;>offloading/scheduler.py</code> 中兩個 scheduler 端呼叫規劃。先講一個 block size 的事實：offloaded block 可以比 GPU block 大。<code class=&quot;inline-code&quot;>offloaded_block_size = gpu_block_size &times; block_size_factor</code>，所以一個 CPU block 對映 <code class=&quot;inline-code&quot;>block_size_factor</code> 個連續的 GPU block。本節所有 hash 運算都以較大的 offloaded block 為單位。">A load is planned across two scheduler-side calls in <code class="inline-code">offloading/scheduler.py</code>. First a fact about block sizes: the offloaded block can be larger than a GPU block. <code class="inline-code">offloaded_block_size = gpu_block_size &times; block_size_factor</code>, so one CPU block mirrors <code class="inline-code">block_size_factor</code> contiguous GPU blocks. All hashing arithmetic in this section steps in units of the larger offloaded block.</span></p>
+
+  <h3><span class="i18n" data-en="10.1 get_num_new_matched_tokens -- the DRAM hit lookup" data-zh="10.1 get_num_new_matched_tokens —— DRAM 命中查詢">10.1 get_num_new_matched_tokens -- the DRAM hit lookup</span></h3>
+<pre>
+<span class="cm"># offloading/scheduler.py  --  get_num_new_matched_tokens (condensed)</span>
+block_hashes = <span class="va">self</span>.<span class="fn">_get_block_hashes</span>(request)
+<span class="va">self</span>.manager.<span class="fn">touch</span>(block_hashes)                  <span class="cm"># feed recency/frequency even on a miss</span>
+
+start_block_idx = num_computed_tokens // <span class="va">self</span>.offloaded_block_size
+hits = <span class="va">self</span>.manager.<span class="fn">lookup</span>(
+    <span class="va">self</span>.<span class="fn">_get_block_hashes</span>(request, start_idx=start_block_idx))
+
+<span class="kw">if</span> hits <span class="kw">is None</span>:        <span class="kw">return None</span>, <span class="kw">False</span>    <span class="cm"># &quot;ask me again later&quot;</span>
+<span class="kw">if</span> hits == <span class="nu">0</span>:           <span class="kw">return</span> <span class="nu">0</span>, <span class="kw">False</span>
+<span class="cm"># delay if any hit block is already being loaded by another request</span>
+<span class="kw">if</span> <span class="fn">any</span>(h <span class="kw">in</span> <span class="va">self</span>._blocks_being_loaded <span class="kw">for</span> h <span class="kw">in</span> block_hashes):
+    <span class="kw">return None</span>, <span class="kw">False</span>
+<span class="kw">return</span> num_hit_tokens, <span class="kw">True</span>            <span class="cm"># True == load happens asynchronously</span>
+</pre>
+  <p><span class="i18n" data-en="The second return value is always <code class=&quot;inline-code&quot;>True</code> on a real hit -- the load is asynchronous, so the request enters <code class=&quot;inline-code&quot;>WAITING_FOR_REMOTE_KVS</code> and only runs once the copy lands. The <code class=&quot;inline-code&quot;>_blocks_being_loaded</code> set (populated only when GPU prefix caching is on) prevents two requests from racing to load the same block twice." data-zh="第二個回傳值在真正命中時永遠是 <code class=&quot;inline-code&quot;>True</code>——load 是非同步的，所以 request 進入 <code class=&quot;inline-code&quot;>WAITING_FOR_REMOTE_KVS</code>，要等複製落地才會跑。<code class=&quot;inline-code&quot;>_blocks_being_loaded</code> 集合（僅在 GPU prefix caching 開啟時填入）防止兩個 request 競爭、把同一個 block 載入兩次。">The second return value is always <code class="inline-code">True</code> on a real hit -- the load is asynchronous, so the request enters <code class="inline-code">WAITING_FOR_REMOTE_KVS</code> and only runs once the copy lands. The <code class="inline-code">_blocks_being_loaded</code> set (populated only when GPU prefix caching is on) prevents two requests from racing to load the same block twice.</span></p>
+
+  <h3><span class="i18n" data-en="10.2 update_state_after_alloc -- pairing CPU blocks to GPU slots" data-zh="10.2 update_state_after_alloc —— 把 CPU block 配對到 GPU slot">10.2 update_state_after_alloc -- pairing CPU blocks to GPU slots</span></h3>
+  <p><span class="i18n" data-en="Once the scheduler reserves GPU blocks, this call builds the transfer plan. <code class=&quot;inline-code&quot;>manager.prepare_load(block_hashes)</code> pins the CPU source blocks and returns a <code class=&quot;inline-code&quot;>CPULoadStoreSpec</code> (physical CPU block IDs). The GPU destination is a <code class=&quot;inline-code&quot;>GPULoadStoreSpec</code> built from the freshly-allocated block IDs. The <code class=&quot;inline-code&quot;>(src, dst)</code> pair -- a <code class=&quot;inline-code&quot;>TransferSpec</code> -- is parked in <code class=&quot;inline-code&quot;>_reqs_to_load</code> until <code class=&quot;inline-code&quot;>build_connector_meta</code> ships it." data-zh="排程器一旦預留 GPU block，這個呼叫就建出搬運計畫。<code class=&quot;inline-code&quot;>manager.prepare_load(block_hashes)</code> 釘住 CPU 來源 block，回傳一個 <code class=&quot;inline-code&quot;>CPULoadStoreSpec</code>（實體 CPU block ID）。GPU 目的端是用剛配置的 block ID 建出的 <code class=&quot;inline-code&quot;>GPULoadStoreSpec</code>。這個 <code class=&quot;inline-code&quot;>(src, dst)</code> 配對——一個 <code class=&quot;inline-code&quot;>TransferSpec</code>——被擱在 <code class=&quot;inline-code&quot;>_reqs_to_load</code>，直到 <code class=&quot;inline-code&quot;>build_connector_meta</code> 把它送出。">Once the scheduler reserves GPU blocks, this call builds the transfer plan. <code class="inline-code">manager.prepare_load(block_hashes)</code> pins the CPU source blocks and returns a <code class="inline-code">CPULoadStoreSpec</code> (physical CPU block IDs). The GPU destination is a <code class="inline-code">GPULoadStoreSpec</code> built from the freshly-allocated block IDs. The <code class="inline-code">(src, dst)</code> pair -- a <code class="inline-code">TransferSpec</code> -- is parked in <code class="inline-code">_reqs_to_load</code> until <code class="inline-code">build_connector_meta</code> ships it.</span></p>
+  <p><span class="i18n" data-en="Because an offloaded block is <code class=&quot;inline-code&quot;>block_size_factor</code> GPU blocks wide, <code class=&quot;inline-code&quot;>GPULoadStoreSpec</code> also carries <code class=&quot;inline-code&quot;>group_sizes</code> and <code class=&quot;inline-code&quot;>block_indices</code> -- the first GPU block of a load may be misaligned to the offloaded boundary (some sub-blocks were already on GPU), and <code class=&quot;inline-code&quot;>block_indices</code> tells the worker how many leading sub-blocks to skip." data-zh="因為一個 offloaded block 寬達 <code class=&quot;inline-code&quot;>block_size_factor</code> 個 GPU block，<code class=&quot;inline-code&quot;>GPULoadStoreSpec</code> 也帶 <code class=&quot;inline-code&quot;>group_sizes</code> 與 <code class=&quot;inline-code&quot;>block_indices</code>——一次 load 的第一個 GPU block 可能未對齊 offloaded 邊界（部分 sub-block 已在 GPU 上），<code class=&quot;inline-code&quot;>block_indices</code> 告訴 worker 要跳過幾個開頭的 sub-block。">Because an offloaded block is <code class="inline-code">block_size_factor</code> GPU blocks wide, <code class="inline-code">GPULoadStoreSpec</code> also carries <code class="inline-code">group_sizes</code> and <code class="inline-code">block_indices</code> -- the first GPU block of a load may be misaligned to the offloaded boundary (some sub-blocks were already on GPU), and <code class="inline-code">block_indices</code> tells the worker how many leading sub-blocks to skip.</span></p>
+</div>
+
+<!-- ==================== SECTION 11: STORE PATH ==================== -->
+<div class="section" id="store-path">
+  <span class="section-label">Part 2 &middot; Store path</span>
+  <h2><span class="i18n" data-en="11. The Store Path & Deferred Offload" data-zh="11. Store Path 與延遲 Offload">11. The Store Path & Deferred Offload</span></h2>
+  <p><span class="i18n" data-en="Stores are planned by <code class=&quot;inline-code&quot;>_get_reqs_to_store</code>, called once per step inside <code class=&quot;inline-code&quot;>build_connector_meta</code>. It walks both new and cached requests via <code class=&quot;inline-code&quot;>yield_req_data(scheduler_output)</code> and offloads only blocks that have newly become full." data-zh="Store 由 <code class=&quot;inline-code&quot;>_get_reqs_to_store</code> 規劃，在 <code class=&quot;inline-code&quot;>build_connector_meta</code> 內每步呼叫一次。它透過 <code class=&quot;inline-code&quot;>yield_req_data(scheduler_output)</code> 走訪新與快取中的 request，只 offload 剛變滿的 block。">Stores are planned by <code class="inline-code">_get_reqs_to_store</code>, called once per step inside <code class="inline-code">build_connector_meta</code>. It walks both new and cached requests via <code class="inline-code">yield_req_data(scheduler_output)</code> and offloads only blocks that have newly become full.</span></p>
+
+  <h3><span class="i18n" data-en="11.1 The per-request cursor" data-zh="11.1 每個 request 的游標">11.1 The per-request cursor</span></h3>
+<pre>
+<span class="cm"># offloading/scheduler.py  --  _get_reqs_to_store (condensed)</span>
+num_blocks       = total_tokens // <span class="va">self</span>.offloaded_block_size
+start_block_idx  = <span class="va">self</span>._next_stored_block_idx.<span class="fn">get</span>(req_id, <span class="nu">0</span>)   <span class="cm"># cursor</span>
+num_new_blocks   = num_blocks - start_block_idx
+<span class="kw">if</span> num_new_blocks &lt;= <span class="nu">0</span>:
+    <span class="kw">continue</span>                                <span class="cm"># nothing new to offload</span>
+
+new_block_hashes = <span class="va">self</span>.<span class="fn">_get_block_hashes</span>(req, start_block_idx, num_blocks)
+store_output     = <span class="va">self</span>.manager.<span class="fn">prepare_store</span>(new_block_hashes)
+<span class="kw">if</span> store_output <span class="kw">is None</span>:                     <span class="cm"># CPU pool full, eviction failed</span>
+    <span class="kw">continue</span>
+<span class="va">self</span>._next_stored_block_idx[req_id] = num_blocks   <span class="cm"># advance cursor</span>
+</pre>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>_next_stored_block_idx</code> is a monotonic cursor per request. Each step offloads only the blocks between the cursor and the current full-block count, then advances. A block is never offloaded twice, and the scan is O(new blocks) not O(request length)." data-zh="<code class=&quot;inline-code&quot;>_next_stored_block_idx</code> 是每個 request 的單調游標。每步只 offload 游標到目前滿 block 數之間的 block，然後前進。一個 block 永不被 offload 兩次，掃描成本是 O(新 block) 而非 O(request 長度)。"><code class="inline-code">_next_stored_block_idx</code> is a monotonic cursor per request. Each step offloads only the blocks between the cursor and the current full-block count, then advances. A block is never offloaded twice, and the scan is O(new blocks) not O(request length).</span></p>
+
+  <h3><span class="i18n" data-en="11.2 Why stores are deferred one step" data-zh="11.2 為什麼 store 延遲一步">11.2 Why stores are deferred one step</span></h3>
+  <p><span class="i18n" data-en="The worker does NOT submit a store the moment it is planned. <code class=&quot;inline-code&quot;>prepare_store_kv</code> (called from <code class=&quot;inline-code&quot;>wait_for_save</code>) only appends the job to <code class=&quot;inline-code&quot;>_unsubmitted_store_jobs</code>. The actual <code class=&quot;inline-code&quot;>worker.transfer_async</code> call happens at the <em>start of the next step</em>, inside <code class=&quot;inline-code&quot;>start_kv_transfers</code> / <code class=&quot;inline-code&quot;>handle_preemptions</code>. The source comment is explicit:" data-zh="Worker 不會在 store 一規劃好就提交。<code class=&quot;inline-code&quot;>prepare_store_kv</code>（由 <code class=&quot;inline-code&quot;>wait_for_save</code> 呼叫）只是把 job 加進 <code class=&quot;inline-code&quot;>_unsubmitted_store_jobs</code>。真正的 <code class=&quot;inline-code&quot;>worker.transfer_async</code> 呼叫發生在<em>下一步的開頭</em>，在 <code class=&quot;inline-code&quot;>start_kv_transfers</code> / <code class=&quot;inline-code&quot;>handle_preemptions</code> 內。原始碼註解說得很白：">The worker does NOT submit a store the moment it is planned. <code class="inline-code">prepare_store_kv</code> (called from <code class="inline-code">wait_for_save</code>) only appends the job to <code class="inline-code">_unsubmitted_store_jobs</code>. The actual <code class="inline-code">worker.transfer_async</code> call happens at the <em>start of the next step</em>, inside <code class="inline-code">start_kv_transfers</code> / <code class="inline-code">handle_preemptions</code>. The source comment is explicit:</span></p>
+  <div class="callout warn">
+    <span class="i18n" data-en="<em>&quot;defer the store to the beginning of the next engine step, so that offloading starts AFTER transfers related to token sampling, thereby avoiding delays to token generation due to offloading.&quot;</em> -- A store moves data the user has already finished computing; a sampling transfer is on the critical path of the next token. Deferring the store one step keeps the offload DMA from contending with latency-sensitive work." data-zh="<em>「把 store 延到下一個 engine step 的開頭，讓 offloading 在和 token sampling 相關的傳輸之後才開始，藉此避免 offloading 拖慢 token 生成。」</em>——store 搬的是使用者已算完的資料；sampling 傳輸卻在下一個 token 的關鍵路徑上。把 store 延後一步，可避免 offload DMA 和延遲敏感的工作搶資源。"><em>"defer the store to the beginning of the next engine step, so that offloading starts AFTER transfers related to token sampling, thereby avoiding delays to token generation due to offloading."</em> -- A store moves data the user has already finished computing; a sampling transfer is on the critical path of the next token. Deferring the store one step keeps the offload DMA from contending with latency-sensitive work.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="11.3 Completion accounting" data-zh="11.3 完成帳本">11.3 Completion accounting</span></h3>
+  <p><span class="i18n" data-en="When a transfer's CUDA event fires, <code class=&quot;inline-code&quot;>worker.get_finished</code> returns the request to <code class=&quot;inline-code&quot;>(finished_sending, finished_recving)</code>. Back on the scheduler, <code class=&quot;inline-code&quot;>update_connector_output</code> calls <code class=&quot;inline-code&quot;>manager.complete_store</code> (block becomes loadable) or <code class=&quot;inline-code&quot;>manager.complete_load</code> (unpin). A request that finishes generation while a store is still in flight is held in <code class=&quot;inline-code&quot;>_finished_reqs_waiting_for_store</code> -- its GPU blocks are not freed until the outbound copy lands, exactly the contract <code class=&quot;inline-code&quot;>request_finished()</code> promises in &sect;2." data-zh="當一個傳輸的 CUDA event 觸發，<code class=&quot;inline-code&quot;>worker.get_finished</code> 把 request 回報到 <code class=&quot;inline-code&quot;>(finished_sending, finished_recving)</code>。回到排程器，<code class=&quot;inline-code&quot;>update_connector_output</code> 呼叫 <code class=&quot;inline-code&quot;>manager.complete_store</code>（block 變可載入）或 <code class=&quot;inline-code&quot;>manager.complete_load</code>（解除釘選）。一個在 store 仍飛行中就生成結束的 request 會被 <code class=&quot;inline-code&quot;>_finished_reqs_waiting_for_store</code> 扣住——它的 GPU block 要等外送複製落地才釋放，正是 &sect;2 中 <code class=&quot;inline-code&quot;>request_finished()</code> 承諾的契約。">When a transfer's CUDA event fires, <code class="inline-code">worker.get_finished</code> returns the request to <code class="inline-code">(finished_sending, finished_recving)</code>. Back on the scheduler, <code class="inline-code">update_connector_output</code> calls <code class="inline-code">manager.complete_store</code> (block becomes loadable) or <code class="inline-code">manager.complete_load</code> (unpin). A request that finishes generation while a store is still in flight is held in <code class="inline-code">_finished_reqs_waiting_for_store</code> -- its GPU blocks are not freed until the outbound copy lands, exactly the contract <code class="inline-code">request_finished()</code> promises in &sect;2.</span></p>
+</div>
+
+<!-- ==================== SECTION 12: WORKER & DMA ==================== -->
+<div class="section" id="worker-dma">
+  <span class="section-label">Part 2 &middot; Worker side</span>
+  <h2><span class="i18n" data-en="12. The Worker -- Canonical Tensors, Streams, DMA" data-zh="12. Worker 端 —— 正規化張量、Stream、DMA">12. The Worker -- Canonical Tensors, Streams, DMA</span></h2>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>OffloadingConnectorWorker</code> turns the declarative <code class=&quot;inline-code&quot;>TransferSpec</code>s into CUDA work. It owns an <code class=&quot;inline-code&quot;>OffloadingWorker</code> that holds a registry of <code class=&quot;inline-code&quot;>OffloadingHandler</code>s keyed by <code class=&quot;inline-code&quot;>(src_medium, dst_medium)</code> -- <code class=&quot;inline-code&quot;>(&quot;GPU&quot;,&quot;CPU&quot;)</code> and <code class=&quot;inline-code&quot;>(&quot;CPU&quot;,&quot;GPU&quot;)</code> each map to one direction handler." data-zh="<code class=&quot;inline-code&quot;>OffloadingConnectorWorker</code> 把宣告式的 <code class=&quot;inline-code&quot;>TransferSpec</code> 轉成 CUDA 工作。它持有一個 <code class=&quot;inline-code&quot;>OffloadingWorker</code>，內含以 <code class=&quot;inline-code&quot;>(src_medium, dst_medium)</code> 為鍵的 <code class=&quot;inline-code&quot;>OffloadingHandler</code> registry——<code class=&quot;inline-code&quot;>(&quot;GPU&quot;,&quot;CPU&quot;)</code> 與 <code class=&quot;inline-code&quot;>(&quot;CPU&quot;,&quot;GPU&quot;)</code> 各對映一個方向 handler。"><code class="inline-code">OffloadingConnectorWorker</code> turns the declarative <code class="inline-code">TransferSpec</code>s into CUDA work. It owns an <code class="inline-code">OffloadingWorker</code> that holds a registry of <code class="inline-code">OffloadingHandler</code>s keyed by <code class="inline-code">(src_medium, dst_medium)</code> -- <code class="inline-code">("GPU","CPU")</code> and <code class="inline-code">("CPU","GPU")</code> each map to one direction handler.</span></p>
+
+  <h3><span class="i18n" data-en="12.1 register_kv_caches -- canonicalizing layouts" data-zh="12.1 register_kv_caches —— 正規化記憶體佈局">12.1 register_kv_caches -- canonicalizing layouts</span></h3>
+  <p><span class="i18n" data-en="The hardest worker code is layout-wrangling. Different attention backends store KV with different physical layouts -- FlashAttention uses <code class=&quot;inline-code&quot;>(2, num_blocks, ...)</code>, others put <code class=&quot;inline-code&quot;>num_blocks</code> first, Mamba is different again. <code class=&quot;inline-code&quot;>register_kv_caches</code> probes each backend's <code class=&quot;inline-code&quot;>get_kv_cache_shape</code>, sorts the strides to find which physical dimension is <code class=&quot;inline-code&quot;>num_blocks</code>, and rebuilds every layer as a canonical <code class=&quot;inline-code&quot;>(num_blocks, page_size_bytes)</code> int8 tensor. FlashAttention's leading-2 layout is <code class=&quot;inline-code&quot;>unbind</code>'d into two tensors (K and V). The result is a <code class=&quot;inline-code&quot;>CanonicalKVCaches</code> -- a uniform block-major view regardless of backend." data-zh="Worker 最難的程式碼是佈局處理。不同的 attention backend 用不同實體佈局存 KV——FlashAttention 用 <code class=&quot;inline-code&quot;>(2, num_blocks, ...)</code>，其他把 <code class=&quot;inline-code&quot;>num_blocks</code> 放前面，Mamba 又不一樣。<code class=&quot;inline-code&quot;>register_kv_caches</code> 探測每個 backend 的 <code class=&quot;inline-code&quot;>get_kv_cache_shape</code>，排序 stride 找出哪個實體維度是 <code class=&quot;inline-code&quot;>num_blocks</code>，把每層重建成正規的 <code class=&quot;inline-code&quot;>(num_blocks, page_size_bytes)</code> int8 tensor。FlashAttention 開頭為 2 的佈局會被 <code class=&quot;inline-code&quot;>unbind</code> 成兩個 tensor（K 和 V）。結果是一個 <code class=&quot;inline-code&quot;>CanonicalKVCaches</code>——不論 backend 為何都是統一的 block-major 視圖。">The hardest worker code is layout-wrangling. Different attention backends store KV with different physical layouts -- FlashAttention uses <code class="inline-code">(2, num_blocks, ...)</code>, others put <code class="inline-code">num_blocks</code> first, Mamba is different again. <code class="inline-code">register_kv_caches</code> probes each backend's <code class="inline-code">get_kv_cache_shape</code>, sorts the strides to find which physical dimension is <code class="inline-code">num_blocks</code>, and rebuilds every layer as a canonical <code class="inline-code">(num_blocks, page_size_bytes)</code> int8 tensor. FlashAttention's leading-2 layout is <code class="inline-code">unbind</code>'d into two tensors (K and V). The result is a <code class="inline-code">CanonicalKVCaches</code> -- a uniform block-major view regardless of backend.</span></p>
+
+  <h3><span class="i18n" data-en="12.2 transfer_async -- streams and event chaining" data-zh="12.2 transfer_async —— Stream 與 event 串接">12.2 transfer_async -- streams and event chaining</span></h3>
+  <p><span class="i18n" data-en="Each transfer gets its own CUDA stream from a pool and is wrapped in start/end <code class=&quot;inline-code&quot;>torch.Event</code>s. To preserve submission order without serializing onto the compute stream, each new transfer's stream <code class=&quot;inline-code&quot;>wait_event</code>s on the previous transfer's end event. GPU&rarr;CPU transfers also <code class=&quot;inline-code&quot;>wait_stream</code> on the current compute stream so offload only starts after the model has written the KV." data-zh="每個傳輸從 pool 拿到自己的 CUDA stream，並用 start/end <code class=&quot;inline-code&quot;>torch.Event</code> 包住。為了保留提交順序又不串接到 compute stream 上，每個新傳輸的 stream 會 <code class=&quot;inline-code&quot;>wait_event</code> 前一個傳輸的 end event。GPU&rarr;CPU 傳輸還會 <code class=&quot;inline-code&quot;>wait_stream</code> 當前 compute stream，讓 offload 只在模型寫完 KV 後才開始。">Each transfer gets its own CUDA stream from a pool and is wrapped in start/end <code class="inline-code">torch.Event</code>s. To preserve submission order without serializing onto the compute stream, each new transfer's stream <code class="inline-code">wait_event</code>s on the previous transfer's end event. GPU&rarr;CPU transfers also <code class="inline-code">wait_stream</code> on the current compute stream so offload only starts after the model has written the KV.</span></p>
+<pre>
+<span class="cm"># worker/cpu_gpu.py  --  the actual copy, per KV tensor</span>
+<span class="kw">with</span> torch.cuda.<span class="fn">stream</span>(stream):
+    start_event.<span class="fn">record</span>(stream)
+    <span class="kw">for</span> src_tensor, dst_tensor, block_size_in_bytes <span class="kw">in</span> ...:
+        ops.<span class="fn">swap_blocks</span>(src_tensor, dst_tensor,
+                        block_size_in_bytes, src_to_dst_tensor)
+    end_event.<span class="fn">record</span>(stream)
+
+<span class="cm"># csrc/cache_kernels.cu  --  swap_blocks lowers to a per-block memcpy loop</span>
+<span class="kw">for</span> (<span class="ty">size_t</span> i = <span class="nu">0</span>; i &lt; num_blocks; i++)
+    <span class="fn">cudaMemcpyAsync</span>(dst_ptr + dst_off, src_ptr + src_off,
+                    block_size_in_bytes, memcpy_type, stream);
+</pre>
+
+  <div class="callout red">
+    <strong><span class="i18n" data-en="Does the KV cache pass through VRAM? Yes." data-zh="KV cache 會經過 VRAM 嗎？會。">Does the KV cache pass through VRAM? Yes.</span></strong>
+    <span class="i18n" data-en="The destination of a CPU&rarr;GPU load is the <em>live KV cache HBM allocation</em> -- <code class=&quot;inline-code&quot;>swap_blocks</code> issues per-block <code class=&quot;inline-code&quot;>cudaMemcpyAsync(HostToDevice)</code>, so the bytes physically land in VRAM and the attention kernels read them from HBM. The CPU buffer is pinned (for true async DMA) but NOT memory-mapped -- this is explicit copy, not UVA zero-copy. vLLM's <code class=&quot;inline-code&quot;>UVAOffloader</code> (for model <em>weights</em>) does map host memory and lets the SM read it over PCIe; the KV path deliberately does not. The reason is reuse: a KV block is re-read by attention many times per decode step, so one PCIe copy + many ~3&nbsp;TB/s HBM reads beats N ~64&nbsp;GB/s PCIe reads. Weights are streamed once per layer, so zero-copy wins there. vLLM picks per data-reuse profile." data-zh="一次 CPU&rarr;GPU load 的目的地是<em>活的 KV cache HBM 配置</em>——<code class=&quot;inline-code&quot;>swap_blocks</code> 發出逐 block 的 <code class=&quot;inline-code&quot;>cudaMemcpyAsync(HostToDevice)</code>，所以位元組實際落在 VRAM，attention kernel 從 HBM 讀它們。CPU buffer 有 pin（為了真正的非同步 DMA）但沒有 memory-map——這是顯式複製，不是 UVA zero-copy。vLLM 的 <code class=&quot;inline-code&quot;>UVAOffloader</code>（給模型<em>權重</em>）確實會映射 host memory、讓 SM 透過 PCIe 直接讀；KV 路徑刻意不這樣。原因是重用度：一個 KV block 在每個 decode step 被 attention 重讀多次，所以「一次 PCIe 複製 + 多次 ~3&nbsp;TB/s HBM 讀」勝過「N 次 ~64&nbsp;GB/s PCIe 讀」。權重每層只串流一次，zero-copy 在那邊才划算。vLLM 依資料重用特性分別選擇。">The destination of a CPU&rarr;GPU load is the <em>live KV cache HBM allocation</em> -- <code class="inline-code">swap_blocks</code> issues per-block <code class="inline-code">cudaMemcpyAsync(HostToDevice)</code>, so the bytes physically land in VRAM and the attention kernels read them from HBM. The CPU buffer is pinned (for true async DMA) but NOT memory-mapped -- this is explicit copy, not UVA zero-copy. vLLM's <code class="inline-code">UVAOffloader</code> (for model <em>weights</em>) does map host memory and lets the SM read it over PCIe; the KV path deliberately does not. The reason is reuse: a KV block is re-read by attention many times per decode step, so one PCIe copy + many ~3&nbsp;TB/s HBM reads beats N ~64&nbsp;GB/s PCIe reads. Weights are streamed once per layer, so zero-copy wins there. vLLM picks per data-reuse profile.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="12.3 get_finished -- polling completion" data-zh="12.3 get_finished —— 輪詢完成">12.3 get_finished -- polling completion</span></h3>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>get_finished</code> drains <code class=&quot;inline-code&quot;>worker.get_finished()</code>, which non-blockingly queries each pending transfer's end event. A finished load returns its request in <code class=&quot;inline-code&quot;>finished_recving</code>; a store decrements that request's pending-job count and only reports <code class=&quot;inline-code&quot;>finished_sending</code> once the count hits zero. Transfer size and elapsed time are recorded into <code class=&quot;inline-code&quot;>OffloadingConnectorStats</code> for Prometheus." data-zh="<code class=&quot;inline-code&quot;>get_finished</code> 排出 <code class=&quot;inline-code&quot;>worker.get_finished()</code>，後者非阻塞地查詢每個待處理傳輸的 end event。完成的 load 把它的 request 放進 <code class=&quot;inline-code&quot;>finished_recving</code>；store 則遞減該 request 的待處理 job 計數，計數歸零才回報 <code class=&quot;inline-code&quot;>finished_sending</code>。傳輸大小與耗時記進 <code class=&quot;inline-code&quot;>OffloadingConnectorStats</code> 供 Prometheus 使用。"><code class="inline-code">get_finished</code> drains <code class="inline-code">worker.get_finished()</code>, which non-blockingly queries each pending transfer's end event. A finished load returns its request in <code class="inline-code">finished_recving</code>; a store decrements that request's pending-job count and only reports <code class="inline-code">finished_sending</code> once the count hits zero. Transfer size and elapsed time are recorded into <code class="inline-code">OffloadingConnectorStats</code> for Prometheus.</span></p>
+</div>
+
+<!-- ==================== SECTION 13: REFERENCE ==================== -->
+<div class="section" id="reference">
+  <span class="section-label">Reference</span>
+  <h2><span class="i18n" data-en="13. Configuration & File Map" data-zh="13. 設定與檔案對照">13. Configuration & File Map</span></h2>
+
+  <h3><span class="i18n" data-en="13.1 Configuration surface" data-zh="13.1 設定表面">13.1 Configuration surface</span></h3>
+  <p><span class="i18n" data-en="Everything is driven through <code class=&quot;inline-code&quot;>kv_transfer_config.kv_connector_extra_config</code>:" data-zh="一切都透過 <code class=&quot;inline-code&quot;>kv_transfer_config.kv_connector_extra_config</code> 驅動：">Everything is driven through <code class="inline-code">kv_transfer_config.kv_connector_extra_config</code>:</span></p>
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  <table>
+    <tr><th><span class="i18n" data-en="Key" data-zh="鍵">Key</span></th><th><span class="i18n" data-en="Default" data-zh="預設">Default</span></th><th><span class="i18n" data-en="Effect" data-zh="作用">Effect</span></th></tr>
+    <tr><td><code class="inline-code">spec_name</code></td><td><code class="inline-code">"CPUOffloadingSpec"</code></td><td><span class="i18n" data-en="Which OffloadingSpec the factory builds." data-zh="Factory 要建哪個 OffloadingSpec。">Which OffloadingSpec the factory builds.</span></td></tr>
+    <tr><td><code class="inline-code">spec_module_path</code></td><td>&mdash;</td><td><span class="i18n" data-en="Import path for an out-of-tree spec." data-zh="樹外 spec 的 import 路徑。">Import path for an out-of-tree spec.</span></td></tr>
+    <tr><td><code class="inline-code">cpu_bytes_to_use</code></td><td><span class="i18n" data-en="required" data-zh="必填">required</span></td><td><span class="i18n" data-en="DRAM budget; divided by block bytes to size the CPU pool." data-zh="DRAM 預算；除以 block 位元組數來決定 CPU pool 大小。">DRAM budget; divided by block bytes to size the CPU pool.</span></td></tr>
+    <tr><td><code class="inline-code">block_size</code></td><td><span class="i18n" data-en="= GPU block" data-zh="= GPU block">= GPU block</span></td><td><span class="i18n" data-en="Offloaded block size; sets block_size_factor (must be a multiple)." data-zh="Offloaded block 大小；決定 block_size_factor（必須是倍數）。">Offloaded block size; sets block_size_factor (must be a multiple).</span></td></tr>
+    <tr><td><code class="inline-code">eviction_policy</code></td><td><code class="inline-code">"lru"</code></td><td><span class="i18n" data-en="lru or arc -- selects the CachePolicy." data-zh="lru 或 arc——選擇 CachePolicy。">lru or arc -- selects the CachePolicy.</span></td></tr>
+    <tr><td><code class="inline-code">store_threshold</code></td><td><code class="inline-code">0</code></td><td><span class="i18n" data-en="&gt;=2 enables the reuse filter (&sect;9); 0/1 = no gating." data-zh="&gt;=2 啟用 reuse filter（&sect;9）；0/1 = 不過濾。">&gt;=2 enables the reuse filter (&sect;9); 0/1 = no gating.</span></td></tr>
+    <tr><td><code class="inline-code">max_tracker_size</code></td><td><code class="inline-code">64000</code></td><td><span class="i18n" data-en="LRU counter cap for the reuse filter." data-zh="Reuse filter 的 LRU 計數器上限。">LRU counter cap for the reuse filter.</span></td></tr>
   </table>
   </div>
 
-  <h3><span class="i18n" data-en="13.1 Design Principles PR #37160 Preserves" data-zh="13.1 PR #37160 保留的設計原則">13.1 Design Principles PR #37160 Preserves</span></h3>
-  <div class="ds-grid">
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="No scheduler changes beyond opt-in hooks" data-zh="除了選配 hook，不動排程器">No scheduler changes beyond opt-in hooks</span></h5>
-      <p><span class="i18n" data-en="Seven lines in scheduler.py. Everything else in the PR is isolated to the connector package." data-zh="scheduler.py 只動七行。PR 其他變更全部隔離在 connector 套件內。">Seven lines in scheduler.py. Everything else in the PR is isolated to the connector package.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="Reuse BlockPool, don't replicate" data-zh="重用 BlockPool，不要複製">Reuse BlockPool, don't replicate</span></h5>
-      <p><span class="i18n" data-en="The CPU tier is just another BlockPool with its own LRU and prefix-cache map -- zero new cache code." data-zh="CPU 層就是另一個 BlockPool，有自己的 LRU 和 prefix-cache map——沒有新增任何 cache 程式碼。">The CPU tier is just another BlockPool with its own LRU and prefix-cache map -- zero new cache code.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="Flat block IDs across IPC" data-zh="IPC 上跨傳扁平的 block id">Flat block IDs across IPC</span></h5>
-      <p><span class="i18n" data-en="Worker sees only <code class=&quot;inline-code&quot;>list[int]</code> + event_idx. No request identities cross the boundary except for the load_event_to_reqs reverse map." data-zh="Worker 只看得到 <code class=&quot;inline-code&quot;>list[int]</code> + event_idx。除了 load_event_to_reqs 這個反向 map，沒有任何 request 身份跨界。">Worker sees only <code class="inline-code">list[int]</code> + event_idx. No request identities cross the boundary except for the load_event_to_reqs reverse map.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="Event-count TP quorum, not broadcast" data-zh="以事件計數做 TP quorum，不是廣播">Event-count TP quorum, not broadcast</span></h5>
-      <p><span class="i18n" data-en="TP/PP completion is resolved by counting per-rank reports in <code class=&quot;inline-code&quot;>_store_event_pending_counts</code>. No explicit rank-0 leader, no broadcast collectives." data-zh="TP/PP 完成透過 <code class=&quot;inline-code&quot;>_store_event_pending_counts</code> 數 rank 回報。沒有 rank-0 leader、沒有 broadcast collective。">TP/PP completion is resolved by counting per-rank reports in <code class="inline-code">_store_event_pending_counts</code>. No explicit rank-0 leader, no broadcast collectives.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="Pin memory manually, not via PyTorch" data-zh="手動 pin memory，不透過 PyTorch">Pin memory manually, not via PyTorch</span></h5>
-      <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>cudaHostRegister</code> avoids PyTorch's <code class=&quot;inline-code&quot;>pin_memory=True</code> allocator that rounds every allocation up to the next power of 2." data-zh="<code class=&quot;inline-code&quot;>cudaHostRegister</code> 繞開 PyTorch <code class=&quot;inline-code&quot;>pin_memory=True</code> allocator 把每筆配置 round up 到 2 次方的行為。"><code class="inline-code">cudaHostRegister</code> avoids PyTorch's <code class="inline-code">pin_memory=True</code> allocator that rounds every allocation up to the next power of 2.</span></p>
-    </div>
-    <div class="ds-box">
-      <h5><span class="i18n" data-en="Batch + defer beats fine-grained overlap" data-zh="批次 + 延後優於細粒度 overlap">Batch + defer beats fine-grained overlap</span></h5>
-      <p><span class="i18n" data-en="Per-layer hooks are no-ops. Everything launches in one batched call in <code class=&quot;inline-code&quot;>get_finished()</code> on a low-priority stream." data-zh="逐層 hook 全部 no-op。所有事情在 <code class=&quot;inline-code&quot;>get_finished()</code> 裡用低優先權 stream 以一次批次呼叫 launch。">Per-layer hooks are no-ops. Everything launches in one batched call in <code class="inline-code">get_finished()</code> on a low-priority stream.</span></p>
-    </div>
+  <h3><span class="i18n" data-en="13.2 Complete file map" data-zh="13.2 完整檔案對照">13.2 Complete file map</span></h3>
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+  <table>
+    <tr><th><span class="i18n" data-en="File" data-zh="檔案">File</span></th><th><span class="i18n" data-en="Layer" data-zh="層">Layer</span></th><th><span class="i18n" data-en="Key class" data-zh="主要 class">Key class</span></th><th><span class="i18n" data-en="Responsibility" data-zh="職責">Responsibility</span></th></tr>
+    <tr><td><code class="inline-code">offloading_connector.py</code></td><td><span class="tag sched">conn</span></td><td><code class="inline-code">OffloadingConnector</code></td><td><span class="i18n" data-en="Facade; delegates to scheduler/worker halves." data-zh="Facade；委派給 scheduler/worker 兩半。">Facade; delegates to scheduler/worker halves.</span></td></tr>
+    <tr><td><code class="inline-code">offloading/scheduler.py</code></td><td><span class="tag sched">conn</span></td><td><code class="inline-code">OffloadingConnectorScheduler</code></td><td><span class="i18n" data-en="Load/store planning, cursors, completion accounting." data-zh="Load/store 規劃、游標、完成帳本。">Load/store planning, cursors, completion accounting.</span></td></tr>
+    <tr><td><code class="inline-code">offloading/worker.py</code></td><td><span class="tag worker">conn</span></td><td><code class="inline-code">OffloadingConnectorWorker</code></td><td><span class="i18n" data-en="Canonicalizes KV layouts, drives the OffloadingWorker." data-zh="正規化 KV 佈局，驅動 OffloadingWorker。">Canonicalizes KV layouts, drives the OffloadingWorker.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/factory.py</code></td><td><span class="tag dram">spec</span></td><td><code class="inline-code">OffloadingSpecFactory</code></td><td><span class="i18n" data-en="Lazy registry of OffloadingSpec implementations." data-zh="OffloadingSpec 實作的延遲 registry。">Lazy registry of OffloadingSpec implementations.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/cpu/spec.py</code></td><td><span class="tag dram">spec</span></td><td><code class="inline-code">CPUOffloadingSpec</code></td><td><span class="i18n" data-en="Builds the manager + handlers; the layer seam." data-zh="建出 manager + handlers；層的接縫。">Builds the manager + handlers; the layer seam.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/cpu/manager.py</code></td><td><span class="tag dram">spec</span></td><td><code class="inline-code">CPUOffloadingManager</code></td><td><span class="i18n" data-en="CPU block pool, ref-counting, events." data-zh="CPU block pool、ref-counting、事件。">CPU block pool, ref-counting, events.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/cpu/policies/</code></td><td><span class="tag dram">spec</span></td><td><code class="inline-code">LRUCachePolicy</code> / <code class="inline-code">ARCCachePolicy</code></td><td><span class="i18n" data-en="Pluggable eviction; the research extension point." data-zh="可插拔淘汰；研究擴充點。">Pluggable eviction; the research extension point.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/reuse_manager.py</code></td><td><span class="tag dram">spec</span></td><td><code class="inline-code">FilterReusedOffloadingManager</code></td><td><span class="i18n" data-en="Optional reuse-frequency admission filter." data-zh="選配的重用頻率准入過濾器。">Optional reuse-frequency admission filter.</span></td></tr>
+    <tr><td><code class="inline-code">kv_offload/worker/cpu_gpu.py</code></td><td><span class="tag worker">spec</span></td><td><code class="inline-code">CpuGpuOffloadingHandlers</code></td><td><span class="i18n" data-en="Per-direction handlers; streams, events, swap_blocks." data-zh="每方向 handler；stream、event、swap_blocks。">Per-direction handlers; streams, events, swap_blocks.</span></td></tr>
+  </table>
   </div>
 
-  <h3><span class="i18n" data-en="13.2 Known Limitations" data-zh="13.2 已知限制">13.2 Known Limitations</span></h3>
-  <ul>
-    <li><span class="i18n" data-en="<code class=&quot;inline-code&quot;>reset_cache()</code> raises NotImplementedError -- the connector cannot synchronously flush all in-flight transfers, so <code class=&quot;inline-code&quot;>reset_prefix_cache()</code> (used in RLHF weight updates) is unsupported." data-zh="<code class=&quot;inline-code&quot;>reset_cache()</code> 會 raise NotImplementedError——connector 無法同步 flush 所有飛行中的傳輸，因此 RLHF 權重更新用的 <code class=&quot;inline-code&quot;>reset_prefix_cache()</code> 不被支援。"><code class="inline-code">reset_cache()</code> raises NotImplementedError -- the connector cannot synchronously flush all in-flight transfers, so <code class="inline-code">reset_prefix_cache()</code> (used in RLHF weight updates) is unsupported.</span></li>
-    <li><span class="i18n" data-en="DCP / PCP world sizes must be 1 (asserted at init). Multi-layer context-parallel is not yet wired." data-zh="DCP / PCP world size 必須是 1（init 時 assert）。多層 context-parallel 尚未接好。">DCP / PCP world sizes must be 1 (asserted at init). Multi-layer context-parallel is not yet wired.</span></li>
-    <li><span class="i18n" data-en="<code class=&quot;inline-code&quot;>num_stored_blocks</code> can go stale if the CPU pool evicts a mid-request block -- the source comments this as a future fix (<code class=&quot;inline-code&quot;>FIXME (yifan): handle CPU cache eviction...</code>)." data-zh="<code class=&quot;inline-code&quot;>num_stored_blocks</code> 在 CPU pool 把請求中段 block 踢掉時會變 stale——原始碼註解為「FIXME (yifan): handle CPU cache eviction…」。"><code class="inline-code">num_stored_blocks</code> can go stale if the CPU pool evicts a mid-request block -- the source comments this as a future fix (<code class="inline-code">FIXME (yifan): handle CPU cache eviction...</code>).</span></li>
-    <li><span class="i18n" data-en="Eager mode may miss the final block of a request that finishes the same step its last block completes -- comments flag <code class=&quot;inline-code&quot;>TODO: flush on finish</code>." data-zh="Eager 模式可能漏掉「最後一個 block 剛好在 finish 那一步才算完」的 block——原始碼標 <code class=&quot;inline-code&quot;>TODO: flush on finish</code>。">Eager mode may miss the final block of a request that finishes the same step its last block completes -- comments flag <code class="inline-code">TODO: flush on finish</code>.</span></li>
-  </ul>
+  <h3><span class="i18n" data-en="13.3 OffloadingConnector vs the older SimpleCPUOffloadConnector" data-zh="13.3 OffloadingConnector vs 較舊的 SimpleCPUOffloadConnector">13.3 OffloadingConnector vs the older SimpleCPUOffloadConnector</span></h3>
+  <p><span class="i18n" data-en="<code class=&quot;inline-code&quot;>SimpleCPUOffloadConnector</code> is still registered in the factory, but it is the lighter single-file design: it piggy-backs on the GPU BlockPool LRU, bakes in its own offload logic, and is not extensible. <code class=&quot;inline-code&quot;>OffloadingConnector</code> is the modern path -- a connector/spec split, a pluggable eviction policy, an optional reuse filter, and a factory seam for entirely new tiers. For new work, build on <code class=&quot;inline-code&quot;>OffloadingConnector</code> and <code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code>." data-zh="<code class=&quot;inline-code&quot;>SimpleCPUOffloadConnector</code> 仍註冊在 factory 裡，但它是較輕的單檔設計：搭便車用 GPU BlockPool LRU、把 offload 邏輯寫死、不可擴充。<code class=&quot;inline-code&quot;>OffloadingConnector</code> 才是現代路徑——connector/spec 分層、可插拔淘汰策略、選配 reuse filter、以及給全新層用的 factory 接縫。新工作請建在 <code class=&quot;inline-code&quot;>OffloadingConnector</code> 與 <code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code> 上。"><code class="inline-code">SimpleCPUOffloadConnector</code> is still registered in the factory, but it is the lighter single-file design: it piggy-backs on the GPU BlockPool LRU, bakes in its own offload logic, and is not extensible. <code class="inline-code">OffloadingConnector</code> is the modern path -- a connector/spec split, a pluggable eviction policy, an optional reuse filter, and a factory seam for entirely new tiers. For new work, build on <code class="inline-code">OffloadingConnector</code> and <code class="inline-code">vllm/v1/kv_offload/</code>.</span></p>
 
-  <div class="callout blue">
+  <div class="callout key">
     <strong><span class="i18n" data-en="Bottom line" data-zh="結論">Bottom line</span>:</strong>
-    <span class="i18n" data-en=" PR #37160 is 1,354 lines of concentrated work. It delivers a production-ready DRAM offload tier by leaning on three things the scheduler already had -- BlockPool LRU, prefix-cache hashing, Merkle-chained block hashes -- and adding only two genuinely new concepts: the monotonic event counter for async accounting, and the cursor that walks the GPU free queue in lazy mode. Everything else is pure plumbing." data-zh="PR #37160 是 1,354 行精煉的工作。它提供一個可上線的 DRAM offload 層，靠的是排程器本來就有的三樣東西——BlockPool LRU、prefix-cache 雜湊、Merkle chain block hash——只新增了兩個真正的新概念：非同步帳本用的單調 event counter，以及 lazy 模式下走訪 GPU free queue 的 cursor。其他全是純接管道。"> PR #37160 is 1,354 lines of concentrated work. It delivers a production-ready DRAM offload tier by leaning on three things the scheduler already had -- BlockPool LRU, prefix-cache hashing, Merkle-chained block hashes -- and adding only two genuinely new concepts: the monotonic event counter for async accounting, and the cursor that walks the GPU free queue in lazy mode. Everything else is pure plumbing.</span>
+    <span class="i18n" data-en="The modern offload stack is two layers around one seam. The connector layer is pure plumbing into <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code>; the <code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code> backend owns the real decisions -- and exposes three independent extension points: a new <code class=&quot;inline-code&quot;>OffloadingSpec</code> (a whole new tier), a new <code class=&quot;inline-code&quot;>CachePolicy</code> (smarter eviction), and the reuse filter. KV data still transits VRAM by explicit DMA, because KV blocks are reused too heavily for zero-copy to pay off." data-zh="現代 offload 堆疊是繞著一個接縫的兩層。Connector 層是接進 <code class=&quot;inline-code&quot;>KVConnectorBase_V1</code> 的純管線；<code class=&quot;inline-code&quot;>vllm/v1/kv_offload/</code> 後端擁有真正的決策——並暴露三個獨立擴充點：新的 <code class=&quot;inline-code&quot;>OffloadingSpec</code>（一整層新層級）、新的 <code class=&quot;inline-code&quot;>CachePolicy</code>（更聰明的淘汰）、以及 reuse filter。KV 資料仍以顯式 DMA 經過 VRAM，因為 KV block 的重用太頻繁，zero-copy 划不來。">The modern offload stack is two layers around one seam. The connector layer is pure plumbing into <code class="inline-code">KVConnectorBase_V1</code>; the <code class="inline-code">vllm/v1/kv_offload/</code> backend owns the real decisions -- and exposes three independent extension points: a new <code class="inline-code">OffloadingSpec</code> (a whole new tier), a new <code class="inline-code">CachePolicy</code> (smarter eviction), and the reuse filter. KV data still transits VRAM by explicit DMA, because KV blocks are reused too heavily for zero-copy to pay off.</span>
   </div>
 </div>
 
@@ -1254,14 +933,15 @@ metadata = <span class="va">self</span>._connector_metadata
 
 <!-- ==================== FOOTER ==================== -->
 <footer>
-  <p><span class="i18n" data-en="Deep dive generated from vLLM v0.19.x source plus" data-zh="深入分析生成自 vLLM v0.19.x 原始碼加上">Deep dive generated from vLLM v0.19.x source plus</span>
-     <a href="https://github.com/vllm-project/vllm/pull/37160" target="_blank">PR #37160</a> &middot;
-     <a href="https://github.com/hungchun0201/Agentic_KVCache_management">hungchun0201/Agentic_KVCache_management</a> (<span class="i18n" data-en="fork" data-zh="分支">fork</span>) &middot;
+  <p><span class="i18n" data-en="Deep dive generated from vLLM V1 source" data-zh="深入分析生成自 vLLM V1 原始碼">Deep dive generated from vLLM V1 source</span> &middot;
      <a href="https://github.com/vllm-project/vllm">vllm-project/vllm</a> (<span class="i18n" data-en="upstream" data-zh="上游">upstream</span>)</p>
   <p><span class="i18n" data-en="Files analyzed:" data-zh="分析的檔案：">Files analyzed:</span>
-     <code>vllm/distributed/kv_transfer/kv_connector/v1/{base,factory,simple_cpu_offload_connector}.py</code>,
-     <code>vllm/v1/simple_kv_offload/{manager,worker,metadata,copy_backend,cuda_mem_ops}.py</code>,
-     <code>vllm/v1/core/sched/scheduler.py</code></p>
+     <code>kv_transfer/kv_connector/v1/{base,factory,offloading_connector}.py</code>,
+     <code>kv_connector/v1/offloading/{scheduler,worker,common,metrics}.py</code>,
+     <code>vllm/v1/kv_offload/{abstract,spec,factory,mediums,reuse_manager}.py</code>,
+     <code>vllm/v1/kv_offload/cpu/{spec,manager,policies/*}.py</code>,
+     <code>vllm/v1/kv_offload/worker/{worker,cpu_gpu}.py</code>,
+     <code>csrc/cache_kernels.cu</code></p>
 </footer>
 
 <script>function setLang(l){document.querySelectorAll('.i18n').forEach(e=>{if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)};(function(){var l=localStorage.getItem('lang');if(l)setLang(l)})()</script>
