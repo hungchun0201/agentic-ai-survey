@@ -70,9 +70,31 @@ function isBilingualMissing(value) {
 }
 
 function splitMulti(s, sep = /[,;]/) {
+  // Depth-aware splitter: treats commas/semicolons inside (), [], or {} as
+  // part of a single tag instead of splitting on them. Falls back to the raw
+  // regex on a per-character test so callers can still pass /,/ to require
+  // comma-only splitting.
   const str = typeof s === "string" ? s : pickLang(s);
   if (!isMeaningful(str)) return [];
-  return String(str).split(sep).map((t) => t.trim()).filter(Boolean);
+  const text = String(str);
+  const out = [];
+  let buf = "";
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+    if (depth === 0 && sep.test(ch)) {
+      const t = buf.trim();
+      if (t) out.push(t);
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  const last = buf.trim();
+  if (last) out.push(last);
+  return out;
 }
 
 function tagPill(tag, { title = "" } = {}) {
