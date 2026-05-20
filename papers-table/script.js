@@ -118,7 +118,7 @@ function renderVenue(record) {
 function renderArxiv(value) {
   if (!isMeaningful(value)) return renderText(NOT_SPEC);
   const id = String(value).trim();
-  return `<a class="arxiv-link" href="https://arxiv.org/abs/${encodeURIComponent(id)}" target="_blank" rel="noopener">${escapeHTML(id)}</a>`;
+  return `<a class="arxiv-link" style="white-space:nowrap" href="https://arxiv.org/abs/${encodeURIComponent(id)}" target="_blank" rel="noopener">${escapeHTML(id)}</a>`;
 }
 
 function renderAffiliations(value) {
@@ -127,23 +127,46 @@ function renderAffiliations(value) {
   return `<div class="tag-wrap">${items.map((a) => tagPill(a)).join("")}</div>`;
 }
 
+function linkLabelFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host.endsWith("github.com")) return "GitHub";
+    if (host.endsWith("huggingface.co")) return "HuggingFace";
+    if (host.endsWith("anonymous.4open.science")) return "Anonymous";
+    if (host.endsWith("zenodo.org")) return "Zenodo";
+    if (host.endsWith("gitlab.com")) return "GitLab";
+    if (host.endsWith("bitbucket.org")) return "Bitbucket";
+    return host.replace(/^www\./, "");
+  } catch (_) {
+    return "Link";
+  }
+}
+
 function renderLink(value) {
   if (!isMeaningful(value)) return renderText(NOT_SPEC);
-  const text = String(value);
-  const m = text.match(/(https?:\/\/[^\s)]+|github\.com\/[^\s)]+)/i);
-  let verdict = text.replace(m ? m[0] : "", "").replace(/[()\s]+$/, "").trim();
-  if (!verdict) verdict = m ? "Yes" : text;
-  const verdictNorm = verdict.toLowerCase();
+  const text = String(value).trim();
+  const urls = text.match(/https?:\/\/[^\s,;)]+/gi) || [];
+  const verdictRaw = text.replace(/https?:\/\/[^\s,;)]+/gi, "").replace(/[()\s,;]+/g, " ").trim();
+  const verdictNorm = verdictRaw.toLowerCase();
   let cls = "other";
-  if (/^yes/.test(verdictNorm)) cls = "yes";
+  if (/^yes/.test(verdictNorm) || urls.length) cls = "yes";
   else if (/^partial/.test(verdictNorm)) cls = "partial";
-  else if (/^no/.test(verdictNorm)) cls = "no";
-  const verdictHTML = `<span class="link-verdict ${cls}">${escapeHTML(verdict)}</span>`;
-  if (!m) return verdictHTML;
-  let url = m[0];
-  if (!/^https?:/i.test(url)) url = "https://" + url;
-  const linkLabel = t("link", "連結");
-  return `${verdictHTML} <a class="repo-link" href="${escapeHTML(url)}" target="_blank" rel="noopener">${linkLabel} ↗</a>`;
+  else if (/^no\b/.test(verdictNorm)) cls = "no";
+  if (urls.length === 0) {
+    const fallback = verdictRaw || text;
+    return `<span class="link-verdict ${cls}">${escapeHTML(fallback)}</span>`;
+  }
+  const verdictLabel = /^partial/.test(verdictNorm) ? "Partial" : "";
+  const links = urls.map((u) => {
+    const safeUrl = /^https?:/i.test(u) ? u : "https://" + u;
+    const label = linkLabelFromUrl(safeUrl);
+    return `<a class="repo-link" href="${escapeHTML(safeUrl)}" target="_blank" rel="noopener">${escapeHTML(label)} ↗</a>`;
+  }).join(" ");
+  const verdictHTML = verdictLabel
+    ? `<span class="link-verdict ${cls}">${escapeHTML(verdictLabel)}</span> `
+    : "";
+  return `${verdictHTML}${links}`;
 }
 
 function renderList(value) {
