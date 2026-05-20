@@ -1,65 +1,18 @@
-// Data-driven paper comparison table.
-// Fetches data/extracted-index.json (technical fingerprints) and
-// data/papers-index.json (editorial metadata) and renders a merged view.
+// Schema-driven paper comparison table.
 //
-// Field rendering is declared per-column in COLUMNS so the future
-// extract skill can mirror these requirements when producing
-// content/extracted/<slug>.json.
+// Columns + canonical tag values + bilingual labels all come from
+// schemas/<domain>.yaml. Each subtable tab loads its own schema and
+// shows records whose `domains` array contains that domain.
+//
+// To add a new subtable: drop a new YAML at schemas/<name>.yaml and add
+// the name to AVAILABLE_DOMAINS below.
 
 const NOT_SPEC = "Not Specified";
 
-// ── Column specs ──────────────────────────────────────────────────────────
-// kind:
-//   "idx"          row index (rendered after sort/filter)
-//   "title"        paper title + optional deep-dive link
-//   "venue"        single colored badge (uses venue_full as hover title)
-//   "arxiv"        arxiv id rendered as link to arxiv.org/abs/<id>
-//   "affiliations" comma-split into multiple colored badges
-//   "link"         text + extracted URL rendered as link badge (open_source)
-//   "tags"         comma/semicolon-split into colored pills
-//   "text"         plain text fallback
-const COLUMNS = [
-  { key: "idx", label: "#", label_zh: "#", kind: "idx", width: 40 },
-  { key: "title", label: "Title", label_zh: "標題", kind: "title", width: 260 },
-  { key: "authors", label: "Authors", label_zh: "作者", kind: "text", width: 170 },
-  { key: "year", label: "Year", label_zh: "年份", kind: "text", width: 55 },
-  { key: "venue", label: "Venue", label_zh: "場域", kind: "venue", width: 110 },
-  { key: "arxiv", label: "arXiv", label_zh: "arXiv", kind: "arxiv", width: 90 },
-  { key: "affiliations", label: "Affiliations", label_zh: "單位", kind: "affiliations", width: 170 },
-  { key: "problem_statement", label: "Problem", label_zh: "問題", kind: "text", group: "core_insights", width: 260 },
-  { key: "key_innovation", label: "Innovation", label_zh: "創新", kind: "text", group: "core_insights", width: 260 },
-  { key: "baselines_compared", label: "Baselines", label_zh: "比較對象", kind: "tags", group: "evaluation_and_results", width: 170 },
-  { key: "key_improvements", label: "Improvements", label_zh: "改進", kind: "text", group: "evaluation_and_results", width: 220 },
-  { key: "open_source", label: "Open Source", label_zh: "開源", kind: "link", group: "evaluation_and_results", width: 130 },
-  { key: "evaluation_method", label: "Eval Method", label_zh: "評估方法", kind: "tags", group: "experimental_setup", width: 120 },
-  { key: "software_simulator", label: "Simulator", label_zh: "模擬器", kind: "tags", group: "experimental_setup", width: 130 },
-  { key: "network_topology", label: "Network Topology", label_zh: "網路拓樸", kind: "tags", group: "experimental_setup", width: 140 },
-  { key: "ai_task", label: "AI Task", label_zh: "AI 任務", kind: "tags", group: "workload_and_traffic", width: 160 },
-  { key: "traffic_pattern", label: "Traffic Pattern", label_zh: "流量模式", kind: "tags", group: "workload_and_traffic", width: 160 },
-  { key: "compute_memory_hw", label: "Compute & Mem HW", label_zh: "運算/記憶體", kind: "tags", group: "hardware_infrastructure", width: 180 },
-  { key: "network_hw", label: "Network HW", label_zh: "網路硬體", kind: "tags", group: "hardware_infrastructure", width: 160 },
-  { key: "platform", label: "Platform", label_zh: "平台", kind: "tags", group: "hardware_infrastructure", width: 110 },
-  { key: "transport_and_interconnect", label: "Transport", label_zh: "傳輸層", kind: "tags", group: "networking_stack", width: 150 },
-  { key: "routing_and_congestion_control", label: "Routing & CC", label_zh: "路由/壅塞控制", kind: "tags", group: "networking_stack", width: 150 },
-  { key: "comm_libraries", label: "Comm Libraries", label_zh: "通訊函式庫", kind: "tags", group: "networking_stack", width: 150 },
-  { key: "gpu_count", label: "GPU Count", label_zh: "GPU 數", kind: "text", group: "scale", width: 110 },
-  { key: "node_count", label: "Node Count", label_zh: "節點數", kind: "text", group: "scale", width: 90 },
-];
+// Known subtables — add an entry here when you add a new schema YAML.
+const AVAILABLE_DOMAINS = ["ai-networking", "inference-modeling"];
 
-// Filter panel groups — subset of `tags` columns we want as filter facets.
-const FILTER_FIELDS = [
-  "compute_memory_hw",
-  "comm_libraries",
-  "software_simulator",
-  "baselines_compared",
-  "traffic_pattern",
-  "ai_task",
-  "network_topology",
-  "transport_and_interconnect",
-  "routing_and_congestion_control",
-];
-
-// Deterministic tag-color palette — same vibe as the original lit-survey output.
+// Deterministic tag-color palette.
 const PALETTE = [
   ["#dbeafe", "#1e40af"], ["#dcfce7", "#166534"], ["#fef3c7", "#92400e"],
   ["#fce7f3", "#9d174d"], ["#e0e7ff", "#3730a3"], ["#f3e8ff", "#6b21a8"],
@@ -84,17 +37,21 @@ function escapeHTML(s) {
   }[c]));
 }
 
+// ── Bilingual helpers ────────────────────────────────────────────────────
+function currentLang() {
+  return (window.__getLang && window.__getLang()) || document.documentElement.lang || "en";
+}
+function t(en, zh) { return currentLang() === "zh" ? zh : en; }
+function currentNotSpec() { return currentLang() === "zh" ? "未說明" : "Not Specified"; }
+
 function isMeaningful(v) {
   return v && v !== NOT_SPEC && String(v).trim() !== "";
 }
 
-// Bilingual values may be either plain strings (legacy / EN-only fields) or
-// {en, zh} objects (long-form prose). Resolve to a string given the current
-// language, falling back to the other language if the preferred slot is empty.
 function pickLang(value, lang = currentLang()) {
   if (value == null) return "";
   if (typeof value === "string") return value;
-  if (typeof value === "object") {
+  if (typeof value === "object" && !Array.isArray(value)) {
     const primary = value[lang];
     if (isMeaningful(primary)) return primary;
     const other = lang === "zh" ? value.en : value.zh;
@@ -106,9 +63,7 @@ function pickLang(value, lang = currentLang()) {
 
 function isBilingualMissing(value) {
   return (
-    typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
+    typeof value === "object" && value !== null && !Array.isArray(value)
     && !isMeaningful(value[currentLang()])
     && isMeaningful(value[currentLang() === "zh" ? "en" : "zh"])
   );
@@ -122,16 +77,15 @@ function splitMulti(s, sep = /[,;]/) {
 
 function tagPill(tag, { title = "" } = {}) {
   const [bg, fg] = tagColor(tag);
-  const t = title ? ` title="${escapeHTML(title)}"` : "";
-  return `<span class="tag" style="background:${bg};color:${fg}"${t}>${escapeHTML(tag)}</span>`;
+  const ti = title ? ` title="${escapeHTML(title)}"` : "";
+  return `<span class="tag" style="background:${bg};color:${fg}"${ti}>${escapeHTML(tag)}</span>`;
 }
 
-// ── Per-kind renderers ────────────────────────────────────────────────────
-
+// ── Per-kind renderers ───────────────────────────────────────────────────
 function renderText(value) {
   const resolved = pickLang(value);
   if (!isMeaningful(resolved)) {
-    return `<span class="not-specified i18n" data-en="Not Specified" data-zh="未說明">${currentNotSpec()}</span>`;
+    return `<span class="not-specified">${currentNotSpec()}</span>`;
   }
   const marker = isBilingualMissing(value)
     ? ` <span class="lang-fallback" title="${currentLang() === "zh" ? "尚無中文翻譯，顯示原文" : "no translation"}">${currentLang() === "zh" ? "EN" : "原文"}</span>`
@@ -142,22 +96,23 @@ function renderText(value) {
 function renderTags(value) {
   const tags = splitMulti(value);
   if (tags.length === 0) return renderText(NOT_SPEC);
-  return `<div class="tag-wrap">${tags.map((t) => tagPill(t)).join("")}</div>`;
+  return `<div class="tag-wrap">${tags.map((tg) => tagPill(tg)).join("")}</div>`;
 }
 
-function renderTitle(flat, editorial) {
-  const arxivUrl = flat.arxiv ? `https://arxiv.org/abs/${flat.arxiv}` : (flat.url || "");
+function renderTitle(record, editorial) {
+  const title = pickLang(record.title) || record.title || "";
+  const arxivUrl = record.arxiv ? `https://arxiv.org/abs/${record.arxiv}` : (record.url || "");
   const titleLink = arxivUrl
-    ? `<a href="${escapeHTML(arxivUrl)}" target="_blank" rel="noopener">${escapeHTML(flat.title)}</a>`
-    : escapeHTML(flat.title);
+    ? `<a href="${escapeHTML(arxivUrl)}" target="_blank" rel="noopener">${escapeHTML(title)}</a>`
+    : escapeHTML(title);
   if (!editorial) return titleLink;
-  const ddLabel = `<span class="i18n" data-en="→ deep dive" data-zh="→ 深度頁面">→ deep dive</span>`;
+  const ddLabel = t("→ deep dive", "→ 深度頁面");
   return `${titleLink}<br><a class="deep-dive-link" href="../papers/${escapeHTML(editorial.slug)}/">${ddLabel}</a>`;
 }
 
-function renderVenue(flat) {
-  if (!isMeaningful(flat.venue)) return renderText(NOT_SPEC);
-  return `<div class="tag-wrap">${tagPill(flat.venue, { title: flat.venue_full || "" })}</div>`;
+function renderVenue(record) {
+  if (!isMeaningful(record.venue)) return renderText(NOT_SPEC);
+  return `<div class="tag-wrap">${tagPill(record.venue, { title: record.venue_full || "" })}</div>`;
 }
 
 function renderArxiv(value) {
@@ -172,134 +127,195 @@ function renderAffiliations(value) {
   return `<div class="tag-wrap">${items.map((a) => tagPill(a)).join("")}</div>`;
 }
 
-// Extract a URL from a free-form open_source string like
-//   "Yes (https://github.com/...)"  →  Yes [link]
-//   "Yes"                            →  Yes
-//   "No"                             →  No
-//   "Partial (github.com/...)"       →  Partial [link]
 function renderLink(value) {
   if (!isMeaningful(value)) return renderText(NOT_SPEC);
   const text = String(value);
   const m = text.match(/(https?:\/\/[^\s)]+|github\.com\/[^\s)]+)/i);
-  // Take whatever sits before the URL (or the first word) as the verdict.
   let verdict = text.replace(m ? m[0] : "", "").replace(/[()\s]+$/, "").trim();
   if (!verdict) verdict = m ? "Yes" : text;
   const verdictNorm = verdict.toLowerCase();
-  let verdictHTML;
-  if (/^yes/.test(verdictNorm)) {
-    verdictHTML = `<span class="link-verdict yes">${escapeHTML(verdict)}</span>`;
-  } else if (/^partial/.test(verdictNorm)) {
-    verdictHTML = `<span class="link-verdict partial">${escapeHTML(verdict)}</span>`;
-  } else if (/^no/.test(verdictNorm)) {
-    verdictHTML = `<span class="link-verdict no">${escapeHTML(verdict)}</span>`;
-  } else {
-    verdictHTML = `<span class="link-verdict other">${escapeHTML(verdict)}</span>`;
-  }
+  let cls = "other";
+  if (/^yes/.test(verdictNorm)) cls = "yes";
+  else if (/^partial/.test(verdictNorm)) cls = "partial";
+  else if (/^no/.test(verdictNorm)) cls = "no";
+  const verdictHTML = `<span class="link-verdict ${cls}">${escapeHTML(verdict)}</span>`;
   if (!m) return verdictHTML;
   let url = m[0];
   if (!/^https?:/i.test(url)) url = "https://" + url;
-  const linkLabel = `<span class="i18n" data-en="link" data-zh="連結">link</span>`;
+  const linkLabel = t("link", "連結");
   return `${verdictHTML} <a class="repo-link" href="${escapeHTML(url)}" target="_blank" rel="noopener">${linkLabel} ↗</a>`;
 }
 
-function renderCell(col, flat, editorial) {
-  switch (col.kind) {
-    case "idx": return ""; // populated after sort/filter
-    case "title": return renderTitle(flat, editorial);
-    case "venue": return renderVenue(flat);
-    case "arxiv": return renderArxiv(flat[col.key]);
-    case "affiliations": return renderAffiliations(flat[col.key]);
-    case "link": return renderLink(flat[col.key]);
-    case "tags": return renderTags(flat[col.key]);
-    case "text": return renderText(flat[col.key]);
-    // (renderText handles both plain-string and {en, zh} object values)
-    default: return escapeHTML(String(flat[col.key] ?? ""));
+function renderList(value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return renderText(NOT_SPEC);
+    return `<div class="tag-wrap">${value.map((tg) => tagPill(String(tg))).join("")}</div>`;
+  }
+  return renderTags(value);
+}
+
+function renderDomains(value) {
+  if (!Array.isArray(value) || !value.length) return renderText(NOT_SPEC);
+  return `<div class="tag-wrap">${value.map((d) => tagPill(d)).join("")}</div>`;
+}
+
+function renderCell(field, record, editorial) {
+  const value = record[field.key];
+  switch (field.kind) {
+    case "title": return renderTitle(record, editorial);
+    case "venue": return renderVenue(record);
+    case "arxiv": return renderArxiv(value);
+    case "affiliations": return renderAffiliations(value);
+    case "link": return renderLink(value);
+    case "tags": return renderTags(value);
+    case "list": return renderList(value);
+    case "domains": return renderDomains(value);
+    case "text": return renderText(value);
+    default: return escapeHTML(String(value ?? ""));
   }
 }
 
-// ── State + helpers ───────────────────────────────────────────────────────
+// ── Schema loading ───────────────────────────────────────────────────────
+const schemaCache = new Map();
+
+async function fetchYamlText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status}`);
+  return r.text();
+}
+
+async function loadSchema(name) {
+  if (schemaCache.has(name)) return schemaCache.get(name);
+  const yamlText = await fetchYamlText(`../schemas/${name}.yaml`);
+  const raw = jsyaml.load(yamlText);
+  // Resolve inheritance: parent fields first (in their order), then child fields.
+  // Child entries with the same key override parent entries.
+  let mergedFields = {};
+  if (Array.isArray(raw.inherits)) {
+    for (const parentName of raw.inherits) {
+      const parent = await loadSchema(parentName);
+      mergedFields = { ...mergedFields, ...parent.fields };
+    }
+  }
+  mergedFields = { ...mergedFields, ...(raw.fields || {}) };
+  // Attach the field key (object key) onto each field as `.key` for downstream use.
+  const fieldsWithKey = {};
+  for (const [k, v] of Object.entries(mergedFields)) {
+    fieldsWithKey[k] = { key: k, ...v };
+  }
+  const resolved = { ...raw, fields: fieldsWithKey };
+  schemaCache.set(name, resolved);
+  return resolved;
+}
+
+function getLabel(obj, fallback = "") {
+  if (!obj) return fallback;
+  if (typeof obj === "string") return obj;
+  return obj[currentLang()] || obj.en || obj.zh || fallback;
+}
+
+// ── State ────────────────────────────────────────────────────────────────
 const state = {
-  records: [],
-  flatRecords: [],
-  editorialMap: {},
+  domain: "ai-networking",
+  schemas: {},        // name → resolved schema
+  records: [],        // all records
+  editorialMap: {},   // slug → editorial paper
+  visibleRecords: [], // records matching state.domain
   checkedTags: {},
   sortCol: null,
   sortDir: 1,
 };
 
-function currentLang() {
-  return (window.__getLang && window.__getLang()) || document.documentElement.lang || "en";
+// ── UI build ─────────────────────────────────────────────────────────────
+function buildSubtableTabs() {
+  const c = document.getElementById("subtableTabs");
+  c.innerHTML = AVAILABLE_DOMAINS.map((d) => {
+    const sch = state.schemas[d];
+    const lbl = getLabel(sch && sch.label, d);
+    const cls = d === state.domain ? "subtable-tab active" : "subtable-tab";
+    return `<button class="${cls}" data-domain="${escapeHTML(d)}">${escapeHTML(lbl)}</button>`;
+  }).join("");
+  c.querySelectorAll(".subtable-tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchDomain(btn.dataset.domain));
+  });
 }
 
-function currentNotSpec() {
-  return currentLang() === "zh" ? "未說明" : "Not Specified";
-}
-
-function t(en, zh) {
-  return currentLang() === "zh" ? zh : en;
-}
-
-function flatRecord(p) {
-  const groups = [
-    "core_insights",
-    "evaluation_and_results",
-    "experimental_setup",
-    "workload_and_traffic",
-    "hardware_infrastructure",
-    "networking_stack",
-    "scale",
-  ];
-  const out = { ...p };
-  for (const g of groups) {
-    if (p[g] && typeof p[g] === "object") Object.assign(out, p[g]);
+function switchDomain(domain) {
+  if (!state.schemas[domain]) {
+    console.warn("Unknown domain", domain);
+    return;
   }
-  return out;
+  state.domain = domain;
+  state.checkedTags = {};
+  state.sortCol = null;
+  state.sortDir = 1;
+  // Update URL without reloading
+  const url = new URL(location.href);
+  url.searchParams.set("domain", domain);
+  history.replaceState(null, "", url);
+  // Update active tab
+  document.querySelectorAll(".subtable-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.domain === domain);
+  });
+  // Filter records
+  state.visibleRecords = state.records.filter((r) => (r.domains || []).includes(domain));
+  buildFilterPanel();
+  buildTable();
+  applyFilters();
 }
 
-function fieldTagsForRecord(flat, field) {
-  return splitMulti(flat[field]);
+function fieldsForCurrentDomain() {
+  const sch = state.schemas[state.domain];
+  // Build column order: title first, then everything else (respecting YAML key order)
+  const all = Object.values(sch.fields);
+  const titleField = all.find((f) => f.kind === "title");
+  const rest = all.filter((f) => f.kind !== "title" && f.kind !== "domains");
+  // Domains column intentionally hidden in the comparison table — it's filter-state.
+  return titleField ? [titleField, ...rest] : rest;
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────
+function filterableFields() {
+  // Any field with kind "tags" or "list" becomes a filter facet.
+  return fieldsForCurrentDomain().filter((f) => f.kind === "tags" || f.kind === "list");
+}
 
 function buildFilterPanel() {
-  const container = document.getElementById("filterGroups");
-  container.innerHTML = "";
-  for (const field of FILTER_FIELDS) {
-    const col = COLUMNS.find((c) => c.key === field);
-    if (!col) continue;
+  const c = document.getElementById("filterGroups");
+  c.innerHTML = "";
+  for (const field of filterableFields()) {
     const counts = new Map();
-    for (const flat of state.flatRecords) {
-      for (const tg of fieldTagsForRecord(flat, field)) {
-        counts.set(tg, (counts.get(tg) || 0) + 1);
-      }
+    for (const r of state.visibleRecords) {
+      const v = r[field.key];
+      const tags = Array.isArray(v) ? v.map(String) : splitMulti(v);
+      for (const tag of tags) counts.set(tag, (counts.get(tag) || 0) + 1);
     }
     const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    const group = document.createElement("div");
-    group.className = "filter-group";
-    group.dataset.field = field;
+    const grp = document.createElement("div");
+    grp.className = "filter-group";
+    grp.dataset.field = field.key;
     const tagsHTML = sorted.map(([tag, n]) => `<label class="filter-tag">
-        <input type="checkbox" data-field="${field}" data-tag="${escapeHTML(tag)}">
-        ${tagPill(tag)}
-        <span class="tag-count">${n}</span>
-      </label>`).join("");
-    group.innerHTML = `
+      <input type="checkbox" data-field="${field.key}" data-tag="${escapeHTML(tag)}">
+      ${tagPill(tag)}
+      <span class="tag-count">${n}</span>
+    </label>`).join("");
+    const lbl = escapeHTML(getLabel(field.label, field.key));
+    grp.innerHTML = `
       <div class="filter-group-title">
-        ${escapeHTML(col.label)}
+        ${lbl}
         <span class="filter-group-count">${sorted.length} tags</span>
       </div>
       <div class="filter-group-tags">${tagsHTML}</div>
     `;
-    container.appendChild(group);
+    c.appendChild(grp);
   }
-  container.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+  c.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
     cb.addEventListener("change", () => {
-      const field = cb.dataset.field;
+      const f = cb.dataset.field;
       const tag = cb.dataset.tag;
-      if (!state.checkedTags[field]) state.checkedTags[field] = new Set();
-      if (cb.checked) state.checkedTags[field].add(tag);
-      else state.checkedTags[field].delete(tag);
-      if (state.checkedTags[field].size === 0) delete state.checkedTags[field];
+      if (!state.checkedTags[f]) state.checkedTags[f] = new Set();
+      if (cb.checked) state.checkedTags[f].add(tag);
+      else state.checkedTags[f].delete(tag);
+      if (state.checkedTags[f].size === 0) delete state.checkedTags[f];
       applyFilters();
     });
   });
@@ -307,49 +323,54 @@ function buildFilterPanel() {
 
 function buildTable() {
   const table = document.getElementById("paperTable");
-  const oldColgroup = table.querySelector("colgroup");
-  if (oldColgroup) oldColgroup.remove();
+  const old = table.querySelector("colgroup");
+  if (old) old.remove();
+  const cols = fieldsForCurrentDomain();
+  // Insert an index column up front.
   const colgroup = document.createElement("colgroup");
-  colgroup.innerHTML = COLUMNS.map((c) => `<col style="width:${c.width}px">`).join("");
+  colgroup.innerHTML = `<col style="width:40px">` + cols.map(
+    (c) => `<col style="width:${c.width || 150}px">`
+  ).join("");
   table.insertBefore(colgroup, table.firstChild);
-  table.style.width = COLUMNS.reduce((s, c) => s + c.width, 0) + "px";
+  table.style.width = (40 + cols.reduce((s, c) => s + (c.width || 150), 0)) + "px";
 
   const thead = document.getElementById("thead");
-  const tbody = document.getElementById("tbody");
-  thead.innerHTML = `<tr>${COLUMNS.map((c, i) =>
-    `<th data-col="${i}">${escapeHTML(c.label)}</th>`
-  ).join("")}</tr>`;
+  thead.innerHTML = `<tr><th data-col="-1">#</th>` + cols.map(
+    (c, i) => `<th data-col="${i}">${escapeHTML(getLabel(c.label, c.key))}</th>`
+  ).join("") + `</tr>`;
   thead.querySelectorAll("th").forEach((th) => {
     th.addEventListener("click", () => {
       const i = +th.dataset.col;
+      if (i < 0) return; // # column not sortable
       if (state.sortCol === i) state.sortDir = -state.sortDir;
       else { state.sortCol = i; state.sortDir = 1; }
       applyFilters();
     });
   });
 
+  const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
-  for (let i = 0; i < state.flatRecords.length; i++) {
-    const flat = state.flatRecords[i];
-    const editorial = state.editorialMap[flat.slug];
+  for (const record of state.visibleRecords) {
+    const editorial = state.editorialMap[record.slug];
     const tr = document.createElement("tr");
     tr.dataset.hasDetail = editorial ? "1" : "0";
-    tr.innerHTML = COLUMNS.map((col) => {
-      const cls = (col.kind === "tags" || col.kind === "venue" || col.kind === "affiliations")
-        ? "tag-cell"
-        : col.kind === "title" ? "title-cell"
-        : col.kind === "idx" ? "idx-cell"
-        : col.kind === "link" ? "link-cell"
+    tr.innerHTML = `<td class="idx-cell"></td>` + cols.map((field) => {
+      const cls = (field.kind === "tags" || field.kind === "venue"
+                  || field.kind === "affiliations" || field.kind === "list"
+                  || field.kind === "domains") ? "tag-cell"
+        : field.kind === "title" ? "title-cell"
+        : field.kind === "link" ? "link-cell"
         : "text-cell";
-      return `<td class="${cls}" data-key="${col.key}">${renderCell(col, flat, editorial)}</td>`;
+      return `<td class="${cls}" data-key="${field.key}">${renderCell(field, record, editorial)}</td>`;
     }).join("");
     tbody.appendChild(tr);
   }
 }
 
-function rowMatchesTagFilters(flat) {
+function rowMatchesTagFilters(record) {
   for (const [field, required] of Object.entries(state.checkedTags)) {
-    const rowTags = new Set(fieldTagsForRecord(flat, field));
+    const v = record[field];
+    const rowTags = new Set(Array.isArray(v) ? v.map(String) : splitMulti(v));
     let any = false;
     for (const tg of required) {
       if (rowTags.has(tg)) { any = true; break; }
@@ -365,64 +386,79 @@ function applyFilters() {
   const hasTagFilters = Object.keys(state.checkedTags).length > 0;
   const tbody = document.getElementById("tbody");
   const rows = Array.from(tbody.querySelectorAll("tr"));
-  const flagged = [];
   let visible = 0;
 
   rows.forEach((tr, i) => {
-    const flat = state.flatRecords[i];
+    const record = state.visibleRecords[i];
     const text = tr.textContent.toLowerCase();
     const inText = !q || text.includes(q);
     const inDetail = !detail
       || (detail === "with" && tr.dataset.hasDetail === "1")
       || (detail === "without" && tr.dataset.hasDetail === "0");
-    const inTags = !hasTagFilters || rowMatchesTagFilters(flat);
+    const inTags = !hasTagFilters || rowMatchesTagFilters(record);
     const v = inText && inDetail && inTags;
-    flagged.push(v);
     tr.classList.toggle("hidden", !v);
     if (v) visible++;
   });
 
   if (state.sortCol != null) {
-    const col = COLUMNS[state.sortCol];
-    const sorted = rows.map((tr, i) => ({ tr, flat: state.flatRecords[i] }))
-      .sort((a, b) => {
-        const av = String(a.flat[col.key] ?? "");
-        const bv = String(b.flat[col.key] ?? "");
-        return state.sortDir * av.localeCompare(bv, undefined, { numeric: true });
+    const cols = fieldsForCurrentDomain();
+    const field = cols[state.sortCol];
+    if (field) {
+      const sorted = rows.map((tr, i) => ({ tr, record: state.visibleRecords[i] }))
+        .sort((a, b) => {
+          const av = String(pickLang(a.record[field.key]) ?? "");
+          const bv = String(pickLang(b.record[field.key]) ?? "");
+          return state.sortDir * av.localeCompare(bv, undefined, { numeric: true });
+        });
+      sorted.forEach(({ tr }) => tbody.appendChild(tr));
+      document.querySelectorAll("thead th").forEach((th, i) => {
+        const colIdx = +th.dataset.col;
+        th.classList.toggle("sort-asc", colIdx === state.sortCol && state.sortDir === 1);
+        th.classList.toggle("sort-desc", colIdx === state.sortCol && state.sortDir === -1);
       });
-    sorted.forEach(({ tr }) => tbody.appendChild(tr));
-    document.querySelectorAll("thead th").forEach((th, i) => {
-      th.classList.toggle("sort-asc", i === state.sortCol && state.sortDir === 1);
-      th.classList.toggle("sort-desc", i === state.sortCol && state.sortDir === -1);
-    });
+    }
   }
 
   let n = 1;
   tbody.querySelectorAll("tr:not(.hidden) td.idx-cell").forEach((td) => { td.textContent = n++; });
 
   document.getElementById("visibleCount").textContent =
-    t(`Showing ${visible} of ${state.records.length} papers`,
-      `顯示 ${visible} 篇，共 ${state.records.length} 篇`);
-  document.getElementById("clearFiltersBtn").style.display =
-    hasTagFilters ? "inline-block" : "none";
+    t(`Showing ${visible} of ${state.visibleRecords.length} papers`,
+      `顯示 ${visible} 篇，共 ${state.visibleRecords.length} 篇`);
+  document.getElementById("clearFiltersBtn").style.display = hasTagFilters ? "inline-block" : "none";
 
-  const ddCount = state.records.filter((p) => state.editorialMap[p.slug]).length;
+  const ddCount = state.visibleRecords.filter((p) => state.editorialMap[p.slug]).length;
   document.getElementById("stats").innerHTML =
-    `<span>` + t(`<strong>${visible}</strong> visible / <strong>${state.records.length}</strong> total`,
-                 `<strong>${visible}</strong> 顯示 / <strong>${state.records.length}</strong> 總計`) + `</span>` +
+    `<span>` + t(`<strong>${visible}</strong> visible / <strong>${state.visibleRecords.length}</strong> in subtable`,
+                 `<strong>${visible}</strong> 顯示 / <strong>${state.visibleRecords.length}</strong> 此分表`) + `</span>` +
     `<span>` + t(`Deep-dive pages: <strong>${ddCount}</strong>`,
-                 `深度頁面：<strong>${ddCount}</strong>`) + `</span>`;
+                 `深度頁面：<strong>${ddCount}</strong>`) + `</span>` +
+    `<span>` + t(`(${state.records.length} total records)`,
+                 `（共 ${state.records.length} 筆記錄）`) + `</span>`;
 }
 
 async function init() {
+  // Load all known schemas in parallel.
+  await Promise.all(AVAILABLE_DOMAINS.map(async (d) => {
+    state.schemas[d] = await loadSchema(d);
+  }));
+
   const [extracted, editorial] = await Promise.all([
     fetch("../data/extracted-index.json").then((r) => r.json()),
-    fetch("../data/papers-index.json").then((r) => r.json()),
+    fetch("../data/papers-index.json").then((r) => r.json()).catch(() => []),
   ]);
   state.records = extracted;
-  state.flatRecords = extracted.map(flatRecord);
   state.editorialMap = Object.fromEntries(editorial.map((p) => [p.slug, p]));
 
+  // Pick initial domain from URL or default to first available.
+  const urlDomain = new URLSearchParams(location.search).get("domain");
+  state.domain = (urlDomain && AVAILABLE_DOMAINS.includes(urlDomain))
+    ? urlDomain
+    : AVAILABLE_DOMAINS[0];
+
+  buildSubtableTabs();
+  state.visibleRecords = state.records.filter((r) => (r.domains || []).includes(state.domain));
   buildFilterPanel();
   buildTable();
   applyFilters();
@@ -442,10 +478,10 @@ async function init() {
     applyFilters();
   });
 
-  // Re-render dynamic DOM on language change, then re-apply .i18n swap to the
-  // freshly built nodes (avoids recursing through setLang's dispatchEvent).
   document.addEventListener("langchange", (ev) => {
     const l = ev.detail.lang;
+    buildSubtableTabs();
+    buildFilterPanel();
     buildTable();
     applyFilters();
     document.querySelectorAll(".i18n").forEach((e) => {
@@ -454,14 +490,10 @@ async function init() {
   });
 
   document.getElementById("footer").innerHTML =
-    `<span class="i18n" data-en="Built from content/extracted/ — one paper per JSON file. Future updates: prompt-driven via skill." data-zh="資料來自 content/extracted/ — 每篇論文一個 JSON。未來更新將透過 skill 以 prompt 觸發。">` +
-    `Built from content/extracted/ — one paper per JSON file. Future updates: prompt-driven via skill.</span>`;
-
-  // If a lang preference was already set before script.js loaded, the inline
-  // bootstrap at the bottom of the HTML will trigger setLang after this init.
+    `<span class="i18n" data-en="Schema-driven: edit schemas/&lt;domain&gt;.yaml to change columns or canonical tag values. Records at content/extracted/&lt;slug&gt;.json, one paper per file." data-zh="Schema-driven：編輯 schemas/&lt;domain&gt;.yaml 即可變更欄位或 canonical tag 值。記錄位於 content/extracted/&lt;slug&gt;.json，每篇論文一個檔。">Schema-driven: edit schemas/&lt;domain&gt;.yaml to change columns or canonical tag values.</span>`;
 }
 
 init().catch((e) => {
-  document.getElementById("stats").textContent = `Failed to load data: ${e.message}`;
+  document.getElementById("stats").textContent = `Failed to load: ${e.message}`;
   console.error(e);
 });
