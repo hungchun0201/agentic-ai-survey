@@ -373,10 +373,11 @@ function buildTable() {
 
   const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
-  for (const record of state.visibleRecords) {
+  state.visibleRecords.forEach((record, idx) => {
     const editorial = state.editorialMap[record.slug];
     const tr = document.createElement("tr");
     tr.dataset.hasDetail = editorial ? "1" : "0";
+    tr.dataset.recordIdx = String(idx);
     tr.innerHTML = `<td class="idx-cell"></td>` + cols.map((field) => {
       const cls = (field.kind === "tags" || field.kind === "venue"
                   || field.kind === "affiliations" || field.kind === "list"
@@ -387,7 +388,7 @@ function buildTable() {
       return `<td class="${cls}" data-key="${field.key}">${renderCell(field, record, editorial)}</td>`;
     }).join("");
     tbody.appendChild(tr);
-  }
+  });
 }
 
 function rowMatchesTagFilters(record) {
@@ -411,8 +412,9 @@ function applyFilters() {
   const rows = Array.from(tbody.querySelectorAll("tr"));
   let visible = 0;
 
-  rows.forEach((tr, i) => {
-    const record = state.visibleRecords[i];
+  rows.forEach((tr) => {
+    const idx = +tr.dataset.recordIdx;
+    const record = state.visibleRecords[idx];
     const text = tr.textContent.toLowerCase();
     const inText = !q || text.includes(q);
     const inDetail = !detail
@@ -428,14 +430,21 @@ function applyFilters() {
     const cols = fieldsForCurrentDomain();
     const field = cols[state.sortCol];
     if (field) {
-      const sorted = rows.map((tr, i) => ({ tr, record: state.visibleRecords[i] }))
-        .sort((a, b) => {
-          const av = String(pickLang(a.record[field.key]) ?? "");
-          const bv = String(pickLang(b.record[field.key]) ?? "");
-          return state.sortDir * av.localeCompare(bv, undefined, { numeric: true });
-        });
+      const sorted = rows.map((tr) => {
+        const idx = +tr.dataset.recordIdx;
+        return { tr, record: state.visibleRecords[idx] };
+      }).sort((a, b) => {
+        const av = String(pickLang(a.record[field.key]) ?? "");
+        const bv = String(pickLang(b.record[field.key]) ?? "");
+        const aMeaningful = av && av !== "Not Specified" && av !== "未說明";
+        const bMeaningful = bv && bv !== "Not Specified" && bv !== "未說明";
+        if (!aMeaningful && bMeaningful) return 1;
+        if (aMeaningful && !bMeaningful) return -1;
+        if (!aMeaningful && !bMeaningful) return 0;
+        return state.sortDir * av.localeCompare(bv, undefined, { numeric: true });
+      });
       sorted.forEach(({ tr }) => tbody.appendChild(tr));
-      document.querySelectorAll("thead th").forEach((th, i) => {
+      document.querySelectorAll("thead th").forEach((th) => {
         const colIdx = +th.dataset.col;
         th.classList.toggle("sort-asc", colIdx === state.sortCol && state.sortDir === 1);
         th.classList.toggle("sort-desc", colIdx === state.sortCol && state.sortDir === -1);
