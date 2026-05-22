@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nitsum — Tiered-SLO Serving via Adaptive Tensor Parallelism</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+:root{--accent:#ab47bc;--accent-rgb:171,71,188;--nav-bg:rgba(40,18,46,0.95)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#c0a8c8;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent;cursor:pointer}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+.hero{background:linear-gradient(135deg,#231030 0%,#1d1430 50%,#241030 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.07) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(110,198,255,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.1rem;color:#bfa6c8;max-width:780px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent)}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:740px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative;margin-bottom:6px}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.purple{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.4);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem;color:#ffb74d}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:740px;flex-wrap:wrap;margin-bottom:6px}
+.vflow .branch .box{flex:1;min-width:210px;margin-bottom:0}
+
+.tbar{display:flex;align-items:center;gap:0;margin:1rem 0 1.8rem;flex-wrap:nowrap;overflow:visible}
+.tbar .seg{height:56px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:500;white-space:nowrap;padding:0 16px;position:relative}
+.tbar .seg.a{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:6px 0 0 6px}
+.tbar .seg.b{background:rgba(var(--accent-rgb),.2);color:var(--accent);flex:1;min-width:120px}
+.tbar .seg.c{background:rgba(245,166,35,.22);color:#ffb74d;border-radius:0 6px 6px 0}
+.tbar .seg .marker{position:absolute;bottom:-18px;font-size:.7rem;color:#8fa4c0}
+
+.diagram{background:#1a1620;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto;font-family:'JetBrains Mono','Fira Code',monospace;font-size:.86rem;color:#cdd6f4}
+
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.warn strong{color:#fff}
+
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:1.9rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:640px}
+.paper-fig.fig-xs img{max-width:480px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:820px;display:inline-block;text-align:left;line-height:1.55}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center;position:relative}
+.math-block .eq-label{position:absolute;right:18px;top:50%;transform:translateY(-50%);color:#8fa4c0;font-size:.85rem}
+
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+@media(max-width:768px){
+  .hero h1{font-size:1.7rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+}
+</style>
+</head>
+<body>
+
+<nav>
+<ul>
+  <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+  <li><a href="#why-now">Why Now</a></li>
+  <li><a href="#failure">Failure</a></li>
+  <li><a href="#obstacle">Obstacle</a></li>
+  <li><a href="#strawman">Strawman</a></li>
+  <li><a href="#prior">Prior Work</a></li>
+  <li><a href="#insight">TP as Control</a></li>
+  <li><a href="#contributions">Contributions</a></li>
+  <li><a href="#arch">Architecture</a></li>
+  <li><a href="#weight">Weight Switch</a></li>
+  <li><a href="#kvmig">KV Migration</a></li>
+  <li><a href="#sched">Scheduling</a></li>
+  <li><a href="#results">Results</a></li>
+  <li><a href="#ablation">Ablation</a></li>
+  <li><a href="#sensitivity">Sensitivity</a></li>
+  <li><a href="#limits">Limits</a></li>
+  <li class="lang-switch">
+    <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+    <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+  </li>
+</ul>
+</nav>
+
+<div class="hero">
+  <h1>Nitsum</h1>
+  <p class="sub"><span class="i18n" data-en="Serving Tiered LLM Requests with Adaptive Tensor Parallelism — promoting TP from a deployment knob to a sub-second runtime control surface." data-zh="以自適應張量並行支援多 SLO 階層的 LLM 服務 — 將 TP 由部署旋鈕提升為次秒級的執行期控制面。">Serving Tiered LLM Requests with Adaptive Tensor Parallelism — promoting TP from a deployment knob to a sub-second runtime control surface.</span></p>
+  <div class="badges">
+    <span class="badge">arXiv:2605.05467</span>
+    <span class="badge">May 2026</span>
+    <span class="badge">cs.DC</span>
+    <span class="badge">Tiered SLO</span>
+    <span class="badge">Dynamic TP</span>
+    <span class="badge">PD Disaggregation</span>
+  </div>
+  <p style="color:#bfa6c8;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Vikranth Srivatsa, Zijian He, Pu Guo, Dongming Li, Yiying Zhang</p>
+  <p style="color:#8a7896;font-size:.85rem;position:relative;max-width:none">University of California San Diego &middot; GenseeAI Inc.</p>
+</div>
+
+<div class="container">
+
+<section id="why-now">
+<h2><span class="i18n" data-en="1. Why now: production traffic stopped being single-tier" data-zh="1. 為何此時提出：生產流量不再是單一 SLO">1. Why now: production traffic stopped being single-tier</span></h2>
+
+<p><span class="i18n"
+  data-en="Until roughly 2023, the LLM serving literature could legitimately treat a deployment as having one SLO at a time. A chat product optimized TTFT; a batch-summarization service optimized throughput; the two were operated on separate clusters with separate budgets, so each scheduler had only one objective to honor at any moment. Production traffic in 2025-2026 has broken this assumption. The same model checkpoint and the same GPU pool now serve a workload mix that contains, simultaneously, interactive code-completion requests that require a TTFT below 300 ms, longer interactive conversations with a TTFT budget closer to 500 ms, agent-style background calls that are willing to wait several seconds for the first token, and bulk summarization or evaluation jobs whose deadline is measured in minutes."
+  data-zh="直到 2023 年前後，LLM serving 文獻仍可合理地假設每個部署在任何時刻只有單一 SLO。對話產品優化 TTFT；批次摘要服務優化吞吐量；兩者在不同的叢集與不同的預算下運行，每個排程器在任何時刻只須兼顧一個目標。2025-2026 年的生產流量已使此假設失效。同一模型權重與同一 GPU 池現在須同時承擔多種請求：要求 TTFT 低於 300 毫秒的互動式程式碼補全、TTFT 預算約 500 毫秒的較長對話、可容忍數秒首 token 延遲的代理人背景呼叫，以及以分鐘計算截止時間的批次摘要或評估任務。"
+  >Until roughly 2023, the LLM serving literature could legitimately treat a deployment as having one SLO at a time. A chat product optimized TTFT; a batch-summarization service optimized throughput; the two were operated on separate clusters with separate budgets, so each scheduler had only one objective to honor at any moment. Production traffic in 2025-2026 has broken this assumption. The same model checkpoint and the same GPU pool now serve a workload mix that contains, simultaneously, interactive code-completion requests that require a TTFT below 300 ms, longer interactive conversations with a TTFT budget closer to 500 ms, agent-style background calls that are willing to wait several seconds for the first token, and bulk summarization or evaluation jobs whose deadline is measured in minutes.</span></p>
+
+<p><span class="i18n"
+  data-en="Two infrastructure pressures are responsible for this consolidation. The first is unit economics: a Hopper-class GPU rents at multi-dollar per hour, and provisioning a separate cluster for each SLO tier leaves expensive accelerators idle whenever that tier's traffic dips. Operators are therefore pooling traffic across tiers, accepting the scheduling complexity in exchange for utilization. The second is model homogenization: a single model family of a given size is now reused across all of these use cases, so the only differentiator at the serving layer is the SLO the request was admitted under, not the model weights it touches."
+  data-zh="兩項基礎設施壓力導致此種整合。其一為單位經濟：Hopper 級 GPU 每小時租金以美元為單位計算，為每個 SLO 階層單獨配置叢集，將使昂貴的加速器在該階層流量低谷時閒置；運營方因此選擇跨階層匯流量，以排程複雜度換取使用率。其二為模型同質化：相同規模的單一模型家族被重複用於上述所有使用情境，因此服務層的唯一區分要素是請求進入時所附帶的 SLO，而非其所觸及的模型權重。"
+  >Two infrastructure pressures are responsible for this consolidation. The first is unit economics: a Hopper-class GPU rents at multi-dollar per hour, and provisioning a separate cluster for each SLO tier leaves expensive accelerators idle whenever that tier's traffic dips. Operators are therefore pooling traffic across tiers, accepting the scheduling complexity in exchange for utilization. The second is model homogenization: a single model family of a given size is now reused across all of these use cases, so the only differentiator at the serving layer is the SLO the request was admitted under, not the model weights it touches.</span></p>
+
+<p><span class="i18n"
+  data-en="The paper grounds this shift in the ServeGen workload, which mirrors the Alibaba production trace. Within a ten-minute window on an eight-GPU H100 cluster running Llama-3.1-8B, the conversation and coding mixes oscillate substantially in both arrival rate and prompt-length distribution. The configuration of GPUs that maximizes goodput at minute three is not the configuration that maximizes goodput at minute seven, even though the SLO targets and the model checkpoint have not changed."
+  data-zh="本文以 ServeGen 工作負載印證此一變化，其分布鏡像 Alibaba 生產 trace。在執行 Llama-3.1-8B 的 8 GPU H100 叢集上的十分鐘窗格內，對話與程式碼混合在到達率與 prompt 長度分布兩個維度上皆呈現可觀的擺盪：第三分鐘最大化 goodput 的 GPU 配置並非第七分鐘最大化 goodput 的配置，即便 SLO 目標與模型權重均未改變。"
+  >The paper grounds this shift in the ServeGen workload, which mirrors the Alibaba production trace. Within a ten-minute window on an eight-GPU H100 cluster running Llama-3.1-8B, the conversation and coding mixes oscillate substantially in both arrival rate and prompt-length distribution. The configuration of GPUs that maximizes goodput at minute three is not the configuration that maximizes goodput at minute seven, even though the SLO targets and the model checkpoint have not changed.</span></p>
+
+<div class="paper-fig">
+  <img src="https://arxiv.org/html/2605.05467v1/x1.png"
+       alt="Figure 1: Tiered SLO workload and cluster dynamism over ten minutes">
+  <div class="fig-cap"><strong>Figure 1 (from paper):</strong>
+    <span class="i18n"
+      data-en="ServeGen conversation and coding workloads on 8 H100 GPUs serving Llama-3.1-8B over a ten-minute window. Top: the per-second request arrival pattern for each tier. Middle: the configuration (request group | prefill / decode stage | TP level) that maximizes goodput at each instant — note that the optimal mapping changes multiple times within the window. The figure motivates treating execution configuration as a runtime control, not a deployment constant."
+      data-zh="於 8 GPU H100 叢集執行 Llama-3.1-8B、為期十分鐘的 ServeGen 對話與程式碼工作負載。上：各階層每秒請求到達模式。中：使 goodput 最大化的配置（請求群組｜prefill/decode 階段｜TP 層級）— 該最佳對映在窗格內多次改變。此圖促成將執行配置視為執行期控制而非部署時常量的設計動機。"
+      >ServeGen conversation and coding workloads on 8 H100 GPUs serving Llama-3.1-8B over a ten-minute window. Top: the per-second request arrival pattern for each tier. Middle: the configuration (request group | prefill / decode stage | TP level) that maximizes goodput at each instant — note that the optimal mapping changes multiple times within the window. The figure motivates treating execution configuration as a runtime control, not a deployment constant.</span>
+  </div>
+</div>
+
+</section>
+
+<section id="failure">
+<h2><span class="i18n" data-en="2. A concrete failure: what a static config does on this workload" data-zh="2. 一個具體的失敗：靜態配置在此工作負載上的行為">2. A concrete failure: what a static config does on this workload</span></h2>
+
+<p><span class="i18n"
+  data-en="To make the cost of a static execution configuration concrete, consider a single ten-minute slice of the ServeGen trace served on four A100 GPUs by Llama-3.1-8B. The mix consists of a strict tier requiring 500 ms TTFT and 15 ms TPOT, and a loose tier requiring 500 ms TTFT and 30 ms TPOT. Suppose the operator commits to a single execution configuration for the entire slice. Three obvious choices exist: run all four GPUs at tensor-parallel degree 1 with prefill and decode co-located, run all four GPUs at TP=2, or split the cluster so that prefill runs at TP=1 on two GPUs and decode runs at TP=2 on the other two."
+  data-zh="為使靜態執行配置的代價具體化，考慮以 4 GPU A100 服務 Llama-3.1-8B 的一段 ServeGen 十分鐘切片。混合包含兩個階層：strict 階層要求 TTFT 500 毫秒、TPOT 15 毫秒；loose 階層要求 TTFT 500 毫秒、TPOT 30 毫秒。假設運營方對整段切片只能採用單一執行配置，明顯候選有三：全 4 GPU 採 TP=1 且 prefill/decode 共置；全 4 GPU 採 TP=2；或將叢集切分為 2 GPU 採 TP=1 跑 prefill、另 2 GPU 採 TP=2 跑 decode。"
+  >To make the cost of a static execution configuration concrete, consider a single ten-minute slice of the ServeGen trace served on four A100 GPUs by Llama-3.1-8B. The mix consists of a strict tier requiring 500 ms TTFT and 15 ms TPOT, and a loose tier requiring 500 ms TTFT and 30 ms TPOT. Suppose the operator commits to a single execution configuration for the entire slice. Three obvious choices exist: run all four GPUs at tensor-parallel degree 1 with prefill and decode co-located, run all four GPUs at TP=2, or split the cluster so that prefill runs at TP=1 on two GPUs and decode runs at TP=2 on the other two.</span></p>
+
+<p><span class="i18n"
+  data-en="The paper's measurement (Figure 3) shows that none of these three static choices dominates for more than a fraction of the window. When arrivals are heavy and prompts are short, TP=1 with co-located stages packs the largest decode batches and wins. When arrivals are heavy and prompts are long, the prefill-decode split reduces head-of-line blocking on long prefills and wins. When arrivals are light, the higher TP degree wins on TTFT because tensor shards become small enough that compute, not communication, is the binding constraint. An oracle that may switch among these three configurations every second outperforms every fixed choice; the paper measures the gap at 23-29% additional goodput, and the gap is the part of capacity that any static deployment leaves on the table."
+  data-zh="本文的量測（圖 3）顯示，三種靜態選擇均無法主宰窗格的大部分時段。當到達率高且 prompt 短時，TP=1 與階段共置可堆疊最大的 decode 批次而勝出；當到達率高且 prompt 長時，prefill/decode 切分可減少長 prefill 引起的隊頭阻塞而勝出；當到達率低時，較高 TP 因張量分片足夠小、瓶頸從通訊轉為計算而在 TTFT 上勝出。能每秒切換上述三種配置的 oracle 在所有時段皆優於任何固定選擇，本文量到的差距為額外 23-29% 的 goodput — 此即任何靜態部署放棄的容量。"
+  >The paper's measurement (Figure 3) shows that none of these three static choices dominates for more than a fraction of the window. When arrivals are heavy and prompts are short, TP=1 with co-located stages packs the largest decode batches and wins. When arrivals are heavy and prompts are long, the prefill-decode split reduces head-of-line blocking on long prefills and wins. When arrivals are light, the higher TP degree wins on TTFT because tensor shards become small enough that compute, not communication, is the binding constraint. An oracle that may switch among these three configurations every second outperforms every fixed choice; the paper measures the gap at 23-29% additional goodput, and the gap is the part of capacity that any static deployment leaves on the table.</span></p>
+
+<p><span class="i18n"
+  data-en="A second observation in the same figure is more severe. When incoming load rises above roughly 40 requests per second, the goodput of every static configuration collapses to a small fraction of arrivals, because each configuration has at least one tier whose service time exceeds the SLO under that load. A scheduler that controls only when requests run cannot recover this lost capacity — by the time a request has been queued, dispatched, and given to a backend that is fundamentally too slow for its tier, the deadline has already been missed."
+  data-zh="同一圖中的第二項觀察更為嚴重：當到達率上升至約每秒 40 個請求以上時，每種靜態配置的 goodput 均退化至到達率的小部分，因為任一配置在該負載下至少有一個階層的服務時間超過 SLO。僅能控制請求「何時」執行的排程器無法挽回此失去的容量 — 當請求完成排隊、派遣並交付給一個對其階層而言根本太慢的後端時，截止時間已被錯過。"
+  >A second observation in the same figure is more severe. When incoming load rises above roughly 40 requests per second, the goodput of every static configuration collapses to a small fraction of arrivals, because each configuration has at least one tier whose service time exceeds the SLO under that load. A scheduler that controls only when requests run cannot recover this lost capacity — by the time a request has been queued, dispatched, and given to a backend that is fundamentally too slow for its tier, the deadline has already been missed.</span></p>
+
+<div class="paper-fig">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/dynamic_tp_detailed_A100_v3.png"
+       alt="Figure 3a: per-second goodput of three static TP configurations versus an oracle dynamic-TP upper bound on the ServeGen workload">
+  <div class="fig-cap"><strong>Figure 3 (from paper):</strong>
+    <span class="i18n"
+      data-en="Per-second goodput for three static configurations (All TP=1, All TP=2, TP=1-prefill + TP=2-decode) and an oracle that selects the best configuration each second, on the ServeGen workload over 4 A100s with Llama-3.1-8B. Dashed line shows the incoming RPS. No single static configuration matches the oracle for more than a brief interval, and all static configurations collapse together once the cluster is over-subscribed."
+      data-zh="於 4 GPU A100 執行 Llama-3.1-8B 的 ServeGen 工作負載下，三種靜態配置（全 TP=1、全 TP=2、TP=1 prefill + TP=2 decode）與每秒選擇最佳配置之 oracle 的逐秒 goodput；虛線為到達 RPS。任一靜態配置在窗格內僅短暫追平 oracle，且叢集過載時所有靜態配置同時崩落。"
+      >Per-second goodput for three static configurations (All TP=1, All TP=2, TP=1-prefill + TP=2-decode) and an oracle that selects the best configuration each second, on the ServeGen workload over 4 A100s with Llama-3.1-8B. Dashed line shows the incoming RPS. No single static configuration matches the oracle for more than a brief interval, and all static configurations collapse together once the cluster is over-subscribed.</span>
+  </div>
+</div>
+
+<div class="metric-boxes">
+  <div class="metric-box">
+    <div class="value">23-29%</div>
+    <div class="label"><span class="i18n" data-en="goodput left on the table by the best static configuration vs an oracle that switches every second" data-zh="最佳靜態配置相較每秒切換之 oracle 所放棄的 goodput">goodput left on the table by the best static configuration vs an oracle that switches every second</span></div>
+  </div>
+  <div class="metric-box">
+    <div class="value">~0</div>
+    <div class="label"><span class="i18n" data-en="SLO-compliant goodput of every static configuration once load exceeds 40 RPS" data-zh="一旦負載超過 40 RPS，所有靜態配置的 SLO 合規 goodput">SLO-compliant goodput of every static configuration once load exceeds 40 RPS</span></div>
+  </div>
+  <div class="metric-box">
+    <div class="value">2 tiers</div>
+    <div class="label"><span class="i18n" data-en="distinct TTFT/TPOT targets that must be honored concurrently in the basic experiment" data-zh="基本實驗中須同時兼顧的 TTFT/TPOT 目標數">distinct TTFT/TPOT targets that must be honored concurrently in the basic experiment</span></div>
+  </div>
+</div>
+
+</section>
+
+<section id="obstacle">
+<h2><span class="i18n" data-en="3. The fundamental obstacle: when-to-run is not enough" data-zh="3. 根本障礙：「何時執行」並不足夠">3. The fundamental obstacle: when-to-run is not enough</span></h2>
+
+<p><span class="i18n"
+  data-en="The reason a request-level scheduler cannot close the gap shown in the previous section is structural, not algorithmic. Every existing SLO-aware serving system — Llumnix, Chiron, QLM, SCOOT, and to a large extent DistServe and SplitWise — operates on a control surface that decides which request runs on which backend, in which order, and with what batch composition. The backend's per-request service time, however, is fixed by the execution configuration that was chosen when the backend was launched: the tensor-parallel degree, the prefill-decode partition, the compiled CUDA graphs, the kernel selections. A scheduler whose action space is restricted to picking among backends with already-determined service times can rearrange the order in which deadlines are missed; it cannot make a request whose required service time is 12 ms run on a backend whose service time is 18 ms."
+  data-zh="上一節所示的差距無法由請求層級的排程器消弭，原因屬結構性而非演算法性。所有既有的 SLO 感知 serving 系統 — Llumnix、Chiron、QLM、SCOOT，以及在很大程度上的 DistServe 與 SplitWise — 操作的控制面只能決定哪個請求在哪個後端、以何種順序、以何種批次組成執行。然而後端對單請求的服務時間，在後端啟動時即由執行配置（張量並行度、prefill/decode 切分、編譯後的 CUDA graph、kernel 選擇）所固定。動作空間僅限於在「服務時間已被決定」的若干後端間取捨的排程器，只能重新排列截止時間錯過的順序，無法讓所需服務時間為 12 毫秒的請求於服務時間為 18 毫秒的後端上完成。"
+  >The reason a request-level scheduler cannot close the gap shown in the previous section is structural, not algorithmic. Every existing SLO-aware serving system — Llumnix, Chiron, QLM, SCOOT, and to a large extent DistServe and SplitWise — operates on a control surface that decides which request runs on which backend, in which order, and with what batch composition. The backend's per-request service time, however, is fixed by the execution configuration that was chosen when the backend was launched: the tensor-parallel degree, the prefill-decode partition, the compiled CUDA graphs, the kernel selections. A scheduler whose action space is restricted to picking among backends with already-determined service times can rearrange the order in which deadlines are missed; it cannot make a request whose required service time is 12 ms run on a backend whose service time is 18 ms.</span></p>
+
+<p><span class="i18n"
+  data-en="A second structural issue is that the optimal execution configuration for a given workload mix is itself non-stationary. The paper's measurement of tensor parallelism on a 14B model on A100 and a 70B model on H100 and B200 (Figure 2) shows that raising TP from 1 to 2 to 4 to 8 reduces TTFT monotonically for every input length, but its effect on per-GPU decode throughput is non-monotonic in batch size. At batch size 1, raising TP to 4 produces roughly a 3x throughput advantage because the smaller per-GPU tensor shards fit in L2 cache and reduce HBM traffic; as batch size grows, communication cost dominates and the advantage shrinks, eventually flipping. There is therefore no single TP degree that is best across the realistic range of decode batch sizes — and the realistic range itself changes as the workload mix and load intensity drift over time."
+  data-zh="第二項結構性問題在於：給定工作負載組成下的最佳執行配置本身為非穩態。本文於 A100 上 14B 模型、H100 與 B200 上 70B 模型的張量並行量測（圖 2）顯示，TP 由 1 提升至 2、4、8 時，TTFT 對所有輸入長度皆單調下降；但其對每 GPU decode 吞吐量的影響相對於批次大小為非單調。批次大小為 1 時，TP 提升至 4 可帶來約 3 倍吞吐量優勢，因為較小的單 GPU 張量分片可容於 L2 快取並降低 HBM 流量；批次增大時通訊成本主導，優勢縮減終至反轉。因此在實際 decode 批次範圍內並不存在單一最佳 TP 度 — 而該實際範圍本身會隨工作負載組成與負載強度之漂移而變動。"
+  >A second structural issue is that the optimal execution configuration for a given workload mix is itself non-stationary. The paper's measurement of tensor parallelism on a 14B model on A100 and a 70B model on H100 and B200 (Figure 2) shows that raising TP from 1 to 2 to 4 to 8 reduces TTFT monotonically for every input length, but its effect on per-GPU decode throughput is non-monotonic in batch size. At batch size 1, raising TP to 4 produces roughly a 3x throughput advantage because the smaller per-GPU tensor shards fit in L2 cache and reduce HBM traffic; as batch size grows, communication cost dominates and the advantage shrinks, eventually flipping. There is therefore no single TP degree that is best across the realistic range of decode batch sizes — and the realistic range itself changes as the workload mix and load intensity drift over time.</span></p>
+
+<div class="paper-fig-row">
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2605.05467v1/Figures/motivation_1_prefill_ttft_vs_input_len.png"
+         alt="Figure 2a: prefill TTFT vs input length across TP levels on A100">
+    <div class="fig-cap"><strong>Figure 2a:</strong> <span class="i18n" data-en="Prefill TTFT versus input length for the 14B model on A100 across TP = 1, 2, 4, 8. Higher TP reduces TTFT monotonically." data-zh="A100 上 14B 模型於 TP = 1、2、4、8 下，prefill TTFT 與輸入長度之關係：較高 TP 使 TTFT 單調下降。">Prefill TTFT versus input length for the 14B model on A100 across TP = 1, 2, 4, 8. Higher TP reduces TTFT monotonically.</span></div>
+  </div>
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2605.05467v1/Figures/normalized_by_decode_side/motivation_1_decode_normalized_throughput_vs_batch_size.png"
+         alt="Figure 2b: per-GPU decode throughput vs batch size across TP levels on A100">
+    <div class="fig-cap"><strong>Figure 2b:</strong> <span class="i18n" data-en="Per-GPU decode throughput (normalized) versus batch size on A100. The TP that maximizes decode throughput depends on batch size, so no single TP degree dominates over the workload's realistic batch-size range." data-zh="A100 上每 GPU 標準化 decode 吞吐量與批次大小之關係：使 decode 吞吐量最大化的 TP 取決於批次大小，因此在工作負載的實際批次範圍內並無單一最佳 TP。">Per-GPU decode throughput (normalized) versus batch size on A100. The TP that maximizes decode throughput depends on batch size, so no single TP degree dominates over the workload's realistic batch-size range.</span></div>
+  </div>
+</div>
+
+<p><span class="i18n"
+  data-en="The combination of these two observations is what makes the problem genuinely require an execution-level control. The optimal service time for each tier depends on a moment-by-moment property of the workload (which TP / partition the backend should expose), and the service time of every backend has been baked in at deployment. Any solution that does not adjust execution configuration at second-scale must therefore either over-provision (run multiple separate clusters, accepting low utilization) or accept that whichever tier is unlucky in this minute will miss its SLO."
+  data-zh="兩項觀察結合，正是使此問題確實需要執行層控制的關鍵。各階層的最佳服務時間取決於工作負載的逐刻屬性（後端應暴露的 TP 與切分），而每個後端的服務時間在部署時即已決定。任何不在秒級調整執行配置的方案，要嘛須過度配置（運行多個分離叢集而承擔低使用率），要嘛須接受該分鐘內運氣不佳的階層必然違反 SLO。"
+  >The combination of these two observations is what makes the problem genuinely require an execution-level control. The optimal service time for each tier depends on a moment-by-moment property of the workload (which TP / partition the backend should expose), and the service time of every backend has been baked in at deployment. Any solution that does not adjust execution configuration at second-scale must therefore either over-provision (run multiple separate clusters, accepting low utilization) or accept that whichever tier is unlucky in this minute will miss its SLO.</span></p>
+
+</section>
+
+<section id="strawman">
+<h2><span class="i18n" data-en="4. Strawman: the obvious fixes and why each one fails" data-zh="4. 草圖方案：顯而易見的補救與其各自的失敗">4. Strawman: the obvious fixes and why each one fails</span></h2>
+
+<p><span class="i18n"
+  data-en="A reader at this point may ask why an operator would not simply split the cluster into per-tier slices, or, conversely, why the operator would not simply implement classical TP reconfiguration as a runtime control. The paper considers both and shows each to fail for a different structural reason, which clears the design space for the actual contribution."
+  data-zh="讀至此處可能會問：運營方為何不將叢集逕行依階層切片？反之，為何不直接將傳統 TP 重配置實作為執行期控制？本文檢視兩者並顯示其各自因不同的結構原因而失效，從而為實際貢獻清出設計空間。"
+  >A reader at this point may ask why an operator would not simply split the cluster into per-tier slices, or, conversely, why the operator would not simply implement classical TP reconfiguration as a runtime control. The paper considers both and shows each to fail for a different structural reason, which clears the design space for the actual contribution.</span></p>
+
+<h3><span class="i18n" data-en="4.1 Strawman A: partition the cluster by tier" data-zh="4.1 草圖 A：依階層切割叢集">4.1 Strawman A: partition the cluster by tier</span></h3>
+
+<p><span class="i18n"
+  data-en="Allocate two GPUs to the strict tier and two to the loose tier, each running the static TP that is best for that tier in isolation. This restores per-tier optimization and eliminates interference. The structural problem is that the optimal partition is workload-dependent: when 80% of arrivals in a minute are loose-tier requests, the two strict-tier GPUs sit idle while the loose-tier partition is over-subscribed; when the mix inverts, the opposite occurs. Rebalancing capacity between the partitions every second to chase the workload is, by inspection, the same scheduling problem in a different costume — except that it now also pays the cost of cold-loading model weights every time it shifts a GPU from one tier to the other."
+  data-zh="將 2 GPU 分配給 strict 階層、2 GPU 分配給 loose 階層，各自運行對該階層而言孤立最佳的靜態 TP。此舉恢復每階層獨立優化並消除相互干擾。其結構性問題在於：最佳切分本身依工作負載而定。若某分鐘 80% 到達為 loose 請求，則 strict 兩 GPU 閒置而 loose 一側超額負荷；當組成反轉時則情形對調。逐秒在分區間重新平衡容量以追趕工作負載，從本質上而言仍是同一個排程問題換個外衣 — 且此時還須額外承擔每次將 GPU 從某階層搬至另一階層時的冷載權重成本。"
+  >Allocate two GPUs to the strict tier and two to the loose tier, each running the static TP that is best for that tier in isolation. This restores per-tier optimization and eliminates interference. The structural problem is that the optimal partition is workload-dependent: when 80% of arrivals in a minute are loose-tier requests, the two strict-tier GPUs sit idle while the loose-tier partition is over-subscribed; when the mix inverts, the opposite occurs. Rebalancing capacity between the partitions every second to chase the workload is, by inspection, the same scheduling problem in a different costume — except that it now also pays the cost of cold-loading model weights every time it shifts a GPU from one tier to the other.</span></p>
+
+<h3><span class="i18n" data-en="4.2 Strawman B: classical TP reconfiguration as runtime control" data-zh="4.2 草圖 B：以傳統 TP 重配置作為執行期控制">4.2 Strawman B: classical TP reconfiguration as runtime control</span></h3>
+
+<p><span class="i18n"
+  data-en="The dual strawman accepts that TP must change at runtime and implements it the obvious way: when the policy decides to switch from TP=2 to TP=4, redistribute the weights across GPUs, repartition the running requests' KV-cache heads, and resume. The paper measures this naive approach end-to-end on Qwen-14B and reports approximately 30 seconds per TP change for the weight redistribution alone, even with the weights already cached on each GPU's local SSD. A second variant stores one weight copy per TP level on each GPU to avoid the redistribution; this consumes 56% of the GPU memory budget on a 13B Llama model and leaves correspondingly less HBM for KV cache. A third variant migrates running KV using cudaMemcpyAsync over the PagedAttention page table; because each page is a separate small allocation, each requires its own async copy, and the resulting overhead measures in hundreds of milliseconds for the working sets the system actually has to move."
+  data-zh="第二項草圖方案接受 TP 須於執行期改變，並以最直觀方式實作：當策略決定由 TP=2 切至 TP=4 時，跨 GPU 重新分配權重、重新切分運行中請求的 KV 頭、再恢復服務。本文於 Qwen-14B 端對端量測此 naive 做法，僅權重重分佈一項即耗時約 30 秒，即便權重已於各 GPU 本地 SSD 中快取。第二項變體於每張 GPU 上為每個 TP 層級各保留一份權重副本以避免重分佈，此舉於 13B Llama 模型上將消耗 56% 的 GPU 記憶體預算，留給 KV cache 的 HBM 因此對應減少。第三項變體以 cudaMemcpyAsync 透過 PagedAttention 分頁表遷移運行中 KV；由於每頁均為獨立小分配，各須獨立的非同步複製，對於系統實際須搬移的工作集，所累積之 overhead 達數百毫秒。"
+  >The dual strawman accepts that TP must change at runtime and implements it the obvious way: when the policy decides to switch from TP=2 to TP=4, redistribute the weights across GPUs, repartition the running requests' KV-cache heads, and resume. The paper measures this naive approach end-to-end on Qwen-14B and reports approximately 30 seconds per TP change for the weight redistribution alone, even with the weights already cached on each GPU's local SSD. A second variant stores one weight copy per TP level on each GPU to avoid the redistribution; this consumes 56% of the GPU memory budget on a 13B Llama model and leaves correspondingly less HBM for KV cache. A third variant migrates running KV using cudaMemcpyAsync over the PagedAttention page table; because each page is a separate small allocation, each requires its own async copy, and the resulting overhead measures in hundreds of milliseconds for the working sets the system actually has to move.</span></p>
+
+<p><span class="i18n"
+  data-en="The ablation study confirms the magnitude of this obstacle. When the paper inserts a runtime TP-switching policy into vanilla SGLang and implements both the weight reload and the KV migration the obvious way, end-to-end goodput collapses to zero on the experimental workload because every switch stalls service for longer than the SLO permits. The conclusion is that runtime TP control is not merely an interesting algorithmic question; it is a question whose answer depends entirely on whether the switching mechanisms can be made fast enough that the control loop is worth running at all."
+  data-zh="Ablation 研究確認此障礙的量級。當本文於 vanilla SGLang 中插入執行期 TP 切換策略並以最直觀方式同時實作權重重載與 KV 遷移時，端對端 goodput 於實驗工作負載上崩至零，因為每次切換造成的服務中斷時長皆超過 SLO 容許範圍。結論是：執行期 TP 控制並非僅為一個有趣的演算法問題，其答案完全取決於切換機制能否足夠快速，以至使該控制迴路本身值得運行。"
+  >The ablation study confirms the magnitude of this obstacle. When the paper inserts a runtime TP-switching policy into vanilla SGLang and implements both the weight reload and the KV migration the obvious way, end-to-end goodput collapses to zero on the experimental workload because every switch stalls service for longer than the SLO permits. The conclusion is that runtime TP control is not merely an interesting algorithmic question; it is a question whose answer depends entirely on whether the switching mechanisms can be made fast enough that the control loop is worth running at all.</span></p>
+
+</section>
+
+<section id="prior">
+<h2><span class="i18n" data-en="5. Position against immediate prior work" data-zh="5. 相對於直接相關前作的定位">5. Position against immediate prior work</span></h2>
+
+<p><span class="i18n"
+  data-en="The contribution sits in a thin gap left by four streams of recent serving research. The table below names each, the action it is restricted to, and the structural property of the production workload it is unable to handle. The point is that the prior works are not wrong; they each optimize an action surface that is necessary but, by itself, insufficient for the 2025-2026 tiered-SLO setting."
+  data-zh="本貢獻位於近期四股 serving 研究所留下的一處薄縫。下表列出各支研究的動作空間，以及其無法處理之生產工作負載的結構性屬性。重點並非前作有誤，而在於各自所優化的動作面雖屬必要、但對 2025-2026 多 SLO 階層情境而言尚不充分。"
+  >The contribution sits in a thin gap left by four streams of recent serving research. The table below names each, the action it is restricted to, and the structural property of the production workload it is unable to handle. The point is that the prior works are not wrong; they each optimize an action surface that is necessary but, by itself, insufficient for the 2025-2026 tiered-SLO setting.</span></p>
+
+<table>
+  <thead>
+    <tr>
+      <th><span class="i18n" data-en="Prior work" data-zh="前作">Prior work</span></th>
+      <th><span class="i18n" data-en="Control surface" data-zh="控制面">Control surface</span></th>
+      <th><span class="i18n" data-en="What it left on the table" data-zh="未處理之屬性">What it left on the table</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>DistServe / SplitWise</td>
+      <td><span class="i18n" data-en="Prefill-decode disaggregation; static TP per pool" data-zh="prefill/decode 解耦合；每池靜態 TP">Prefill-decode disaggregation; static TP per pool</span></td>
+      <td><span class="i18n" data-en="A single SLO per pool. TP within a pool remains a deployment constant; cannot adapt to intra-tier batch-size drift." data-zh="每池單一 SLO；池內 TP 仍為部署常量，無法因應同階層內批次大小的漂移。">A single SLO per pool. TP within a pool remains a deployment constant; cannot adapt to intra-tier batch-size drift.</span></td>
+    </tr>
+    <tr>
+      <td>Sarathi-Serve</td>
+      <td><span class="i18n" data-en="Chunked prefill, interleaved batching" data-zh="分塊 prefill 與交錯批次">Chunked prefill, interleaved batching</span></td>
+      <td><span class="i18n" data-en="Optimizes batch composition under a fixed execution configuration; the TP-degree and prefill/decode partition remain set at launch." data-zh="於固定執行配置下優化批次組成；TP 度與 prefill/decode 切分仍在啟動時固定。">Optimizes batch composition under a fixed execution configuration; the TP-degree and prefill/decode partition remain set at launch.</span></td>
+    </tr>
+    <tr>
+      <td>Llumnix</td>
+      <td><span class="i18n" data-en="Live request migration across replicas" data-zh="跨副本的請求活遷">Live request migration across replicas</span></td>
+      <td><span class="i18n" data-en="Rearranges where requests run; cannot change the service time each backend offers. KV migration in particular is slow enough (~300 ms) to be impractical as the inner loop of a TP-reconfiguration policy." data-zh="僅重新安排請求執行位置，無法改變後端所提供之服務時間。其 KV 遷移約 300 毫秒，不適合作為 TP 重配置策略的內層迴圈。">Rearranges where requests run; cannot change the service time each backend offers. KV migration in particular is slow enough (~300 ms) to be impractical as the inner loop of a TP-reconfiguration policy.</span></td>
+    </tr>
+    <tr>
+      <td>Chiron / QLM / SCOOT</td>
+      <td><span class="i18n" data-en="Hierarchical autoscaling, queue admission, backpressure" data-zh="層級式自動擴縮、佇列入場控制、回壓">Hierarchical autoscaling, queue admission, backpressure</span></td>
+      <td><span class="i18n" data-en="Acts at the replica or queue level; cannot move the per-request service time below the level fixed by the launched configuration." data-zh="作用於副本或佇列層級，無法將單請求服務時間壓至已啟動配置所決定的水平以下。">Acts at the replica or queue level; cannot move the per-request service time below the level fixed by the launched configuration.</span></td>
+    </tr>
+    <tr>
+      <td><strong>Nitsum (this work)</strong></td>
+      <td><span class="i18n" data-en="Joint TP-level + prefill/decode split + SLO-aware request schedule, recomputed every ~1 s" data-zh="TP 層級 + prefill/decode 切分 + SLO 感知排程聯合，約每秒重算">Joint TP-level + prefill/decode split + SLO-aware request schedule, recomputed every ~1 s</span></td>
+      <td><span class="i18n" data-en="Adds execution-level control orthogonal to all of the above. Composable with chunked prefill, request migration, and autoscaling, none of which it replaces." data-zh="加入與上述各層均正交的執行層控制；可與分塊 prefill、請求遷移與自動擴縮組合，並非取代其中任何一者。">Adds execution-level control orthogonal to all of the above. Composable with chunked prefill, request migration, and autoscaling, none of which it replaces.</span></td>
+    </tr>
+  </tbody>
+</table>
+
+</section>
+
+<section id="insight">
+<h2><span class="i18n" data-en="6. The central insight: tensor parallelism as a control surface" data-zh="6. 核心洞見：將張量並行視為控制面">6. The central insight: tensor parallelism as a control surface</span></h2>
+
+<p><span class="i18n"
+  data-en="The paper's framing is that the tensor-parallel degree is not, in fact, a deployment constant; it is a knob that — under appropriate engineering — can be turned on the same time scale as a batching decision. Once TP is admitted to the action space, the scheduler gains two qualitatively new abilities. It can satisfy the strict tier by raising TP so that prefill and small-batch decode complete fast enough to meet TTFT and tail TPOT. It can simultaneously satisfy the loose tier by lowering TP on a different subset of GPUs so that decode runs in large batches and saturates the cluster's throughput."
+  data-zh="本文的框架為：張量並行度實際上並非部署常量，而是一個 — 在適當工程下 — 可於與批次決策相同時間尺度上轉動的旋鈕。一旦 TP 進入動作空間，排程器即獲得兩項質性新能力：可藉提高 TP 使 prefill 與小批次 decode 加速、以滿足 strict 階層的 TTFT 與尾端 TPOT；同時於另一子集 GPU 上降低 TP，使 decode 以大批次運行、飽和叢集吞吐量、以滿足 loose 階層。"
+  >The paper's framing is that the tensor-parallel degree is not, in fact, a deployment constant; it is a knob that — under appropriate engineering — can be turned on the same time scale as a batching decision. Once TP is admitted to the action space, the scheduler gains two qualitatively new abilities. It can satisfy the strict tier by raising TP so that prefill and small-batch decode complete fast enough to meet TTFT and tail TPOT. It can simultaneously satisfy the loose tier by lowering TP on a different subset of GPUs so that decode runs in large batches and saturates the cluster's throughput.</span></p>
+
+<p><span class="i18n"
+  data-en="The non-obvious part of this claim is the L2 cache effect at small decode batches. Conventional intuition treats higher TP as a pure TTFT win paid for in inter-GPU communication and thus a decode-throughput loss. The paper's measurement on A100 (Figure 2c-d) shows that this intuition is wrong below a workload-dependent batch-size threshold: as TP rises, each GPU's tensor shard shrinks, the active working set fits in L2, and the resulting HBM-traffic reduction dominates the NVLink communication cost. The effect is large — roughly 3x throughput advantage at batch size 1 — and it disappears as batch size grows. The scheduler therefore prefers high TP when the cluster is lightly loaded (small batches) and low TP when it is heavily loaded (large batches), exactly the opposite of what a deployment-time choice would commit to."
+  data-zh="此主張中不顯而易見的部分是小 decode 批次下的 L2 cache 效應。傳統直觀認為較高 TP 純為 TTFT 之得、以 GPU 間通訊為代價、因而為 decode 吞吐量之失。本文於 A100 上的量測（圖 2c-d）顯示，於工作負載相依的批次大小閾值以下，此直觀為誤：TP 提升使每張 GPU 之張量分片縮小、活躍工作集容於 L2、由此帶來的 HBM 流量降低主導 NVLink 通訊成本。此效應幅度可觀 — 批次大小為 1 時約為 3 倍吞吐優勢 — 並隨批次增大而消退。因此排程器於叢集輕載（小批次）時偏好高 TP、重載（大批次）時偏好低 TP，恰與部署時擇定之傾向相反。"
+  >The non-obvious part of this claim is the L2 cache effect at small decode batches. Conventional intuition treats higher TP as a pure TTFT win paid for in inter-GPU communication and thus a decode-throughput loss. The paper's measurement on A100 (Figure 2c-d) shows that this intuition is wrong below a workload-dependent batch-size threshold: as TP rises, each GPU's tensor shard shrinks, the active working set fits in L2, and the resulting HBM-traffic reduction dominates the NVLink communication cost. The effect is large — roughly 3x throughput advantage at batch size 1 — and it disappears as batch size grows. The scheduler therefore prefers high TP when the cluster is lightly loaded (small batches) and low TP when it is heavily loaded (large batches), exactly the opposite of what a deployment-time choice would commit to.</span></p>
+
+<div class="paper-fig-row">
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2605.05467v1/Figures/panel_l2_a100_14b.png"
+         alt="Figure 2c: L2 cache hit rate vs batch size across TP levels on A100 with 14B model">
+    <div class="fig-cap"><strong>Figure 2c:</strong> <span class="i18n" data-en="L2 cache hit rate versus decode batch size for the 14B model on A100 across TP = 1, 2, 4, 8. Higher TP shrinks the per-GPU shard until it fits in L2, sharply raising the hit rate at small batches." data-zh="A100 上 14B 模型於 TP = 1、2、4、8 下，L2 cache 命中率與 decode 批次大小之關係：較高 TP 縮小每 GPU 分片至 L2 可容，於小批次處顯著提升命中率。">L2 cache hit rate versus decode batch size for the 14B model on A100 across TP = 1, 2, 4, 8. Higher TP shrinks the per-GPU shard until it fits in L2, sharply raising the hit rate at small batches.</span></div>
+  </div>
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2605.05467v1/Figures/panel_comm_a100_14b.png"
+         alt="Figure 2d: inter-GPU communication cost vs batch size across TP levels on A100 with 14B model">
+    <div class="fig-cap"><strong>Figure 2d:</strong> <span class="i18n" data-en="Inter-GPU communication cost versus decode batch size on A100. Communication grows with TP, but at small batches the L2-cache gain still dominates; the crossover defines the batch-size threshold below which the scheduler should prefer higher TP." data-zh="A100 上 GPU 間通訊成本與 decode 批次大小之關係：通訊隨 TP 增加而成長，但於小批次處 L2 命中率收益仍佔上風；其交叉點定義了排程器應偏好較高 TP 的批次大小閾值。">Inter-GPU communication cost versus decode batch size on A100. Communication grows with TP, but at small batches the L2-cache gain still dominates; the crossover defines the batch-size threshold below which the scheduler should prefer higher TP.</span></div>
+  </div>
+</div>
+
+<div class="note">
+  <strong><span class="i18n" data-en="Why this insight is load-bearing." data-zh="此洞見為何具有承重作用。">Why this insight is load-bearing.</span></strong>
+  <span class="i18n"
+    data-en=" If the optimal TP were monotonic in batch size, a moderately sophisticated static deployment could approximate it well. The non-monotonicity, combined with the workload's drift in arrival rate and prompt-length distribution, is what forces the optimal TP to change within minutes and what therefore forces the scheduler to be allowed to change it within minutes."
+    data-zh=" 若最佳 TP 對批次大小為單調，則一個中等複雜度的靜態部署即可良好近似之。非單調性疊加工作負載於到達率與 prompt 長度分布上之漂移，迫使最佳 TP 於分鐘級內變動，並因此迫使排程器在相同尺度上被允許進行該變動。"
+    > If the optimal TP were monotonic in batch size, a moderately sophisticated static deployment could approximate it well. The non-monotonicity, combined with the workload's drift in arrival rate and prompt-length distribution, is what forces the optimal TP to change within minutes and what therefore forces the scheduler to be allowed to change it within minutes.</span>
+</div>
+
+</section>
+
+<section id="contributions">
+<h2><span class="i18n" data-en="7. What Nitsum contributes" data-zh="7. Nitsum 的具體貢獻">7. What Nitsum contributes</span></h2>
+
+<p><span class="i18n"
+  data-en="With the motivation now established, the system's contributions can be stated in their proper order. Each is necessary; removing any one is shown in the ablation to collapse end-to-end goodput."
+  data-zh="動機既已確立，本系統的貢獻可依其應有的次序陳述。各項均為必要 — ablation 顯示移除其一即會使端對端 goodput 崩落。"
+  >With the motivation now established, the system's contributions can be stated in their proper order. Each is necessary; removing any one is shown in the ablation to collapse end-to-end goodput.</span></p>
+
+<div class="cards">
+  <div class="card hl">
+    <h4><span class="i18n" data-en="C1. TP as runtime control" data-zh="C1. TP 作為執行期控制">C1. TP as runtime control</span></h4>
+    <p><span class="i18n"
+      data-en="Reframes tensor parallelism from a deployment constant to a runtime variable, then characterizes its effect on TTFT, decode throughput, L2 cache hit rate, and inter-GPU communication across 14B and 70B models on A100, H100, and B200, establishing that no single TP degree dominates across the realistic workload range."
+      data-zh="將張量並行由部署常量重新界定為執行期變數，並於 A100、H100、B200 上之 14B 與 70B 模型上刻劃其對 TTFT、decode 吞吐量、L2 命中率與 GPU 間通訊的影響，據此確立實際工作負載範圍內並無單一最佳 TP。"
+      >Reframes tensor parallelism from a deployment constant to a runtime variable, then characterizes its effect on TTFT, decode throughput, L2 cache hit rate, and inter-GPU communication across 14B and 70B models on A100, H100, and B200, establishing that no single TP degree dominates across the realistic workload range.</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="C2. Zero-overhead TP weight switching" data-zh="C2. 零成本 TP 權重切換">C2. Zero-overhead TP weight switching</span></h4>
+    <p><span class="i18n"
+      data-en="Each GPU holds a single full weight copy and exposes TP-specific shards via a small kernel-side selector. Warm processes for every candidate TP level are pre-launched and pre-compiled (CUDA graphs, torch.compile); switching activates a warm process and hibernates the rest, eliminating the ~30 s redistribution cost."
+      data-zh="每張 GPU 持有完整權重之單一副本，並透過小型 kernel 側選擇器暴露各 TP 層級的分片。每個候選 TP 層級的進程於部署時保溫並預編譯（CUDA graph、torch.compile）；切換時啟用對應的保溫進程並將其他進入休眠，消除約 30 秒的權重重分佈成本。"
+      >Each GPU holds a single full weight copy and exposes TP-specific shards via a small kernel-side selector. Warm processes for every candidate TP level are pre-launched and pre-compiled (CUDA graphs, torch.compile); switching activates a warm process and hibernates the rest, eliminating the ~30 s redistribution cost.</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="C3. Aggregated, pipelined KV migration" data-zh="C3. 聚合管線化的 KV 遷移">C3. Aggregated, pipelined KV migration</span></h4>
+    <p><span class="i18n"
+      data-en="A custom kernel coalesces fragmented PagedAttention regions into a contiguous staging buffer while the previous stage's bytes are still in flight on the network, overlapping the two phases. Measured speedup is 245-376x versus cudaMemcpyAsync, bringing 0.5-5 GB KV migrations from 0.88-9.25 s down to 3.6-24.8 ms — fast enough to live inside a 1 s control window."
+      data-zh="自製 kernel 將 PagedAttention 的破碎區塊聚合至連續暫存緩衝，並與前一段位元組於網路上的傳輸重疊。相較 cudaMemcpyAsync 量測加速為 245-376 倍：將 0.5-5 GB KV 遷移由 0.88-9.25 秒降至 3.6-24.8 毫秒 — 足以容於 1 秒控制窗格內。"
+      >A custom kernel coalesces fragmented PagedAttention regions into a contiguous staging buffer while the previous stage's bytes are still in flight on the network, overlapping the two phases. Measured speedup is 245-376x versus cudaMemcpyAsync, bringing 0.5-5 GB KV migrations from 0.88-9.25 s down to 3.6-24.8 ms — fast enough to live inside a 1 s control window.</span></p>
+  </div>
+  <div class="card hl">
+    <h4><span class="i18n" data-en="C4. Goodput-aware joint policy" data-zh="C4. Goodput 感知聯合策略">C4. Goodput-aware joint policy</span></h4>
+    <p><span class="i18n"
+      data-en="A reconfiguration policy that jointly selects per-tier TP level and prefill/decode GPU split each control window using offline-profiled per-stage throughput, paired with an SLO-aware request scheduler that tracks per-GPU SLO-compliant available bandwidth, classifies arriving requests as feasible or best-effort, and isolates background traffic into a designated pool."
+      data-zh="重配置策略於每個控制窗格內，根據離線剖析的每階段吞吐量聯合選擇各階層的 TP 層級與 prefill/decode 切分，並搭配 SLO 感知請求排程器：追蹤每 GPU 的 SLO 合規可用頻寬、將到達請求分類為可行或盡力而為、並將背景流量隔離至專屬池。"
+      >A reconfiguration policy that jointly selects per-tier TP level and prefill/decode GPU split each control window using offline-profiled per-stage throughput, paired with an SLO-aware request scheduler that tracks per-GPU SLO-compliant available bandwidth, classifies arriving requests as feasible or best-effort, and isolates background traffic into a designated pool.</span></p>
+  </div>
+</div>
+
+<div class="metric-boxes">
+  <div class="metric-box"><div class="value">5.3x</div><div class="label"><span class="i18n" data-en="peak SLO-compliant goodput vs strongest baseline" data-zh="相對最強基準的尖峰 SLO 合規 goodput">peak SLO-compliant goodput vs strongest baseline</span></div></div>
+  <div class="metric-box"><div class="value">245-376x</div><div class="label"><span class="i18n" data-en="KV migration speedup vs cudaMemcpyAsync" data-zh="KV 遷移相對 cudaMemcpyAsync 之加速">KV migration speedup vs cudaMemcpyAsync</span></div></div>
+  <div class="metric-box"><div class="value">~30 s &rarr; 0</div><div class="label"><span class="i18n" data-en="weight-reload cost per TP switch, removed by weight reuse" data-zh="每次 TP 切換的權重重載成本，經由權重重用消除">weight-reload cost per TP switch, removed by weight reuse</span></div></div>
+  <div class="metric-box"><div class="value">2.49 ms</div><div class="label"><span class="i18n" data-en="average reconfiguration planning time for 128 GPUs / 4 tiers" data-zh="128 GPU、4 個請求群之重配置規劃平均時間">average reconfiguration planning time for 128 GPUs / 4 tiers</span></div></div>
+</div>
+
+</section>
+
+<section id="arch">
+<h2><span class="i18n" data-en="8. System architecture" data-zh="8. 系統架構">8. System architecture</span></h2>
+
+<p><span class="i18n"
+  data-en="Nitsum is built atop SGLang and adds a thin control plane that runs out-of-band from the request path. The control plane comprises three components arranged as a 1 Hz outer loop and a continuously running inner loop. The outer loop, called the cluster reconfiguration policy, takes recent arrival statistics and the offline performance profile as inputs and emits a configuration vector — one (TP-prefill, TP-decode, GPU-count-prefill, GPU-count-decode) tuple per request tier. The inner loop, the SLO-aware request scheduler, dispatches arriving requests into the configuration chosen by the outer loop. The TP-switching mechanism and KV-migration kernel sit inside the data plane: they are invoked when the outer loop's decision differs from the prior one."
+  data-zh="Nitsum 構建於 SGLang 之上，並新增一層輕量控制面，於請求路徑之外帶外運行。控制面由三個元件組成，以 1 Hz 外迴圈與持續運行之內迴圈構成。外迴圈稱為叢集重配置策略，以近期到達統計與離線效能剖析為輸入，輸出一組配置向量 — 每個請求階層各一組（TP-prefill、TP-decode、GPU-prefill 數、GPU-decode 數）四元組。內迴圈為 SLO 感知請求排程器，將到達請求派遣至外迴圈所選之配置內。TP 切換機制與 KV 遷移 kernel 位於資料面，於外迴圈決策與先前不同時被調用。"
+  >Nitsum is built atop SGLang and adds a thin control plane that runs out-of-band from the request path. The control plane comprises three components arranged as a 1 Hz outer loop and a continuously running inner loop. The outer loop, called the cluster reconfiguration policy, takes recent arrival statistics and the offline performance profile as inputs and emits a configuration vector — one (TP-prefill, TP-decode, GPU-count-prefill, GPU-count-decode) tuple per request tier. The inner loop, the SLO-aware request scheduler, dispatches arriving requests into the configuration chosen by the outer loop. The TP-switching mechanism and KV-migration kernel sit inside the data plane: they are invoked when the outer loop's decision differs from the prior one.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x2.png"
+       alt="Figure 4: Nitsum architecture overview">
+  <div class="fig-cap"><strong>Figure 4 (from paper):</strong> <span class="i18n" data-en="Nitsum architecture. The control plane runs a 1 Hz reconfiguration policy whose decisions are realized by warm-process activation (TP weight switching) and a coalesced pipelined KV migration. The request scheduler is the inner loop, dispatching arriving requests against the bandwidth budget exposed by the current configuration." data-zh="Nitsum 架構。控制面以 1 Hz 運行重配置策略，其決策由保溫進程激活（TP 權重切換）與聚合管線化 KV 遷移落實。請求排程器為內迴圈，依當前配置所暴露的頻寬預算派遣到達請求。">Nitsum architecture. The control plane runs a 1 Hz reconfiguration policy whose decisions are realized by warm-process activation (TP weight switching) and a coalesced pipelined KV migration. The request scheduler is the inner loop, dispatching arriving requests against the bandwidth budget exposed by the current configuration.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="A single design choice unifies the four contributions: every action the control plane takes must complete within the 1 s control window, otherwise the policy is reacting to a stale picture of the workload. The 1 s budget is what sets the engineering requirement on the weight-switching and KV-migration mechanisms; conversely, it is the existence of those fast mechanisms that justifies running the policy at 1 Hz rather than at the autoscaling-typical timescale of minutes."
+  data-zh="單一設計選擇統一四項貢獻：控制面所採取的每個動作均須於 1 秒控制窗格內完成，否則策略將對過期之工作負載景象做出回應。此 1 秒預算決定了權重切換與 KV 遷移機制的工程需求；反之，正是這些快速機制的存在，使該策略可以 1 Hz 運行而非典型自動擴縮的分鐘級時間尺度。"
+  >A single design choice unifies the four contributions: every action the control plane takes must complete within the 1 s control window, otherwise the policy is reacting to a stale picture of the workload. The 1 s budget is what sets the engineering requirement on the weight-switching and KV-migration mechanisms; conversely, it is the existence of those fast mechanisms that justifies running the policy at 1 Hz rather than at the autoscaling-typical timescale of minutes.</span></p>
+
+</section>
+
+<section id="weight">
+<h2><span class="i18n" data-en="9. Mechanism 1: TP-aware weight reuse" data-zh="9. 機制一：TP 感知的權重重用">9. Mechanism 1: TP-aware weight reuse</span></h2>
+
+<p><span class="i18n"
+  data-en="The first mechanism eliminates weight-transfer cost across TP transitions. The starting observation is that, regardless of TP degree, the sharded weight that a GPU needs to hold for a particular layer is a contiguous slice of the unsharded weight tensor. When TP=2, GPU-0 needs the first half of each weight matrix along the sharded axis; when TP=4 on the same node, GPU-0 needs the first quarter; when TP=1, GPU-0 needs the entire matrix. The system therefore stores the full unsharded weight once per GPU and selects the appropriate slice at execution time via a thin kernel-side selector. No bytes move between GPUs at a TP switch, because each GPU already holds every slice it will ever need."
+  data-zh="第一項機制消除 TP 過渡時的權重傳輸成本。起點觀察為：無論 TP 度為何，某 GPU 為某層所須持有的分片權重，皆為未分片權重張量沿分片軸的一個連續切片。TP=2 時，GPU-0 須持每個權重矩陣於分片軸上的前半；同節點 TP=4 時 GPU-0 須持前四分之一；TP=1 時 GPU-0 須持整個矩陣。系統因此於每張 GPU 上將完整未分片權重儲存一次，並於執行時以薄薄的 kernel 側選擇器選定切片。TP 切換時 GPU 之間並無位元組搬移，因為每張 GPU 早已持有其將需用到的所有切片。"
+  >The first mechanism eliminates weight-transfer cost across TP transitions. The starting observation is that, regardless of TP degree, the sharded weight that a GPU needs to hold for a particular layer is a contiguous slice of the unsharded weight tensor. When TP=2, GPU-0 needs the first half of each weight matrix along the sharded axis; when TP=4 on the same node, GPU-0 needs the first quarter; when TP=1, GPU-0 needs the entire matrix. The system therefore stores the full unsharded weight once per GPU and selects the appropriate slice at execution time via a thin kernel-side selector. No bytes move between GPUs at a TP switch, because each GPU already holds every slice it will ever need.</span></p>
+
+<p><span class="i18n"
+  data-en="The remaining cost is the runtime infrastructure: each TP level requires its own process, its own NCCL communicator, its own CUDA graphs, and its own torch.compile cache. Building this infrastructure on the critical path of a TP switch would cost hundreds of milliseconds. The system therefore pre-launches a process per candidate TP level at deployment, runs them through a warm-up step that captures CUDA graphs and torch.compile cache entries, and leaves them resident but idle. A TP switch is reduced to a single operation: signal the warm process for the new TP level to take over, and signal the previous one to hibernate. The active process at any given moment is the one whose TP level the policy has selected."
+  data-zh="剩餘成本屬執行時基礎設施：每個 TP 層級各需自己的進程、NCCL communicator、CUDA graph 與 torch.compile 快取。將此基礎設施構建於 TP 切換之關鍵路徑上，將耗費數百毫秒。系統因此於部署時為每個候選 TP 層級預啟動一個進程，並執行暖機步驟以擷取 CUDA graph 與 torch.compile 快取項，然後使其駐留但閒置。TP 切換因此縮減為單一動作：發訊使新 TP 層級的保溫進程接手、原進程進入休眠。任一時刻的活躍進程即為策略所選 TP 層級對應的進程。"
+  >The remaining cost is the runtime infrastructure: each TP level requires its own process, its own NCCL communicator, its own CUDA graphs, and its own torch.compile cache. Building this infrastructure on the critical path of a TP switch would cost hundreds of milliseconds. The system therefore pre-launches a process per candidate TP level at deployment, runs them through a warm-up step that captures CUDA graphs and torch.compile cache entries, and leaves them resident but idle. A TP switch is reduced to a single operation: signal the warm process for the new TP level to take over, and signal the previous one to hibernate. The active process at any given moment is the one whose TP level the policy has selected.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x3.png"
+       alt="Figure 5: comparison of Nitsum weight reuse vs two strawmen for TP switching">
+  <div class="fig-cap"><strong>Figure 5 (from paper):</strong> <span class="i18n" data-en="Three approaches to dynamic TP. Strawman 1 redistributes weights across GPUs at every switch (~30 s for 14B). Strawman 2 stores a per-TP weight copy and reloads on demand (consumes 56% of GPU memory). Nitsum keeps one full copy per GPU plus a warm pre-compiled process per TP level; switching is process activation, not weight movement." data-zh="動態 TP 三種做法。草圖一於每次切換時跨 GPU 重分佈權重（14B 模型約需 30 秒）。草圖二為每個 TP 層級各存一份權重副本並按需重載（耗用 56% GPU 記憶體）。Nitsum 於每張 GPU 持完整權重一份，並為每個 TP 層級保溫一個預編譯進程；切換即進程啟用，非權重搬移。">Three approaches to dynamic TP. Strawman 1 redistributes weights across GPUs at every switch (~30 s for 14B). Strawman 2 stores a per-TP weight copy and reloads on demand (consumes 56% of GPU memory). Nitsum keeps one full copy per GPU plus a warm pre-compiled process per TP level; switching is process activation, not weight movement.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="The memory overhead of this scheme is bounded by one full weight copy per GPU rather than one per TP level. For Llama-3.1-8B on an 80 GB A100, the full weight is approximately 16 GB; the remaining 64 GB are available for KV cache and activations. The strawman of storing one per-TP copy of the same model would push the weight footprint past 45 GB and leave only 35 GB for KV — a regression that ablation confirms collapses goodput on the loose tier, whose decode-side memory demand is high."
+  data-zh="此方案的記憶體額外負擔上限為每張 GPU 一份完整權重，而非每 TP 層級一份。Llama-3.1-8B 於 80 GB A100 上完整權重約 16 GB，剩餘 64 GB 可用於 KV 與激活值。將同模型每 TP 層級各存一份的草圖則使權重占用超過 45 GB，留給 KV 的僅 35 GB — ablation 確認此一退化將使解碼側記憶體需求較高的 loose 階層 goodput 崩落。"
+  >The memory overhead of this scheme is bounded by one full weight copy per GPU rather than one per TP level. For Llama-3.1-8B on an 80 GB A100, the full weight is approximately 16 GB; the remaining 64 GB are available for KV cache and activations. The strawman of storing one per-TP copy of the same model would push the weight footprint past 45 GB and leave only 35 GB for KV — a regression that ablation confirms collapses goodput on the loose tier, whose decode-side memory demand is high.</span></p>
+
+<h3><span class="i18n" data-en="9.1 Memory accounting on an 80 GB A100" data-zh="9.1 80 GB A100 上的記憶體帳目">9.1 Memory accounting on an 80 GB A100</span></h3>
+
+<p><span class="i18n"
+  data-en="The table below makes the trade-off concrete for a 13 B Llama-class model on a single 80 GB A100, comparing what each TP-switching scheme costs in GPU memory before any request has been admitted. Numbers follow the paper's measurement for the per-TP-copy strawman and the full-copy scheme; the warm-process residency is reported as an approximate per-level addition."
+  data-zh="下表將取捨具體化於單張 80 GB A100 上的 13B Llama 級模型，比較各 TP 切換方案於任何請求進入前所耗用之 GPU 記憶體。數字依本文於每 TP 層級獨立權重之草圖與完整單副本方案上的量測；保溫進程駐留量則為每層級之近似增量。"
+  >The table below makes the trade-off concrete for a 13 B Llama-class model on a single 80 GB A100, comparing what each TP-switching scheme costs in GPU memory before any request has been admitted. Numbers follow the paper's measurement for the per-TP-copy strawman and the full-copy scheme; the warm-process residency is reported as an approximate per-level addition.</span></p>
+
+<table>
+  <thead>
+    <tr>
+      <th><span class="i18n" data-en="Scheme" data-zh="方案">Scheme</span></th>
+      <th><span class="i18n" data-en="Weights" data-zh="權重">Weights</span></th>
+      <th><span class="i18n" data-en="Warm processes" data-zh="保溫進程">Warm processes</span></th>
+      <th><span class="i18n" data-en="HBM left for KV / activations" data-zh="留予 KV / 激活的 HBM">HBM left for KV / activations</span></th>
+      <th><span class="i18n" data-en="Switching cost" data-zh="切換成本">Switching cost</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="i18n" data-en="Strawman 1: redistribute on demand" data-zh="草圖 1：按需重分佈">Strawman 1: redistribute on demand</span></td>
+      <td>~26 GB</td>
+      <td>0</td>
+      <td>~54 GB</td>
+      <td><span class="i18n" data-en="~30 s per switch" data-zh="每次切換約 30 秒">~30 s per switch</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Strawman 2: per-TP weight copy" data-zh="草圖 2：每 TP 層級各存一份權重">Strawman 2: per-TP weight copy</span></td>
+      <td>~45 GB (56% of 80 GB)</td>
+      <td>0</td>
+      <td>~35 GB</td>
+      <td><span class="i18n" data-en="Bounded; but KV pressure causes regression" data-zh="有限；但 KV 壓力導致退化">Bounded; but KV pressure causes regression</span></td>
+    </tr>
+    <tr>
+      <td><strong><span class="i18n" data-en="Nitsum: shared full copy + warm processes" data-zh="Nitsum：共用完整副本 + 保溫進程">Nitsum: shared full copy + warm processes</span></strong></td>
+      <td>~26 GB</td>
+      <td><span class="i18n" data-en="~0.3-0.5 GB per TP level" data-zh="每 TP 層級約 0.3-0.5 GB">~0.3-0.5 GB per TP level</span></td>
+      <td><span class="i18n" data-en="~52 GB after four warm levels" data-zh="保留 4 個保溫層級後約 52 GB">~52 GB after four warm levels</span></td>
+      <td><span class="i18n" data-en="Process activation only — sub-millisecond" data-zh="僅進程啟用 — 次毫秒">Process activation only — sub-millisecond</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<p><span class="i18n"
+  data-en="The accounting shows why the warm-process design is asymmetric in its costs. The bytes per TP level are tiny — a few hundred megabytes for CUDA-graph state, communicator handles, and torch.compile metadata — and once those are paid the marginal cost of having TP=1, TP=2, TP=4, and TP=8 all available is roughly 1.5-2 GB total. The same per-TP slice of weights would cost roughly 75 GB on this hardware, which is most of the HBM budget. The asymmetry is what makes warm-process pre-launch the choice that actually composes with KV-cache demand at production scale."
+  data-zh="此帳目顯示保溫進程設計於成本上之非對稱。每 TP 層級之位元組數甚小 — 數百 MB 之 CUDA graph 狀態、communicator handle 與 torch.compile 元資料 — 一次付清後，同時保留 TP=1、TP=2、TP=4、TP=8 的邊際成本合計約 1.5-2 GB。將相同切片以權重形式為每 TP 層級各存一份，於此硬體上將耗約 75 GB，幾乎為 HBM 預算全額。此非對稱即為保溫進程預啟動於生產規模下能與 KV 需求相容之根本原因。"
+  >The accounting shows why the warm-process design is asymmetric in its costs. The bytes per TP level are tiny — a few hundred megabytes for CUDA-graph state, communicator handles, and torch.compile metadata — and once those are paid the marginal cost of having TP=1, TP=2, TP=4, and TP=8 all available is roughly 1.5-2 GB total. The same per-TP slice of weights would cost roughly 75 GB on this hardware, which is most of the HBM budget. The asymmetry is what makes warm-process pre-launch the choice that actually composes with KV-cache demand at production scale.</span></p>
+
+</section>
+
+<section id="kvmig">
+<h2><span class="i18n" data-en="10. Mechanism 2: aggregated and pipelined KV migration" data-zh="10. 機制二：聚合且管線化的 KV 遷移">10. Mechanism 2: aggregated and pipelined KV migration</span></h2>
+
+<p><span class="i18n"
+  data-en="The second mechanism addresses what is left over after weights have been removed from the critical path: the KV cache of in-flight requests, which must be repartitioned every time the TP level changes. The structural difficulty is that PagedAttention represents each request's KV as a list of small fixed-size pages scattered across HBM, and on a TP transition the heads on each page need to be redistributed across a different number of GPUs. A naive port of this operation onto cudaMemcpyAsync issues one async copy per page, and the per-call launch overhead — not the bytes themselves — dominates the elapsed time."
+  data-zh="第二項機制處理權重退出關鍵路徑後所剩之問題：執行中請求的 KV cache 在每次 TP 改變時必須重新切分。其結構性困難在於 PagedAttention 將每個請求的 KV 表示為散佈於 HBM 的小型定長頁面清單，而 TP 過渡時各頁面上的 head 須跨不同 GPU 數重新分配。將此操作直接移植至 cudaMemcpyAsync 將為每頁發出一次非同步複製，每次呼叫的啟動開銷 — 而非位元組本身 — 主導所經過時間。"
+  >The second mechanism addresses what is left over after weights have been removed from the critical path: the KV cache of in-flight requests, which must be repartitioned every time the TP level changes. The structural difficulty is that PagedAttention represents each request's KV as a list of small fixed-size pages scattered across HBM, and on a TP transition the heads on each page need to be redistributed across a different number of GPUs. A naive port of this operation onto cudaMemcpyAsync issues one async copy per page, and the per-call launch overhead — not the bytes themselves — dominates the elapsed time.</span></p>
+
+<p><span class="i18n"
+  data-en="The system replaces this with a single custom kernel per source-destination pair that performs three steps simultaneously: it walks the page table on the GPU, gathers the relevant heads from the source pages into a contiguous staging buffer, and hands that buffer to NCCL for transmission. While the kernel is filling stage k of the staging buffer, NCCL is sending stage k-1 on the wire, and the destination kernel is scattering the just-arrived bytes from stage k-2 into the destination page table. The pipeline has three stages, all double-buffered, and the dominant cost is whichever stage is slowest — bandwidth for moderate-to-large KV migrations, kernel launch only for tiny ones."
+  data-zh="系統以單一自製 kernel 取代之，每對來源-目的對應一支 kernel，同時執行三項步驟：於 GPU 上走訪頁表、將相關 head 自來源頁面聚合至連續暫存緩衝、再將該緩衝交由 NCCL 傳輸。kernel 填充暫存緩衝第 k 階段時，NCCL 正於線上傳送第 k-1 階段，目的端 kernel 正將剛抵達的第 k-2 階段位元組分散至目的頁表。管線共三階段、皆雙緩衝；主導成本為最慢之階段 — 中至大型 KV 遷移為頻寬，極小型則為 kernel 啟動。"
+  >The system replaces this with a single custom kernel per source-destination pair that performs three steps simultaneously: it walks the page table on the GPU, gathers the relevant heads from the source pages into a contiguous staging buffer, and hands that buffer to NCCL for transmission. While the kernel is filling stage k of the staging buffer, NCCL is sending stage k-1 on the wire, and the destination kernel is scattering the just-arrived bytes from stage k-2 into the destination page table. The pipeline has three stages, all double-buffered, and the dominant cost is whichever stage is slowest — bandwidth for moderate-to-large KV migrations, kernel launch only for tiny ones.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x4.png"
+       alt="Figure 6: KV head conversion when changing TP from 1 to 2 to 4 on a four-GPU node with 8 KV heads">
+  <div class="fig-cap"><strong>Figure 6 (from paper):</strong> <span class="i18n" data-en="KV head repartitioning across a TP=1 to TP=2 to TP=4 transition on a four-GPU node with 8 KV heads. Each head's bytes follow a deterministic source-to-destination mapping that the custom kernel walks once per page table." data-zh="於 4 GPU 節點上、共 8 個 KV head，由 TP=1 至 TP=2 再至 TP=4 過渡時的 KV head 重新切分。每個 head 之位元組遵循確定性的來源至目的對應，自製 kernel 對每張頁表走訪一次即可完成。">KV head repartitioning across a TP=1 to TP=2 to TP=4 transition on a four-GPU node with 8 KV heads. Each head's bytes follow a deterministic source-to-destination mapping that the custom kernel walks once per page table.</span></div>
+</div>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x5.png"
+       alt="Figure 7: KV migration latency vs payload size, comparing cudaMemcpyAsync, contiguous baseline, and Nitsum">
+  <div class="fig-cap"><strong>Figure 7 (from paper):</strong> <span class="i18n" data-en="Migration latency (log scale) versus KV payload size, for fully fragmented and contiguous layouts, across cudaMemcpyAsync, a contiguous-aware baseline, and Nitsum's coalesced pipelined kernel. Nitsum tracks the contiguous baseline regardless of fragmentation; cudaMemcpyAsync lags by 245-376x at the working sizes the system actually moves." data-zh="於完全破碎與連續兩種布局下，cudaMemcpyAsync、連續感知基準、與 Nitsum 聚合管線 kernel 的遷移延遲（對數刻度）對 KV 載荷大小之關係。Nitsum 無論 KV 是否破碎皆貼近連續基準；於系統實際搬移的工作集大小下，cudaMemcpyAsync 落後 245-376 倍。">Migration latency (log scale) versus KV payload size, for fully fragmented and contiguous layouts, across cudaMemcpyAsync, a contiguous-aware baseline, and Nitsum's coalesced pipelined kernel. Nitsum tracks the contiguous baseline regardless of fragmentation; cudaMemcpyAsync lags by 245-376x at the working sizes the system actually moves.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="The reported numbers are 3.6-24.8 ms for migrations of 0.5-5 GB of KV (4,096-40,960 tokens of fp16 Llama-3.1-8B), against 0.88-9.25 s for cudaMemcpyAsync on the same payloads. The headline 245-376x speedup is the ratio of those two ranges at matching payloads. The system can therefore migrate the KV of every in-flight request on a 4-GPU node within roughly 10 ms, which is well below the per-token decode budget of even the strict tier."
+  data-zh="報告之數字為 3.6-24.8 毫秒以遷移 0.5-5 GB KV（fp16 Llama-3.1-8B 之 4,096-40,960 token），對比同等載荷下 cudaMemcpyAsync 的 0.88-9.25 秒。245-376 倍的標題加速即上述二範圍在對應載荷下的比值。系統因此可於約 10 毫秒內遷移 4 GPU 節點上所有執行中請求的 KV，遠低於 strict 階層每 token 的 decode 預算。"
+  >The reported numbers are 3.6-24.8 ms for migrations of 0.5-5 GB of KV (4,096-40,960 tokens of fp16 Llama-3.1-8B), against 0.88-9.25 s for cudaMemcpyAsync on the same payloads. The headline 245-376x speedup is the ratio of those two ranges at matching payloads. The system can therefore migrate the KV of every in-flight request on a 4-GPU node within roughly 10 ms, which is well below the per-token decode budget of even the strict tier.</span></p>
+
+</section>
+
+<section id="sched">
+<h2><span class="i18n" data-en="11. Scheduling: goodput-aware allocation and SLO-aware dispatch" data-zh="11. 排程：goodput 感知配置與 SLO 感知派遣">11. Scheduling: goodput-aware allocation and SLO-aware dispatch</span></h2>
+
+<p><span class="i18n"
+  data-en="With the mechanism cost reduced to roughly 10 ms per switch, the system can afford to ask the policy questions every second. The policy itself is structured as a two-level decision: an outer cluster-reconfiguration step that picks a per-tier (TP-level, prefill/decode split) configuration, and an inner scheduling step that places each arriving request into the configuration the outer step chose."
+  data-zh="切換機制成本降至每次約 10 毫秒後，系統可負擔每秒向策略提問一次。策略本身為兩層決策：外層叢集重配置依各階層選擇（TP 層級、prefill/decode 切分）配置；內層排程將每個到達請求置入外層所選之配置內。"
+  >With the mechanism cost reduced to roughly 10 ms per switch, the system can afford to ask the policy questions every second. The policy itself is structured as a two-level decision: an outer cluster-reconfiguration step that picks a per-tier (TP-level, prefill/decode split) configuration, and an inner scheduling step that places each arriving request into the configuration the outer step chose.</span></p>
+
+<h3><span class="i18n" data-en="11.1 Goodput efficiency and the assignment rule" data-zh="11.1 Goodput 效率與配置規則">11.1 Goodput efficiency and the assignment rule</span></h3>
+
+<p><span class="i18n"
+  data-en="Let a candidate configuration for tier $t$ be a pair $(\text{TP}_i, \text{TP}_j)$ — the TP degree for prefill and decode respectively — together with $P$ prefill GPUs and $D$ decode GPUs. The offline profile gives $\text{THP}_t^{\text{TP}_i}$, the maximum prefill throughput in requests per second that one GPU at TP $i$ can deliver for tier $t$'s prompt-length distribution while honoring the tier's TTFT, and the analogous $\text{THP}_t^{\text{TP}_j}$ for decode and TPOT. The system balances the two stages so neither becomes the bottleneck, and defines goodput efficiency as goodput delivered per GPU consumed:"
+  data-zh="令階層 $t$ 的某候選配置為一對 $(\text{TP}_i, \text{TP}_j)$ — 分別為 prefill 與 decode 之 TP 度 — 並搭配 $P$ 張 prefill GPU 與 $D$ 張 decode GPU。離線剖析提供 $\text{THP}_t^{\text{TP}_i}$：於 TP $i$ 下、單 GPU 對階層 $t$ 之 prompt 長度分布在守住 TTFT 的前提下所能達到的最大 prefill 每秒請求數；以及 decode 與 TPOT 的對應量 $\text{THP}_t^{\text{TP}_j}$。系統平衡兩階段以使無一成為瓶頸，並將 goodput 效率定義為每消耗一張 GPU 所交付之 goodput："
+  >Let a candidate configuration for tier $t$ be a pair $(\text{TP}_i, \text{TP}_j)$ — the TP degree for prefill and decode respectively — together with $P$ prefill GPUs and $D$ decode GPUs. The offline profile gives $\text{THP}_t^{\text{TP}_i}$, the maximum prefill throughput in requests per second that one GPU at TP $i$ can deliver for tier $t$'s prompt-length distribution while honoring the tier's TTFT, and the analogous $\text{THP}_t^{\text{TP}_j}$ for decode and TPOT. The system balances the two stages so neither becomes the bottleneck, and defines goodput efficiency as goodput delivered per GPU consumed:</span></p>
+
+<div class="math-block">
+  <span class="eq-label">(1)</span>
+  $$\text{GE}_t^{(\text{TP}_i,\text{TP}_j)} \;=\; \frac{\min\!\bigl(\,P \cdot \text{THP}_t^{\text{TP}_i},\; \text{rps}_t\,\bigr)}{P \cdot \text{TP}_i \;+\; D \cdot \text{TP}_j}$$
+</div>
+
+<p><span class="i18n"
+  data-en="The numerator is the goodput the configuration actually delivers — capped by either the prefill stage's serving rate or the tier's arrival rate $\text{rps}_t$, whichever is smaller. The denominator is the GPU cost of running both stages at their chosen TP degrees. A greedy allocator that simply picked the configuration maximizing $\text{GE}_t$ would starve any tier whose efficiency happens to be lower in this window, so the system weights each tier's score by the fraction of demand it has so far failed to serve:"
+  data-zh="分子為配置實際交付之 goodput — 由 prefill 階段服務率或階層到達率 $\text{rps}_t$ 中較小者封頂。分母為以所選 TP 度運行兩階段之 GPU 成本。若 greedy 配置直接最大化 $\text{GE}_t$，於此窗格內效率較低之階層將出現資源饑餓，系統因此以該階層至今未滿足之需求比例為其分數加權："
+  >The numerator is the goodput the configuration actually delivers — capped by either the prefill stage's serving rate or the tier's arrival rate $\text{rps}_t$, whichever is smaller. The denominator is the GPU cost of running both stages at their chosen TP degrees. A greedy allocator that simply picked the configuration maximizing $\text{GE}_t$ would starve any tier whose efficiency happens to be lower in this window, so the system weights each tier's score by the fraction of demand it has so far failed to serve:</span></p>
+
+<div class="math-block">
+  <span class="eq-label">(2)</span>
+  $$\text{WGE}_t^{(\text{TP}_i,\text{TP}_j)} \;=\; \text{GE}_t^{(\text{TP}_i,\text{TP}_j)} \cdot \frac{\text{rps}_t}{\text{served\_rps}_t}$$
+</div>
+
+<p><span class="i18n"
+  data-en="The allocator iterates over tiers in descending order of $\text{WGE}_t$, awarding each tier the configuration that maximizes its weighted goodput efficiency on the GPUs that have not yet been assigned. Because $\text{TP}_i, \text{TP}_j \in \{1, 2, 4, 8\}$ and the number of GPUs per node is bounded, the candidate space is small (on the order of a few hundred per tier per cluster size), and the allocator returns in roughly 2.5 ms for 128 GPUs and four tiers."
+  data-zh="配置器依 $\text{WGE}_t$ 由大至小迭代各階層，於尚未指派之 GPU 上為每階層選取最大化其加權 goodput 效率的配置。由於 $\text{TP}_i, \text{TP}_j \in \{1, 2, 4, 8\}$ 且節點 GPU 數有上限，候選空間規模有限（每階層每叢集規模約數百個），配置器於 128 GPU 與 4 階層下約 2.5 毫秒返回。"
+  >The allocator iterates over tiers in descending order of $\text{WGE}_t$, awarding each tier the configuration that maximizes its weighted goodput efficiency on the GPUs that have not yet been assigned. Because $\text{TP}_i, \text{TP}_j \in \{1, 2, 4, 8\}$ and the number of GPUs per node is bounded, the candidate space is small (on the order of a few hundred per tier per cluster size), and the allocator returns in roughly 2.5 ms for 128 GPUs and four tiers.</span></p>
+
+<h3><span class="i18n" data-en="11.2 SLO-aware dispatch" data-zh="11.2 SLO 感知派遣">11.2 SLO-aware dispatch</span></h3>
+
+<p><span class="i18n"
+  data-en="The inner-loop scheduler is split between a global dispatcher (one per cluster) and a local scheduler (one per GPU). The global dispatcher maintains, for each prefill GPU, the SLO-compliant available serving bandwidth — the maximum throughput the GPU can produce in its current configuration minus the throughput it has already committed to feasible requests. An arriving request is marked feasible if adding it to a prefill GPU of its tier would not exceed that GPU's bandwidth; feasible requests are routed to the least-loaded such GPU. Requests that fail this test are spilled into a best-effort pool routed to any prefill GPU; background-tier requests bypass both checks and go directly to a designated background pool."
+  data-zh="內迴圈排程器分為全域派遣器（每叢集一個）與本地排程器（每 GPU 一個）。全域派遣器為每張 prefill GPU 維護 SLO 合規可用服務頻寬 — 該 GPU 於目前配置下可生產的最大吞吐量、扣除已承諾予可行請求之吞吐量。若將某到達請求加入其階層之 prefill GPU 不致超出該 GPU 之頻寬，則該請求被標記為可行；可行請求被路由至負載最低的同階層 prefill GPU。未通過該檢查之請求溢入盡力而為池，路由至任一 prefill GPU；背景階層請求略過兩道檢查，直接前往專屬背景池。"
+  >The inner-loop scheduler is split between a global dispatcher (one per cluster) and a local scheduler (one per GPU). The global dispatcher maintains, for each prefill GPU, the SLO-compliant available serving bandwidth — the maximum throughput the GPU can produce in its current configuration minus the throughput it has already committed to feasible requests. An arriving request is marked feasible if adding it to a prefill GPU of its tier would not exceed that GPU's bandwidth; feasible requests are routed to the least-loaded such GPU. Requests that fail this test are spilled into a best-effort pool routed to any prefill GPU; background-tier requests bypass both checks and go directly to a designated background pool.</span></p>
+
+<p><span class="i18n"
+  data-en="The local scheduler at each GPU maintains three queues — feasible SLO requests, best-effort spill, and background — and assembles each forward batch by drawing from the queues in that order, subject to the per-tier throughput bound derived from the profile. When a request completes, the local scheduler notifies the global dispatcher so that the available-bandwidth counter is restored. The combination keeps feasible requests in their preferred backend, makes opportunistic use of residual capacity for best-effort, and prevents background traffic from displacing either."
+  data-zh="每張 GPU 的本地排程器維護三條佇列 — 可行 SLO 請求、盡力而為溢出、背景 — 並依此順序自佇列中組合每次前向批次，受剖析所得之每階層吞吐上限所限。請求完成時，本地排程器通知全域派遣器以還原可用頻寬計數。此組合使可行請求保留於其首選後端、以剩餘容量機會式服務盡力而為請求、並防止背景流量擠占其餘兩者。"
+  >The local scheduler at each GPU maintains three queues — feasible SLO requests, best-effort spill, and background — and assembles each forward batch by drawing from the queues in that order, subject to the per-tier throughput bound derived from the profile. When a request completes, the local scheduler notifies the global dispatcher so that the available-bandwidth counter is restored. The combination keeps feasible requests in their preferred backend, makes opportunistic use of residual capacity for best-effort, and prevents background traffic from displacing either.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x6.png"
+       alt="Figure 8: Nitsum request scheduling and dynamic serving configuration">
+  <div class="fig-cap"><strong>Figure 8 (from paper):</strong> <span class="i18n" data-en="The two-level scheduler. The global dispatcher tracks per-GPU SLO-compliant available bandwidth and classifies arrivals into feasible, best-effort, or background. The local scheduler on each GPU consumes its three queues in priority order, bounded by the profile's per-tier throughput cap." data-zh="兩層排程器。全域派遣器追蹤每 GPU 之 SLO 合規可用頻寬，並將到達請求分類為可行、盡力而為或背景。每張 GPU 的本地排程器依優先序消耗其三條佇列，並受剖析所得每階層吞吐上限所限。">The two-level scheduler. The global dispatcher tracks per-GPU SLO-compliant available bandwidth and classifies arrivals into feasible, best-effort, or background. The local scheduler on each GPU consumes its three queues in priority order, bounded by the profile's per-tier throughput cap.</span></div>
+</div>
+
+</section>
+
+<section id="results">
+<h2><span class="i18n" data-en="12. End-to-end results" data-zh="12. 端對端結果">12. End-to-end results</span></h2>
+
+<p><span class="i18n"
+  data-en="The end-to-end evaluation runs Llama-3.1-8B on 4 and 8 A100s and Qwen-14B on 4 and 8 H100s, against Azure production traces and ServeGen, with the per-configuration SLOs reproduced from the paper's Table 1. The five comparison points are Llumnix, Chiron, SGLang with prefill-decode disaggregation, vanilla SGLang, and Split — the last being a strict-vs-loose cluster partition where each side runs the static TP that is best for its tier in isolation. The headline result is that goodput remains monotonically increasing with offered RPS only for Nitsum; every baseline collapses once the offered load exceeds the bandwidth its static configuration can deliver SLO-compliantly."
+  data-zh="端對端評估於 4 與 8 A100 上執行 Llama-3.1-8B、於 4 與 8 H100 上執行 Qwen-14B，並針對 Azure 生產 trace 與 ServeGen 進行，逐配置之 SLO 依本文 Table 1。五個比較點為：Llumnix、Chiron、附 prefill/decode 解耦合之 SGLang、vanilla SGLang、以及 Split（嚴格對寬鬆叢集切分，各側以其階層之孤立最佳靜態 TP 運行）。標題結果為：僅有 Nitsum 的 goodput 隨提供 RPS 單調上升；每個基準於提供負載超出其靜態配置在 SLO 合規下能交付的頻寬時即崩落。"
+  >The end-to-end evaluation runs Llama-3.1-8B on 4 and 8 A100s and Qwen-14B on 4 and 8 H100s, against Azure production traces and ServeGen, with the per-configuration SLOs reproduced from the paper's Table 1. The five comparison points are Llumnix, Chiron, SGLang with prefill-decode disaggregation, vanilla SGLang, and Split — the last being a strict-vs-loose cluster partition where each side runs the static TP that is best for its tier in isolation. The headline result is that goodput remains monotonically increasing with offered RPS only for Nitsum; every baseline collapses once the offered load exceeds the bandwidth its static configuration can deliver SLO-compliantly.</span></p>
+
+<div class="paper-fig">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/e2e_results_nitsum.png"
+       alt="Figure 9: end-to-end goodput on Azure and ServeGen workloads across baselines">
+  <div class="fig-cap"><strong>Figure 9 (from paper):</strong> <span class="i18n" data-en="End-to-end goodput (requests satisfying both TTFT and TPOT SLOs per second) versus offered RPS across A100 and H100 clusters of 4 and 8 GPUs, Llama-3.1-8B and Qwen-14B, and Azure and ServeGen workloads. Nitsum is the only system whose goodput continues to track offered load past the point where the strongest baseline saturates." data-zh="端對端 goodput（每秒同時達標 TTFT 與 TPOT 之請求數）對提供 RPS 之關係，橫跨 4 與 8 GPU 的 A100 與 H100 叢集、Llama-3.1-8B 與 Qwen-14B、Azure 與 ServeGen 工作負載。Nitsum 為唯一在最強基準飽和點以後 goodput 仍持續追隨提供負載之系統。">End-to-end goodput (requests satisfying both TTFT and TPOT SLOs per second) versus offered RPS across A100 and H100 clusters of 4 and 8 GPUs, Llama-3.1-8B and Qwen-14B, and Azure and ServeGen workloads. Nitsum is the only system whose goodput continues to track offered load past the point where the strongest baseline saturates.</span></div>
+</div>
+
+<div class="paper-fig">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/ttft_tpot_plot.png"
+       alt="Figure 10: median TTFT and TPOT under load">
+  <div class="fig-cap"><strong>Figure 10 (from paper):</strong> <span class="i18n" data-en="Median TTFT and TPOT versus offered RPS. Nitsum's medians stay within both SLOs across the tested load range; baselines violate one or both as RPS rises." data-zh="中位 TTFT 與 TPOT 對提供 RPS 之關係。Nitsum 之中位數於所測負載範圍內皆守住兩項 SLO；基準於 RPS 上升時違反其一或兩者。">Median TTFT and TPOT versus offered RPS. Nitsum's medians stay within both SLOs across the tested load range; baselines violate one or both as RPS rises.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="A separate scalability experiment varies cluster size from 4 to 64 GPUs at fixed per-GPU offered load. Nitsum's goodput scales near-linearly with GPU count, while each baseline requires 1.5x to 4x more GPUs to match Nitsum's goodput at any given operating point. The result is consistent across the three workload pairs measured, indicating that the joint TP-and-partition policy is the source of the efficiency rather than any artifact of a particular cluster size."
+  data-zh="另一項擴展性實驗於每 GPU 固定提供負載下、將叢集規模自 4 變動至 64 GPU。Nitsum 的 goodput 隨 GPU 數近線性擴展，而每個基準在任一給定操作點上須以 1.5 至 4 倍 GPU 數方能追平 Nitsum 之 goodput。結果於所測三組工作負載對中一致，顯示效率源自 TP 與切分之聯合策略本身，而非源自任何特定叢集規模之偶然性。"
+  >A separate scalability experiment varies cluster size from 4 to 64 GPUs at fixed per-GPU offered load. Nitsum's goodput scales near-linearly with GPU count, while each baseline requires 1.5x to 4x more GPUs to match Nitsum's goodput at any given operating point. The result is consistent across the three workload pairs measured, indicating that the joint TP-and-partition policy is the source of the efficiency rather than any artifact of a particular cluster size.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/mustin_gpu_scaling.png"
+       alt="Figure 15: goodput vs GPU count from 4 to 64 GPUs">
+  <div class="fig-cap"><strong>Figure 15 (from paper):</strong> <span class="i18n" data-en="Goodput as cluster size grows from 4 to 64 GPUs. Nitsum scales near-linearly; baselines require 1.5-4x more GPUs to reach Nitsum's goodput at the same operating point." data-zh="叢集自 4 GPU 擴至 64 GPU 時的 goodput。Nitsum 近線性擴展；基準須以 1.5-4 倍 GPU 數方能於同一操作點達到 Nitsum 之 goodput。">Goodput as cluster size grows from 4 to 64 GPUs. Nitsum scales near-linearly; baselines require 1.5-4x more GPUs to reach Nitsum's goodput at the same operating point.</span></div>
+</div>
+
+</section>
+
+<section id="ablation">
+<h2><span class="i18n" data-en="13. Ablation: which contributions are load-bearing" data-zh="13. Ablation：哪些貢獻具有承重作用">13. Ablation: which contributions are load-bearing</span></h2>
+
+<p><span class="i18n"
+  data-en="The ablation runs Qwen-14B on 8 H100s at 70 RPS and incrementally adds components starting from vanilla SGLang. The point of the experiment is not to show that each component helps a little; it is to show that two components are individually nullifying — adding them in isolation drops goodput to zero — and become positive only when the rest of the system is also present."
+  data-zh="Ablation 於 8 H100 上以 70 RPS 執行 Qwen-14B，自 vanilla SGLang 起逐步加入元件。實驗重點並非證明各元件略有助益，而在於顯示其中兩項元件單獨加入時為零化的 — 將其孤立加入會使 goodput 降至零 — 唯有其餘系統亦同時存在時方轉為正向。"
+  >The ablation runs Qwen-14B on 8 H100s at 70 RPS and incrementally adds components starting from vanilla SGLang. The point of the experiment is not to show that each component helps a little; it is to show that two components are individually nullifying — adding them in isolation drops goodput to zero — and become positive only when the rest of the system is also present.</span></p>
+
+<table>
+  <thead>
+    <tr>
+      <th><span class="i18n" data-en="Configuration" data-zh="配置">Configuration</span></th>
+      <th><span class="i18n" data-en="Goodput (req/s)" data-zh="Goodput（req/s）">Goodput (req/s)</span></th>
+      <th><span class="i18n" data-en="Reading" data-zh="解讀">Reading</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="i18n" data-en="Vanilla SGLang, static TP=1" data-zh="vanilla SGLang，靜態 TP=1">Vanilla SGLang, static TP=1</span></td>
+      <td>13.2</td>
+      <td><span class="i18n" data-en="SLO-agnostic baseline." data-zh="不感知 SLO 的基準。">SLO-agnostic baseline.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+ Prefill/decode disaggregation" data-zh="+ prefill/decode 解耦合">+ Prefill/decode disaggregation</span></td>
+      <td>0.0</td>
+      <td><span class="i18n" data-en="Disaggregation under a still-static configuration is worse than co-location at this mix — the wrong split starves one tier completely." data-zh="於仍為靜態的配置下，解耦合於此工作組成上反不如共置 — 錯誤的切分使其中一階層完全資源饑餓。">Disaggregation under a still-static configuration is worse than co-location at this mix — the wrong split starves one tier completely.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+ SLO-aware batch rules and best static TP" data-zh="+ SLO 感知批次規則與最佳靜態 TP">+ SLO-aware batch rules and best static TP</span></td>
+      <td>16.7</td>
+      <td><span class="i18n" data-en="A single chosen TP, even with SLO-aware batching, recovers only a modest fraction of the available goodput." data-zh="即便搭配 SLO 感知批次，單一選定 TP 僅能回收可用 goodput 的有限比例。">A single chosen TP, even with SLO-aware batching, recovers only a modest fraction of the available goodput.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+ Per-tier partitioning" data-zh="+ 依階層切分">+ Per-tier partitioning</span></td>
+      <td>17.2</td>
+      <td><span class="i18n" data-en="Marginal improvement; isolation removes interference but reintroduces the static-partition starvation problem of §4.1." data-zh="改善有限；隔離雖消除干擾，卻重新引入 §4.1 之靜態切分饑餓問題。">Marginal improvement; isolation removes interference but reintroduces the static-partition starvation problem of §4.1.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+ SLO-aware scheduler" data-zh="+ SLO 感知排程器">+ SLO-aware scheduler</span></td>
+      <td>28.0</td>
+      <td><span class="i18n" data-en="The dispatcher's bandwidth-tracking and three-queue local scheduler are responsible for the largest gain that can be obtained without changing execution configuration." data-zh="派遣器的頻寬追蹤與三條佇列本地排程器，貢獻了在不改變執行配置之下所能取得的最大增益。">The dispatcher's bandwidth-tracking and three-queue local scheduler are responsible for the largest gain that can be obtained without changing execution configuration.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="+ Naive dynamic TP (per-TP weight copy + cudaMemcpyAsync)" data-zh="+ Naive 動態 TP（每 TP 一份權重 + cudaMemcpyAsync）">+ Naive dynamic TP (per-TP weight copy + cudaMemcpyAsync)</span></td>
+      <td>0.0</td>
+      <td><span class="i18n" data-en="Dynamic TP without the fast mechanisms is worse than no dynamic TP — every switch stalls service for longer than the SLO permits, and the run-time KV-cache pressure of multiple weight copies displaces useful work." data-zh="無快速機制的動態 TP 較無動態 TP 更差 — 每次切換造成服務中斷時長皆逾 SLO 容許，且多份權重副本帶來的執行期 KV 壓力擠占有用工作。">Dynamic TP without the fast mechanisms is worse than no dynamic TP — every switch stalls service for longer than the SLO permits, and the run-time KV-cache pressure of multiple weight copies displaces useful work.</span></td>
+    </tr>
+    <tr>
+      <td><strong><span class="i18n" data-en="Full Nitsum" data-zh="完整 Nitsum">Full Nitsum</span></strong></td>
+      <td><strong>33.3</strong></td>
+      <td><span class="i18n" data-en="Efficient TP switching converts the dynamic-TP option from a regression into a 1.4x lift over the SLO-aware-scheduler line." data-zh="高效 TP 切換將動態 TP 由退化轉為相對 SLO 感知排程器一線的 1.4 倍提升。">Efficient TP switching converts the dynamic-TP option from a regression into a 1.4x lift over the SLO-aware-scheduler line.</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/x7.png"
+       alt="Figure 12: ablation study from vanilla SGLang to full Nitsum">
+  <div class="fig-cap"><strong>Figure 12 (from paper):</strong> <span class="i18n" data-en="Goodput as features are progressively added from vanilla SGLang to full Nitsum on Qwen-14B with 8 H100s at 70 RPS. Two features (prefill/decode disaggregation without dynamic configuration, and naive dynamic TP) reduce goodput to zero in isolation." data-zh="於 8 H100、70 RPS 下執行 Qwen-14B，自 vanilla SGLang 逐步加入特徵至完整 Nitsum 的 goodput。兩項特徵（無動態配置之 prefill/decode 解耦合、以及 naive 動態 TP）孤立加入時將 goodput 降至零。">Goodput as features are progressively added from vanilla SGLang to full Nitsum on Qwen-14B with 8 H100s at 70 RPS. Two features (prefill/decode disaggregation without dynamic configuration, and naive dynamic TP) reduce goodput to zero in isolation.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="The two zero-goodput rows are the part of the ablation that carries the paper's argument. Prefill/decode disaggregation is widely regarded as a near-universal serving win, and yet without dynamic reconfiguration it is actively harmful here, because the split has to be chosen at deployment and cannot track the workload. Likewise, dynamic TP is widely regarded as too expensive to consider at runtime, and the naive implementation confirms that suspicion — but with weight reuse and pipelined KV migration in place, the same dynamic-TP capability is responsible for the last 1.4x of end-to-end gain. The conclusion the paper draws is that the fast mechanisms are not an optimization on top of the policy; they are the precondition that makes the policy worth running."
+  data-zh="兩列零 goodput 結果是 ablation 中承載本文論證的部分。prefill/decode 解耦合普遍被視為近乎萬靈的 serving 收益，但於此處未配以動態重配置時反為有害，因為其切分須於部署時擇定、無法追隨工作負載。同理，動態 TP 普遍被視為執行期成本過高而不予考慮，naive 實作確認此一懷疑 — 但於權重重用與管線化 KV 遷移就位後，同一動態 TP 能力即貢獻了端對端最後 1.4 倍之增益。本文據此得出之結論為：快速機制並非建於策略之上的優化，而是使該策略本身值得運行的先決條件。"
+  >The two zero-goodput rows are the part of the ablation that carries the paper's argument. Prefill/decode disaggregation is widely regarded as a near-universal serving win, and yet without dynamic reconfiguration it is actively harmful here, because the split has to be chosen at deployment and cannot track the workload. Likewise, dynamic TP is widely regarded as too expensive to consider at runtime, and the naive implementation confirms that suspicion — but with weight reuse and pipelined KV migration in place, the same dynamic-TP capability is responsible for the last 1.4x of end-to-end gain. The conclusion the paper draws is that the fast mechanisms are not an optimization on top of the policy; they are the precondition that makes the policy worth running.</span></p>
+
+</section>
+
+<section id="sensitivity">
+<h2><span class="i18n" data-en="14. Sensitivity and operating range" data-zh="14. 敏感度與運行範圍">14. Sensitivity and operating range</span></h2>
+
+<p><span class="i18n"
+  data-en="Two sensitivity experiments calibrate the regime in which the system is worth running. The first sweeps an SLO-scale factor that uniformly tightens or relaxes the targets in Table 1. The system's advantage over the best static baseline is largest at the moderate end of the range — the regime that matches production traces — and shrinks as SLOs relax, because once the targets are loose enough that the prefill stage's worst-case latency already fits inside the TTFT bound, dynamic TP has nothing left to optimize. At the strict end of the range, the absolute goodput of every system falls because the cluster is too small to honor the targets at the offered load, but the relative ordering is preserved."
+  data-zh="兩項敏感度實驗校準系統值得運行的範圍。其一掃描一個 SLO 縮放因子，使 Table 1 之目標同步收緊或放鬆。系統相對最佳靜態基準之優勢於範圍中段最大 — 即與生產 trace 相符之區段 — 並隨 SLO 放鬆而縮減，因為當目標足夠寬鬆，使 prefill 階段最壞情況延遲已落入 TTFT 界限內時，動態 TP 已無可優化之餘地。範圍嚴格端各系統絕對 goodput 皆下降，因為叢集規模相對提供負載已不足以守住目標，但相對排名仍維持。"
+  >Two sensitivity experiments calibrate the regime in which the system is worth running. The first sweeps an SLO-scale factor that uniformly tightens or relaxes the targets in Table 1. The system's advantage over the best static baseline is largest at the moderate end of the range — the regime that matches production traces — and shrinks as SLOs relax, because once the targets are loose enough that the prefill stage's worst-case latency already fits inside the TTFT bound, dynamic TP has nothing left to optimize. At the strict end of the range, the absolute goodput of every system falls because the cluster is too small to honor the targets at the offered load, but the relative ordering is preserved.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/slo_scale_goodput.png"
+       alt="Figure 13: goodput vs SLO scale factor">
+  <div class="fig-cap"><strong>Figure 13 (from paper):</strong> <span class="i18n" data-en="Goodput against an SLO-scale factor that uniformly tightens (factor &lt; 1) or relaxes (factor &gt; 1) the Table 1 targets. Nitsum's lift is largest at moderate SLO levels and shrinks as targets relax." data-zh="goodput 對 SLO 縮放因子之關係，因子 &lt; 1 收緊、&gt; 1 放鬆 Table 1 之目標。Nitsum 之提升於中等 SLO 水準時最大、目標放鬆時收斂。">Goodput against an SLO-scale factor that uniformly tightens (factor &lt; 1) or relaxes (factor &gt; 1) the Table 1 targets. Nitsum's lift is largest at moderate SLO levels and shrinks as targets relax.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="The second sensitivity experiment extends the workload to three SLO tiers — interactive, deadline, and a new relaxed tier — running concurrently on the same ServeGen-derived stream. Split, the static-partition baseline, holds up reasonably well at high load because its boundaries happen to match the steady-state mix, but wastes capacity in any window whose mix departs from steady state. Nitsum dominates across the entire load range because it can re-balance among the three tiers each second."
+  data-zh="第二項敏感度實驗將工作負載延伸至三個 SLO 階層 — 互動、截止時限、以及新增之寬鬆階層 — 於同一條 ServeGen 衍生流量上並行。Split（靜態切分基準）於高負載下尚能勉強支撐，因其分界恰好對應穩態組成，但於任何組成偏離穩態之窗格中皆浪費容量。Nitsum 於整個負載範圍內主導，因其可每秒於三個階層間重新平衡。"
+  >The second sensitivity experiment extends the workload to three SLO tiers — interactive, deadline, and a new relaxed tier — running concurrently on the same ServeGen-derived stream. Split, the static-partition baseline, holds up reasonably well at high load because its boundaries happen to match the steady-state mix, but wastes capacity in any window whose mix departs from steady state. Nitsum dominates across the entire load range because it can re-balance among the three tiers each second.</span></p>
+
+<div class="paper-fig fig-sm">
+  <img src="https://arxiv.org/html/2605.05467v1/Figures/micro_multi_slo_tier_relaxed_alibaba.png"
+       alt="Figure 14: three-tier serving experiment on ServeGen">
+  <div class="fig-cap"><strong>Figure 14 (from paper):</strong> <span class="i18n" data-en="Three-tier experiment (interactive, deadline, and a new relaxed tier) on ServeGen. Split holds up at high load when its static boundaries match the steady-state mix; Nitsum dominates across the full load range by re-balancing each second." data-zh="於 ServeGen 上的三階層實驗（互動、截止時限與新寬鬆階層）。Split 於穩態組成與靜態分界相符的高負載下尚可支撐；Nitsum 於整個負載範圍內主導，因其每秒重新平衡。">Three-tier experiment (interactive, deadline, and a new relaxed tier) on ServeGen. Split holds up at high load when its static boundaries match the steady-state mix; Nitsum dominates across the full load range by re-balancing each second.</span></div>
+</div>
+
+<p><span class="i18n"
+  data-en="A separate microbenchmark on the scheduler implementation itself reports 16,100 requests per second of dispatch throughput in a single-process Rust service and a 2.49 ms average reconfiguration-planning time for 128 GPUs and four tiers. Because the candidate space is bounded by the cardinality of TP levels and the number of GPUs per node, this planning time does not grow appreciably with cluster size."
+  data-zh="另一項針對排程器實作本身的微基準回報：單進程 Rust 服務每秒派遣 16,100 個請求；於 128 GPU 與 4 階層下重配置規劃平均時間為 2.49 毫秒。由於候選空間以 TP 層級基數與節點 GPU 數為界，該規劃時間並不隨叢集規模顯著增長。"
+  >A separate microbenchmark on the scheduler implementation itself reports 16,100 requests per second of dispatch throughput in a single-process Rust service and a 2.49 ms average reconfiguration-planning time for 128 GPUs and four tiers. Because the candidate space is bounded by the cardinality of TP levels and the number of GPUs per node, this planning time does not grow appreciably with cluster size.</span></p>
+
+</section>
+
+<section id="limits">
+<h2><span class="i18n" data-en="15. Limitations and what remains open" data-zh="15. 限制與尚未解決之問題">15. Limitations and what remains open</span></h2>
+
+<div class="grid-2">
+  <div class="card">
+    <h4><span class="i18n" data-en="Workload-dependent benefit" data-zh="效益取決於工作負載">Workload-dependent benefit</span></h4>
+    <p><span class="i18n"
+      data-en="The system's lift is largest when the workload's optimal configuration drifts within minutes — multi-tier traffic mixes, ServeGen, Azure-like traces. On a stationary workload that the operator can already characterize at deployment, dynamic TP has little to offer and the memory overhead of the warm processes is uncompensated."
+      data-zh="系統之提升於工作負載最佳配置以分鐘級漂移時最大 — 多階層流量組成、ServeGen、類 Azure trace。對於運營方可於部署時即刻劃之穩態工作負載而言，動態 TP 所能貢獻者甚少，保溫進程的記憶體開銷亦得不到補償。"
+      >The system's lift is largest when the workload's optimal configuration drifts within minutes — multi-tier traffic mixes, ServeGen, Azure-like traces. On a stationary workload that the operator can already characterize at deployment, dynamic TP has little to offer and the memory overhead of the warm processes is uncompensated.</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Memory overhead" data-zh="記憶體額外負擔">Memory overhead</span></h4>
+    <p><span class="i18n"
+      data-en="Each GPU holds one full unsharded weight copy plus a warm process per candidate TP level. The weight footprint is bounded but the warm-process resident set adds a few hundred megabytes per level. The system trades this memory for the elimination of weight-redistribution and process-startup time on every switch."
+      data-zh="每張 GPU 持有一份完整未分片權重副本，加上每個候選 TP 層級各一個保溫進程。權重佔用有上界，但每層保溫進程駐留集另增數百 MB。系統以此記憶體換取每次切換時權重重分佈與進程啟動時間之消除。"
+      >Each GPU holds one full unsharded weight copy plus a warm process per candidate TP level. The weight footprint is bounded but the warm-process resident set adds a few hundred megabytes per level. The system trades this memory for the elimination of weight-redistribution and process-startup time on every switch.</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Forecast dependence" data-zh="對預測之依賴">Forecast dependence</span></h4>
+    <p><span class="i18n"
+      data-en="The reconfiguration policy uses a recent-arrival estimate of rps per tier as input. Workloads whose arrival rate is bursty on time scales shorter than the 1 s window can cause the policy to react to a still-developing burst; the paper reports robustness across a 0.5-2 s window range but the limit is fundamental — a sub-second control loop cannot react to sub-millisecond bursts."
+      data-zh="重配置策略以最近到達估計之每階層 rps 為輸入。到達率於短於 1 秒尺度上具突發性的工作負載，可能使策略對仍在形成中的突發做出反應；本文於 0.5-2 秒窗格範圍內回報穩健性，但限制屬基本性的 — 次秒級控制迴路無法回應毫秒級以下之突發。"
+      >The reconfiguration policy uses a recent-arrival estimate of rps per tier as input. Workloads whose arrival rate is bursty on time scales shorter than the 1 s window can cause the policy to react to a still-developing burst; the paper reports robustness across a 0.5-2 s window range but the limit is fundamental — a sub-second control loop cannot react to sub-millisecond bursts.</span></p>
+  </div>
+  <div class="card">
+    <h4><span class="i18n" data-en="Scope of the control surface" data-zh="控制面之範圍">Scope of the control surface</span></h4>
+    <p><span class="i18n"
+      data-en="The action space considered is the tensor-parallel degree and the prefill/decode GPU split. The paper notes that the same approach in principle extends to pipeline parallelism, MPS, and other execution knobs, but does not yet implement those; whether they can be made fast enough to participate in a sub-second control loop is an open engineering question."
+      data-zh="所考慮之動作空間為張量並行度與 prefill/decode GPU 切分。本文指出原則上同一方法可延伸至管線並行、MPS 與其他執行旋鈕，但尚未實作之；其能否被加速至足以參與次秒級控制迴路為一未決工程問題。"
+      >The action space considered is the tensor-parallel degree and the prefill/decode GPU split. The paper notes that the same approach in principle extends to pipeline parallelism, MPS, and other execution knobs, but does not yet implement those; whether they can be made fast enough to participate in a sub-second control loop is an open engineering question.</span></p>
+  </div>
+</div>
+
+<div class="warn">
+  <strong><span class="i18n" data-en="Open-source status." data-zh="開源狀態。">Open-source status.</span></strong>
+  <span class="i18n" data-en=" The paper states the implementation will be released, but no code URL was attached to the v1 submission. Anyone wishing to reproduce the headline numbers will need either the eventual release or a reimplementation of the warm-process pre-launch, the kernel-side TP slice selector, and the coalesced pipelined KV migration on top of SGLang." data-zh=" 本文指出實作將開源，但 v1 投稿並未附程式碼連結。欲重現標題數字者，須等待後續釋出，或於 SGLang 之上自行重新實作保溫進程預啟動、kernel 側 TP 切片選擇器、與聚合管線化 KV 遷移。"> The paper states the implementation will be released, but no code URL was attached to the v1 submission. Anyone wishing to reproduce the headline numbers will need either the eventual release or a reimplementation of the warm-process pre-launch, the kernel-side TP slice selector, and the coalesced pipelined KV migration on top of SGLang.</span>
+</div>
+
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Nitsum: Serving Tiered LLM Requests with Adaptive Tensor Parallelism. Srivatsa, He, Guo, Li, Zhang (UCSD &amp; GenseeAI). arXiv:2605.05467, May 2026." data-zh="Nitsum：以自適應張量並行支援多 SLO 階層的 LLM 服務。Srivatsa、He、Guo、Li、Zhang（UCSD 與 GenseeAI）。arXiv:2605.05467，2026 年 5 月。">Nitsum: Serving Tiered LLM Requests with Adaptive Tensor Parallelism. Srivatsa, He, Guo, Li, Zhang (UCSD &amp; GenseeAI). arXiv:2605.05467, May 2026.</span></p>
+  <p><span class="i18n" data-en="Page generated 2026-05-22." data-zh="頁面產生日期：2026-05-22。">Page generated 2026-05-22.</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$',  right: '$',  display: false}
+      ]
+    });
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+
+</body>
+</html>
