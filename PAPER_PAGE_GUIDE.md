@@ -81,8 +81,12 @@ papers/<paper-slug>/其他補充頁面.html  ← 可選
   <footer>...</footer>
 
   <!-- 5. i18n 切換腳本 -->
+  <!-- IMPORTANT: setLang MUST re-run KaTeX after swapping innerHTML. Switching language replaces
+       the element's HTML with the other language's raw `$...$` text; without the renderMathInElement
+       call at the end, every inline formula inside an .i18n span renders as raw LaTeX after any toggle.
+       (Only needed if the page loads KaTeX; harmless otherwise — guarded by `if (window.renderMathInElement)`.) -->
   <script>
-    function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l)}
+    function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}}
     (function(){var l=localStorage.getItem('lang');if(l)setLang(l)})();
   </script>
 </body>
