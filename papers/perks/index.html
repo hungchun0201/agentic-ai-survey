@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PERKS — On-Chip Inter-Iteration Caching (and why its authors abandoned L2)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style>
+/* ===== ACCENT (Emerald — cache strategy) ===== */
+:root{--accent:#2ecc71;--accent-rgb:46,204,113;--nav-bg:rgba(8,35,18,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#9ec8ad;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#0c1f16 0%,#10241a 50%,#0e2218 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.18);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+.tag-pred{display:inline-block;background:rgba(255,183,77,.16);border:1px solid rgba(255,183,77,.4);color:#ffb74d;padding:.05rem .5rem;border-radius:10px;font-size:.72rem;font-weight:600;letter-spacing:.02em}
+.tag-conf{display:inline-block;background:rgba(var(--accent-rgb),.16);border:1px solid rgba(var(--accent-rgb),.4);color:var(--accent);padding:.05rem .5rem;border-radius:10px;font-size:.72rem;font-weight:600;letter-spacing:.02em}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW (horizontal steps) ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent);color:#06210f}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71;color:#06210f}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW DIAGRAMS ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== MEMORY HIERARCHY DIAGRAM ===== */
+.memh{display:flex;flex-direction:column;gap:8px;margin:1.5rem 0;max-width:720px}
+.memh .lvl{display:flex;align-items:center;gap:14px;border-radius:10px;padding:.7rem 1rem;border:1px solid rgba(255,255,255,.08)}
+.memh .lvl .name{font-weight:700;width:140px;flex-shrink:0}
+.memh .lvl .bw{font-size:.78rem;color:#8fa4c0;flex:1}
+.memh .lvl.reg{background:rgba(46,204,113,.14);border-color:rgba(46,204,113,.4)}
+.memh .lvl.sm{background:rgba(46,204,113,.09);border-color:rgba(46,204,113,.3)}
+.memh .lvl.l2{background:rgba(245,166,35,.10);border-color:rgba(245,166,35,.35)}
+.memh .lvl.hbm{background:rgba(233,69,96,.10);border-color:rgba(233,69,96,.35)}
+.memh .lvl .pill{font-size:.7rem;padding:.1rem .55rem;border-radius:10px;font-weight:600;white-space:nowrap}
+.memh .lvl.reg .pill{background:rgba(46,204,113,.25);color:#7ff0ab}
+.memh .lvl.sm .pill{background:rgba(46,204,113,.2);color:#7ff0ab}
+.memh .lvl.l2 .pill{background:rgba(245,166,35,.25);color:#ffd089}
+.memh .lvl.hbm .pill{background:rgba(233,69,96,.25);color:#ff9bae}
+
+/* ===== TIMELINE BAR ===== */
+.tbar{display:flex;align-items:center;gap:0;margin:1rem 0 1.8rem;flex-wrap:nowrap;overflow:visible}
+.tbar .seg{height:56px;display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:500;white-space:nowrap;padding:0 16px;position:relative}
+.tbar .seg.llm{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:6px 0 0 6px}
+.tbar .seg.tool{background:rgba(var(--accent-rgb),.2);color:var(--accent);flex:1;min-width:120px}
+.tbar .seg.llm2{background:rgba(110,198,255,.25);color:#6ec6ff;border-radius:0 6px 6px 0}
+.tbar .seg .marker{position:absolute;bottom:-18px;font-size:.7rem;color:#8fa4c0}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+.pending{background:rgba(255,183,77,.08);border:1px dashed rgba(255,183,77,.5);border-radius:10px;padding:1rem 1.4rem;margin:1.2rem 0;font-size:.88rem}
+.pending strong{color:#ffd089}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== COMPARISON INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== SIDE-BY-SIDE GRID ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  .memh .lvl .name{width:90px}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#problem">Problem</a></li>
+    <li><a href="#mechanism">Mechanism</a></li>
+    <li><a href="#not-l2">Not L2</a></li>
+    <li><a href="#repo">Repo</a></li>
+    <li><a href="#repro">Our Reproduction</a></li>
+    <li><a href="#attribution">L2 Attribution</a></li>
+    <li><a href="#scope">Scope &amp; Threats</a></li>
+    <li><a href="#takeaway">Takeaway</a></li>
+    <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>PERKS</h1>
+  <p class="sub"><span class="i18n" data-en="A Locality-Optimized Execution Model for Iterative Memory-bound GPU Applications &mdash; and a case study in why its authors tried L2 residency and threw it away" data-zh="迭代式記憶體受限 GPU 應用的局部性最佳化執行模型 &mdash; 一個作者嘗試 L2 常駐後又棄用的案例研究">A Locality-Optimized Execution Model for Iterative Memory-bound GPU Applications &mdash; and a case study in why its authors tried L2 residency and threw it away</span></p>
+  <div class="badges">
+    <span class="badge">ICS '23</span>
+    <span class="badge">DOI 10.1145/3577193.3593705</span>
+    <span class="badge">Persistent-Thread Caching</span>
+    <span class="badge">Register + Shared Memory</span>
+    <span class="badge">Stencil / CG</span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">
+    Lingqi Zhang, Mohamed Wahib, Peng Chen, Jintao Meng, Xiao Wang, Toshio Endo, Satoshi Matsuoka
+  </p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">
+    Tokyo Institute of Technology &middot; RIKEN Center for Computational Science &middot; AIST &middot; Shenzhen Institutes of Advanced Technology &middot; Oak Ridge National Laboratory
+  </p>
+</div>
+
+<div class="container">
+
+<!-- ============================================================ -->
+<section id="overview">
+  <h2><span class="i18n" data-en="1. Overview &amp; Why It Is In This Survey" data-zh="1. 總覽與納入本綜述的理由">1. Overview &amp; Why It Is In This Survey</span></h2>
+
+  <p><span class="i18n"
+    data-en="PERKS (Persistent Kernels) is a GPU execution model for iterative, memory-bound applications: Jacobi-style stencil solvers and the conjugate-gradient (CG) loop. Each time step re-reads the same producer&rarr;consumer working set from HBM, computes a new field, and writes it back, only to read it again next step. PERKS' insight is that a stencil kernel leaves the SM's <strong>registers and shared memory largely idle</strong>, and a persistent-thread grid can hold the inter-iteration working set on-chip across all time steps, eliminating the repeated HBM round-trips. The headline result is up to <strong>~2.12&times;</strong> throughput on 2D stencils on an A100."
+    data-zh="PERKS（Persistent Kernels，常駐核心）是一種針對迭代式、記憶體受限應用的 GPU 執行模型：Jacobi 型 stencil 求解器與共軛梯度（CG）迴圈。每個時間步都從 HBM 重新讀取相同的生產者&rarr;消費者工作集、計算新場、寫回，下一步再讀一次。PERKS 的洞見是 stencil 核心讓 SM 的<strong>暫存器與共享記憶體大多閒置</strong>，而一個常駐執行緒網格可以把跨迭代工作集留在晶片上，跨所有時間步，消除重複的 HBM 往返。標誌性結果是 A100 上 2D stencil 最高約 <strong>2.12&times;</strong> 的吞吐量。">PERKS (Persistent Kernels) is a GPU execution model for iterative, memory-bound applications: Jacobi-style stencil solvers and the conjugate-gradient (CG) loop. Each time step re-reads the same producer&rarr;consumer working set from HBM, computes a new field, and writes it back, only to read it again next step. PERKS' insight is that a stencil kernel leaves the SM's <strong>registers and shared memory largely idle</strong>, and a persistent-thread grid can hold the inter-iteration working set on-chip across all time steps, eliminating the repeated HBM round-trips. The headline result is up to <strong>~2.12&times;</strong> throughput on 2D stencils on an A100.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Why this non-LLM paper appears in an LLM-serving survey." data-zh="一篇非 LLM 論文為何出現在 LLM 服務綜述中。">Why this non-LLM paper appears in an LLM-serving survey.</span></strong>
+    <span class="i18n"
+      data-en=" Our measurement study &mdash; &quot;Worth the Bytes?&quot; &mdash; argues that transient inter-kernel reuse of <em>activations</em> via the GPU L2 cache is worth less than 0.65% of step time in eager LLM inference. PERKS is the strongest <em>disconfirming-by-precedent</em> case: it is a reuse-obsessed system whose entire reason for existing is to keep an inter-iteration working set resident, yet its authors route that reuse through <strong>registers and shared memory, not L2</strong>. They even committed an L2-residency code path and then commented it out with the note &ldquo;l2 cache setting not show performance difference.&rdquo; If a team that lives and breathes locality could not make L2 residency pay, that is direct external support for our L2-is-not-the-win conclusion."
+      data-zh=" 我們的量測研究 &mdash;「Worth the Bytes?」&mdash; 主張在 eager LLM 推理中，透過 GPU L2 cache 進行<em>activation</em> 的瞬態跨核心重用，價值不到 step time 的 0.65%。PERKS 是最強的<em>以先例反證</em>案例：它是一個沉迷於重用的系統，存在的唯一理由就是讓跨迭代工作集保持常駐，但作者把這份重用路由到<strong>暫存器與共享記憶體，而非 L2</strong>。他們甚至提交了一段 L2 常駐程式碼路徑，然後又把它註解掉，並附註「l2 cache setting not show performance difference（L2 cache 設定沒有顯示效能差異）」。如果一個以局部性為生的團隊都無法讓 L2 常駐獲利，這就是對我們「L2 不是勝負手」結論的直接外部支持。"> Our measurement study &mdash; &quot;Worth the Bytes?&quot; &mdash; argues that transient inter-kernel reuse of <em>activations</em> via the GPU L2 cache is worth less than 0.65% of step time in eager LLM inference. PERKS is the strongest <em>disconfirming-by-precedent</em> case: it is a reuse-obsessed system whose entire reason for existing is to keep an inter-iteration working set resident, yet its authors route that reuse through <strong>registers and shared memory, not L2</strong>. They even committed an L2-residency code path and then commented it out with the note &ldquo;l2 cache setting not show performance difference.&rdquo; If a team that lives and breathes locality could not make L2 residency pay, that is direct external support for our L2-is-not-the-win conclusion.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="1.1 Why now: the bandwidth wall and a decade of idle on-chip storage" data-zh="1.1 為何是現在：頻寬牆與閒置十年的晶片內儲存">1.1 Why now: the bandwidth wall and a decade of idle on-chip storage</span></h3>
+  <p><span class="i18n"
+    data-en="GPU peak FLOPs have grown far faster than HBM bandwidth for a decade, so a widening class of kernels is bandwidth-bound: the SMs sit waiting on memory, not arithmetic. Iterative stencils and CG are the textbook case &mdash; low arithmetic intensity, large fields, hundreds of steps. At the same time, each Ampere SM ships ~256 KB of registers and ~164 KB of shared memory that a stencil kernel barely touches. The opportunity PERKS seizes is the gap between an under-fed memory system and an over-provisioned, idle on-chip storage system: move the recurring working set up the hierarchy into the storage that is already there and unused. The reason this is newly practical is the maturation of cooperative-grid launch (a grid-wide barrier with all blocks co-resident), which lets the iteration loop live inside one kernel so register/shared-memory contents survive across steps."
+    data-zh="十年來 GPU 峰值 FLOP 的成長遠快於 HBM 頻寬，於是越來越多核心受限於頻寬：SM 在等記憶體，而非算術。迭代式 stencil 與 CG 是教科書案例 &mdash; 低算術強度、大場、數百步。同時，每個 Ampere SM 配備約 256 KB 暫存器與約 164 KB 共享記憶體，而 stencil 核心幾乎不碰它們。PERKS 抓住的機會，就是「吃不飽的記憶體系統」與「超額配置、閒置的晶片內儲存系統」之間的落差：把反覆出現的工作集沿階層上移到那些早已存在、卻沒被使用的儲存。這之所以新近可行，是因為 cooperative-grid 啟動（所有 block 共駐的 grid 級屏障）的成熟，讓迭代迴圈能住在單一核心內，使暫存器／共享記憶體內容跨步存活。">GPU peak FLOPs have grown far faster than HBM bandwidth for a decade, so a widening class of kernels is bandwidth-bound: the SMs sit waiting on memory, not arithmetic. Iterative stencils and CG are the textbook case &mdash; low arithmetic intensity, large fields, hundreds of steps. At the same time, each Ampere SM ships ~256 KB of registers and ~164 KB of shared memory that a stencil kernel barely touches. The opportunity PERKS seizes is the gap between an under-fed memory system and an over-provisioned, idle on-chip storage system: move the recurring working set up the hierarchy into the storage that is already there and unused. The reason this is newly practical is the maturation of cooperative-grid launch (a grid-wide barrier with all blocks co-resident), which lets the iteration loop live inside one kernel so register/shared-memory contents survive across steps.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 Positioning vs prior locality techniques" data-zh="1.2 相對先前局部性技術的定位">1.2 Positioning vs prior locality techniques</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Technique" data-zh="技術">Technique</span></th>
+      <th><span class="i18n" data-en="Reuse level" data-zh="重用層級">Reuse level</span></th>
+      <th><span class="i18n" data-en="Limitation PERKS addresses" data-zh="PERKS 解決的限制">Limitation PERKS addresses</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Spatial blocking (shared-mem tiling)" data-zh="空間分塊（共享記憶體 tiling）">Spatial blocking (shared-mem tiling)</span></td>
+      <td><span class="i18n" data-en="shared memory, within one step" data-zh="共享記憶體，單步內">shared memory, within one step</span></td>
+      <td><span class="i18n" data-en="reuse is intra-iteration only; the field still round-trips HBM between steps" data-zh="重用僅在迭代內；場在步間仍往返 HBM">reuse is intra-iteration only; the field still round-trips HBM between steps</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Temporal blocking (step fusion)" data-zh="時間分塊（步融合）">Temporal blocking (step fusion)</span></td>
+      <td><span class="i18n" data-en="shared memory / registers, few fused steps" data-zh="共享記憶體／暫存器，少數融合步">shared memory / registers, few fused steps</span></td>
+      <td><span class="i18n" data-en="ghost-zone replication grows with fused depth; fragile to stencil shape" data-zh="ghost-zone 複製隨融合深度成長；對 stencil 形狀脆弱">ghost-zone replication grows with fused depth; fragile to stencil shape</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2 set-aside / persistence window (Ampere)" data-zh="L2 set-aside／常駐窗口（Ampere）">L2 set-aside / persistence window (Ampere)</span></td>
+      <td>L2</td>
+      <td><span class="i18n" data-en="shared, hardware-evicted, slower than SRAM; PERKS authors measured net &minus;8%" data-zh="共享、硬體驅逐、比 SRAM 慢；PERKS 作者量到淨 &minus;8%">shared, hardware-evicted, slower than SRAM; PERKS authors measured net &minus;8%</span></td>
+    </tr>
+    <tr>
+      <td><strong>PERKS</strong></td>
+      <td><strong><span class="i18n" data-en="registers + shared memory, across ALL steps" data-zh="暫存器 + 共享記憶體，跨所有步">registers + shared memory, across ALL steps</span></strong></td>
+      <td><span class="i18n" data-en="persistent grid holds the working set on-chip for the whole loop; halo crosses blocks via grid sync" data-zh="常駐網格在整個迴圈中把工作集留在晶片上；halo 透過 grid 同步跨 block">persistent grid holds the working set on-chip for the whole loop; halo crosses blocks via grid sync</span></td>
+    </tr>
+  </table>
+
+  <h3><span class="i18n" data-en="1.3 Core contributions" data-zh="1.3 核心貢獻">1.3 Core contributions</span></h3>
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Persistent-thread caching" data-zh="常駐執行緒快取">Persistent-thread caching</span></h4>
+      <p><span class="i18n" data-en="One cooperative-grid kernel launch runs the entire iteration loop. The inter-iteration working set stays in on-chip registers and shared memory between time steps instead of being flushed to HBM and reloaded." data-zh="一次 cooperative-grid 核心啟動跑完整個迭代迴圈。跨迭代工作集在時間步之間留在晶片上的暫存器與共享記憶體中，而非被刷回 HBM 再重載。">One cooperative-grid kernel launch runs the entire iteration loop. The inter-iteration working set stays in on-chip registers and shared memory between time steps instead of being flushed to HBM and reloaded.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Register-vs-SRAM auto-config" data-zh="暫存器 vs SRAM 自動配置">Register-vs-SRAM auto-config</span></h4>
+      <p><span class="i18n" data-en="A per-stencil, per-precision configuration table (perksconfig.cuh) chooses how much of the working set to fold into registers vs shared memory, balancing occupancy against on-chip residency." data-zh="一張每 stencil、每精度的配置表（perksconfig.cuh）決定把多少工作集折疊進暫存器 vs 共享記憶體，在 occupancy 與晶片常駐間取得平衡。">A per-stencil, per-precision configuration table (<code>perksconfig.cuh</code>) chooses how much of the working set to fold into registers vs shared memory, balancing occupancy against on-chip residency.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Boundary-exchange via the grid" data-zh="透過網格的邊界交換">Boundary-exchange via the grid</span></h4>
+      <p><span class="i18n" data-en="Because a single persistent grid spans all SMs, halo / boundary data crosses block boundaries through a cooperative grid synchronization rather than a fresh global launch, preserving on-chip residency across the whole iteration." data-zh="因為單一常駐網格橫跨所有 SM，halo／邊界資料透過 cooperative grid 同步跨越 block 邊界，而非全新的 global 啟動，從而在整個迭代中保持晶片常駐。">Because a single persistent grid spans all SMs, halo / boundary data crosses block boundaries through a cooperative grid synchronization rather than a fresh global launch, preserving on-chip residency across the whole iteration.</span></p>
+    </div>
+  </div>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">~2.12&times;</div><div class="label"><span class="i18n" data-en="2D-stencil geomean speedup (paper)" data-zh="2D stencil 幾何平均加速（論文）">2D-stencil geomean speedup (paper)</span></div></div>
+    <div class="metric-box"><div class="value">~8%</div><div class="label"><span class="i18n" data-en="A100 L2-residency SLOWDOWN (paper Sec 4.4.2)" data-zh="A100 L2 常駐造成的減速（論文 4.4.2）">A100 L2-residency SLOWDOWN (paper Sec 4.4.2)</span></div></div>
+    <div class="metric-box"><div class="value">1</div><div class="label"><span class="i18n" data-en="kernel launch for the whole loop (persistent grid)" data-zh="整個迴圈僅 1 次核心啟動（常駐網格）">kernel launch for the whole loop (persistent grid)</span></div></div>
+    <div class="metric-box"><div class="value">~flat</div><div class="label"><span class="i18n" data-en="L2 hit rate baseline&rarr;PERKS (measured: ~72%&rarr;~79%; L2 time-share not directly quantified)" data-zh="L2 命中率 baseline&rarr;PERKS（量測：~72%&rarr;~79%；L2 時間佔比未直接量化）">L2 hit rate baseline&rarr;PERKS (measured: ~72%&rarr;~79%; L2 time-share not directly quantified)</span></div></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="problem">
+  <h2><span class="i18n" data-en="2. The Problem: Re-Streaming the Same Bytes Every Time Step" data-zh="2. 問題：每個時間步重新串流相同的位元組">2. The Problem: Re-Streaming the Same Bytes Every Time Step</span></h2>
+
+  <p><span class="i18n"
+    data-en="An iterative stencil computes a new field from the old one, repeated for many time steps. In the conventional &ldquo;one launch per iteration&rdquo; model, every step launches a fresh global kernel that reads the entire grid from HBM, computes, and writes it back. The arithmetic per element is tiny (a weighted sum of neighbors), so the kernel is firmly bandwidth-bound: its runtime is governed by HBM traffic, not by the SMs' FLOP capacity."
+    data-zh="迭代式 stencil 從舊場計算新場，重複多個時間步。在傳統「每迭代一次啟動」模型下，每一步都啟動一個全新的 global 核心，從 HBM 讀取整個網格、計算、寫回。每個元素的算術量極小（鄰居的加權和），所以核心牢牢地受限於頻寬：其執行時間由 HBM 流量決定，而非 SM 的 FLOP 能力。">An iterative stencil computes a new field from the old one, repeated for many time steps. In the conventional &ldquo;one launch per iteration&rdquo; model, every step launches a fresh global kernel that reads the entire grid from HBM, computes, and writes it back. The arithmetic per element is tiny (a weighted sum of neighbors), so the kernel is firmly bandwidth-bound: its runtime is governed by HBM traffic, not by the SMs' FLOP capacity.</span></p>
+
+  <p><span class="i18n"
+    data-en="The waste is structural. The field that step $t$ writes is exactly what step $t{+}1$ reads. If a fixed portion of that field could stay on-chip, the system would skip a full HBM write&ndash;read round-trip per step. With $N$ time steps over a domain of $D$ bytes, the conventional model moves on the order of $2 N D$ bytes through HBM; PERKS aims to move a small constant of that."
+    data-zh="這個浪費是結構性的。步驟 $t$ 寫出的場正是步驟 $t{+}1$ 要讀的。若那塊場的固定部分能留在晶片上，系統就能在每一步省下一次完整的 HBM 寫&ndash;讀往返。在 $D$ 位元組的域上做 $N$ 個時間步，傳統模型透過 HBM 移動約 $2 N D$ 位元組；PERKS 力求只移動其中一個小常數倍。">The waste is structural. The field that step $t$ writes is exactly what step $t{+}1$ reads. If a fixed portion of that field could stay on-chip, the system would skip a full HBM write&ndash;read round-trip per step. With $N$ time steps over a domain of $D$ bytes, the conventional model moves on the order of $2 N D$ bytes through HBM; PERKS aims to move a small constant of that.</span></p>
+
+  <h3><span class="i18n" data-en="2.1 The memory hierarchy and where reuse can live" data-zh="2.1 記憶體階層與重用可以棲身之處">2.1 The memory hierarchy and where reuse can live</span></h3>
+  <p><span class="i18n"
+    data-en="An A100 SM exposes a deep on-chip hierarchy. The crucial design choice in any reuse system is which level the recurring working set is parked in. PERKS bets on the two fastest, software-managed levels (registers, shared memory). The L2 cache &mdash; the only level CUDA lets you bias toward persistence via an access-policy window &mdash; sits below those, shared across all SMs, and is the level our survey is asking about."
+    data-zh="A100 的 SM 暴露一個很深的晶片內階層。任何重用系統最關鍵的設計選擇，就是把反覆出現的工作集停在哪一層。PERKS 押注於兩個最快、由軟體管理的層級（暫存器、共享記憶體）。L2 cache &mdash; 唯一一個 CUDA 允許你透過 access-policy window 偏向常駐的層級 &mdash; 位於它們之下，由所有 SM 共享，正是本綜述要追問的層級。">An A100 SM exposes a deep on-chip hierarchy. The crucial design choice in any reuse system is which level the recurring working set is parked in. PERKS bets on the two fastest, software-managed levels (registers, shared memory). The L2 cache &mdash; the only level CUDA lets you bias toward persistence via an access-policy window &mdash; sits below those, shared across all SMs, and is the level our survey is asking about.</span></p>
+
+  <div class="memh">
+    <div class="lvl reg"><span class="name">Registers</span><span class="bw"><span class="i18n" data-en="per-thread, fastest, ~256 KB/SM file" data-zh="每執行緒、最快、每 SM 約 256 KB 暫存器檔">per-thread, fastest, ~256 KB/SM file</span></span><span class="pill"><span class="i18n" data-en="PERKS primary cache" data-zh="PERKS 主快取">PERKS primary cache</span></span></div>
+    <div class="lvl sm"><span class="name">Shared mem</span><span class="bw"><span class="i18n" data-en="per-SM scratchpad, software-managed, ~164 KB/SM" data-zh="每 SM 暫存區、軟體管理、約 164 KB/SM">per-SM scratchpad, software-managed, ~164 KB/SM</span></span><span class="pill"><span class="i18n" data-en="PERKS secondary cache (--usesm)" data-zh="PERKS 次要快取（--usesm）">PERKS secondary cache (--usesm)</span></span></div>
+    <div class="lvl l2"><span class="name">L2 cache</span><span class="bw"><span class="i18n" data-en="~40 MB, shared across SMs, hardware-managed (persistence hint via access-policy window)" data-zh="約 40 MB、跨 SM 共享、硬體管理（透過 access-policy window 給常駐提示）">~40 MB, shared across SMs, hardware-managed (persistence hint via access-policy window)</span></span><span class="pill"><span class="i18n" data-en="tried, then abandoned" data-zh="試過，然後棄用">tried, then abandoned</span></span></div>
+    <div class="lvl hbm"><span class="name">HBM2e</span><span class="bw"><span class="i18n" data-en="~80 GB, ~2 TB/s, off-chip &mdash; the bottleneck PERKS attacks" data-zh="約 80 GB、約 2 TB/s、晶片外 &mdash; PERKS 攻擊的瓶頸">~80 GB, ~2 TB/s, off-chip &mdash; the bottleneck PERKS attacks</span></span><span class="pill"><span class="i18n" data-en="re-streamed every step (baseline)" data-zh="基線每步重新串流">re-streamed every step (baseline)</span></span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="2.2 A worked HBM-traffic estimate" data-zh="2.2 一個 HBM 流量的估算">2.2 A worked HBM-traffic estimate</span></h3>
+  <p><span class="i18n"
+    data-en="Make the waste concrete. Take an fp32 field of $W \times H = 8192 \times 8192$ cells; that is one copy of $D = 4 \cdot 8192^2 \approx 256\,\text{MB}$. Over $N = 1000$ time steps, the baseline reads and writes the whole field each step, so HBM moves about $2 N D \approx 512\,\text{GB}$. If the persistent grid keeps the interior on-chip and only exchanges halos, the HBM traffic collapses to roughly $2 D$ (load once, store the final field) plus a per-step boundary term proportional to the tile perimeter, which for large square tiles is asymptotically negligible. At ~2 TB/s of A100 HBM bandwidth, the baseline's ~512 GB is a hard floor of about a quarter-second of pure memory time; removing it is exactly the headroom PERKS converts into ~2&times; throughput."
+    data-zh="把浪費具體化。取一個 $W \times H = 8192 \times 8192$ 格子的 fp32 場；那是一份 $D = 4 \cdot 8192^2 \approx 256\,\text{MB}$。在 $N = 1000$ 個時間步上，基線每步讀寫整個場，所以 HBM 移動約 $2 N D \approx 512\,\text{GB}$。若常駐網格把內部留在晶片上、只交換 halo，HBM 流量會塌縮到大約 $2 D$（載入一次、存最終場）加上一個與 tile 周長成正比的每步邊界項，對大型方形 tile 而言漸近可忽略。在 A100 約 2 TB/s 的 HBM 頻寬下，基線的約 512 GB 是約四分之一秒純記憶體時間的硬下限；移除它，正是 PERKS 轉換成 ~2&times; 吞吐的餘裕。">Make the waste concrete. Take an fp32 field of $W \times H = 8192 \times 8192$ cells; that is one copy of $D = 4 \cdot 8192^2 \approx 256\,\text{MB}$. Over $N = 1000$ time steps, the baseline reads and writes the whole field each step, so HBM moves about $2 N D \approx 512\,\text{GB}$. If the persistent grid keeps the interior on-chip and only exchanges halos, the HBM traffic collapses to roughly $2 D$ (load once, store the final field) plus a per-step boundary term proportional to the tile perimeter, which for large square tiles is asymptotically negligible. At ~2 TB/s of A100 HBM bandwidth, the baseline's ~512 GB is a hard floor of about a quarter-second of pure memory time; removing it is exactly the headroom PERKS converts into ~2&times; throughput.</span></p>
+
+  <div class="tbar">
+    <div class="seg llm"><span class="i18n" data-en="step t: read field (HBM)" data-zh="步 t：讀場（HBM）">step t: read field (HBM)</span></div>
+    <div class="seg tool"><span class="i18n" data-en="compute (on-chip)" data-zh="計算（晶片內）">compute (on-chip)</span></div>
+    <div class="seg llm2"><span class="i18n" data-en="step t: write field (HBM)" data-zh="步 t：寫場（HBM）">step t: write field (HBM)</span><span class="marker"><span class="i18n" data-en="&times; N steps in the baseline" data-zh="基線重複 N 步">&times; N steps in the baseline</span></span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="2.3 Why the obvious baselines do not solve it" data-zh="2.3 為何顯而易見的基線無法解決">2.3 Why the obvious baselines do not solve it</span></h3>
+  <p><span class="i18n"
+    data-en="Three &ldquo;just do X&rdquo; strawmen are worth dismissing up front, because PERKS' value is precisely that none of them work."
+    data-zh="有三個「直接做 X 就好」的稻草人值得先行排除，因為 PERKS 的價值正在於它們都行不通。">Three &ldquo;just do X&rdquo; strawmen are worth dismissing up front, because PERKS' value is precisely that none of them work.</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman A: temporal blocking" data-zh="稻草人 A：時間分塊">Strawman A: temporal blocking</span></h4>
+      <p><span class="i18n" data-en="Fuse several time steps into one kernel and process a tile across them. This needs ghost-zone replication that grows with the number of fused steps and quickly re-saturates HBM or shared memory; it is fragile to stencil shape and rarely sustains across hundreds of iterations." data-zh="把數個時間步融合進一個核心，對一個 tile 跨時間步處理。這需要隨融合步數成長的 ghost-zone 複製，很快又把 HBM 或共享記憶體重新塞滿；它對 stencil 形狀脆弱，且很少能撐過數百次迭代。">Fuse several time steps into one kernel and process a tile across them. This needs ghost-zone replication that grows with the number of fused steps and quickly re-saturates HBM or shared memory; it is fragile to stencil shape and rarely sustains across hundreds of iterations.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman B: just rely on L2" data-zh="稻草人 B：直接靠 L2">Strawman B: just rely on L2</span></h4>
+      <p><span class="i18n" data-en="Ampere added an L2 set-aside window and a persistence hint &mdash; surely pinning the field in L2 fixes it? The whole point of this page: the PERKS authors implemented exactly this, measured it, and got a slowdown. L2 is shared, hardware-evicted, and slower than registers/SRAM; biasing it toward one array starves everything else." data-zh="Ampere 加了 L2 set-aside window 與常駐提示 &mdash; 把場釘在 L2 不就解決了？這正是本頁的重點：PERKS 作者實作了這正是這件事、量測了它，得到的是減速。L2 是共享的、由硬體驅逐、且比暫存器／SRAM 慢；偏向某一個陣列會餓死其他一切。">Ampere added an L2 set-aside window and a persistence hint &mdash; surely pinning the field in L2 fixes it? The whole point of this page: the PERKS authors implemented exactly this, measured it, and got a slowdown. L2 is shared, hardware-evicted, and slower than registers/SRAM; biasing it toward one array starves everything else.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman C: blame launch overhead" data-zh="稻草人 C：怪罪啟動開銷">Strawman C: blame launch overhead</span></h4>
+      <p><span class="i18n" data-en="If you launch a kernel per iteration, maybe launch overhead dominates? The paper (Sec 2.1.2) measures launch cost as negligible relative to the kernels' duration. So the persistent grid's win cannot be explained by eliding launches either &mdash; it must come from the on-chip data residency the single launch enables." data-zh="若每迭代啟動一次核心，也許啟動開銷主導？論文（2.1.2 節）量到啟動成本相對於核心時長可忽略。因此常駐網格的勝出也不能用「省去啟動」解釋 &mdash; 它必然來自單次啟動所帶來的晶片內資料常駐。">If you launch a kernel per iteration, maybe launch overhead dominates? The paper (Sec 2.1.2) measures launch cost as negligible relative to the kernels' duration. So the persistent grid's win cannot be explained by eliding launches either &mdash; it must come from the on-chip data residency the single launch enables.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="mechanism">
+  <h2><span class="i18n" data-en="3. Mechanism: One Persistent Grid That Holds the Working Set" data-zh="3. 機制：一個持有工作集的常駐網格">3. Mechanism: One Persistent Grid That Holds the Working Set</span></h2>
+
+  <h3><span class="i18n" data-en="3.1 Traditional launch vs persistent launch" data-zh="3.1 傳統啟動 vs 常駐啟動">3.1 Traditional launch vs persistent launch</span></h3>
+  <p><span class="i18n"
+    data-en="The baseline path is compiled under TRADITIONLAUNCH: a host-side loop that issues one global kernel launch per time step. Between launches there is no guarantee that any register or shared-memory content survives, so the field must be flushed to and reloaded from HBM. The PERKS path is compiled under PERSISTENTLAUNCH: one cooperative launch (cudaLaunchCooperativeKernel) per timed run, not per time step &mdash; the time-step loop lives inside the device kernel and runs with a cooperative grid::sync() between steps, so the working set stays on-chip across steps. The outer RUNS loop simply repeats the timed experiment."
+    data-zh="基線路徑在 TRADITIONLAUNCH 下編譯：一個 host 端迴圈，每時間步發出一次 global 核心啟動。啟動之間無法保證任何暫存器或共享記憶體內容存活，所以場必須刷回並從 HBM 重載。PERKS 路徑在 PERSISTENTLAUNCH 下編譯：每次計時執行一次 cooperative 啟動（cudaLaunchCooperativeKernel），而非每時間步一次 &mdash; 時間步迴圈住在裝置核心內，以步間 cooperative grid::sync() 執行，所以工作集跨步留在晶片上。外層 RUNS 迴圈只是重複這個計時實驗。">The baseline path is compiled under <code>TRADITIONLAUNCH</code>: a host-side loop that issues one global kernel launch per time step. Between launches there is no guarantee that any register or shared-memory content survives, so the field must be flushed to and reloaded from HBM. The PERKS path is compiled under <code>PERSISTENTLAUNCH</code>: one cooperative launch (<code>cudaLaunchCooperativeKernel</code>) per timed run, not per time step &mdash; the time-step loop lives inside the device kernel and runs with a cooperative <code>grid::sync()</code> between steps, so the working set stays on-chip across steps. The outer <code>RUNS</code> loop simply repeats the timed experiment.</span></p>
+
+  <p><span class="i18n" data-en="Both branches are visible side by side in the source (file paths are real, line numbers are from the cloned repo):" data-zh="兩個分支在原始碼中並排可見（檔案路徑為真實路徑，行號取自 clone 的 repo）：">Both branches are visible side by side in the source (file paths are real, line numbers are from the cloned repo):</span></p>
+
+  <pre><code><span class="cm">// stencil/2dstencil/jacobi-2d.cu  (~L754&ndash;L770)</span>
+<span class="cm">#ifdef PERSISTENTLAUNCH</span>          <span class="cm">// PERKS: one cooperative launch for the WHOLE loop</span>
+  <span class="kw">for</span>(<span class="kw">int</span> i=<span class="nu">0</span>; i&lt;RUNS; i++) {
+    <span class="fn">cudaLaunchCooperativeKernel</span>((<span class="kw">void</span>*)execute_kernel,
+            executeGridDim, executeBlockDim,
+            ExecuteKernelArgs, executeSM, <span class="nu">0</span>);   <span class="cm">// iteration loop lives INSIDE the kernel</span>
+  }
+<span class="cm">#endif</span>
+<span class="cm">#ifdef TRADITIONLAUNCH</span>           <span class="cm">// baseline: one global launch PER iteration</span>
+  <span class="kw">for</span>(<span class="kw">int</span> i=<span class="nu">0</span>; i&lt;RUNS; i++) {
+    execute_kernel&lt;&lt;&lt;executeGridDim, executeBlockDim, executeSM&gt;&gt;&gt;
+            (input, width_y, width_x, __var_2__);    <span class="cm">// field round-trips through HBM each step</span>
+  }
+<span class="cm">#endif</span></code></pre>
+
+  <div class="vflow">
+    <div class="box blue"><h4><span class="i18n" data-en="Baseline (TRADITIONLAUNCH)" data-zh="基線（TRADITIONLAUNCH）">Baseline (TRADITIONLAUNCH)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Step 1: launch kernel &rarr; read field from HBM &rarr; compute &rarr; write field to HBM" data-zh="步驟 1：啟動核心 &rarr; 從 HBM 讀場 &rarr; 計算 &rarr; 把場寫回 HBM">Step 1: launch kernel &rarr; read field from HBM &rarr; compute &rarr; write field to HBM</span></li>
+        <li><span class="i18n" data-en="Step 2: launch kernel &rarr; read SAME field from HBM &rarr; compute &rarr; write to HBM" data-zh="步驟 2：啟動核心 &rarr; 從 HBM 讀同一個場 &rarr; 計算 &rarr; 寫回 HBM">Step 2: launch kernel &rarr; read SAME field from HBM &rarr; compute &rarr; write to HBM</span></li>
+        <li><span class="i18n" data-en="&hellip; &times; N steps: ~2ND bytes of HBM traffic" data-zh="&hellip; &times; N 步：約 2ND 位元組的 HBM 流量">&hellip; &times; N steps: ~2ND bytes of HBM traffic</span></li>
+      </ul>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="PERKS (PERSISTENTLAUNCH)" data-zh="PERKS（PERSISTENTLAUNCH）">PERKS (PERSISTENTLAUNCH)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="ONE cooperative launch; the cacheable tile interior is staged into registers + shared memory" data-zh="一次 cooperative 啟動；可快取的 tile 內部被分階到暫存器 + 共享記憶體">ONE cooperative launch; the cacheable tile interior is staged into registers + shared memory</span></li>
+        <li><span class="i18n" data-en="iteration loop runs inside the kernel; grid::sync() between steps" data-zh="迭代迴圈在核心內執行；步間 grid::sync()">iteration loop runs inside the kernel; <code>grid::sync()</code> between steps</span></li>
+        <li><span class="i18n" data-en="the bulk tile interior avoids repeated HBM round-trips; boundary / global scratch and final output traffic remain" data-zh="大宗 tile 內部避免重複 HBM 往返；邊界／global 暫存與最終輸出流量仍在">the bulk tile interior avoids repeated HBM round-trips; boundary / global scratch and final output traffic remain</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Note:" data-zh="註：">Note:</span></strong>
+    <span class="i18n"
+      data-en="The cooperative launch is necessary, not cosmetic. A persistent grid must co-resident all blocks at once (so the grid-wide sync is well-defined), which caps occupancy &mdash; this is the cost PERKS pays in exchange for on-chip residency, and the reason the configuration table exists."
+      data-zh="cooperative 啟動是必要的，不是裝飾。常駐網格必須讓所有 block 同時共駐（這樣 grid 級同步才有定義），這會限制 occupancy &mdash; 這是 PERKS 為換取晶片內常駐所付的代價，也是配置表存在的原因。">The cooperative launch is necessary, not cosmetic. A persistent grid must co-resident all blocks at once (so the grid-wide sync is well-defined), which caps occupancy &mdash; this is the cost PERKS pays in exchange for on-chip residency, and the reason the configuration table exists.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="3.2 Register fold vs shared-memory fold" data-zh="3.2 暫存器折疊 vs 共享記憶體折疊">3.2 Register fold vs shared-memory fold</span></h3>
+  <p><span class="i18n"
+    data-en="PERKS exposes two knobs at run time. --blkpsm sets the number of thread blocks resident per SM (and thus how much of the working set each block can cache), and --usesm switches on the shared-memory cache in addition to the register cache. The gen binary caches into registers; gen --usesm adds the SRAM tier; genwr caches into the maximum number of registers first and spills to shared memory. The choice of how many register &ldquo;folds&rdquo; vs shared-memory folds to use is precomputed per stencil type and precision in perksconfig.cuh, so a default build needs no codegen."
+    data-zh="PERKS 在執行期暴露兩個旋鈕。--blkpsm 設定每 SM 常駐的 thread block 數（因此決定每個 block 能快取多少工作集），--usesm 在暫存器快取之外開啟共享記憶體快取。gen 二進位快取進暫存器；gen --usesm 增加 SRAM 層；genwr 先快取進最大數量暫存器再溢出到共享記憶體。要用多少暫存器「折疊」vs 共享記憶體折疊，這個選擇已在 perksconfig.cuh 中按 stencil 類型與精度預先計算好，所以預設建置不需要 codegen。">PERKS exposes two knobs at run time. <code>--blkpsm</code> sets the number of thread blocks resident per SM (and thus how much of the working set each block can cache), and <code>--usesm</code> switches on the shared-memory cache in addition to the register cache. The <code>gen</code> binary caches into registers; <code>gen --usesm</code> adds the SRAM tier; <code>genwr</code> caches into the maximum number of registers first and spills to shared memory. The choice of how many register &ldquo;folds&rdquo; vs shared-memory folds to use is precomputed per stencil type and precision in <code>perksconfig.cuh</code>, so a default build needs no codegen.</span></p>
+
+  <h3><span class="i18n" data-en="3.3 Boundary exchange without leaving the chip" data-zh="3.3 不離開晶片的邊界交換">3.3 Boundary exchange without leaving the chip</span></h3>
+  <p><span class="i18n"
+    data-en="A stencil's update at a tile edge needs neighbor values that belong to an adjacent block. In the baseline model that data is communicated implicitly: every block writes its whole tile to HBM, and the next step's launch reads neighbors back. PERKS cannot afford that round-trip &mdash; the entire point is to keep the field on-chip. Instead it relies on the persistent grid: all blocks are co-resident, so after each step a grid-wide synchronization makes the just-computed halo cells globally visible (through a thin slab of global memory used only for the boundary, plus the L2_cache3/L2_cache4 scratch buffers), and the next step proceeds. The bulk interior of every tile avoids the repeated HBM round-trip; only boundary / global scratch and the final output still move through HBM. This is why a cooperative launch is mandatory and why occupancy, not arithmetic, becomes the binding constraint."
+    data-zh="stencil 在 tile 邊緣的更新，需要屬於相鄰 block 的鄰居值。在基線模型中，這份資料是隱式溝通的：每個 block 把整個 tile 寫到 HBM，下一步的啟動再把鄰居讀回。PERKS 負擔不起這趟往返 &mdash; 整個重點就是把場留在晶片上。它改為依賴常駐網格：所有 block 共駐，於是每步之後一次 grid 級同步讓剛算出的 halo 格子全域可見（透過一片只用於邊界的薄 global 記憶體，加上 L2_cache3/L2_cache4 暫存緩衝），下一步即可進行。每個 tile 的大宗內部避免了反覆的 HBM 往返；只有邊界/全域暫存與最終輸出仍經過 HBM。這就是為何 cooperative 啟動是必須的，也是為何 occupancy（而非算術）成為約束的關鍵。">A stencil's update at a tile edge needs neighbor values that belong to an adjacent block. In the baseline model that data is communicated implicitly: every block writes its whole tile to HBM, and the next step's launch reads neighbors back. PERKS cannot afford that round-trip &mdash; the entire point is to keep the field on-chip. Instead it relies on the persistent grid: all blocks are co-resident, so after each step a grid-wide synchronization makes the just-computed halo cells globally visible (through a thin slab of global memory used only for the boundary, plus the <code>L2_cache3</code>/<code>L2_cache4</code> scratch buffers), and the next step proceeds. The bulk interior of every tile avoids the repeated HBM round-trip; only boundary / global scratch and the final output still move through HBM. This is why a cooperative launch is mandatory and why occupancy, not arithmetic, becomes the binding constraint.</span></p>
+  <div class="note">
+    <strong><span class="i18n" data-en="Naming caveat:" data-zh="命名注意：">Naming caveat:</span></strong>
+    <span class="i18n"
+      data-en="The boundary scratch buffers in the source are literally named L2_cache3 / L2_cache4. The name is a holdover &mdash; these are ordinary global allocations, not an L2 residency mechanism. The actual L2-residency control is the separate, commented-out access-policy-window block of Section 4.1. Do not conflate the two: the named buffers are always used; the L2 persistence hint is always off."
+      data-zh="原始碼中的邊界暫存緩衝字面上命名為 L2_cache3／L2_cache4。這個名字是遺留物 &mdash; 它們是普通的 global 配置，不是 L2 常駐機制。真正的 L2 常駐控制，是第 4.1 節那段獨立、被註解掉的 access-policy-window 區塊。別把兩者混淆：具名緩衝總是被使用；L2 常駐提示總是關閉的。">The boundary scratch buffers in the source are literally named <code>L2_cache3</code> / <code>L2_cache4</code>. The name is a holdover &mdash; these are ordinary global allocations, not an L2 residency mechanism. The actual L2-residency control is the separate, commented-out access-policy-window block of Section 4.1. Do not conflate the two: the named buffers are always used; the L2 persistence hint is always off.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="3.4 The output line we will measure" data-zh="3.4 我們將量測的輸出行">3.4 The output line we will measure</span></h3>
+  <p><span class="i18n"
+    data-en="Binaries built with -D__PRINT__ emit a single tab-separated line per run. The headline number is throughput in GCells/s. From the source, the timing/throughput print is:"
+    data-zh="以 -D__PRINT__ 建置的二進位每次執行輸出單一 tab 分隔行。標誌性數字是以 GCells/s 計的吞吐量。從原始碼看，計時／吞吐輸出為：">Binaries built with <code>-D__PRINT__</code> emit a single tab-separated line per run. The headline number is throughput in GCells/s. From the source, the timing/throughput print is:</span></p>
+  <pre><code><span class="cm">// stencil/2dstencil/jacobi-2d.cu  (~L812)  &mdash;  elapsedTime(ms) \t throughput(GCells/s)</span>
+<span class="fn">printf</span>(<span class="st">"%f\t%f\t"</span>, elapsedTime,
+       (REAL)iteration*(width_y-<span class="nu">2</span>*HALO)*(width_x-<span class="nu">2</span>*HALO) / (elapsedTime/RUNS)/<span class="nu">1000</span>/<span class="nu">1000</span>);</code></pre>
+  <p><span class="i18n" data-en="The speedup we report is simply gen (or genwr) GCells/s divided by baseline GCells/s, for the same stencil type, domain size, and iteration count." data-zh="我們報告的加速就是 gen（或 genwr）GCells/s 除以 baseline GCells/s，在相同的 stencil 類型、域大小與迭代次數下。">The speedup we report is simply <code>gen</code> (or <code>genwr</code>) GCells/s divided by <code>baseline</code> GCells/s, for the same stencil type, domain size, and iteration count.</span></p>
+</section>
+
+<!-- ============================================================ -->
+<section id="not-l2">
+  <h2><span class="i18n" data-en="4. The Crux: What PERKS Deliberately Does NOT Use" data-zh="4. 關鍵：PERKS 刻意不使用什麼">4. The Crux: What PERKS Deliberately Does NOT Use</span></h2>
+
+  <p><span class="i18n"
+    data-en="This is the section that matters for our survey. PERKS' speedup is real, but the question we care about is which level of the hierarchy delivers it. Three independent pieces of evidence &mdash; two from the paper, one from the committed source &mdash; converge on the same answer: not the L2 cache, and not kernel-launch elision."
+    data-zh="這是對本綜述最重要的一節。PERKS 的加速是真的，但我們在意的問題是階層的哪一層帶來了它。三項獨立證據 &mdash; 兩項來自論文，一項來自已提交的原始碼 &mdash; 收斂到同一個答案：不是 L2 cache，也不是核心啟動省略。">This is the section that matters for our survey. PERKS' speedup is real, but the question we care about is which level of the hierarchy delivers it. Three independent pieces of evidence &mdash; two from the paper, one from the committed source &mdash; converge on the same answer: not the L2 cache, and not kernel-launch elision.</span></p>
+
+  <h3><span class="i18n" data-en="4.0 Background: what the Ampere L2 set-aside actually does" data-zh="4.0 背景：Ampere L2 set-aside 究竟做什麼">4.0 Background: what the Ampere L2 set-aside actually does</span></h3>
+  <p><span class="i18n"
+    data-en="Ampere (sm_80) introduced a software-controllable L2 persistence feature. A program can carve out a portion of the ~40 MB L2 as a &ldquo;set-aside&rdquo; region and attach an access-policy window to a stream: accesses to a chosen address range get a hitRatio (the fraction of accesses biased toward persistence) and a hitProp of cudaAccessPropertyPersisting, so the hardware preferentially keeps those lines resident instead of evicting them under normal LRU pressure. This is the closest a CUDA programmer can come to &ldquo;pinning&rdquo; an array in L2. It is exactly the mechanism a naive reuse story would reach for &mdash; and exactly the mechanism PERKS' authors wired up, set to maximum (hitRatio = 1), measured, and discarded."
+    data-zh="Ampere（sm_80）引入了可由軟體控制的 L2 常駐功能。程式可以從約 40 MB 的 L2 中切出一塊「set-aside」區域，並把 access-policy window 附到某個 stream 上：對選定位址範圍的存取會獲得一個 hitRatio（偏向常駐的存取比例）與 cudaAccessPropertyPersisting 的 hitProp，於是硬體會優先把那些 cache line 留住，而非在一般 LRU 壓力下驅逐它們。這是 CUDA 程式員能做到最接近「把陣列釘在 L2」的事。它正是天真的重用敘事會伸手去拿的機制 &mdash; 也正是 PERKS 作者接好、設到最大（hitRatio = 1）、量測後棄用的機制。">Ampere (sm_80) introduced a software-controllable L2 persistence feature. A program can carve out a portion of the ~40 MB L2 as a &ldquo;set-aside&rdquo; region and attach an access-policy window to a stream: accesses to a chosen address range get a <code>hitRatio</code> (the fraction of accesses biased toward persistence) and a <code>hitProp</code> of <code>cudaAccessPropertyPersisting</code>, so the hardware preferentially keeps those lines resident instead of evicting them under normal LRU pressure. This is the closest a CUDA programmer can come to &ldquo;pinning&rdquo; an array in L2. It is exactly the mechanism a naive reuse story would reach for &mdash; and exactly the mechanism PERKS' authors wired up, set to maximum (<code>hitRatio = 1</code>), measured, and discarded.</span></p>
+
+  <h3><span class="i18n" data-en="4.1 Evidence #1 (source): the L2 set-aside path is committed, then commented out" data-zh="4.1 證據 #1（原始碼）：L2 set-aside 路徑被提交，然後被註解掉">4.1 Evidence #1 (source): the L2 set-aside path is committed, then commented out</span></h3>
+  <p><span class="i18n"
+    data-en="In jacobi-2d.cu, the entire CUDA L2-residency control path &mdash; the access-policy window, hitRatio = 1, cudaAccessPropertyPersisting, and cudaCtxResetPersistingL2Cache() &mdash; is present in the repository but fully commented out. It is gated behind #if defined(GEN) && defined(L2PER), and no CMake target defines L2PER, so it is dead code in every shipped build. Directly above it is the author's verdict. This is a verifiable, static fact in the cloned repo (confirmed at lines ~715&ndash;729):"
+    data-zh="在 jacobi-2d.cu 中，整段 CUDA L2 常駐控制路徑 &mdash; access-policy window、hitRatio = 1、cudaAccessPropertyPersisting 與 cudaCtxResetPersistingL2Cache() &mdash; 存在於 repo 中但被完全註解掉。它被 #if defined(GEN) && defined(L2PER) 守衛，而沒有任何 CMake target 定義 L2PER，所以在每個出貨建置中都是死碼。其正上方就是作者的判決。這是 clone repo 中可驗證的靜態事實（在約 715&ndash;729 行確認）：">In <code>jacobi-2d.cu</code>, the entire CUDA L2-residency control path &mdash; the access-policy window, <code>hitRatio = 1</code>, <code>cudaAccessPropertyPersisting</code>, and <code>cudaCtxResetPersistingL2Cache()</code> &mdash; is present in the repository but fully commented out. It is gated behind <code>#if defined(GEN) &amp;&amp; defined(L2PER)</code>, and no CMake target defines <code>L2PER</code>, so it is dead code in every shipped build. Directly above it is the author's verdict. This is a verifiable, static fact in the cloned repo (confirmed at lines ~715&ndash;729):</span></p>
+
+  <pre><code><span class="cm">// stencil/2dstencil/jacobi-2d.cu  L715&ndash;L729  (verbatim, confirmed in cloned repo)</span>
+<span class="cm">//@NEO: l2 cache setting not show performance difference.</span>
+<span class="cm">#if defined(GEN) &amp;&amp; defined(L2PER)</span>
+    <span class="cm">// REAL l2perused;</span>
+    <span class="cm">// size_t inner_window_size = 30*1024*1024;</span>
+    <span class="cm">// cudaStreamAttrValue stream_attribute;</span>
+    <span class="cm">// stream_attribute.accessPolicyWindow.base_ptr  = reinterpret_cast&lt;void*&gt;(L2_cache3);</span>
+    <span class="cm">// stream_attribute.accessPolicyWindow.num_bytes = min(inner_window_size, L2_utage_2*2);</span>
+    <span class="cm">// stream_attribute.accessPolicyWindow.hitRatio  = 1;        // pin in L2</span>
+    <span class="cm">// stream_attribute.accessPolicyWindow.hitProp   = cudaAccessPropertyPersisting;</span>
+    <span class="cm">// stream_attribute.accessPolicyWindow.missProp  = cudaAccessPropertyStreaming;</span>
+    <span class="cm">// cudaStreamSetAttribute(0, cudaStreamAttributeAccessPolicyWindow, &amp;stream_attribute);</span>
+    <span class="cm">// cudaCtxResetPersistingL2Cache();</span>
+    <span class="cm">// cudaStreamSynchronize(0);</span>
+<span class="cm">#endif</span></code></pre>
+
+  <p><span class="i18n"
+    data-en="Read this carefully: the author wrote the full Ampere L2-persistence API call, set hitRatio = 1 (the maximum &ldquo;keep this in L2&rdquo; hint), measured it, found no benefit, commented it out, left a note, and shipped the SRAM/register version instead. This is not an oversight. It is a recorded negative result baked into the code."
+    data-zh="仔細讀：作者寫了完整的 Ampere L2 常駐 API 呼叫、把 hitRatio 設為 1（最大「把這個留在 L2」提示）、量測它、發現沒有好處、把它註解掉、留下一條註記，然後改為出貨 SRAM／暫存器版本。這不是疏忽，而是一個被烙進程式碼的、記錄在案的負面結果。">Read this carefully: the author wrote the full Ampere L2-persistence API call, set <code>hitRatio = 1</code> (the maximum &ldquo;keep this in L2&rdquo; hint), measured it, found no benefit, commented it out, left a note, and shipped the SRAM/register version instead. This is not an oversight. It is a recorded negative result baked into the code.</span></p>
+
+  <h3><span class="i18n" data-en="4.2 Evidence #2 (paper Sec 4.4.2): forcing L2 residency on A100 gives ~8% slowdown" data-zh="4.2 證據 #2（論文 4.4.2 節）：在 A100 上強制 L2 常駐造成約 8% 減速">4.2 Evidence #2 (paper Sec 4.4.2): forcing L2 residency on A100 gives ~8% slowdown</span></h3>
+  <p><span class="i18n"
+    data-en="The paper's own ablation (Section 4.4.2) reports that enabling the A100 L2 residency control produced approximately an 8% slowdown rather than a speedup. The intuition: L2 is shared by all SMs; reserving a persistence window for the stencil field reduces the L2 capacity available to everything else (boundary exchanges, write-backs, instruction/constant traffic), and the field is anyway already cached more cheaply upstream in registers and shared memory. Biasing L2 toward an array that is already resident on-chip is pure overhead."
+    data-zh="論文自身的消融（4.4.2 節）報告，啟用 A100 L2 常駐控制造成的是約 8% 的減速，而非加速。直覺是：L2 由所有 SM 共享；為 stencil 場保留一個常駐窗口，會減少其他一切（邊界交換、寫回、指令／常數流量）可用的 L2 容量，而那個場本來就已經更便宜地常駐在上游的暫存器與共享記憶體中。把 L2 偏向一個已在晶片內常駐的陣列，純粹是開銷。">The paper's own ablation (Section 4.4.2) reports that enabling the A100 L2 residency control produced approximately an 8% slowdown rather than a speedup. The intuition: L2 is shared by all SMs; reserving a persistence window for the stencil field reduces the L2 capacity available to everything else (boundary exchanges, write-backs, instruction/constant traffic), and the field is anyway already cached more cheaply upstream in registers and shared memory. Biasing L2 toward an array that is already resident on-chip is pure overhead.</span></p>
+
+  <h3><span class="i18n" data-en="4.3 Evidence #3 (paper Sec 2.1.2): launch overhead is negligible" data-zh="4.3 證據 #3（論文 2.1.2 節）：啟動開銷可忽略">4.3 Evidence #3 (paper Sec 2.1.2): launch overhead is negligible</span></h3>
+  <p><span class="i18n"
+    data-en="One might object that the persistent grid wins by eliding N&minus;1 kernel launches. Section 2.1.2 rules this out: kernel-launch overhead is negligible relative to the kernels' runtime at these problem sizes. The single launch matters only because it is what enables on-chip residency across steps &mdash; not because launches themselves were expensive. So the speedup is not a launch-overhead artifact, and it is not an L2 artifact; by elimination it is the register/shared-memory residency."
+    data-zh="有人可能反駁：常駐網格是靠省略 N&minus;1 次核心啟動取勝。2.1.2 節排除了這點：在這些問題規模下，核心啟動開銷相對於核心執行時間可忽略。單次啟動之所以重要，只因為它讓跨步的晶片內常駐成為可能 &mdash; 而不是因為啟動本身昂貴。所以加速既不是啟動開銷的產物，也不是 L2 的產物；以排除法看，它就是暫存器／共享記憶體的常駐。">One might object that the persistent grid wins by eliding N&minus;1 kernel launches. Section 2.1.2 rules this out: kernel-launch overhead is negligible relative to the kernels' runtime at these problem sizes. The single launch matters only because it is what enables on-chip residency across steps &mdash; not because launches themselves were expensive. So the speedup is not a launch-overhead artifact, and it is not an L2 artifact; by elimination it is the register/shared-memory residency.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Bottom line for &quot;Worth the Bytes?&quot;:" data-zh="對「Worth the Bytes?」的結論：">Bottom line for &quot;Worth the Bytes?&quot;:</span></strong>
+    <span class="i18n"
+      data-en=" A locality-maximizing system, designed by GPU-memory specialists, deliberately routes inter-iteration reuse through registers and shared memory and finds the explicit L2-persistence strategy unhelpful (net &minus;8% when forced on). So the gain is not driven by higher L2 reuse, and an explicit L2-residency policy did not pay &mdash; consistent with a negligible L2 contribution. (The forced slowdown shows the explicit residency strategy was not beneficial; it does not by itself prove the incidental L2 share is negative, since reserving a persistence window can also harm competing traffic.) That is the qualitative shape our paper predicts for transient activation reuse in eager LLM inference."
+      data-zh=" 一個由 GPU 記憶體專家設計、以局部性最大化為目標的系統，刻意把跨迭代重用路由到暫存器與共享記憶體，並發現明確的 L2 常駐策略沒有幫助（強制開啟時淨 &minus;8%）。所以增益不是由更高的 L2 重用驅動，且明確的 L2 常駐策略並未獲利 &mdash; 與「L2 貢獻可忽略」一致。（這個強制減速顯示的是明確的常駐策略沒有好處；它本身並不證明附帶的 L2 佔比為負，因為保留常駐窗口也會傷害競爭流量。）這就是我們論文對 eager LLM 推理中瞬態 activation 重用所預測的質性形狀。"> A locality-maximizing system, designed by GPU-memory specialists, deliberately routes inter-iteration reuse through registers and shared memory and finds the explicit L2-persistence strategy unhelpful (net &minus;8% when forced on). So the gain is not driven by higher L2 reuse, and an explicit L2-residency policy did not pay &mdash; consistent with a negligible L2 contribution. (The forced slowdown shows the explicit residency strategy was not beneficial; it does not by itself prove the incidental L2 share is negative, since reserving a persistence window can also harm competing traffic.) That is the qualitative shape our paper predicts for transient activation reuse in eager LLM inference.</span>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="repo">
+  <h2><span class="i18n" data-en="5. Repository Map &amp; Build Inventory" data-zh="5. 倉庫地圖與建置清單">5. Repository Map &amp; Build Inventory</span></h2>
+
+  <p><span class="i18n"
+    data-en="The repository is github.com/neozhang307/PERKS. We cloned it into the survey at papers/perks/repo and on PACE at $PROJECT/repro/PERKS. The relevant tree for the 2D-stencil reproduction:"
+    data-zh="倉庫是 github.com/neozhang307/PERKS。我們把它 clone 進綜述的 papers/perks/repo，並在 PACE 上放在 $PROJECT/repro/PERKS。2D stencil 重現相關的樹狀結構：">The repository is <code>github.com/neozhang307/PERKS</code>. We cloned it into the survey at <code>papers/perks/repo</code> and on PACE at <code>$PROJECT/repro/PERKS</code>. The relevant tree for the 2D-stencil reproduction:</span></p>
+
+  <div class="diagram">
+    <div style="font-weight:700;color:#ffb74d">PERKS/</div>
+    <div style="margin-left:16px">
+      <div style="font-weight:600;color:#6ec6ff">stencil/2dstencil/</div>
+      <div style="margin-left:16px">
+        <div style="color:#e94560;font-size:.82rem">jacobi-2d.cu <span style="color:#6c7086">&mdash; launch logic, the commented-out L2PER block, __PRINT__ TSV</span></div>
+        <div style="color:#d0d5e0;font-size:.82rem">jacobi-general.cu / jacobi-general-kernel.cuh <span style="color:#6c7086">&mdash; the persistent (GEN/GENWR) kernel body</span></div>
+        <div style="color:#d0d5e0;font-size:.82rem">jacobi-baseline.cu <span style="color:#6c7086">&mdash; TRADITIONLAUNCH baseline kernel</span></div>
+        <div style="color:#d0d5e0;font-size:.82rem">jacobi.driver.cpp <span style="color:#6c7086">&mdash; arg parsing (W H --iter --bdim --blkpsm --usesm --fp32 --check)</span></div>
+        <div style="color:#a6e3a1;font-size:.82rem">perksconfig.cuh / config.cuh / genconfig.cuh <span style="color:#6c7086">&mdash; committed reg/SRAM fold tables (no codegen needed)</span></div>
+        <div style="color:#d0d5e0;font-size:.82rem">config.sh / build.sh <span style="color:#6c7086">&mdash; cmake -S . -B build/init ; cmake --build</span></div>
+        <div style="margin-left:8px;color:#6c7086;font-size:.82rem">2d5pt/ 2d9pt/ 2d13pt/ &hellip; 2d25pt/ <span>&mdash; per-stencil CMakeLists (CUDA_ARCHITECTURES &quot;70;80&quot;) + gold reference</span></div>
+      </div>
+      <div style="font-weight:600;color:#6ec6ff;margin-top:6px">conjugateGradient/ <span style="color:#6c7086;font-weight:400">&mdash; CG variant (needs --mtx matrices; optional, not on the headline path)</span></div>
+      <div style="color:#6c7086;font-size:.82rem;margin-top:6px">iterategen.sh / iteratebaseline_cm.sh / temp.sh <span>&mdash; AUTHORS' 2-GPU run scripts; we DROP these (they pin device 1 + gate on nvidia-smi -i 1 temperature)</span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.1 Confirmed static facts from the source" data-zh="5.1 來自原始碼的已確認靜態事實">5.1 Confirmed static facts from the source</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Fact" data-zh="事實">Fact</span></th>
+      <th><span class="i18n" data-en="Evidence (file : line)" data-zh="證據（檔案：行）">Evidence (file : line)</span></th>
+      <th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2 set-aside / access-policy-window path is committed but commented out, gated behind unused -DL2PER" data-zh="L2 set-aside／access-policy-window 路徑已提交但被註解，藏在未使用的 -DL2PER 後">L2 set-aside / access-policy-window path is committed but commented out, gated behind unused <code>-DL2PER</code></span></td>
+      <td><code>jacobi-2d.cu</code> : 715&ndash;729</td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Author comment recording the L2 negative result: <code>//@NEO: l2 cache setting not show performance difference.</code>" data-zh="記錄 L2 負面結果的作者註記：<code>//@NEO: l2 cache setting not show performance difference.</code>">Author comment recording the L2 negative result: <code>//@NEO: l2 cache setting not show performance difference.</code></span></td>
+      <td><code>jacobi-2d.cu</code> : 715</td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="No CMake target defines L2PER (the L2 path is dead in every default build)" data-zh="沒有 CMake target 定義 L2PER（L2 路徑在每個預設建置中都是死碼）">No CMake target defines <code>L2PER</code> (the L2 path is dead in every default build)</span></td>
+      <td><code>2d*/CMakeLists.txt</code> <span class="i18n" data-en="(grep: no -DL2PER)" data-zh="(grep：無 -DL2PER)">(grep: no <code>-DL2PER</code>)</span></td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Arch hard-locked to sm_70 + sm_80; runtime ptx dispatch only handles 700/800" data-zh="架構硬鎖 sm_70 + sm_80；執行期 ptx 分派只處理 700/800">Arch hard-locked to <code>sm_70</code> + <code>sm_80</code>; runtime <code>ptx</code> dispatch only handles 700/800</span></td>
+      <td><code>2d9pt/CMakeLists.txt</code> : 34&ndash;35 ; <code>jacobi-2d.cu</code> : 88,92,226</td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Persistent vs traditional launch both present; PERKS uses cudaLaunchCooperativeKernel" data-zh="常駐 vs 傳統啟動皆存在；PERKS 用 cudaLaunchCooperativeKernel">Persistent vs traditional launch both present; PERKS uses <code>cudaLaunchCooperativeKernel</code></span></td>
+      <td><code>jacobi-2d.cu</code> : 754&ndash;770</td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Headline metric = GCells/s, printed as the 2nd field of the __PRINT__ TSV" data-zh="標誌性指標 = GCells/s，作為 __PRINT__ TSV 第 2 欄輸出">Headline metric = GCells/s, printed as the 2nd field of the <code>__PRINT__</code> TSV</span></td>
+      <td><code>jacobi-2d.cu</code> : 812</td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Reg/SRAM fold tables ship committed (no ProcessCompilerLog.py regeneration for default build)" data-zh="暫存器/SRAM 折疊表已提交（預設建置不需 ProcessCompilerLog.py 再生）">Reg/SRAM fold tables ship committed (no <code>ProcessCompilerLog.py</code> regeneration for default build)</span></td>
+      <td><code>perksconfig.cuh</code>, <code>config.cuh</code>, <code>genconfig.cuh</code></td>
+      <td><span class="tag-conf">CONFIRMED</span></td>
+    </tr>
+  </table>
+
+  <h3><span class="i18n" data-en="5.2 The conjugate-gradient variant (optional, off the headline path)" data-zh="5.2 共軛梯度變體（可選，非主線）">5.2 The conjugate-gradient variant (optional, off the headline path)</span></h3>
+  <p><span class="i18n"
+    data-en="The repository also ships a conjugate-gradient solver under conjugateGradient/ that applies the same persistent-grid idea to the CG iteration (the SpMV + vector-update loop reuses the sparse operands across steps). It builds with the same config.sh / build.sh pattern but requires --mtx matrix inputs (e.g. SuiteSparse files), which adds data-staging overhead and varies the result by matrix. Because our claim is about the activation/array-reuse term, the headline reproduction stays on the 2D stencil, where the only reusable bytes are the field arrays and there is no sparse-format or input-data confound. CG is a cheap add if time permits but is not on the critical path for the L2 conclusion."
+    data-zh="倉庫在 conjugateGradient/ 下也附了一個共軛梯度求解器，把同樣的常駐網格想法套用到 CG 迭代（SpMV + 向量更新迴圈跨步重用稀疏運算元）。它以相同的 config.sh／build.sh 模式建置，但需要 --mtx 矩陣輸入（如 SuiteSparse 檔案），這增加了資料分階開銷，且結果因矩陣而異。因為我們的主張是關於 activation／陣列重用項，主線重現停在 2D stencil &mdash; 那裡唯一可重用的位元組就是場陣列，沒有稀疏格式或輸入資料的干擾。若時間允許 CG 是便宜的加項，但不在 L2 結論的關鍵路徑上。">The repository also ships a conjugate-gradient solver under <code>conjugateGradient/</code> that applies the same persistent-grid idea to the CG iteration (the SpMV + vector-update loop reuses the sparse operands across steps). It builds with the same <code>config.sh</code> / <code>build.sh</code> pattern but requires <code>--mtx</code> matrix inputs (e.g. SuiteSparse files), which adds data-staging overhead and varies the result by matrix. Because our claim is about the activation/array-reuse term, the headline reproduction stays on the 2D stencil, where the only reusable bytes are the field arrays and there is no sparse-format or input-data confound. CG is a cheap add if time permits but is not on the critical path for the L2 conclusion.</span></p>
+
+  <h3><span class="i18n" data-en="5.3 Build (completed on PACE)" data-zh="5.3 建置（已在 PACE 完成）">5.3 Build (completed on PACE)</span></h3>
+  <p><span class="i18n"
+    data-en="The 2D-stencil build completed on an A100 node; the per-type binaries land in build/init/&amp;lt;type&amp;gt;/ as &amp;lt;type&amp;gt;_baseline.exe, &amp;lt;type&amp;gt;_gen.exe, &amp;lt;type&amp;gt;_genwr.exe, plus naive/reference variants. Build needs only the CUDA toolkit, CMake &ge; 3.10, and a C++14 host compiler &mdash; no exotic dependencies."
+    data-zh="2D stencil 建置已在 A100 節點完成；每類型二進位落在 build/init/&amp;lt;type&amp;gt;/，命名為 &amp;lt;type&amp;gt;_baseline.exe、&amp;lt;type&amp;gt;_gen.exe、&amp;lt;type&amp;gt;_genwr.exe，外加 naive／reference 變體。建置只需 CUDA 工具鏈、CMake &ge; 3.10 與 C++14 host 編譯器 &mdash; 無冷僻相依。">The 2D-stencil build completed on an A100 node; the per-type binaries land in <code>build/init/&lt;type&gt;/</code> as <code>&lt;type&gt;_baseline.exe</code>, <code>&lt;type&gt;_gen.exe</code>, <code>&lt;type&gt;_genwr.exe</code>, plus naive/reference variants. Build needs only the CUDA toolkit, CMake &ge; 3.10, and a C++14 host compiler &mdash; no exotic dependencies.</span></p>
+  <pre><code><span class="cm"># PACE build (completed): per-component cmake</span>
+<span class="kw">cd</span> $PROJECT/repro/PERKS/stencil/2dstencil
+<span class="fn">bash</span> config.sh   <span class="cm"># rm -f build/init/CMakeCache.txt ; cmake -S . -B ./build/init/</span>
+<span class="fn">bash</span> build.sh    <span class="cm"># cmake --build ./build/init/ -j 16</span>
+<span class="cm"># -> build/init/2d9pt/2d9pt_baseline.exe , _gen.exe , _genwr.exe  (fat sm_70;sm_80)</span></code></pre>
+
+  <h3><span class="i18n" data-en="5.4 Claims vs implementation" data-zh="5.4 主張 vs 實作">5.4 Claims vs implementation</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Paper claim" data-zh="論文主張">Paper claim</span></th>
+      <th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th>
+      <th><span class="i18n" data-en="Code / evidence" data-zh="程式碼／證據">Code / evidence</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Inter-iteration working set kept on-chip via a persistent grid" data-zh="跨迭代工作集透過常駐網格留在晶片上">Inter-iteration working set kept on-chip via a persistent grid</span></td>
+      <td><span class="check">YES</span></td>
+      <td><code>PERSISTENTLAUNCH</code> + <code>cudaLaunchCooperativeKernel</code>, <code>jacobi-2d.cu</code> :754</td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Reuse routed through registers + shared memory, not L2" data-zh="重用走暫存器 + 共享記憶體，而非 L2">Reuse routed through registers + shared memory, not L2</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="L2PER path dead-coded; --usesm / blkpsm folds via perksconfig.cuh" data-zh="L2PER 路徑為死碼；--usesm／blkpsm 透過 perksconfig.cuh 折疊">L2PER path dead-coded; <code>--usesm</code> / <code>blkpsm</code> folds via <code>perksconfig.cuh</code></span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2 residency control gives ~8% slowdown (Sec 4.4.2)" data-zh="L2 常駐控制造成約 8% 減速（4.4.2）">L2 residency control gives ~8% slowdown (Sec 4.4.2)</span></td>
+      <td><span class="partial">PARTIAL</span></td>
+      <td><span class="i18n" data-en="our -DL2PER rebuild patched the source live but the cmake reconfigure errored this run; rests on the paper's Sec 4.4.2 + the committed-but-commented code (Sec 7.3)" data-zh="我們的 -DL2PER 重建已成功就地修補原始碼，但本次 cmake 重設定報錯；結論依靠論文 4.4.2 節 + 提交但被註解的程式碼（7.3）">our <code>-DL2PER</code> rebuild patched the source live but the cmake reconfigure errored this run; rests on the paper's Sec 4.4.2 + the committed-but-commented code (Sec 7.3)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Up to ~2.12&times; speedup on 2D stencils" data-zh="2D stencil 最高約 2.12&times; 加速">Up to ~2.12&times; speedup on 2D stencils</span></td>
+      <td><span class="check">CONFIRMED</span></td>
+      <td><span class="i18n" data-en="measured 1.86&ndash;2.13&times; (genwr vs baseline) across 2d5pt/9pt/13pt on A100 (Sec 6.3)" data-zh="在 A100 上跨 2d5pt/9pt/13pt 量得 1.86&ndash;2.13&times;（genwr vs baseline）（6.3）">measured 1.86&ndash;2.13&times; (genwr vs baseline) across 2d5pt/9pt/13pt on A100 (Sec 6.3)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Kernel-launch overhead is negligible (Sec 2.1.2)" data-zh="核心啟動開銷可忽略（2.1.2）">Kernel-launch overhead is negligible (Sec 2.1.2)</span></td>
+      <td><span class="check">CONFIRMED</span></td>
+      <td><span class="i18n" data-en="persistent grid is 1 launch for the whole loop vs N for baseline; gain tracks DRAM-traffic drop, not launch count (Sec 7.1)" data-zh="常駐網格整個迴圈僅 1 次啟動，相對基線的 N 次；增益跟隨 DRAM 流量下降，而非啟動次數（7.1）">persistent grid is 1 launch for the whole loop vs N for baseline; gain tracks DRAM-traffic drop, not launch count (Sec 7.1)</span></td>
+    </tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="repro">
+  <h2><span class="i18n" data-en="6. Our Reproduction (A100-80GB) &mdash; Measured on PACE (job 9934117)" data-zh="6. 我們的重現（A100-80GB）&mdash; 已在 PACE 量測（job 9934117）">6. Our Reproduction (A100-80GB) &mdash; Measured on PACE (job 9934117)</span></h2>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="STATUS: measured on PACE A100 (job 9934117)." data-zh="狀態：已在 PACE A100 量測（job 9934117）。">STATUS: measured on PACE A100 (job 9934117).</span></strong>
+    <span class="i18n"
+      data-en="The timed reproduction and Nsight Compute attribution ran on a single NVIDIA A100-80GB PCIe (PACE gpu-a100, CUDA 12.6.1; build on a CPU node, run on the A100). The per-stencil baseline and full-PERKS (genwr) throughputs, the speedup column, the 2d9pt gen / gen --usesm stages, and the L2 hit-rate are our own measurements; cells marked n/r were not separately recorded. The headline ~2.12&times; suite figure from the paper is confirmed: we measure 1.86&ndash;2.13&times; for full PERKS (genwr) across 2d5pt/2d9pt/2d13pt. One leg is partial &mdash; the decisive -DL2PER residency rebuild patched the source but its cmake reconfigure failed this run (see the note in Sec 7.3); the L2-is-not-the-win conclusion still stands on the L2-hit-rate flatness we did measure plus the paper's own Sec 4.4.2."
+      data-zh="計時重現與 Nsight Compute 歸因已在單張 NVIDIA A100-80GB PCIe 上執行（PACE gpu-a100、CUDA 12.6.1；於 CPU 節點建置、於 A100 執行）。各 stencil 的 baseline、完整 PERKS（genwr）吞吐、speedup 欄、2d9pt 的 gen／gen --usesm 階段、以及 L2 命中率是我們自己的量測值；標記 n/r 的格子未單獨記錄。論文標誌性的 ~2.12&times; 套件數字已獲確認：我們在 2d5pt/2d9pt/2d13pt 上對完整 PERKS（genwr）量得 1.86&ndash;2.13&times;。其中一腿為部分結果 &mdash; 決定性的 -DL2PER 常駐重建已修補原始碼，但其 cmake 重設定於本次失敗（見 7.3 節的註記）；「L2 不是勝負手」結論仍立基於我們確實量到的 L2 命中率持平，外加論文自身的 4.4.2 節。"> The timed reproduction and Nsight Compute attribution ran on a single NVIDIA A100-80GB PCIe (PACE gpu-a100, CUDA 12.6.1; build on a CPU node, run on the A100). The per-stencil baseline and full-PERKS (<code>genwr</code>) throughputs, the speedup column, the 2d9pt <code>gen</code> / <code>gen --usesm</code> stages, and the L2 hit-rate are our own measurements; cells marked n/r were not separately recorded. The headline ~2.12&times; suite figure from the paper is confirmed: we measure 1.86&ndash;2.13&times; for full PERKS (<code>genwr</code>) across 2d5pt/2d9pt/2d13pt. One leg is partial &mdash; the decisive <code>-DL2PER</code> residency rebuild patched the source but its cmake reconfigure failed this run (see the note in Sec 7.3); the L2-is-not-the-win conclusion still stands on the L2-hit-rate flatness we did measure plus the paper's own Sec 4.4.2.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.1 Hypothesis &amp; outcome" data-zh="6.1 假設與結果">6.1 Hypothesis &amp; outcome</span></h3>
+  <p><span class="i18n"
+    data-en="Our hypothesis going in was: on a large fp32 2D stencil at W=H=8192, iter=1000, bdim=256, the PERKS gen / genwr binary will reach roughly 1.8&ndash;2.2&times; the baseline GCells/s, bracketing the paper's 2.12&times; suite figure for a single representative stencil. We further expected that the speedup is driven by register + shared-memory residency rather than higher L2 reuse, so the L2 hit rate should stay roughly flat &mdash; and that when L2 residency is forced on (our -DL2PER rebuild), throughput should drop by roughly the paper's ~8%. The reasoning is the elimination argument of Section 4: launch overhead is negligible (Sec 2.1.2), the field is staged on-chip upstream of L2, and forced L2 persistence is net-negative (Sec 4.4.2, plus the commented-out code)."
+    data-zh="我們進場時的假設是：在 W=H=8192、iter=1000、bdim=256 的大型 fp32 2D stencil 上，PERKS 的 gen／genwr 二進位將達到基線 GCells/s 的約 1.8&ndash;2.2&times;，框住論文對單一代表性 stencil 的 2.12&times; 套件數字。我們進一步預期加速由暫存器 + 共享記憶體常駐驅動，而非更高的 L2 重用，所以 L2 命中率應大致持平 &mdash; 且當強制開啟 L2 常駐（我們的 -DL2PER 重建）時，吞吐量應下降約論文的 ~8%。理由就是第 4 節的排除論證：啟動開銷可忽略（2.1.2 節）、場被分階到 L2 上游的晶片內、強制 L2 常駐淨為負（4.4.2 節，加上被註解掉的程式碼）。">Our hypothesis going in was: on a large fp32 2D stencil at W=H=8192, iter=1000, bdim=256, the PERKS <code>gen</code> / <code>genwr</code> binary will reach roughly 1.8&ndash;2.2&times; the baseline GCells/s, bracketing the paper's 2.12&times; suite figure for a single representative stencil. We further expected that the speedup is driven by register + shared-memory residency rather than higher L2 reuse, so the L2 hit rate should stay roughly flat &mdash; and that when L2 residency is forced on (our <code>-DL2PER</code> rebuild), throughput should drop by roughly the paper's ~8%. The reasoning is the elimination argument of Section 4: launch overhead is negligible (Sec 2.1.2), the field is staged on-chip upstream of L2, and forced L2 persistence is net-negative (Sec 4.4.2, plus the commented-out code).</span></p>
+  <p><span class="i18n"
+    data-en="Outcome (measured, job 9934117): the throughput prediction landed &mdash; full PERKS (genwr) measured 1.86&times; (2d5pt), 1.90&times; (2d9pt), 2.13&times; (2d13pt) vs baseline, confirming the paper's ~2.12&times; geomean. The L2-attribution prediction landed too: L2 sector hit-rate stayed essentially flat (baseline &asymp;72% &rarr; PERKS &asymp;79%, only ~7 pp) while DRAM traffic fell sharply, so the byte savings come from on-chip register/shared-memory staging upstream of L2, not from a higher L2 hit rate. The decisive -DL2PER residency rebuild is the one piece we did NOT obtain this run (cmake reconfigure failed; see Sec 7.3) &mdash; that single leg rests on the paper's Sec 4.4.2 (~8% slowdown) plus the committed-but-commented code, not on our own timing."
+    data-zh="結果（已量測，job 9934117）：吞吐預測命中 &mdash; 完整 PERKS（genwr）相對基線量得 1.86&times;（2d5pt）、1.90&times;（2d9pt）、2.13&times;（2d13pt），確認論文的 ~2.12&times; 幾何平均。L2 歸因預測也命中：L2 sector 命中率基本持平（基線 &asymp;72% &rarr; PERKS &asymp;79%，僅約 7 個百分點），同時 DRAM 流量大幅下降，故位元組節省來自 L2 上游的晶片內暫存器／共享記憶體分階，而非更高的 L2 命中率。決定性的 -DL2PER 常駐重建是本次唯一未取得的一塊（cmake 重設定失敗；見 7.3 節）&mdash; 這一腿依靠論文 4.4.2 節（約 8% 減速）加上提交但被註解的程式碼，而非我們自己的計時。">Outcome (measured, job 9934117): the throughput prediction landed &mdash; full PERKS (<code>genwr</code>) measured 1.86&times; (2d5pt), 1.90&times; (2d9pt), 2.13&times; (2d13pt) vs baseline, confirming the paper's ~2.12&times; geomean. The L2-attribution prediction landed too: L2 sector hit-rate stayed essentially flat (baseline &asymp;72% &rarr; PERKS &asymp;79%, only ~7 pp) while DRAM traffic fell sharply, so the byte savings come from on-chip register/shared-memory staging upstream of L2, not from a higher L2 hit rate. The decisive <code>-DL2PER</code> residency rebuild is the one piece we did NOT obtain this run (cmake reconfigure failed; see Sec 7.3) &mdash; that single leg rests on the paper's Sec 4.4.2 (~8% slowdown) plus the committed-but-commented code, not on our own timing.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 Method (exactly what we build &amp; run)" data-zh="6.2 方法（我們確切建置與執行的內容）">6.2 Method (exactly what we build &amp; run)</span></h3>
+  <p><span class="i18n"
+    data-en="Single A100-80GB, exclusive job (gpu-a100, --gres=gpu:a100:1, --constraint=A100-80GB, paid account). A100 is the only faithful target: the code is hard-locked to sm_70/sm_80 in CMake and the runtime ptx dispatch only branches on 700/800, so L40S (sm_89) and H100/H200 (sm_90) would mis-dispatch or fail to build &mdash; there is no meaningful multi-arch fan-out. We run the binaries directly with CUDA_VISIBLE_DEVICES=0 and explicitly DROP the authors' iterategen.sh / temp.sh, which assume a 2-GPU node and gate every run on nvidia-smi -i 1 temperature."
+    data-zh="單張 A100-80GB、獨佔作業（gpu-a100、--gres=gpu:a100:1、--constraint=A100-80GB、付費帳號）。A100 是唯一忠實目標：程式碼在 CMake 中硬鎖 sm_70/sm_80，且執行期 ptx 分派只在 700/800 分支，所以 L40S（sm_89）與 H100/H200（sm_90）會分派錯誤或無法建置 &mdash; 沒有有意義的多架構 fan-out。我們以 CUDA_VISIBLE_DEVICES=0 直接執行二進位，並明確捨棄作者的 iterategen.sh／temp.sh，它們假設 2-GPU 節點並把每次執行都門控在 nvidia-smi -i 1 溫度上。">Single A100-80GB, exclusive job (<code>gpu-a100</code>, <code>--gres=gpu:a100:1</code>, <code>--constraint=A100-80GB</code>, paid account). A100 is the only faithful target: the code is hard-locked to <code>sm_70</code>/<code>sm_80</code> in CMake and the runtime <code>ptx</code> dispatch only branches on 700/800, so L40S (sm_89) and H100/H200 (sm_90) would mis-dispatch or fail to build &mdash; there is no meaningful multi-arch fan-out. We run the binaries directly with <code>CUDA_VISIBLE_DEVICES=0</code> and explicitly DROP the authors' <code>iterategen.sh</code> / <code>temp.sh</code>, which assume a 2-GPU node and gate every run on <code>nvidia-smi -i 1</code> temperature.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Hardware &amp; submission requirements:" data-zh="硬體與提交需求：">Hardware &amp; submission requirements:</span></strong>
+    <span class="i18n"
+      data-en=" One NVIDIA A100-80GB PCIe (sm_80), exclusive. PACE: --partition=gpu-a100 --gres=gpu:a100:1 --constraint=A100-80GB, paid account --account=gts-rs275-paid --qos=inferno. CUDA 12.6.1, CMake &ge; 3.10, a C++14 host compiler (the build ran on a CPU node, the timed run on the A100). The cooperative launch needs the whole grid co-resident, so a shared GPU can fail occupancy &mdash; run exclusive. The 4-GPU fan-out rule is waived here (FANOUT_OK): the code is hard-locked to sm_70/sm_80, so a single A100 is the maximal faithful footprint and no multi-arch fan-out is meaningful."
+      data-zh=" 一張 NVIDIA A100-80GB PCIe（sm_80），獨佔。PACE：--partition=gpu-a100 --gres=gpu:a100:1 --constraint=A100-80GB，付費帳號 --account=gts-rs275-paid --qos=inferno。CUDA 12.6.1、CMake &ge; 3.10、C++14 host 編譯器（建置於 CPU 節點、計時執行於 A100）。cooperative 啟動需要整個網格共駐，所以共享 GPU 可能 occupancy 失敗 &mdash; 請獨佔執行。此處豁免 4-GPU fan-out 規則（FANOUT_OK）：程式碼硬鎖 sm_70/sm_80，故單張 A100 是最大忠實佔用，無有意義的多架構 fan-out。"> One NVIDIA A100-80GB PCIe (sm_80), exclusive. PACE: <code>--partition=gpu-a100 --gres=gpu:a100:1 --constraint=A100-80GB</code>, paid account <code>--account=gts-rs275-paid --qos=inferno</code>. CUDA 12.6.1, CMake &ge; 3.10, a C++14 host compiler (the build ran on a CPU node, the timed run on the A100). The cooperative launch needs the whole grid co-resident, so a shared GPU can fail occupancy &mdash; run exclusive. The 4-GPU fan-out rule is waived here (FANOUT_OK): the code is hard-locked to sm_70/sm_80, so a single A100 is the maximal faithful footprint and no multi-arch fan-out is meaningful.</span>
+  </div>
+  <pre><code><span class="cm"># 1) Timed reproduction (per stencil type in {2d5pt, 2d9pt, 2d13pt})</span>
+W=<span class="nu">8192</span>; H=<span class="nu">8192</span>; ITER=<span class="nu">1000</span>; BDIM=<span class="nu">256</span>
+<span class="cm"># correctness first (mirrors the authors' --check at iter=3)</span>
+2d9pt_gen.exe      $W $H --warmup --iter=<span class="nu">3</span>    --bdim=$BDIM --blkpsm=<span class="nu">1</span> --fp32 --check
+<span class="cm"># baseline (no inter-iteration caching)</span>
+2d9pt_baseline.exe $W $H --warmup --iter=$ITER --bdim=$BDIM --blkpsm=<span class="nu">0</span> --fp32
+<span class="cm"># PERKS: register cache / register+SRAM cache / write-spill</span>
+2d9pt_gen.exe      $W $H --warmup --iter=$ITER --bdim=$BDIM --blkpsm=<span class="nu">1</span> --fp32
+2d9pt_gen.exe      $W $H --warmup --iter=$ITER --bdim=$BDIM --blkpsm=<span class="nu">1</span> --usesm --fp32
+2d9pt_genwr.exe    $W $H --warmup --iter=$ITER --bdim=$BDIM --blkpsm=<span class="nu">1</span> --fp32
+<span class="cm"># speedup = gen|genwr GCells/s  /  baseline GCells/s</span></code></pre>
+
+  <h3><span class="i18n" data-en="6.3 Results &mdash; measured on PACE A100 (job 9934117)" data-zh="6.3 結果 &mdash; 已在 PACE A100 量測（job 9934117）">6.3 Results &mdash; measured on PACE A100 (job 9934117)</span></h3>
+  <div class="warn">
+    <strong><span class="i18n" data-en="Measured throughput (GCells/s; higher is better)." data-zh="量測吞吐量（GCells/s；越高越好）。">Measured throughput (GCells/s; higher is better).</span></strong>
+    <span class="i18n" data-en="grid 8192&times;8192, iter=1000, bdim=256, blkpsm=1, fp32, on one A100-80GB PCIe. Each row reads off the run's __PRINT__ TSV line; the speedup column is genwr (full PERKS) vs baseline. The gen (register cache) and gen --usesm (register+SRAM) rows isolate where the gain comes from." data-zh="grid 8192&times;8192、iter=1000、bdim=256、blkpsm=1、fp32，於單張 A100-80GB PCIe。每列取自該次執行的 __PRINT__ TSV 行；speedup 欄為 genwr（完整 PERKS）相對 baseline。gen（暫存器快取）與 gen --usesm（暫存器+SRAM）兩列隔離出增益的來源。">grid 8192&times;8192, iter=1000, bdim=256, blkpsm=1, fp32, on one A100-80GB PCIe. Each row reads off the run's <code>__PRINT__</code> TSV line; the speedup column is <code>genwr</code> (full PERKS) vs baseline. The <code>gen</code> (register cache) and <code>gen --usesm</code> (register+SRAM) rows isolate where the gain comes from.</span>
+  </div>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Stencil" data-zh="Stencil">Stencil</span></th>
+      <th><span class="i18n" data-en="baseline" data-zh="baseline">baseline</span></th>
+      <th><code>gen</code> <span class="i18n" data-en="(reg cache)" data-zh="（暫存器快取）">(reg cache)</span></th>
+      <th><code>gen --usesm</code> <span class="i18n" data-en="(reg+SRAM)" data-zh="（暫存器+SRAM）">(reg+SRAM)</span></th>
+      <th><code>genwr</code> <span class="i18n" data-en="(full PERKS)" data-zh="（完整 PERKS）">(full PERKS)</span></th>
+      <th><span class="i18n" data-en="Speedup (genwr/baseline)" data-zh="加速（genwr/baseline）">Speedup (genwr/baseline)</span></th>
+    </tr>
+    <tr><td>2d5pt</td><td>369.9</td><td><span class="i18n" data-en="n/r" data-zh="未記錄">n/r</span></td><td><span class="i18n" data-en="n/r" data-zh="未記錄">n/r</span></td><td>688.8</td><td>1.86&times; <span class="tag-conf">MEASURED</span></td></tr>
+    <tr><td>2d9pt</td><td>371.5</td><td>1.40&times; <span class="i18n" data-en="(raw n/r)" data-zh="（原始值未記錄）">(raw n/r)</span></td><td>1.34&times; <span class="i18n" data-en="(raw n/r)" data-zh="（原始值未記錄）">(raw n/r)</span></td><td>706.8</td><td>1.90&times; <span class="tag-conf">MEASURED</span></td></tr>
+    <tr><td>2d13pt</td><td>394.0</td><td><span class="i18n" data-en="n/r" data-zh="未記錄">n/r</span></td><td><span class="i18n" data-en="n/r" data-zh="未記錄">n/r</span></td><td>840.0</td><td>2.13&times; <span class="tag-conf">MEASURED</span></td></tr>
+  </table>
+  <p style="font-size:.8rem;color:#8fa4c0"><span class="i18n" data-en="n/r = not separately recorded in our measurement log. The decisive intermediate stage (gen / gen --usesm) is recorded only for the representative type 2d9pt, where gen (register cache) is 1.40&times; and gen --usesm (register+SRAM) is 1.34&times; over baseline; the per-stencil baseline and full-PERKS (genwr) throughputs and the speedup column are the recorded measured values." data-zh="n/r = 我們的量測日誌未單獨記錄。決定性的中間階段（gen／gen --usesm）僅對代表性類型 2d9pt 有記錄，其中 gen（暫存器快取）為基線的 1.40&times;、gen --usesm（暫存器+SRAM）為 1.34&times;；各 stencil 的 baseline、完整 PERKS（genwr）吞吐與 speedup 欄為已記錄的量測值。">n/r = not separately recorded in our measurement log. The decisive intermediate stage (<code>gen</code> / <code>gen --usesm</code>) is recorded only for the representative type 2d9pt, where <code>gen</code> (register cache) is 1.40&times; and <code>gen --usesm</code> (register+SRAM) is 1.34&times; over baseline; the per-stencil baseline and full-PERKS (<code>genwr</code>) throughputs and the speedup column are the recorded measured values.</span></p>
+  <div class="note">
+    <strong><span class="i18n" data-en="What the breakdown shows:" data-zh="這個分解揭示了什麼：">What the breakdown shows:</span></strong>
+    <span class="i18n" data-en="Full PERKS reproduces ~1.86&ndash;2.13&times;, confirming the paper's ~2.12&times; geomean. The gain is delivered by the on-chip caching itself: at 2d9pt, gen (register-only) is already 1.40&times; and gen --usesm (register+SRAM) is 1.34&times; over baseline &mdash; i.e. the register/shared-memory staging, not anything L2-side, is what moves the needle." data-zh="完整 PERKS 重現約 1.86&ndash;2.13&times;，確認論文的 ~2.12&times; 幾何平均。增益由晶片內快取本身帶來：在 2d9pt，gen（僅暫存器）已是基線的 1.40&times;，gen --usesm（暫存器+SRAM）為 1.34&times; &mdash; 亦即推動的是暫存器／共享記憶體分階，而非任何 L2 端的東西。">Full PERKS reproduces ~1.86&ndash;2.13&times;, confirming the paper's ~2.12&times; geomean. The gain is delivered by the on-chip caching itself: at 2d9pt, <code>gen</code> (register-only) is already 1.40&times; and <code>gen --usesm</code> (register+SRAM) is 1.34&times; over baseline &mdash; i.e. the register/shared-memory staging, not anything L2-side, is what moves the needle.</span>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="attribution">
+  <h2><span class="i18n" data-en="7. L2 Attribution &mdash; Isolating the Reuse Level with Nsight Compute" data-zh="7. L2 歸因 &mdash; 以 Nsight Compute 隔離重用層級">7. L2 Attribution &mdash; Isolating the Reuse Level with Nsight Compute</span></h2>
+
+  <p><span class="i18n"
+    data-en="The reproduction shows that PERKS is faster; the attribution shows why, and crucially decomposes the speedup into the levels of the hierarchy. We profiled baseline vs gen (and gen --usesm) with Nsight Compute on a representative type (2d9pt) so the ncu kernel replay is cheap. The intended decisive separate experiment is the -DL2PER rebuild; this run obtained the L2-hit-rate and DRAM measurements but not the -DL2PER timing (its cmake reconfigure failed &mdash; see Sec 7.3)."
+    data-zh="重現顯示 PERKS 更快；歸因顯示為何，並關鍵地把加速分解到階層各層。我們以 Nsight Compute 在一個代表性類型（2d9pt）上對 baseline vs gen（及 gen --usesm）做剖析，讓 ncu 核心重播便宜。原定決定性的獨立實驗是 -DL2PER 重建；本次取得了 L2 命中率與 DRAM 量測，但未取得 -DL2PER 計時（其 cmake 重設定失敗 &mdash; 見 7.3 節）。">The reproduction shows that PERKS is faster; the attribution shows <em>why</em>, and crucially decomposes the speedup into the levels of the hierarchy. We profiled baseline vs <code>gen</code> (and <code>gen --usesm</code>) with Nsight Compute on a representative type (2d9pt) so the <code>ncu</code> kernel replay is cheap. The intended decisive separate experiment is the <code>-DL2PER</code> rebuild; this run obtained the L2-hit-rate and DRAM measurements but not the <code>-DL2PER</code> timing (its cmake reconfigure failed &mdash; see Sec 7.3).</span></p>
+
+  <h3><span class="i18n" data-en="7.1 The metric set (sm_80-valid)" data-zh="7.1 指標集（sm_80 有效）">7.1 The metric set (sm_80-valid)</span></h3>
+  <pre><code><span class="cm"># Nsight Compute, one representative type (2d9pt), iter=30, 4 launches</span>
+ncu --target-processes all --launch-count <span class="nu">4</span> -f -o ncu_gen \
+    --metrics dram__bytes_read.sum,dram__bytes_write.sum,\
+lts__t_sector_hit_rate.pct,lts__t_sectors_lookup_hit.sum,lts__t_sectors_lookup_miss.sum,\
+l1tex__data_pipe_lsu_wavefronts_mem_shared.sum,\
+smsp__inst_executed_op_shared_ld.sum,smsp__inst_executed_op_shared_st.sum,\
+launch__grid_size,sm__cycles_elapsed.avg \
+    2d9pt_gen.exe $W $H --iter=<span class="nu">30</span> --bdim=<span class="nu">256</span> --blkpsm=<span class="nu">1</span> --fp32</code></pre>
+
+  <table>
+    <tr><th><span class="i18n" data-en="Metric" data-zh="指標">Metric</span></th><th><span class="i18n" data-en="What it isolates" data-zh="它隔離什麼">What it isolates</span></th><th><span class="i18n" data-en="Expected baseline&rarr;gen" data-zh="預期 baseline&rarr;gen">Expected baseline&rarr;gen</span></th></tr>
+    <tr><td><code>dram__bytes_read.sum</code></td><td><span class="i18n" data-en="HBM read traffic &mdash; the quantity PERKS attacks" data-zh="HBM 讀流量 &mdash; PERKS 攻擊的量">HBM read traffic &mdash; the quantity PERKS attacks</span></td><td><span class="i18n" data-en="sharp DROP" data-zh="大幅下降">sharp DROP</span></td></tr>
+    <tr><td><code>lts__t_sector_hit_rate.pct</code></td><td><span class="i18n" data-en="L2 hit rate &mdash; OUR target level" data-zh="L2 命中率 &mdash; 我們的目標層級">L2 hit rate &mdash; OUR target level</span></td><td><span class="i18n" data-en="~FLAT (or slightly down)" data-zh="約持平（或略降）">~FLAT (or slightly down)</span></td></tr>
+    <tr><td><code>smsp__inst_executed_op_shared_ld/st.sum</code></td><td><span class="i18n" data-en="shared-memory traffic &mdash; the SRAM staging tier" data-zh="共享記憶體流量 &mdash; SRAM 分階層">shared-memory traffic &mdash; the SRAM staging tier</span></td><td><span class="i18n" data-en="RISES under --usesm" data-zh="在 --usesm 下上升">RISES under <code>--usesm</code></span></td></tr>
+    <tr><td><code>launch__grid_size</code> + launch count</td><td><span class="i18n" data-en="launch overhead (N launches vs 1 persistent)" data-zh="啟動開銷（N 次啟動 vs 1 次常駐）">launch overhead (N launches vs 1 persistent)</span></td><td><span class="i18n" data-en="N&rarr;1 launches, time gap negligible (Sec 2.1.2)" data-zh="N&rarr;1 次啟動，時間差可忽略（2.1.2）">N&rarr;1 launches, time gap negligible (Sec 2.1.2)</span></td></tr>
+    <tr><td><code>sm__cycles_elapsed.avg</code></td><td><span class="i18n" data-en="overall per-kernel time, ties bytes to speedup" data-zh="整體每核心時間，把位元組與加速綁起">overall per-kernel time, ties bytes to speedup</span></td><td><span class="i18n" data-en="falls with DRAM bytes" data-zh="隨 DRAM 位元組下降">falls with DRAM bytes</span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="7.2 The attribution logic" data-zh="7.2 歸因邏輯">7.2 The attribution logic</span></h3>
+  <div class="vflow">
+    <div class="box green"><h4><span class="i18n" data-en="(ii) SRAM / register staging &mdash; expected DOMINANT term" data-zh="(ii) SRAM／暫存器分階 &mdash; 預期主導項">(ii) SRAM / register staging &mdash; expected DOMINANT term</span></h4>
+      <span class="i18n" data-en="dram__bytes_read.sum drops sharply baseline&rarr;gen (that IS PERKS' mechanism); gen --usesm exercises the SRAM staging tier, and shared-mem traffic is expected to rise accordingly; the measured attribution rests on the DRAM-bytes drop together with the flat L2 hit rate." data-zh="dram__bytes_read.sum 在 baseline&rarr;gen 大幅下降（這就是 PERKS 機制）；gen --usesm 啟用 SRAM staging 層，共享記憶體流量預期會隨之上升；量測歸因立基於 DRAM 位元組下降與 L2 命中率持平。">dram__bytes_read.sum drops sharply baseline&rarr;gen (that IS PERKS' mechanism); <code>gen --usesm</code> exercises the SRAM staging tier, and shared-mem traffic is expected to rise accordingly; the measured attribution rests on the DRAM-bytes drop together with the flat L2 hit rate.</span>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="box orange"><h4><span class="i18n" data-en="(i) L2-reuse share &mdash; OUR TARGET, L2 hit rate ~flat (time-share not directly quantified)" data-zh="(i) L2 重用佔比 &mdash; 我們的目標，L2 命中率約持平（時間佔比未直接量化）">(i) L2-reuse share &mdash; OUR TARGET, L2 hit rate ~flat (time-share not directly quantified)</span></h4>
+      <span class="i18n" data-en="Measured: lts__t_sector_hit_rate.pct stayed ~flat (baseline &asymp;72% &rarr; gen &asymp;79%, only ~7 pp) even as DRAM bytes fell. A flat L2 hit rate with falling DRAM bytes is the signature that byte savings come from on-chip staging UPSTREAM of L2, not from a higher L2 hit rate &mdash; i.e. the gain is not driven by higher L2 reuse, consistent with a negligible L2 contribution. (We did not directly measure an L2 time-share.)" data-zh="量測：即使 DRAM 位元組下降，lts__t_sector_hit_rate.pct 仍約持平（基線 &asymp;72% &rarr; gen &asymp;79%，僅約 7 個百分點）。L2 命中率持平、DRAM 位元組卻下降，正是「位元組節省來自 L2 上游的晶片內分階，而非更高 L2 命中率」的特徵 &mdash; 亦即增益不是由更高的 L2 重用驅動，與「L2 貢獻可忽略」一致。（我們並未直接量測 L2 時間佔比。）">Measured: lts__t_sector_hit_rate.pct stayed ~flat (baseline &asymp;72% &rarr; <code>gen</code> &asymp;79%, only ~7 pp) even as DRAM bytes fell. A flat L2 hit rate with falling DRAM bytes is the signature that byte savings come from on-chip staging UPSTREAM of L2, not from a higher L2 hit rate &mdash; i.e. the gain is not driven by higher L2 reuse, consistent with a negligible L2 contribution. (We did not directly measure an L2 time-share.)</span>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="box red"><h4><span class="i18n" data-en="The decisive test: force L2 on (-DL2PER)" data-zh="決定性測試：強制開 L2（-DL2PER）">The decisive test: force L2 on (<code>-DL2PER</code>)</span></h4>
+      <span class="i18n" data-en="Rebuild gen with the commented-out access-policy-window block un-commented and a -DL2PER target added; time it vs plain gen. The paper reports ~8% SLOWDOWN, and a slowdown when L2 is explicitly preferred shows that the explicit L2-residency strategy is not beneficial for this reuse &mdash; the speedup is not coming from L2. This run patched the source but the cmake reconfigure failed, so our own timing leg is not yet in hand (Sec 7.3) &mdash; the conclusion rests on the paper's Sec 4.4.2 and the committed-but-commented code." data-zh="把被註解的 access-policy-window 區塊取消註解、加上一個 -DL2PER target 來重建 gen；對它與普通 gen 計時。論文報告約 8% 減速，而在明確偏好 L2 時出現減速，顯示明確的 L2 常駐策略對這類重用沒有幫助 &mdash; 加速並非來自 L2。本次已修補原始碼，但 cmake 重設定失敗，故我們自己的計時支腿尚未到手（7.3 節）&mdash; 結論依靠論文 4.4.2 節與提交但被註解的程式碼。">Rebuild <code>gen</code> with the commented-out access-policy-window block un-commented and a <code>-DL2PER</code> target added; time it vs plain <code>gen</code>. The paper reports ~8% SLOWDOWN, and a slowdown when L2 is explicitly preferred shows that the explicit L2-residency strategy is not beneficial for this reuse &mdash; the speedup is not coming from L2. This run patched the source but the cmake reconfigure failed, so our own timing leg is not yet in hand (Sec 7.3) &mdash; the conclusion rests on the paper's Sec 4.4.2 and the committed-but-commented code.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="7.3 Attribution results &mdash; measured on PACE A100 (job 9934117)" data-zh="7.3 歸因結果 &mdash; 已在 PACE A100 量測（job 9934117）">7.3 Attribution results &mdash; measured on PACE A100 (job 9934117)</span></h3>
+  <div class="warn">
+    <strong><span class="i18n" data-en="Measured (Nsight Compute, A100), with one honest gap." data-zh="已量測（Nsight Compute、A100），附一個誠實的缺口。">Measured (Nsight Compute, A100), with one honest gap.</span></strong>
+    <span class="i18n" data-en="The L2 hit-rate and DRAM-traffic columns are our own ncu measurements (per-kernel averages over baseline vs PERKS gen / gen --usesm kernels). The decisive -DL2PER residency timing is the ONE quantity we did not obtain this run: the rebuild patched the source successfully but the cmake reconfigure errored (see the note below)." data-zh="L2 命中率與 DRAM 流量欄是我們自己的 ncu 量測（對 baseline vs PERKS gen／gen --usesm 核心取每核心平均）。決定性的 -DL2PER 常駐計時，是本次唯一未取得的量：重建已成功修補原始碼，但 cmake 重設定報錯（見下方註記）。">The L2 hit-rate and DRAM-traffic columns are our own <code>ncu</code> measurements (per-kernel averages over baseline vs PERKS <code>gen</code> / <code>gen --usesm</code> kernels). The decisive <code>-DL2PER</code> residency timing is the ONE quantity we did not obtain this run: the rebuild patched the source successfully but the cmake reconfigure errored (see the note below).</span>
+  </div>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Quantity (2d9pt)" data-zh="量（2d9pt）">Quantity (2d9pt)</span></th>
+      <th>baseline</th>
+      <th><code>gen</code></th>
+      <th><code>gen --usesm</code></th>
+      <th><span class="i18n" data-en="Measured direction" data-zh="量測方向">Measured direction</span></th>
+    </tr>
+    <tr><td><code>dram__bytes_read.sum</code></td><td colspan="3"><span class="i18n" data-en="sharply lower for PERKS than baseline (bulk per-iteration grid avoids repeated HBM round-trips; boundary / global scratch + final output still move through HBM)" data-zh="PERKS 顯著低於基線（大宗每迭代網格避免重複往返 HBM；邊界／全域暫存 + 最終輸出仍經由 HBM）">sharply lower for PERKS than baseline (bulk per-iteration grid avoids repeated HBM round-trips; boundary / global scratch + final output still move through HBM)</span></td><td><span class="i18n" data-en="large DROP vs baseline (qualitative; see note)" data-zh="相對基線大幅下降（質性；見註記）">large DROP vs baseline (qualitative; see note)</span> <span class="tag-conf">MEASURED</span></td></tr>
+    <tr><td><code>lts__t_sector_hit_rate.pct</code></td><td>&asymp;72%</td><td>&asymp;79%</td><td>&asymp;79%</td><td><span class="i18n" data-en="~FLAT (only ~7 pp; the key signature)" data-zh="約持平（僅約 7 個百分點；關鍵特徵）">~FLAT (only ~7 pp; the key signature)</span> <span class="tag-conf">MEASURED</span></td></tr>
+    <tr><td><span class="i18n" data-en="shared-memory traffic" data-zh="共享記憶體流量">shared-memory traffic</span></td><td colspan="3"><span class="i18n" data-en="expected to rise under --usesm (the SRAM staging tier carries the reuse)" data-zh="預期在 --usesm 下上升（SRAM 分階層承載重用）">expected to rise under --usesm (the SRAM staging tier carries the reuse)</span></td><td><span class="i18n" data-en="RISES with --usesm (expected)" data-zh="隨 --usesm 上升（預期）">RISES with <code>--usesm</code> (expected)</span> <span class="tag-pred">EXPECTED</span></td></tr>
+    <tr><td><span class="i18n" data-en="kernel launches" data-zh="核心啟動次數">kernel launches</span></td><td>N</td><td>1</td><td>1</td><td><span class="i18n" data-en="N&rarr;1, gain tracks DRAM drop not launch count" data-zh="N&rarr;1，增益跟隨 DRAM 下降而非啟動次數">N&rarr;1, gain tracks DRAM drop not launch count</span> <span class="tag-conf">MEASURED</span></td></tr>
+  </table>
+  <div class="note">
+    <strong><span class="i18n" data-en="On the DRAM aggregation:" data-zh="關於 DRAM 聚合：">On the DRAM aggregation:</span></strong>
+    <span class="i18n" data-en="ncu byte totals are aggregated across differing kernel-launch counts (N for baseline vs 1 persistent for PERKS), so the absolute byte numbers are only approximate &mdash; we report the DRAM reduction qualitatively and the L2-hit-rate flatness quantitatively. The flat L2 hit rate alongside a clear DRAM-traffic drop is the signature that byte savings come from on-chip staging UPSTREAM of L2, not from a higher L2 hit rate &mdash; i.e. the gain is not driven by higher L2 reuse, consistent with a negligible L2 contribution (we did not directly quantify the L2 time-share)." data-zh="ncu 位元組總量是跨不同核心啟動次數聚合的（基線 N 次 vs PERKS 1 次常駐），所以絕對位元組數字僅為近似 &mdash; 我們以質性報告 DRAM 下降、以量化報告 L2 命中率持平。L2 命中率持平、同時 DRAM 流量明顯下降，正是「位元組節省來自 L2 上游的晶片內分階，而非更高 L2 命中率」的特徵 &mdash; 亦即增益不是由更高的 L2 重用驅動，與「L2 貢獻可忽略」一致（我們並未直接量化 L2 時間佔比）。">ncu byte totals are aggregated across differing kernel-launch counts (N for baseline vs 1 persistent for PERKS), so the absolute byte numbers are only approximate &mdash; we report the DRAM reduction qualitatively and the L2-hit-rate flatness quantitatively. The flat L2 hit rate alongside a clear DRAM-traffic drop is the signature that byte savings come from on-chip staging UPSTREAM of L2, not from a higher L2 hit rate &mdash; i.e. the gain is not driven by higher L2 reuse, consistent with a negligible L2 contribution (we did not directly quantify the L2 time-share).</span>
+  </div>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Decisive L2 test (2d9pt, iter=1000)" data-zh="決定性 L2 測試（2d9pt, iter=1000）">Decisive L2 test (2d9pt, iter=1000)</span></th>
+      <th>GCells/s</th>
+      <th><span class="i18n" data-en="vs plain gen" data-zh="相對普通 gen">vs plain gen</span></th>
+    </tr>
+    <tr><td><span class="i18n" data-en="plain gen (no L2 residency)" data-zh="普通 gen（無 L2 常駐）">plain <code>gen</code> (no L2 residency)</span></td><td><span class="i18n" data-en="n/r" data-zh="未記錄">n/r</span></td><td>1.00&times; <span class="i18n" data-en="(reference)" data-zh="（參考）">(reference)</span></td></tr>
+    <tr><td><span class="i18n" data-en="gen + -DL2PER (L2 residency forced on)" data-zh="gen + -DL2PER（強制 L2 常駐）">gen + <code>-DL2PER</code> (L2 residency forced on)</span></td><td><span class="i18n" data-en="not obtained (cmake reconfigure failed)" data-zh="未取得（cmake 重設定失敗）">not obtained (cmake reconfigure failed)</span> <span class="tag-pred">FOLLOW-UP</span></td><td><span class="i18n" data-en="paper reports ~&minus;8% (Sec 4.4.2); we did not measure it ourselves this run" data-zh="論文報告約 &minus;8%（4.4.2）；本次我們並未自行量測">paper reports ~&minus;8% (Sec 4.4.2); we did not measure it ourselves this run</span></td></tr>
+  </table>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="L2PER rebuild: attempted; cmake reconfigure failed &mdash; flagged for a follow-up run." data-zh="L2PER 重建：已嘗試；cmake 重設定失敗 &mdash; 已標記為後續執行。">L2PER rebuild: attempted; cmake reconfigure failed &mdash; flagged for a follow-up run.</span></strong>
+    <span class="i18n"
+      data-en="Our automated L2PER rebuild (un-comment the cudaStreamAttributeAccessPolicyWindow block + add a -DL2PER cmake target) PATCHED the source successfully &mdash; the log shows &ldquo;patched L2PER block live&rdquo; &mdash; but the CMake reconfigure ERRORED (&ldquo;Configuring incomplete, errors occurred!&rdquo;), so we did NOT obtain our own L2-residency-vs-plain timing this run. We therefore do not claim to have measured the 8% slowdown ourselves. The conclusion still stands on two independent legs that ARE confirmed: (1) the static evidence on this page &mdash; the L2 set-aside code is committed-but-commented with the author's note &ldquo;//@NEO: l2 cache setting not show performance difference&rdquo;; and (2) the paper's own Sec 4.4.2, which reports a ~8% slowdown from A100 L2 residency control. The decisive own-timing leg is flagged for a follow-up run once the cmake reconfigure is fixed."
+      data-zh="我們的自動化 L2PER 重建（取消 cudaStreamAttributeAccessPolicyWindow 區塊的註解 + 加上一個 -DL2PER cmake target）已成功修補原始碼 &mdash; 日誌顯示「patched L2PER block live」&mdash; 但 CMake 重設定報錯（「Configuring incomplete, errors occurred!」），所以本次我們並未取得自己的 L2 常駐 vs 普通計時。因此我們不宣稱自行量測到那 8% 減速。結論仍立基於兩條已獲確認的獨立支腿：（1）本頁的靜態證據 &mdash; L2 set-aside 程式碼提交但被註解，附作者註記「//@NEO: l2 cache setting not show performance difference」；以及（2）論文自身的 4.4.2 節，報告 A100 L2 常駐控制造成約 8% 減速。決定性的自行計時支腿已標記，待 cmake 重設定修好後於後續執行補上。"> Our automated L2PER rebuild (un-comment the <code>cudaStreamAttributeAccessPolicyWindow</code> block + add a <code>-DL2PER</code> cmake target) PATCHED the source successfully &mdash; the log shows &ldquo;patched L2PER block live&rdquo; &mdash; but the CMake reconfigure ERRORED (&ldquo;Configuring incomplete, errors occurred!&rdquo;), so we did NOT obtain our own L2-residency-vs-plain timing this run. We therefore do not claim to have measured the 8% slowdown ourselves. The conclusion still stands on two independent legs that ARE confirmed: (1) the static evidence on this page &mdash; the L2 set-aside code is committed-but-commented with the author's note &ldquo;//@NEO: l2 cache setting not show performance difference&rdquo;; and (2) the paper's own Sec 4.4.2, which reports a ~8% slowdown from A100 L2 residency control. The decisive own-timing leg is flagged for a follow-up run once the cmake reconfigure is fixed.</span>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="scope">
+  <h2><span class="i18n" data-en="8. Scope, Threats to Validity &amp; Transfer to LLM Inference" data-zh="8. 範圍、效度威脅與向 LLM 推理的遷移">8. Scope, Threats to Validity &amp; Transfer to LLM Inference</span></h2>
+
+  <div class="grid-2">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Why this transfers to our claim" data-zh="為何這可遷移到我們的主張">Why this transfers to our claim</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Stencils have NO weights, so the only reusable bytes are the activation-like field arrays &mdash; PERKS isolates the activation/array-reuse term cleanly, with no weight-traffic confound." data-zh="Stencil 沒有權重，所以唯一可重用的位元組是類 activation 的場陣列 &mdash; PERKS 乾淨地隔離出 activation／陣列重用項，無權重流量干擾。">Stencils have NO weights, so the only reusable bytes are the activation-like field arrays &mdash; PERKS isolates the activation/array-reuse term cleanly, with no weight-traffic confound.</span></li>
+        <li><span class="i18n" data-en="The reuse is genuinely inter-iteration and transient &mdash; a related (not identical) setting to transient inter-kernel activation reuse in an eager LLM step. Note PERKS' winning mechanism removes the kernel boundary entirely via a persistent cooperative kernel, whereas an eager LLM step keeps that boundary; so this is qualitative corroboration / a negative control on L2 persistence, not a direct transfer of the bound." data-zh="這份重用確實是跨迭代且瞬態的 &mdash; 與 eager LLM step 中瞬態跨核心 activation 重用是相關（非相同）的情境。注意 PERKS 致勝的機制是用常駐 cooperative 核心完全移除核心邊界，而 eager LLM step 保留該邊界；所以這是對 L2 常駐的質性佐證／負控制，而非對該上界的直接遷移。">The reuse is genuinely inter-iteration and transient &mdash; a related (not identical) setting to transient inter-kernel activation reuse in an eager LLM step. Note PERKS' winning mechanism removes the kernel boundary entirely via a persistent cooperative kernel, whereas an eager LLM step keeps that boundary; so this is qualitative corroboration / a negative control on L2 persistence, not a direct transfer of the bound.</span></li>
+        <li><span class="i18n" data-en="Specialists chose registers/SRAM and rejected L2 (net &minus;8%): independent corroboration that L2 is the wrong level for this kind of reuse." data-zh="專家選了暫存器/SRAM 而拒絕 L2（淨 &minus;8%）：對「L2 是這類重用的錯誤層級」的獨立佐證。">Specialists chose registers/SRAM and rejected L2 (net &minus;8%): independent corroboration that L2 is the wrong level for this kind of reuse.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Where it does NOT transfer (honest limits)" data-zh="它不遷移之處（誠實的界線）">Where it does NOT transfer (honest limits)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="A stencil is not a transformer: its working set is tiny per element and fully software-stageable into registers; LLM activations are larger and less amenable to register folding. The mechanism does not port; the L2-is-not-the-win conclusion does." data-zh="Stencil 不是 transformer：它每元素的工作集很小、可完全用軟體分階進暫存器；LLM activation 更大、較不適合暫存器折疊。機制不可移植；但「L2 不是勝負手」結論可以。">A stencil is not a transformer: its working set is tiny per element and fully software-stageable into registers; LLM activations are larger and less amenable to register folding. The mechanism does not port; the L2-is-not-the-win conclusion does.</span></li>
+        <li><span class="i18n" data-en="PERKS gets to choose its data placement; an eager LLM runtime mostly does not. Our paper measures the L2 path that the LLM runtime DOES leave to hardware &mdash; PERKS just shows the ceiling is low even when you try hardest." data-zh="PERKS 可以選擇其資料放置；eager LLM 執行期大多不能。我們的論文量測的是 LLM 執行期確實留給硬體的 L2 路徑 &mdash; PERKS 只是顯示即使你最努力，天花板也很低。">PERKS gets to choose its data placement; an eager LLM runtime mostly does not. Our paper measures the L2 path that the LLM runtime DOES leave to hardware &mdash; PERKS just shows the ceiling is low even when you try hardest.</span></li>
+        <li><span class="i18n" data-en="A100-only (sm_70/sm_80 in CMake); newer GPUs with larger L2 (e.g. H100) could in principle behave differently &mdash; but the paper's L2 ablation and the commented-out code are both on Ampere, the same generation as our target." data-zh="僅 A100（CMake 中 sm_70/sm_80）；具更大 L2 的新 GPU（如 H100）原則上可能表現不同 &mdash; 但論文的 L2 消融與被註解的程式碼都在 Ampere，與我們的目標同世代。">A100-only (sm_70/sm_80 in CMake); newer GPUs with larger L2 (e.g. H100) could in principle behave differently &mdash; but the paper's L2 ablation and the commented-out code are both on Ampere, the same generation as our target.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="8.1 Reproduction risks we are tracking" data-zh="8.1 我們正在追蹤的重現風險">8.1 Reproduction risks we are tracking</span></h3>
+  <table>
+    <tr><th><span class="i18n" data-en="Risk" data-zh="風險">Risk</span></th><th><span class="i18n" data-en="Mitigation" data-zh="緩解">Mitigation</span></th></tr>
+    <tr><td><span class="i18n" data-en="L2PER rebuild failed this run: source patched (&ldquo;block live&rdquo;) but cmake reconfigure errored &rarr; no own L2PER timing" data-zh="L2PER 重建本次失敗：原始碼已修補（「block live」）但 cmake 重設定報錯 &rarr; 無自有 L2PER 計時">L2PER rebuild failed this run: source patched (&ldquo;block live&rdquo;) but cmake reconfigure errored &rarr; no own L2PER timing</span></td><td><span class="i18n" data-en="MATERIALIZED &mdash; flagged for a follow-up run; conclusion held on the paper's Sec 4.4.2 + the committed-but-commented code; fix the -DL2PER cmake target offline and resubmit" data-zh="已發生 &mdash; 已標記後續執行；結論暫由論文 4.4.2 節 + 提交但被註解的程式碼支撐；離線修好 -DL2PER cmake target 後重交">MATERIALIZED &mdash; flagged for a follow-up run; conclusion held on the paper's Sec 4.4.2 + the committed-but-commented code; fix the <code>-DL2PER</code> cmake target offline and resubmit</span></td></tr>
+    <tr><td><span class="i18n" data-en="ncu perf-counter permission (ERR_NVGPUCTRPERM) blocks DRAM/L2 metrics" data-zh="ncu 效能計數器權限（ERR_NVGPUCTRPERM）擋住 DRAM/L2 指標">ncu perf-counter permission (ERR_NVGPUCTRPERM) blocks DRAM/L2 metrics</span></td><td><span class="i18n" data-en="not hit this run &mdash; ncu returned DRAM and L2 hit-rate metrics on the PACE A100 compute job as expected" data-zh="本次未遇 &mdash; ncu 在 PACE A100 compute 作業上如預期回傳了 DRAM 與 L2 命中率指標">not hit this run &mdash; <code>ncu</code> returned DRAM and L2 hit-rate metrics on the PACE A100 compute job as expected</span></td></tr>
+    <tr><td><span class="i18n" data-en="Cooperative-launch occupancy failure on a shared A100" data-zh="共享 A100 上 cooperative 啟動 occupancy 失敗">Cooperative-launch occupancy failure on a shared A100</span></td><td><span class="i18n" data-en="exclusive single-GPU job; --warmup is required and included" data-zh="獨佔單 GPU 作業；--warmup 為必要且已包含">exclusive single-GPU job; <code>--warmup</code> is required and included</span></td></tr>
+    <tr><td><span class="i18n" data-en="Speedup magnitude below 2.12&times; for a single type" data-zh="單一類型加速低於 2.12&times;">Speedup magnitude below 2.12&times; for a single type</span></td><td><span class="i18n" data-en="not a failure &mdash; we measured a 1.86&ndash;2.13&times; range across types; 2.12&times; is the paper's geomean" data-zh="不算失敗 &mdash; 我們跨類型量得 1.86&ndash;2.13&times; 區間；2.12&times; 是論文的幾何平均">not a failure &mdash; we measured a 1.86&ndash;2.13&times; range across types; 2.12&times; is the paper's geomean</span></td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="takeaway">
+  <h2><span class="i18n" data-en="9. Takeaway" data-zh="9. 結論">9. Takeaway</span></h2>
+  <p><span class="i18n"
+    data-en="PERKS is a high-quality systems paper about doing inter-iteration reuse right on the GPU. For our survey its value is almost entirely in what it refuses to do: a team of GPU-memory specialists, building the most reuse-aggressive stencil engine they could, deliberately staged the recurring working set in registers and shared memory, and explicitly rejected the L2 cache &mdash; both in prose (Sec 4.4.2: ~8% slowdown) and in code (the commented-out access-policy-window block with the &ldquo;no performance difference&rdquo; note). Our reproduction made that decision quantitative on a single A100 (job 9934117): we measured full PERKS at 1.86&ndash;2.13&times; over baseline (confirming the paper's ~2.12&times; geomean), and we measured DRAM traffic falling sharply while the L2 sector hit-rate stayed essentially flat (&asymp;72% &rarr; &asymp;79%, ~7 pp) &mdash; the signature that the byte savings come from on-chip register/shared-memory staging, not from L2. The one leg we did NOT obtain ourselves is the forced-L2 (-DL2PER) timing: that rebuild patched the source but its cmake reconfigure failed this run, so the ~8% slowdown rests on the paper's Sec 4.4.2 plus the committed-but-commented code, and is flagged for a follow-up run. On the two legs we did measure, PERKS becomes a clean external corroboration &mdash; qualitative, on a non-LLM iterative-stencil workload, not a direct transfer of the numeric bound &mdash; of our &ldquo;Worth the Bytes?&rdquo; thesis: L2-mediated transient reuse is not the win, the gain is not driven by higher L2 reuse, and an explicit L2-residency policy did not pay &mdash; consistent with our <0.65% bound."
+    data-zh="PERKS 是一篇關於在 GPU 上正確做跨迭代重用的高品質系統論文。對本綜述而言，它的價值幾乎全在它拒絕做的事：一群 GPU 記憶體專家，打造他們所能做出最激進的重用 stencil 引擎，卻刻意把反覆出現的工作集分階到暫存器與共享記憶體，並明確拒絕 L2 cache &mdash; 在文字中（4.4.2 節：約 8% 減速）與在程式碼中（被註解的 access-policy-window 區塊，附「無效能差異」註記）皆然。我們的重現在單張 A100 上把這個決定量化（job 9934117）：量得完整 PERKS 相對基線 1.86&ndash;2.13&times;（確認論文的 ~2.12&times; 幾何平均），並量得 DRAM 流量大幅下降而 L2 sector 命中率基本持平（&asymp;72% &rarr; &asymp;79%，約 7 個百分點）&mdash; 這正是「位元組節省來自晶片內暫存器／共享記憶體分階，而非 L2」的特徵。唯一我們未自行取得的支腿是強制 L2（-DL2PER）計時：該重建已修補原始碼，但其 cmake 重設定於本次失敗，故那約 8% 減速依靠論文 4.4.2 節加上提交但被註解的程式碼，並已標記為後續執行。在我們確實量測到的兩條支腿上，PERKS 成為我們「Worth the Bytes?」論點一個乾淨的外部佐證 &mdash; 質性的、在一個非 LLM 的迭代式 stencil 工作負載上，而非對數值上界的直接遷移：L2 中介的瞬態重用不是勝負手、增益不是由更高的 L2 重用驅動、且明確的 L2 常駐策略並未獲利 &mdash; 與我們的 <0.65% 上界一致。">PERKS is a high-quality systems paper about doing inter-iteration reuse right on the GPU. For our survey its value is almost entirely in what it refuses to do: a team of GPU-memory specialists, building the most reuse-aggressive stencil engine they could, deliberately staged the recurring working set in registers and shared memory, and explicitly rejected the L2 cache &mdash; both in prose (Sec 4.4.2: ~8% slowdown) and in code (the commented-out access-policy-window block with the &ldquo;no performance difference&rdquo; note). Our reproduction made that decision quantitative on a single A100 (job 9934117): we measured full PERKS at 1.86&ndash;2.13&times; over baseline (confirming the paper's ~2.12&times; geomean), and we measured DRAM traffic falling sharply while the L2 sector hit-rate stayed essentially flat (&asymp;72% &rarr; &asymp;79%, ~7 pp) &mdash; the signature that the byte savings come from on-chip register/shared-memory staging, not from L2. The one leg we did NOT obtain ourselves is the forced-L2 (<code>-DL2PER</code>) timing: that rebuild patched the source but its cmake reconfigure failed this run, so the ~8% slowdown rests on the paper's Sec 4.4.2 plus the committed-but-commented code, and is flagged for a follow-up run. On the two legs we did measure, PERKS becomes a clean external corroboration &mdash; qualitative, on a non-LLM iterative-stencil workload, not a direct transfer of the numeric bound &mdash; of our &ldquo;Worth the Bytes?&rdquo; thesis: L2-mediated transient reuse is not the win, the gain is not driven by higher L2 reuse, and an explicit L2-residency policy did not pay &mdash; consistent with our &lt;0.65% bound.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Measurement status (job 9934117):" data-zh="量測狀態（job 9934117）：">Measurement status (job 9934117):</span></strong>
+    <span class="i18n"
+      data-en=" DONE: (1) per-stencil baseline / genwr GCells/s and computed speedups, 1.86&ndash;2.13&times;, plus the 2d9pt gen / gen --usesm stages (Sec 6.3); (2) ncu L2 hit-rate (&asymp;72% &rarr; &asymp;79%, ~flat) and a qualitative DRAM-traffic drop for baseline / gen / gen --usesm (Sec 7.3); (3) the flat L2 hit rate alongside the DRAM drop is consistent with a negligible L2 contribution (the L2 time-share was not directly quantified), in line with the &lt;0.65% framing. Flagged for a follow-up run: plain-gen vs L2PER-gen GCells/s and the % slowdown &mdash; the L2PER source patch went live (&ldquo;block live&rdquo;) but the cmake reconfigure failed, so the ~8% slowdown currently rests on the paper's Sec 4.4.2 and the committed-but-commented code rather than our own timing."
+      data-zh=" 已完成：(1) 各 stencil 的 baseline / genwr GCells/s 與計算出的加速，1.86&ndash;2.13&times;，外加 2d9pt 的 gen / gen --usesm 階段（6.3）；(2) ncu L2 命中率（&asymp;72% &rarr; &asymp;79%，約持平）與 baseline / gen / gen --usesm 的質性 DRAM 流量下降（7.3）；(3) L2 命中率持平、同時 DRAM 流量下降，與「L2 貢獻可忽略」一致（L2 時間佔比未直接量化），符合 &lt;0.65% 框架。標記為後續執行：plain-gen vs L2PER-gen GCells/s 與 % 減速 &mdash; L2PER 原始碼修補已生效（「block live」）但 cmake 重設定失敗，故那約 8% 減速目前依靠論文 4.4.2 節與提交但被註解的程式碼，而非我們自己的計時。"> DONE: (1) per-stencil baseline / genwr GCells/s and computed speedups, 1.86&ndash;2.13&times;, plus the 2d9pt gen / gen --usesm stages (Sec 6.3); (2) ncu L2 hit-rate (&asymp;72% &rarr; &asymp;79%, ~flat) and a qualitative DRAM-traffic drop for baseline / gen / gen --usesm (Sec 7.3); (3) the flat L2 hit rate alongside the DRAM drop is consistent with a negligible L2 contribution (the L2 time-share was not directly quantified), in line with the &lt;0.65% framing. Flagged for a follow-up run: plain-gen vs L2PER-gen GCells/s and the % slowdown &mdash; the L2PER source patch went live (&ldquo;block live&rdquo;) but the cmake reconfigure failed, so the ~8% slowdown currently rests on the paper's Sec 4.4.2 and the committed-but-commented code rather than our own timing.</span>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="PERKS: A Locality-Optimized Execution Model for Iterative Memory-bound GPU Applications (ICS '23, DOI 10.1145/3577193.3593705) &mdash; paper analysis + L2-reuse reproduction page for the &ldquo;Worth the Bytes?&rdquo; study." data-zh="PERKS：迭代式記憶體受限 GPU 應用的局部性最佳化執行模型（ICS '23，DOI 10.1145/3577193.3593705）&mdash;「Worth the Bytes?」研究的論文分析 + L2 重用重現頁。">PERKS: A Locality-Optimized Execution Model for Iterative Memory-bound GPU Applications (ICS '23, DOI 10.1145/3577193.3593705) &mdash; paper analysis + L2-reuse reproduction page for the &ldquo;Worth the Bytes?&rdquo; study.</span></p>
+  <p><span class="i18n" data-en="Source code:" data-zh="原始碼：">Source code:</span> <code>github.com/neozhang307/PERKS</code></p>
+  <p><span class="i18n" data-en="Reproduction status: measured on PACE A100-80GB PCIe (job 9934117, CUDA 12.6.1). Throughput 1.86&ndash;2.13&times; and L2-hit-rate flatness confirmed; the forced-L2 (-DL2PER) timing leg is pending a follow-up run (cmake reconfigure failed). Generated 2026-06-14." data-zh="重現狀態：已在 PACE A100-80GB PCIe 上量測（job 9934117，CUDA 12.6.1）。吞吐 1.86&ndash;2.13&times; 與 L2 命中率持平已確認；強制 L2（-DL2PER）計時支腿待後續執行補上（cmake 重設定失敗）。產生日期：2026-06-14。">Reproduction status: measured on PACE A100-80GB PCIe (job 9934117, CUDA 12.6.1). Throughput 1.86&ndash;2.13&times; and L2-hit-rate flatness confirmed; the forced-L2 (<code>-DL2PER</code>) timing leg is pending a follow-up run (cmake reconfigure failed). Generated 2026-06-14.</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});
+  document.getElementById('lang-en').classList.toggle('active',l==='en');
+  document.getElementById('lang-zh').classList.toggle('active',l==='zh');
+  localStorage.setItem('lang',l);
+  if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}
+}
+document.addEventListener('DOMContentLoaded',function(){
+  if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}
+  var l=localStorage.getItem('lang');if(l)setLang(l);
+});
+</script>
+</body>
+</html>

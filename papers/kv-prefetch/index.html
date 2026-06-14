@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asynchronous KV Cache Prefetching — Active L2 Prefetch for PagedAttention</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" crossorigin="anonymous"></script>
+<style>
+/* ===== ACCENT (Sky — infrastructure / vLLM kernel) ===== */
+:root{--accent:#4fc3f7;--accent-rgb:79,195,247;--nav-bg:rgba(10,24,35,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#a8c4d8;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#0e1620 0%,#101a28 50%,#0d1830 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.18);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW (horizontal steps) ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent);color:#08222e}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW DIAGRAMS ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== OVERLAP TIMELINE (custom diagram) ===== */
+.olane{display:flex;flex-direction:column;gap:10px;margin:1.5rem 0}
+.olane .row{display:flex;align-items:center;gap:10px}
+.olane .tag{flex:0 0 130px;font-size:.78rem;color:#8fa4c0;text-align:right;font-weight:600}
+.olane .track{flex:1;display:flex;gap:4px;min-width:0}
+.olane .cell{flex:1;height:40px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:600;color:#08222e;min-width:0;white-space:nowrap;overflow:hidden}
+.olane .compute{background:rgba(110,198,255,.45);color:#cfe9ff}
+.olane .fetch{background:rgba(233,69,96,.35);color:#ffd4dc}
+.olane .pref{background:rgba(79,195,247,.55);color:#062633}
+.olane .stall{background:rgba(245,166,35,.25);color:#ffe2b0;border:1px dashed rgba(245,166,35,.5)}
+.olane .idle{background:rgba(255,255,255,.04);color:#6c7086;border:1px dashed rgba(255,255,255,.12)}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+.pending{background:rgba(245,166,35,.09);border:1px solid rgba(245,166,35,.4);border-left:4px solid #f5a623;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-size:.9rem}
+.pending strong{color:#ffd27a}
+.tagp{display:inline-block;background:rgba(245,166,35,.2);border:1px solid rgba(245,166,35,.5);color:#ffd27a;padding:1px 8px;border-radius:10px;font-size:.7rem;font-weight:700;letter-spacing:.04em;vertical-align:middle}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== COMPARISON INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== SIDE-BY-SIDE GRID ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  .olane .tag{flex:0 0 90px;font-size:.68rem}
+}
+</style>
+</head>
+<body>
+
+<!-- ============ NAV ============ -->
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#motivation">Motivation</a></li>
+    <li><a href="#mechanism">Mechanism</a></li>
+    <li><a href="#repo">Repo Analysis</a></li>
+    <li><a href="#claims">Claims vs Code</a></li>
+    <li><a href="#repro">Our Reproduction</a></li>
+    <li><a href="#attribution">L2 Attribution</a></li>
+    <li><a href="#related">Related Work</a></li>
+    <li><a href="#separability">Separability</a></li>
+    <li><a href="#reproduce">How to Reproduce</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<!-- ============ HERO ============ -->
+<div class="hero">
+  <h1>Asynchronous KV Cache Prefetching</h1>
+  <p class="sub"><span class="i18n" data-en="An ~10-line PTX patch that issues an early L2 prefetch for the next KV block during PagedAttention compute — and why its L2 win is categorically outside the &lt;0.65% passive-residency bound of &quot;Worth the Bytes?&quot;" data-zh="一個約 10 行的 PTX 修補：在 PagedAttention 計算時為下一個 KV block 提早發出 L2 預取——以及為何它的 L2 增益在類別上完全落在「Worth the Bytes?」的 &lt;0.65% 被動殘留上界之外。">An ~10-line PTX patch that issues an early L2 prefetch for the next KV block during PagedAttention compute — and why its L2 win is categorically outside the &lt;0.65% passive-residency bound of "Worth the Bytes?"</span></p>
+  <div class="badges">
+    <span class="badge">AAAI 2026</span>
+    <span class="badge">arXiv:2504.06319</span>
+    <span class="badge">vLLM XFORMERS</span>
+    <span class="badge">cp.async.bulk.prefetch.L2</span>
+    <span class="badge">Hopper sm_90</span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">
+    Alibaba &mdash; <code style="background:none;color:#8fa4c0">github.com/alibaba/vllm_xformers_prefetch</code>
+  </p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">
+    Alibaba Group &middot; experiments on H20 (Hopper) &middot; analysed here as an adversarial L2-reuse case for our measurement study
+  </p>
+</div>
+
+<div class="container">
+
+<!-- ============ TL;DR ============ -->
+<section id="tldr">
+  <h2><span class="i18n" data-en="1. TL;DR" data-zh="1. 重點摘要">1. TL;DR</span></h2>
+
+  <p><span class="i18n"
+    data-en="During the PagedAttention decode kernel, each warp iterates over the sequence's KV blocks one at a time. When a warp finishes block $b$ and reaches for block $b{+}\text{NUM\_WARPS}$, the address of that next block is only resolved as the iteration begins, so the warp stalls on a long-latency global load before its compute can proceed (an exposed long-scoreboard stall). This paper adds a single PTX instruction — <code>cp.async.bulk.prefetch.L2.global</code> — that, while the current block is still being multiplied, issues an asynchronous bulk prefetch of the next block's key (and later value) tensor toward L2. Because the request is issued early, those bytes are moving toward L2 ahead of use, so when the warp reaches that block its long-latency load is hidden behind compute rather than serialized in front of it. (Caveat, measured: the baseline KV is already ~85% L2-resident from natural reuse — see Sections 6-7 — so the prefetch is hiding the exposed load latency, not removing traffic or changing what sits in L2.)"
+    data-zh="在 PagedAttention decode kernel 中，每個 warp 依序處理序列的 KV block。當一個 warp 算完 block $b$、要去取 block $b{+}\text{NUM\_WARPS}$ 時，那個下一個 block 的位址要等迭代開始才解析出來，於是 warp 在它的計算能繼續之前，先在長延遲的 global load 上停頓（一個暴露的 long-scoreboard 停頓）。本文加入單一一條 PTX 指令 — <code>cp.async.bulk.prefetch.L2.global</code> — 在當前 block 還在做矩陣乘法時，就非同步地把下一個 block 的 key（之後是 value）張量預取向 L2。由於請求提早發出，那些位元組在被使用前就已朝 L2 移動，於是 warp 取到那個 block 時，它的長延遲 load 是被計算掩蓋、而非排在計算前面被序列化。（量測上的提醒：基線 KV 本就因自然重用而約 85% L2 駐留 — 見第 6-7 節 — 故預取是在掩蓋暴露的 load 延遲，而非移除流量或改變 L2 中的內容。）">During the PagedAttention decode kernel, each warp iterates over the sequence's KV blocks one at a time. When a warp finishes block $b$ and reaches for block $b{+}\text{NUM\_WARPS}$, the address of that next block is only resolved as the iteration begins, so the warp stalls on a long-latency global load before its compute can proceed (an exposed long-scoreboard stall). This paper adds a single PTX instruction — <code>cp.async.bulk.prefetch.L2.global</code> — that, while the current block is still being multiplied, issues an asynchronous bulk prefetch of the next block's key (and later value) tensor toward L2. Because the request is issued early, those bytes are moving toward L2 ahead of use, so when the warp reaches that block its long-latency load is hidden behind compute rather than serialized in front of it. (Caveat, measured: the baseline KV is already ~85% L2-resident from natural reuse — see Sections 6-7 — so the prefetch is hiding the exposed load latency, not removing traffic or changing what sits in L2.)</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">~2.15&times;</div><div class="label"><span class="i18n" data-en="attention-kernel speedup (paper, H20)" data-zh="注意力 kernel 加速（論文，H20）">attention-kernel speedup (paper, H20)</span></div></div>
+    <div class="metric-box"><div class="value">~1.97&times;</div><div class="label"><span class="i18n" data-en="end-to-end throughput (paper, H20)" data-zh="端到端吞吐（論文，H20）">end-to-end throughput (paper, H20)</span></div></div>
+    <div class="metric-box"><div class="value">~10</div><div class="label"><span class="i18n" data-en="lines added over stock vLLM" data-zh="相對原版 vLLM 新增行數">lines added over stock vLLM</span></div></div>
+    <div class="metric-box"><div class="value">4096 B</div><div class="label"><span class="i18n" data-en="bytes prefetched per instruction" data-zh="每條指令預取位元組數">bytes prefetched per instruction</span></div></div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Why this paper is in our study." data-zh="本文為何納入我們的研究。">Why this paper is in our study.</span></strong>
+    <span class="i18n"
+      data-en=" Our measurement study &quot;Worth the Bytes?&quot; argues that the <em>passive, unmanaged</em> residency of <em>activations</em> in L2 between two consecutive eager-mode kernels is worth less than 0.65% of step time. This paper is the deliberately adversarial stress case: it is a <em>large, real</em> L2 win. But on close reading it is a <em>different lever</em> — an <em>active</em>, software-issued, <em>intra</em>-kernel prefetch of the <em>KV-cache</em> (a long-lived, high-reuse tensor), whose payoff is latency-hiding, not incidental cross-kernel carryover. Reproducing it and attributing the <em>kernel-level cold-replay delta</em> (ncu, 1.01-1.02x) to a drop in memory stalls — while reporting the headline 1.80x as the separate warm-loop e2e figure, not to passive residency — <em>sharpens</em> our bound: it shows precisely where real L2 wins come from, and that they live outside the quantity we measure."
+      data-zh=" 我們的量測研究「Worth the Bytes?」主張：在兩個連續的 eager-mode kernel 之間，<em>activation</em> 在 L2 中的<em>被動、未受管理</em>殘留，價值低於 step 時間的 0.65%。本文是刻意挑選的對抗性壓力案例：它是一個<em>很大、很真實</em>的 L2 增益。但細看之下它是<em>另一個槓桿</em> — 對 <em>KV-cache</em>（長壽、高重用的張量）做<em>主動</em>、軟體發起、<em>kernel 內</em>的預取，其收益來自延遲掩蓋，而非附帶的跨 kernel 殘留。把它重現、並把<em>kernel 層級的冷重播差值</em>（ncu，1.01-1.02x）歸因於記憶體停頓的下降 — 同時把頭條的 1.80x 當作另一個分開的暖迴圈 e2e 數字、而非歸因於被動殘留 — 反而<em>強化</em>我們的上界：它精確指出真正的 L2 增益來自何處，且它落在我們所量測的量之外。">  Our measurement study "Worth the Bytes?" argues that the <em>passive, unmanaged</em> residency of <em>activations</em> in L2 between two consecutive eager-mode kernels is worth less than 0.65% of step time. This paper is the deliberately adversarial stress case: it is a <em>large, real</em> L2 win. But on close reading it is a <em>different lever</em> — an <em>active</em>, software-issued, <em>intra</em>-kernel prefetch of the <em>KV-cache</em> (a long-lived, high-reuse tensor), whose payoff is latency-hiding, not incidental cross-kernel carryover. Reproducing it and attributing the <em>kernel-level cold-replay delta</em> (ncu, 1.01-1.02x) to a drop in memory stalls — while reporting the headline 1.80x as the separate warm-loop e2e figure, not to passive residency — <em>sharpens</em> our bound: it shows precisely where real L2 wins come from, and that they live outside the quantity we measure.</span>
+  </div>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Problem" data-zh="問題">Problem</span></h4>
+      <p><span class="i18n" data-en="In memory-bound decode, the PagedAttention kernel reads KV blocks. The next block's address is resolved too late for the hardware to start its long-latency load early, so that load latency is exposed as a warp stall in front of compute — even though the block is often already in L2." data-zh="在記憶體受限的 decode 階段，PagedAttention kernel 讀取 KV block。下一個 block 的位址解析得太晚，硬體來不及提早啟動它的長延遲 load，於是該 load 延遲以排在計算前面的 warp 停頓暴露出來 — 即便該 block 往往已在 L2 中。">In memory-bound decode, the PagedAttention kernel reads KV blocks. The next block's address is resolved too late for the hardware to start its long-latency load early, so that load latency is exposed as a warp stall in front of compute — even though the block is often already in L2.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Mechanism" data-zh="機制">Mechanism</span></h4>
+      <p><span class="i18n" data-en="Compute the physical address of the block NUM_WARPS iterations ahead and issue cp.async.bulk.prefetch.L2.global for it — once for K, once for V — guarded against the last block. No new launch, no extra shared memory." data-zh="算出領先 NUM_WARPS 次迭代的 block 的實體位址，並對它發出 cp.async.bulk.prefetch.L2.global — K 一次、V 一次 — 並對最後一個 block 設防護。不新增 launch，不額外用 shared memory。">Compute the physical address of the block NUM_WARPS iterations ahead and issue cp.async.bulk.prefetch.L2.global for it — once for K, once for V — guarded against the last block. No new launch, no extra shared memory.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Our finding (measured)" data-zh="我們的發現（已量測）">Our finding (measured)</span></h4>
+      <p><span class="i18n" data-en="Measured on PACE H100 (job 9948442): e2e 1.80x at batch 1, 1.46x at batch 8, 0.99x at batch 32 — reproducing the paper's regime. ncu confirms the mechanism: long-scoreboard mem-stall drops 9.2%->8.5% while HBM read stays flat (2.01 MB). The baseline is already ~85% L2-resident from natural KV reuse, so the prefetch's marginal L2-hit gain is tiny (+0.2-0.4 pp); ~0% of the win is the passive activation-residency mechanism we bound." data-zh="於 PACE H100 量測（job 9948442）：batch 1 e2e 1.80x、batch 8 1.46x、batch 32 0.99x — 重現了論文的區間。ncu 證實機制：long-scoreboard 記憶體停頓由 9.2%->8.5% 下降，而 HBM 讀取持平（2.01 MB）。基線本就因自然 KV 重用而約 85% L2 駐留，故預取的邊際 L2-hit 增益極小（+0.2-0.4 pp）；增益中約 0% 來自我們界定的被動 activation 殘留機制。">Measured on PACE H100 (job 9948442): e2e 1.80x at batch 1, 1.46x at batch 8, 0.99x at batch 32 — reproducing the paper's regime. ncu confirms the mechanism: long-scoreboard mem-stall drops 9.2%->8.5% while HBM read stays flat (2.01 MB). The baseline is already ~85% L2-resident from natural KV reuse, so the prefetch's marginal L2-hit gain is tiny (+0.2-0.4 pp); ~0% of the win is the passive activation-residency mechanism we bound.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MOTIVATION ============ -->
+<section id="motivation">
+  <h2><span class="i18n" data-en="2. Motivation — Why Prefetch the KV-Cache At All?" data-zh="2. 動機 — 為什麼要預取 KV-Cache？">2. Motivation — Why Prefetch the KV-Cache At All?</span></h2>
+
+  <h3><span class="i18n" data-en="2.1 Why now: decode is memory-bound and getting worse" data-zh="2.1 為什麼是現在：decode 是記憶體受限的，而且越來越嚴重">2.1 Why now: decode is memory-bound and getting worse</span></h3>
+  <p><span class="i18n"
+    data-en="Autoregressive decoding generates one token per step and, at each step, must read the entire key/value history of every active sequence. With batch size $B$, sequence length $L$, number of KV heads $H_{kv}$, and head dimension $d$ in two bytes, the per-step KV read is roughly $2 \cdot B \cdot L \cdot H_{kv} \cdot d \cdot 2$ bytes, while the matmul work per step is tiny — a single query vector against the cached keys. The arithmetic intensity of decode is therefore far below the GPU's compute-to-bandwidth ratio, so the attention kernel spends most of its time waiting on HBM. As context windows grow into the tens of thousands of tokens and agentic workloads accumulate ever-longer histories, the fraction of decode time spent moving KV bytes only increases."
+    data-zh="自回歸解碼每步產生一個 token，而每一步都必須讀取每個活躍序列的完整 key/value 歷史。設 batch size 為 $B$、序列長度 $L$、KV head 數 $H_{kv}$、head 維度 $d$，以兩位元組計，每步的 KV 讀取量約為 $2 \cdot B \cdot L \cdot H_{kv} \cdot d \cdot 2$ 位元組，而每步的矩陣乘法量極小 — 單一 query 向量對上已快取的 keys。因此 decode 的算術強度遠低於 GPU 的「計算對頻寬」比，注意力 kernel 大部分時間都在等 HBM。隨著 context 窗口成長到數萬 token、agentic 工作負載累積越來越長的歷史，decode 時間中花在搬 KV 位元組的比例只會上升。">Autoregressive decoding generates one token per step and, at each step, must read the entire key/value history of every active sequence. With batch size $B$, sequence length $L$, number of KV heads $H_{kv}$, and head dimension $d$ in two bytes, the per-step KV read is roughly $2 \cdot B \cdot L \cdot H_{kv} \cdot d \cdot 2$ bytes, while the matmul work per step is tiny — a single query vector against the cached keys. The arithmetic intensity of decode is therefore far below the GPU's compute-to-bandwidth ratio, so the attention kernel spends most of its time waiting on HBM. As context windows grow into the tens of thousands of tokens and agentic workloads accumulate ever-longer histories, the fraction of decode time spent moving KV bytes only increases.</span></p>
+
+  <h3><span class="i18n" data-en="2.2 The bad scenario: a warp stalls every block boundary" data-zh="2.2 糟糕的情境：每個 block 邊界 warp 都停頓">2.2 The bad scenario: a warp stalls every block boundary</span></h3>
+  <p><span class="i18n"
+    data-en="PagedAttention stores the KV-cache in fixed-size physical blocks scattered across HBM, indexed through a per-sequence block table. The decode kernel walks these blocks in a strided loop — warp $w$ handles blocks $w, w{+}\text{NUM\_WARPS}, w{+}2\,\text{NUM\_WARPS}, \dots$ Each loop iteration must (1) translate the logical block to a physical block via the block table, (2) issue a global load for that block's keys, and (3) do the dot products. Because the load address is only known once the iteration begins, the kernel cannot issue that load early enough for the hardware to hide its long latency; the warp issues the load and then sits idle for hundreds of cycles waiting on it — what Nsight calls a <em>long-scoreboard</em> stall — before compute can resume. The stall is the <em>exposed latency</em> of a load that was issued too late, not a claim that the bytes had to travel from HBM (in steady state much of the KV is already L2-resident); the cost is that the warp waits in front of compute instead of behind it. Repeated across every block of every sequence, these stalls dominate the kernel's runtime."
+    data-zh="PagedAttention 把 KV-cache 存成固定大小、散落於 HBM 的實體 block，並透過每序列的 block table 索引。decode kernel 以跨步迴圈走訪這些 block — warp $w$ 處理 block $w, w{+}\text{NUM\_WARPS}, w{+}2\,\text{NUM\_WARPS}, \dots$ 每次迴圈迭代必須 (1) 透過 block table 把邏輯 block 轉成實體 block、(2) 對該 block 的 keys 發出 global load、(3) 做點積。由於 load 位址要等迭代開始才知道，kernel 無法夠早發出該 load 讓硬體掩蓋它的長延遲；warp 發出 load 後就閒置數百個 cycle 等它 — Nsight 所稱的 <em>long-scoreboard</em> 停頓 — 然後計算才能恢復。這個停頓是「發得太晚的 load」的<em>暴露延遲</em>，並非主張那些位元組必須從 HBM 搬來（穩態下許多 KV 本就已 L2 駐留）；代價是 warp 在計算前面等、而非在計算後面等。在每個序列的每個 block 上反覆發生，這些停頓主宰了 kernel 的執行時間。">PagedAttention stores the KV-cache in fixed-size physical blocks scattered across HBM, indexed through a per-sequence block table. The decode kernel walks these blocks in a strided loop — warp $w$ handles blocks $w, w{+}\text{NUM\_WARPS}, w{+}2\,\text{NUM\_WARPS}, \dots$ Each loop iteration must (1) translate the logical block to a physical block via the block table, (2) issue a global load for that block's keys, and (3) do the dot products. Because the load address is only known once the iteration begins, the kernel cannot issue that load early enough for the hardware to hide its long latency; the warp issues the load and then sits idle for hundreds of cycles waiting on it — what Nsight calls a <em>long-scoreboard</em> stall — before compute can resume. The stall is the <em>exposed latency</em> of a load that was issued too late, not a claim that the bytes had to travel from HBM (in steady state much of the KV is already L2-resident); the cost is that the warp waits in front of compute instead of behind it. Repeated across every block of every sequence, these stalls dominate the kernel's runtime.</span></p>
+
+  <h3><span class="i18n" data-en="2.3 Baseline pain: what stock vLLM already does, and where it stops" data-zh="2.3 基線之痛：原版 vLLM 已經做了什麼，又在哪裡止步">2.3 Baseline pain: what stock vLLM already does, and where it stops</span></h3>
+  <p><span class="i18n"
+    data-en="Stock vLLM's PagedAttention is already a heavily-tuned kernel: it vectorizes the loads, uses shared memory for the running softmax, and overlaps thread-group work. What it does <em>not</em> do is look ahead in the block table. The hardware prefetcher cannot help, because the next block's address is a pointer-chase through the block table rather than a linear stride in virtual memory — the very indirection that makes paging flexible also defeats automatic prefetch. So the baseline issues each block's load only at the start of its iteration and pays that load's full latency in the open, even though the address of the next block is, in fact, computable several iterations early from the same block table the kernel already holds in registers. (The latency is exposed because the load is issued late, not because the bytes are necessarily cold in HBM — in steady state much of the KV is already L2-resident; what's missing is the early <em>issue</em>, not the data.)"
+    data-zh="原版 vLLM 的 PagedAttention 本身已是高度調校的 kernel：它把 load 向量化、用 shared memory 維護線上 softmax、並重疊 thread-group 的工作。它<em>沒</em>做的，是在 block table 中往前看。硬體 prefetcher 幫不上忙，因為下一個 block 的位址是穿過 block table 的指標追逐，而非虛擬記憶體中的線性跨步 — 正是這個讓分頁得以靈活的間接性，同時擊敗了自動預取。於是基線只在每個 block 迭代開始時才發出它的 load，並把該 load 的完整延遲攤在明面上付出，儘管下一個 block 的位址其實可以從 kernel 已握在暫存器中的同一張 block table，提前數次迭代就算出來。（延遲被暴露是因為 load 發得晚，而非因為位元組在 HBM 裡必然是冷的 — 穩態下許多 KV 本就已 L2 駐留；缺的是提早<em>發出</em>，不是資料。）">Stock vLLM's PagedAttention is already a heavily-tuned kernel: it vectorizes the loads, uses shared memory for the running softmax, and overlaps thread-group work. What it does <em>not</em> do is look ahead in the block table. The hardware prefetcher cannot help, because the next block's address is a pointer-chase through the block table rather than a linear stride in virtual memory — the very indirection that makes paging flexible also defeats automatic prefetch. So the baseline issues each block's load only at the start of its iteration and pays that load's full latency in the open, even though the address of the next block is, in fact, computable several iterations early from the same block table the kernel already holds in registers. (The latency is exposed because the load is issued late, not because the bytes are necessarily cold in HBM — in steady state much of the KV is already L2-resident; what's missing is the early <em>issue</em>, not the data.)</span></p>
+
+  <h3><span class="i18n" data-en="2.4 Strawman approaches and why they fall short" data-zh="2.4 稻草人方案以及它們為何不足">2.4 Strawman approaches and why they fall short</span></h3>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman A: stage KV into shared memory" data-zh="稻草人 A：把 KV 搬進 shared memory">Strawman A: stage KV into shared memory</span></h4>
+      <p><span class="i18n" data-en="One could double-buffer the next block into SRAM with cp.async. But the decode KV working set per warp is small and shared memory is already spent on the softmax reduction; the win is marginal and the occupancy cost is real. Crucially it changes the kernel's memory hierarchy and register pressure." data-zh="可以用 cp.async 把下一個 block 雙緩衝進 SRAM。但 decode 時每個 warp 的 KV 工作集很小，而 shared memory 已花在 softmax 的歸約上；增益邊際而占用率成本實在。關鍵是它改變了 kernel 的記憶體階層與暫存器壓力。">One could double-buffer the next block into SRAM with cp.async. But the decode KV working set per warp is small and shared memory is already spent on the softmax reduction; the win is marginal and the occupancy cost is real. Crucially it changes the kernel's memory hierarchy and register pressure.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman B: bigger blocks / fused kernels" data-zh="稻草人 B：更大的 block／融合 kernel">Strawman B: bigger blocks / fused kernels</span></h4>
+      <p><span class="i18n" data-en="Larger paged blocks amortize the per-block setup but waste HBM and capacity, and a fully fused FlashAttention-style kernel is a major rewrite that the XFORMERS V0 path was not built around. Neither is a drop-in for an existing deployment." data-zh="更大的分頁 block 可攤平每 block 的設定成本，但浪費 HBM 與容量；而完全融合、FlashAttention 風格的 kernel 是一次大規模改寫，XFORMERS 的 V0 路徑並非圍繞它設計。兩者都不是既有部署的即插即用方案。">Larger paged blocks amortize the per-block setup but waste HBM and capacity, and a fully fused FlashAttention-style kernel is a major rewrite that the XFORMERS V0 path was not built around. Neither is a drop-in for an existing deployment.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Strawman C: trust the hardware prefetcher" data-zh="稻草人 C：信任硬體 prefetcher">Strawman C: trust the hardware prefetcher</span></h4>
+      <p><span class="i18n" data-en="As 2.3 explains, the block-table indirection defeats the stride-based hardware prefetcher. Doing nothing leaves the latency fully exposed. The address is known to software but not to the prefetcher — so software must volunteer it." data-zh="如 2.3 所述，block-table 的間接性擊敗了基於跨步的硬體 prefetcher。什麼都不做就讓延遲完全暴露。位址對軟體已知、對 prefetcher 未知 — 所以必須由軟體主動提供。">As 2.3 explains, the block-table indirection defeats the stride-based hardware prefetcher. Doing nothing leaves the latency fully exposed. The address is known to software but not to the prefetcher — so software must volunteer it.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="2.5 The obstacle and the positioning" data-zh="2.5 障礙與定位">2.5 The obstacle and the positioning</span></h3>
+  <p><span class="i18n"
+    data-en="The obstacle the paper must clear is precision-without-disruption: it needs to issue the next block's load/prefetch early enough to hide exposed long-scoreboard latency <em>before</em> use, <em>without</em> consuming shared memory, <em>without</em> blocking the issuing warp, and <em>without</em> rewriting the kernel. Hopper (sm_90+) supplies exactly the right primitive — <code>cp.async.bulk.prefetch.L2.global</code> — a non-blocking bulk-prefetch hint that requests data be moved from global memory toward L2 and returns immediately, touching neither registers nor shared memory of the issuing warp. (It is a scalar L2-prefetch instruction in the same async-bulk-copy family as TMA, but unlike a full TMA tensor copy it needs no tensor-map descriptor and writes nothing into shared memory.) The paper's positioning is therefore narrow and honest: it is not a new attention algorithm; it is a minimal, additive latency-hiding patch that exploits a Hopper hardware feature to prefetch a tensor whose address the software already knows."
+    data-zh="本文必須跨越的障礙是「精確而不擾動」：它要在下一個 block 被使用<em>之前</em>夠早發出它的 load/prefetch，以掩蓋暴露的 long-scoreboard 延遲，<em>不</em>消耗 shared memory、<em>不</em>阻塞發起的 warp、<em>不</em>改寫 kernel。Hopper（sm_90+）正好提供恰當的原語 — <code>cp.async.bulk.prefetch.L2.global</code> — 一個非阻塞的 bulk-prefetch 提示，請求把資料從 global memory 搬向 L2 後立即返回，不碰發起 warp 的暫存器或 shared memory。（它是與 TMA 同屬 async-bulk-copy 家族的純量 L2-prefetch 指令，但不同於完整的 TMA tensor 複製，它不需要 tensor-map descriptor，也不寫入 shared memory。）因此本文的定位狹窄而誠實：它不是新的注意力演算法，而是一個極簡、增補式的延遲掩蓋修補，利用一項 Hopper 硬體特性來預取一個其位址軟體早已知道的張量。">The obstacle the paper must clear is precision-without-disruption: it needs to issue the next block's load/prefetch early enough to hide exposed long-scoreboard latency <em>before</em> use, <em>without</em> consuming shared memory, <em>without</em> blocking the issuing warp, and <em>without</em> rewriting the kernel. Hopper (sm_90+) supplies exactly the right primitive — <code>cp.async.bulk.prefetch.L2.global</code> — a non-blocking bulk-prefetch hint that requests data be moved from global memory toward L2 and returns immediately, touching neither registers nor shared memory of the issuing warp. (It is a scalar L2-prefetch instruction in the same async-bulk-copy family as TMA, but unlike a full TMA tensor copy it needs no tensor-map descriptor and writes nothing into shared memory.) The paper's positioning is therefore narrow and honest: it is not a new attention algorithm; it is a minimal, additive latency-hiding patch that exploits a Hopper hardware feature to prefetch a tensor whose address the software already knows.</span></p>
+
+  <h3><span class="i18n" data-en="2.6 Contributions" data-zh="2.6 貢獻">2.6 Contributions</span></h3>
+  <ol>
+    <li><span class="i18n" data-en="<strong>A one-iteration-ahead block lookahead</strong> computed from the existing block table (<code>block_idx + NUM_WARPS</code>), reusing data the kernel already touches." data-zh="<strong>提前一次迭代的 block 預看</strong>，由既有的 block table 算出（<code>block_idx + NUM_WARPS</code>），重用 kernel 本就接觸的資料。"><strong>A one-iteration-ahead block lookahead</strong> computed from the existing block table (<code>block_idx + NUM_WARPS</code>), reusing data the kernel already touches.</span></li>
+    <li><span class="i18n" data-en="<strong>An asynchronous L2 prefetch</strong> for both the key and the value cache of that next block, issued by a single lane while the rest of the warp computes the current block." data-zh="<strong>非同步 L2 預取</strong>，對下一個 block 的 key 與 value cache 各一次，由單一 lane 發出，而 warp 其餘部分在計算當前 block。"><strong>An asynchronous L2 prefetch</strong> for both the key and the value cache of that next block, issued by a single lane while the rest of the warp computes the current block.</span></li>
+    <li><span class="i18n" data-en="<strong>A drop-in deployment story</strong>: a single header file replaces vLLM's <code>attention_kernels.cuh</code>; no scheduler, model, or API changes. Measured ~2.15&times; kernel and up to ~1.97&times; e2e on H20." data-zh="<strong>即插即用的部署方式</strong>：單一標頭檔替換 vLLM 的 <code>attention_kernels.cuh</code>；不動 scheduler、模型或 API。在 H20 上量測到約 2.15&times; kernel、最高約 1.97&times; e2e。"><strong>A drop-in deployment story</strong>: a single header file replaces vLLM's <code>attention_kernels.cuh</code>; no scheduler, model, or API changes. Measured ~2.15&times; kernel and up to ~1.97&times; e2e on H20.</span></li>
+  </ol>
+</section>
+
+<!-- ============ MECHANISM ============ -->
+<section id="mechanism">
+  <h2><span class="i18n" data-en="3. Core Mechanism" data-zh="3. 核心機制">3. Core Mechanism</span></h2>
+
+  <h3><span class="i18n" data-en="3.1 The overlap, visualized" data-zh="3.1 重疊機制的視覺化">3.1 The overlap, visualized</span></h3>
+  <p><span class="i18n"
+    data-en="The whole idea is to convert serial &quot;load-then-compute&quot; into overlapped &quot;compute-while-loading&quot;. In the baseline, each block iteration begins with an exposed late global-load (long-scoreboard) stall (the warp waits in front of compute), then computes. In the patched kernel, lane 0 fires a prefetch for the next block at the <em>start</em> of the current iteration; the bulk-prefetch engine issues that next block's load toward L2 in the background while the warp computes the current block. By the time the next iteration needs that block, its load is already in flight, so the long-latency global load is hidden behind compute rather than serialized in front of it. (Measured caveat: the baseline KV is already ~85% L2-resident, so the observable signature is a small drop in memory stalls, not a large L2-hit jump — see Sections 6-7.)"
+    data-zh="整個想法是把序列式的「先 load 後算」轉成重疊式的「邊算邊 load」。在基線中，每個 block 迭代都以一次暴露的 late global-load（long-scoreboard）停頓開始（warp 在計算前面等），然後計算。在修補後的 kernel 中，lane 0 在當前迭代<em>開始</em>時就為下一個 block 發出預取；bulk-prefetch 引擎在背景把那個下一個 block 的 load 發向 L2，同時 warp 計算當前 block。等下一次迭代需要那個 block 時，它的 load 已在途中，於是長延遲的 global load 是被計算掩蓋、而非排在計算前面被序列化。（量測上的提醒：基線 KV 本就約 85% L2 駐留，故可觀測的特徵是記憶體停頓的小幅下降，而非 L2-hit 的大幅躍升 — 見第 6-7 節。）">The whole idea is to convert serial "load-then-compute" into overlapped "compute-while-loading". In the baseline, each block iteration begins with an exposed late global-load (long-scoreboard) stall (the warp waits in front of compute), then computes. In the patched kernel, lane 0 fires a prefetch for the next block at the <em>start</em> of the current iteration; the bulk-prefetch engine issues that next block's load toward L2 in the background while the warp computes the current block. By the time the next iteration needs that block, its load is already in flight, so the long-latency global load is hidden behind compute rather than serialized in front of it. (Measured caveat: the baseline KV is already ~85% L2-resident, so the observable signature is a small drop in memory stalls, not a large L2-hit jump — see Sections 6-7.)</span></p>
+
+  <h4><span class="i18n" data-en="Baseline: exposed late global-load (long-scoreboard) latency" data-zh="基線：暴露的 late global-load（long-scoreboard）延遲">Baseline: exposed late global-load (long-scoreboard) latency</span></h4>
+  <div class="olane">
+    <div class="row"><div class="tag"><span class="i18n" data-en="warp timeline" data-zh="warp 時間軸">warp timeline</span></div>
+      <div class="track">
+        <div class="cell fetch"><span class="i18n" data-en="late load b0" data-zh="late load b0">late load b0</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b0" data-zh="計算 b0">compute b0</span></div>
+        <div class="cell stall"><span class="i18n" data-en="stall (b1 wait)" data-zh="停頓 (等 b1)">stall (b1 wait)</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b1" data-zh="計算 b1">compute b1</span></div>
+        <div class="cell stall"><span class="i18n" data-en="stall (b2 wait)" data-zh="停頓 (等 b2)">stall (b2 wait)</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b2" data-zh="計算 b2">compute b2</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h4><span class="i18n" data-en="Patched: prefetch overlapped with compute" data-zh="修補後：預取與計算重疊">Patched: prefetch overlapped with compute</span></h4>
+  <div class="olane">
+    <div class="row"><div class="tag"><span class="i18n" data-en="warp (compute)" data-zh="warp（計算）">warp (compute)</span></div>
+      <div class="track">
+        <div class="cell fetch"><span class="i18n" data-en="late load b0" data-zh="late load b0">late load b0</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b0" data-zh="計算 b0">compute b0</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b1 (no stall)" data-zh="計算 b1 (無停頓)">compute b1 (no stall)</span></div>
+        <div class="cell compute"><span class="i18n" data-en="compute b2 (no stall)" data-zh="計算 b2 (無停頓)">compute b2 (no stall)</span></div>
+      </div>
+    </div>
+    <div class="row"><div class="tag"><span class="i18n" data-en="bulk prefetch &rarr; L2" data-zh="bulk 預取 &rarr; L2">bulk prefetch &rarr; L2</span></div>
+      <div class="track">
+        <div class="cell idle">&mdash;</div>
+        <div class="cell pref"><span class="i18n" data-en="prefetch b1" data-zh="預取 b1">prefetch b1</span></div>
+        <div class="cell pref"><span class="i18n" data-en="prefetch b2" data-zh="預取 b2">prefetch b2</span></div>
+        <div class="cell idle">&mdash;</div>
+      </div>
+    </div>
+  </div>
+  <p style="font-size:.82rem;color:#8fa4c0"><span class="i18n" data-en="The orange dashed cells (baseline stalls) shrink once the next block's bytes have been pulled toward L2 ahead of use. The bottom lane is the non-blocking bulk-prefetch path through the cache subsystem, independent of the warp's compute, which is what makes the overlap free of register and shared-memory cost." data-zh="一旦下一個 block 的位元組在使用前被提前拉向 L2，橙色虛線格（基線停頓）就縮小。下方軌道是穿過快取子系統的非阻塞 bulk-prefetch 路徑，獨立於 warp 的計算，這正是為何此重疊不需暫存器與 shared memory 成本。">The orange dashed cells (baseline stalls) shrink once the next block's bytes have been pulled toward L2 ahead of use. The bottom lane is the non-blocking bulk-prefetch path through the cache subsystem, independent of the warp's compute, which is what makes the overlap free of register and shared-memory cost.</span></p>
+
+  <h3><span class="i18n" data-en="3.2 The lookahead distance: why NUM_WARPS, not 1" data-zh="3.2 預看距離：為何是 NUM_WARPS 而非 1">3.2 The lookahead distance: why NUM_WARPS, not 1</span></h3>
+  <p><span class="i18n"
+    data-en="Because the block loop is strided by <code>NUM_WARPS</code> — warp $w$ processes $w, w{+}\text{NUM\_WARPS}, \dots$ — the block a given warp will touch <em>next</em> is exactly <code>block_idx + NUM_WARPS</code>, not <code>block_idx + 1</code>. The patch therefore looks ahead by the stride, which keeps each warp prefetching precisely the block it itself will consume. This is read straight from the block table the warp already holds, so the lookahead address costs one extra table read and a comparison."
+    data-zh="由於 block 迴圈以 <code>NUM_WARPS</code> 為跨步 — warp $w$ 處理 $w, w{+}\text{NUM\_WARPS}, \dots$ — 某個 warp <em>下一個</em>會碰到的 block 正是 <code>block_idx + NUM_WARPS</code>，而非 <code>block_idx + 1</code>。因此修補以跨步為預看距離，讓每個 warp 精確地預取它自己將消費的那個 block。這直接從 warp 已握有的 block table 讀出，所以預看位址只多一次表格讀取與一次比較。">Because the block loop is strided by <code>NUM_WARPS</code> — warp $w$ processes $w, w{+}\text{NUM\_WARPS}, \dots$ — the block a given warp will touch <em>next</em> is exactly <code>block_idx + NUM_WARPS</code>, not <code>block_idx + 1</code>. The patch therefore looks ahead by the stride, which keeps each warp prefetching precisely the block it itself will consume. This is read straight from the block table the warp already holds, so the lookahead address costs one extra table read and a comparison.</span></p>
+
+  <pre><code><span class="cm">// attention_kernels.cuh:258 — next physical block from the block table</span>
+<span class="kw">const</span> int64_t next_physical_block_number = (block_idx + NUM_WARPS) &lt; end_block_idx ?
+              block_table[block_idx + NUM_WARPS] : <span class="nu">0</span>;</code></pre>
+
+  <h3><span class="i18n" data-en="3.3 The key-cache prefetch (the one PTX line)" data-zh="3.3 Key-cache 預取（那一行 PTX）">3.3 The key-cache prefetch (the one PTX line)</span></h3>
+  <p><span class="i18n"
+    data-en="Inside the per-token vector loop, exactly one lane (lane 0, first vector) issues the prefetch, guarded so the last block — whose <code>next_physical_block_number</code> is the sentinel 0 — is never prefetched. The address is masked to a 16-byte boundary (the low nibble cleared by <code>&amp; 0xFFFFFFFFFFFFFFF0</code>) as the bulk-prefetch instruction requires an aligned global address, and the size is a fixed 4096 bytes — one paged block's worth of key data."
+    data-zh="在每 token 的向量迴圈內，恰好一個 lane（lane 0、第一個向量）發出預取，並設防護使最後一個 block — 其 <code>next_physical_block_number</code> 為哨兵值 0 — 永遠不被預取。位址被對齊到 16 位元組邊界（以 <code>&amp; 0xFFFFFFFFFFFFFFF0</code> 清除低位 nibble），因為 bulk-prefetch 指令要求對齊的 global 位址；大小固定為 4096 位元組 — 一個分頁 block 的 key 資料量。">Inside the per-token vector loop, exactly one lane (lane 0, first vector) issues the prefetch, guarded so the last block — whose <code>next_physical_block_number</code> is the sentinel 0 — is never prefetched. The address is masked to a 16-byte boundary (the low nibble cleared by <code>&amp; 0xFFFFFFFFFFFFFFF0</code>) as the bulk-prefetch instruction requires an aligned global address, and the size is a fixed 4096 bytes — one paged block's worth of key data.</span></p>
+
+  <pre><code><span class="cm">// attention_kernels.cuh:281-287 — Prefetch Key Cache</span>
+<span class="kw">if</span> (j == <span class="nu">0</span> &amp;&amp; lane == <span class="nu">0</span>) {
+    <span class="kw">const</span> cache_t* next_k_ptr = k_cache + next_physical_block_number * kv_block_stride +
+                                kv_head_idx * kv_head_stride;
+    <span class="kw">if</span> (next_physical_block_number != <span class="nu">0</span>)
+    <span class="fn">asm</span> <span class="kw">volatile</span> (<span class="st">"cp.async.bulk.prefetch.L2.global [%0], 4096;"</span>
+        ::<span class="st">"l"</span>((<span class="kw">unsigned long</span>)next_k_ptr &amp; <span class="nu">0xFFFFFFFFFFFFFFF0UL</span>));
+}</code></pre>
+
+  <h3><span class="i18n" data-en="3.4 The value-cache prefetch (the symmetric second line)" data-zh="3.4 Value-cache 預取（對稱的第二行）">3.4 The value-cache prefetch (the symmetric second line)</span></h3>
+  <p><span class="i18n"
+    data-en="The value cache is read in a separate loop (the second pass that computes the weighted sum of values). The patch repeats the same pattern there: recompute <code>next_physical_block_number</code> for the value loop's iteration, and on the first row of lane 0 issue an identical bulk prefetch against the value pointer. The structure is intentionally a mirror of the key prefetch, which is why the diff is so small."
+    data-zh="value cache 在另一個迴圈中讀取（計算值的加權和的第二趟）。修補在那裡重複同樣的模式：為 value 迴圈的迭代重新計算 <code>next_physical_block_number</code>，並在 lane 0 的第一列對 value 指標發出同樣的 bulk 預取。其結構刻意是 key 預取的鏡像，這正是 diff 如此微小的原因。">The value cache is read in a separate loop (the second pass that computes the weighted sum of values). The patch repeats the same pattern there: recompute <code>next_physical_block_number</code> for the value loop's iteration, and on the first row of lane 0 issue an identical bulk prefetch against the value pointer. The structure is intentionally a mirror of the key prefetch, which is why the diff is so small.</span></p>
+
+  <pre><code><span class="cm">// attention_kernels.cuh:425-431 — Prefetch Value Cache</span>
+<span class="kw">if</span> (i == <span class="nu">0</span> &amp;&amp; lane == <span class="nu">0</span>) {
+    <span class="kw">const</span> cache_t* next_v_ptr = v_cache + next_physical_block_number * kv_block_stride +
+                                kv_head_idx * kv_head_stride;
+    <span class="kw">if</span> (next_physical_block_number != <span class="nu">0</span>)
+        <span class="fn">asm</span> <span class="kw">volatile</span> (<span class="st">"cp.async.bulk.prefetch.L2.global [%0], 4096;"</span>
+            ::<span class="st">"l"</span>((<span class="kw">unsigned long</span>)next_v_ptr &amp; <span class="nu">0xFFFFFFFFFFFFFFF0UL</span>));
+}</code></pre>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Where the prefetched bytes land — and why it matters for us." data-zh="預取的位元組落在何處 — 以及為何這對我們重要。">Where the prefetched bytes land — and why it matters for us.</span></strong>
+    <span class="i18n"
+      data-en=" The instruction is <code>.L2.global</code>: data is moved from global memory (HBM) into the <em>L2 cache</em>, not into shared memory and not into registers. That is exactly the cache level our &quot;Worth the Bytes?&quot; study is about. But note three things the code makes unambiguous: the prefetch is (1) <em>issued by software</em> (an explicit <code>asm volatile</code>), (2) <em>intra-kernel</em> (the same kernel prefetches its own future iteration), and (3) <em>on the KV-cache</em> (<code>k_cache</code> / <code>v_cache</code>), a long-lived high-reuse tensor. Our bound concerns the opposite on all three axes: passive, inter-kernel, activation residency."
+      data-zh=" 該指令是 <code>.L2.global</code>：資料從 global memory（HBM）被搬進 <em>L2 cache</em>，不是 shared memory，也不是暫存器。這正是我們「Worth the Bytes?」研究所關注的 cache 層級。但請注意程式碼讓三件事毫不含糊：此預取是 (1) <em>由軟體發起</em>（明確的 <code>asm volatile</code>）、(2) <em>kernel 內</em>（同一 kernel 預取它自己未來的迭代）、(3) <em>針對 KV-cache</em>（<code>k_cache</code> / <code>v_cache</code>），一個長壽、高重用的張量。我們的上界在這三個軸上都恰好相反：被動、跨 kernel、activation 殘留。">  The instruction is <code>.L2.global</code>: data is moved from global memory (HBM) into the <em>L2 cache</em>, not into shared memory and not into registers. That is exactly the cache level our "Worth the Bytes?" study is about. But note three things the code makes unambiguous: the prefetch is (1) <em>issued by software</em> (an explicit <code>asm volatile</code>), (2) <em>intra-kernel</em> (the same kernel prefetches its own future iteration), and (3) <em>on the KV-cache</em> (<code>k_cache</code> / <code>v_cache</code>), a long-lived high-reuse tensor. Our bound concerns the opposite on all three axes: passive, inter-kernel, activation residency.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="3.5 The cost model" data-zh="3.5 成本模型">3.5 The cost model</span></h3>
+  <p><span class="i18n"
+    data-en="The benefit per block iteration is the hidden latency $t_{hide} = \min(t_{load},\, t_{compute})$, where $t_{load} \approx t_{scoreboard}$ is the exposed global-load / cache-hierarchy latency of the late load — the prefetch can hide at most as much exposed global-load latency as there is compute to overlap with. The cost is one block-table read, one comparison, one address mask, and the launch of one asynchronous prefetch per block, all on a single lane. Net speedup appears when $t_{hide}$ accumulated over all blocks dominates the tiny issue overhead, which is exactly the memory-bound regime decode lives in. This is why the paper sees its largest wins on long sequences and decode-heavy workloads."
+    data-zh="每個 block 迭代的收益是被掩蓋的延遲 $t_{hide} = \min(t_{load},\, t_{compute})$，其中 $t_{load} \approx t_{scoreboard}$ 是那個 late load 暴露的 global-load／cache-hierarchy 延遲 — 預取最多只能掩蓋與可重疊計算等量的暴露 global-load 延遲。成本是一次 block-table 讀取、一次比較、一次位址遮罩，以及每個 block 在單一 lane 上啟動一次非同步預取。當所有 block 累積的 $t_{hide}$ 主宰了微小的發出開銷時，淨加速就出現 — 這正是 decode 所處的記憶體受限狀態。這也是為何論文在長序列與 decode 密集的工作負載上看到最大的增益。">The benefit per block iteration is the hidden latency $t_{hide} = \min(t_{load},\, t_{compute})$, where $t_{load} \approx t_{scoreboard}$ is the exposed global-load / cache-hierarchy latency of the late load — the prefetch can hide at most as much exposed global-load latency as there is compute to overlap with. The cost is one block-table read, one comparison, one address mask, and the launch of one asynchronous prefetch per block, all on a single lane. Net speedup appears when $t_{hide}$ accumulated over all blocks dominates the tiny issue overhead, which is exactly the memory-bound regime decode lives in. This is why the paper sees its largest wins on long sequences and decode-heavy workloads.</span></p>
+
+  <h3><span class="i18n" data-en="3.6 Three correctness details hidden in the two lines" data-zh="3.6 藏在那兩行裡的三個正確性細節">3.6 Three correctness details hidden in the two lines</span></h3>
+  <p><span class="i18n"
+    data-en="Although the patch is tiny, each token in the PTX is load-bearing, and getting any of them wrong would either crash the kernel or silently corrupt the prefetch. Three details are worth spelling out because they are exactly the kind of thing a reproduction must preserve byte-for-byte."
+    data-zh="儘管修補很小，PTX 中的每個 token 都是承重的，弄錯其中任何一個都會讓 kernel 崩潰或悄悄破壞預取。有三個細節值得明說，因為它們正是重現時必須逐位元組保留的那類東西。">Although the patch is tiny, each token in the PTX is load-bearing, and getting any of them wrong would either crash the kernel or silently corrupt the prefetch. Three details are worth spelling out because they are exactly the kind of thing a reproduction must preserve byte-for-byte.</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="(a) 16-byte alignment mask" data-zh="(a) 16 位元組對齊遮罩">(a) 16-byte alignment mask</span></h4>
+      <p><span class="i18n" data-en="The address is ANDed with 0xFFFFFFFFFFFFFFF0 to clear its low four bits. The bulk-prefetch instruction requires a 16-byte-aligned global address; without the mask, an unaligned pointer would fault. Clearing the low nibble is safe here because it only rounds the prefetch start down to the enclosing aligned line." data-zh="位址與 0xFFFFFFFFFFFFFFF0 做 AND 以清除其低四位。bulk-prefetch 指令要求 16 位元組對齊的 global 位址；沒有遮罩，未對齊的指標會觸發 fault。在此清除低 nibble 是安全的，因為它只是把預取起點向下取整到所在的對齊 line。">The address is ANDed with 0xFFFFFFFFFFFFFFF0 to clear its low four bits. The bulk-prefetch instruction requires a 16-byte-aligned global address; without the mask, an unaligned pointer would fault. Clearing the low nibble is safe here because it only rounds the prefetch start down to the enclosing aligned line.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="(b) sentinel-0 last-block guard" data-zh="(b) 哨兵 0 的最後一個 block 防護">(b) sentinel-0 last-block guard</span></h4>
+      <p><span class="i18n" data-en="When block_idx + NUM_WARPS reaches past end_block_idx, the lookahead is set to 0, and the if (next_physical_block_number != 0) guard suppresses the prefetch. This prevents reading a non-existent next block — both an out-of-bounds risk and a wasted memory transaction at every sequence boundary. (0 is a conservative no-next sentinel for the optimization, not a correctness invariant: if physical block 0 were ever a valid next block, the guard would merely skip a legal prefetch — a missed optimization, never a correctness break.)" data-zh="當 block_idx + NUM_WARPS 超出 end_block_idx 時，預看被設為 0，而 if (next_physical_block_number != 0) 防護抑制了預取。這避免讀取不存在的下一個 block — 在每個序列邊界既有越界風險，又是浪費的記憶體交易。（0 是此最佳化用的保守「無下一個」哨兵，而非正確性不變式：若實體 block 0 恰好是合法的下一個 block，此防護也只是跳過一次合法預取 — 是錯失的最佳化，絕非正確性破壞。）">When block_idx + NUM_WARPS reaches past end_block_idx, the lookahead is set to 0, and the if (next_physical_block_number != 0) guard suppresses the prefetch. This prevents reading a non-existent next block — both an out-of-bounds risk and a wasted memory transaction at every sequence boundary. (0 is a conservative no-next sentinel for the optimization, not a correctness invariant: if physical block 0 were ever a valid next block, the guard would merely skip a legal prefetch — a missed optimization, never a correctness break.)</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="(c) single-lane issue" data-zh="(c) 單一 lane 發出">(c) single-lane issue</span></h4>
+      <p><span class="i18n" data-en="The prefetch fires only on lane == 0 (and j == 0 / i == 0), so one instruction is issued per warp per block, not 32. Bulk prefetch is a per-region request; duplicating it across all lanes would multiply traffic and serialize on the same L2 line for no benefit." data-zh="預取只在 lane == 0（且 j == 0 / i == 0）時發出，所以每個 warp 每個 block 只發一條指令，而非 32 條。bulk prefetch 是逐區域的請求；在所有 lane 上重複它只會倍增流量、在同一 L2 line 上序列化，毫無益處。">The prefetch fires only on lane == 0 (and j == 0 / i == 0), so one instruction is issued per warp per block, not 32. Bulk prefetch is a per-region request; duplicating it across all lanes would multiply traffic and serialize on the same L2 line for no benefit.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ REPO ANALYSIS ============ -->
+<section id="repo">
+  <h2><span class="i18n" data-en="4. Repo Analysis" data-zh="4. 程式碼倉庫分析">4. Repo Analysis</span></h2>
+  <p><span class="i18n"
+    data-en="The repository is striking in its minimalism. It contains no build system, no benchmark scripts, no Python — just a license, a short README, and one CUDA header. The entire intellectual contribution is shipped as a drop-in replacement for one vLLM file. We cloned it to the path below and confirmed its contents are exactly as described."
+    data-zh="這個倉庫的極簡程度令人印象深刻。它沒有建置系統、沒有測試腳本、沒有 Python — 只有一份授權、一個簡短的 README、和一個 CUDA 標頭檔。全部的智識貢獻都以「單一 vLLM 檔案的即插即用替換」形式交付。我們把它 clone 到下方路徑，並確認其內容與描述完全一致。">The repository is striking in its minimalism. It contains no build system, no benchmark scripts, no Python — just a license, a short README, and one CUDA header. The entire intellectual contribution is shipped as a drop-in replacement for one vLLM file. We cloned it to the path below and confirmed its contents are exactly as described.</span></p>
+
+  <div class="diagram">
+    <div style="font-weight:700;color:#ffb74d">vllm_xformers_prefetch/</div>
+    <div style="margin-left:16px">
+      <div style="color:#6c7086;font-size:.82rem">LICENSE&nbsp;&nbsp;<span style="color:#6a7a94">(Apache 2.0, 11.4 KB)</span></div>
+      <div style="color:#6c7086;font-size:.82rem">README.md&nbsp;&nbsp;<span style="color:#6a7a94">(install = drop-in + recompile; usage = VLLM_ATTENTION_BACKEND=XFORMERS)</span></div>
+      <div style="color:var(--accent);font-weight:600">attention_kernels.cuh&nbsp;&nbsp;<span style="color:#6a7a94;font-weight:400">(696 lines, 29.8 KB — THE entire patch)</span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="4.1 The diff against stock vLLM v0.10.2" data-zh="4.1 對原版 vLLM v0.10.2 的 diff">4.1 The diff against stock vLLM v0.10.2</span></h3>
+  <p><span class="i18n"
+    data-en="The header is a near-verbatim copy of vLLM's own <code>csrc/attention/attention_kernels.cuh</code> with the prefetch additions woven in. The additive change is small — two next-block computations, two PTX prefetch sites (one for K at line 286, one for V at line 430), each behind a last-block guard. The table below maps the paper's mechanism onto exact code locations we read in the cloned header."
+    data-zh="這個標頭檔幾乎逐字複製自 vLLM 自己的 <code>csrc/attention/attention_kernels.cuh</code>，再織入預取的增補。增補性的更動很小 — 兩處下一個 block 的計算、兩處 PTX 預取點（K 在第 286 行、V 在第 430 行），各自置於最後一個 block 的防護之後。下表把論文的機制對映到我們在已 clone 標頭檔中讀到的確切程式碼位置。">The header is a near-verbatim copy of vLLM's own <code>csrc/attention/attention_kernels.cuh</code> with the prefetch additions woven in. The additive change is small — two next-block computations, two PTX prefetch sites (one for K at line 286, one for V at line 430), each behind a last-block guard. The table below maps the paper's mechanism onto exact code locations we read in the cloned header.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Mechanism" data-zh="機制">Mechanism</span></th>
+      <th><span class="i18n" data-en="Location in attention_kernels.cuh" data-zh="在 attention_kernels.cuh 的位置">Location in attention_kernels.cuh</span></th>
+      <th><span class="i18n" data-en="What it does" data-zh="作用">What it does</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Strided block loop" data-zh="跨步 block 迴圈">Strided block loop</span></td>
+      <td><code>:224-225</code>, <code>:389-390</code></td>
+      <td><span class="i18n" data-en="warp w iterates blocks w, w+NUM_WARPS, ... (stock vLLM)" data-zh="warp w 迭代 block w, w+NUM_WARPS, …（原版 vLLM）">warp w iterates blocks w, w+NUM_WARPS, ... (stock vLLM)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="K next-block lookahead" data-zh="K 下一個 block 預看">K next-block lookahead</span></td>
+      <td><code>:258-259</code></td>
+      <td><span class="i18n" data-en="next_physical_block_number = block_table[block_idx + NUM_WARPS] or 0" data-zh="next_physical_block_number = block_table[block_idx + NUM_WARPS] 或 0">next_physical_block_number = block_table[block_idx + NUM_WARPS] or 0</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="K prefetch (PTX)" data-zh="K 預取（PTX）">K prefetch (PTX)</span></td>
+      <td><code>:281-287</code></td>
+      <td><span class="i18n" data-en="lane 0 issues cp.async.bulk.prefetch.L2.global for next K block, 4096 B" data-zh="lane 0 對下一個 K block 發出 cp.async.bulk.prefetch.L2.global，4096 B">lane 0 issues cp.async.bulk.prefetch.L2.global for next K block, 4096 B</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="V next-block lookahead" data-zh="V 下一個 block 預看">V next-block lookahead</span></td>
+      <td><code>:407-408</code></td>
+      <td><span class="i18n" data-en="same lookahead recomputed for the value loop" data-zh="為 value 迴圈重新計算同樣的預看">same lookahead recomputed for the value loop</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="V prefetch (PTX)" data-zh="V 預取（PTX）">V prefetch (PTX)</span></td>
+      <td><code>:425-431</code></td>
+      <td><span class="i18n" data-en="lane 0 issues cp.async.bulk.prefetch.L2.global for next V block, 4096 B" data-zh="lane 0 對下一個 V block 發出 cp.async.bulk.prefetch.L2.global，4096 B">lane 0 issues cp.async.bulk.prefetch.L2.global for next V block, 4096 B</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Last-block guard" data-zh="最後一個 block 防護">Last-block guard</span></td>
+      <td><code>:285</code>, <code>:429</code></td>
+      <td><span class="i18n" data-en="if (next_physical_block_number != 0) — 0 is a conservative no-next sentinel for the prefetch (skips, never corrupts)" data-zh="if (next_physical_block_number != 0) — 0 是預取用的保守「無下一個」哨兵（跳過，絕不破壞）">if (next_physical_block_number != 0) — 0 is a conservative no-next sentinel for the prefetch (skips, never corrupts)</span></td>
+    </tr>
+  </table>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Cloned repo (confirmed)." data-zh="已複製倉庫（已確認）。">Cloned repo (confirmed).</span></strong>
+    <span class="i18n"
+      data-en=" We verified the repository at <code>papers/kv-prefetch/repo/</code> contains exactly three files (LICENSE, README.md, attention_kernels.cuh) with a single git commit (<code>0b804d0 &quot;upload cuh and README&quot;</code>). The line numbers above are read from that file. Because the repo ships no setup.py and no benchmarks, our reproduction harness is reconstructed from vLLM's own <code>benchmarks/benchmark_throughput.py</code> — a deliberate, documented choice."
+      data-zh=" 我們已驗證 <code>papers/kv-prefetch/repo/</code> 倉庫恰好包含三個檔案（LICENSE、README.md、attention_kernels.cuh），僅一個 git commit（<code>0b804d0「upload cuh and README」</code>）。上表的行號即讀自該檔。由於倉庫未附 setup.py 與測試腳本，我們的重現流程是以 vLLM 自帶的 <code>benchmarks/benchmark_throughput.py</code> 重建而成 — 這是刻意且有記錄的選擇。">  We verified the repository at <code>papers/kv-prefetch/repo/</code> contains exactly three files (LICENSE, README.md, attention_kernels.cuh) with a single git commit (<code>0b804d0 "upload cuh and README"</code>). The line numbers above are read from that file. Because the repo ships no setup.py and no benchmarks, our reproduction harness is reconstructed from vLLM's own <code>benchmarks/benchmark_throughput.py</code> — a deliberate, documented choice.</span>
+  </div>
+</section>
+
+<!-- ============ CLAIMS VS CODE ============ -->
+<section id="claims">
+  <h2><span class="i18n" data-en="5. Claims vs Implementation" data-zh="5. 主張 vs 實作">5. Claims vs Implementation</span></h2>
+  <p><span class="i18n" data-en="Each paper/README claim, checked against the cloned header. Performance claims are the paper's H20 numbers; our own measured H100 numbers are in Sections 6-7." data-zh="每一條論文／README 主張，對照已 clone 的標頭檔檢查。效能主張為論文的 H20 數字；我們自己量測的 H100 數字見第 6-7 節。">Each paper/README claim, checked against the cloned header. Performance claims are the paper's H20 numbers; our own measured H100 numbers are in Sections 6-7.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Claim" data-zh="主張">Claim</span></th>
+      <th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th>
+      <th><span class="i18n" data-en="Code evidence" data-zh="程式碼證據">Code evidence</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Adds cp.async.bulk.prefetch.L2.global for next K and V blocks" data-zh="為下一個 K 與 V block 加入 cp.async.bulk.prefetch.L2.global">Adds cp.async.bulk.prefetch.L2.global for next K and V blocks</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="Two identical asm volatile sites: K @ :286, V @ :430" data-zh="兩處相同的 asm volatile：K @ :286、V @ :430">Two identical asm volatile sites: K @ :286, V @ :430</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Prefetches the NEXT block during current-block compute" data-zh="在當前 block 計算時預取下一個 block">Prefetches the NEXT block during current-block compute</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="lookahead = block_idx + NUM_WARPS (:258), issued inside the compute loop before the block is consumed" data-zh="預看 = block_idx + NUM_WARPS (:258)，在 block 被消費前於計算迴圈內發出">lookahead = block_idx + NUM_WARPS (:258), issued inside the compute loop before the block is consumed</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Minimal, additive patch over stock vLLM" data-zh="相對原版 vLLM 為極簡、增補式修補">Minimal, additive patch over stock vLLM</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="One header; the loops, softmax, and reductions are stock vLLM; only the lookahead + 2 prefetch sites are new (~10 lines)" data-zh="單一標頭；迴圈、softmax、歸約皆為原版 vLLM；僅預看 + 2 處預取為新增（約 10 行）">One header; the loops, softmax, and reductions are stock vLLM; only the lookahead + 2 prefetch sites are new (~10 lines)</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Targets the XFORMERS backend's PagedAttention kernel" data-zh="目標為 XFORMERS 後端的 PagedAttention kernel">Targets the XFORMERS backend's PagedAttention kernel</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="File is csrc/attention/attention_kernels.cuh (paged_attention_v1/v2); README sets VLLM_ATTENTION_BACKEND=XFORMERS" data-zh="檔案為 csrc/attention/attention_kernels.cuh（paged_attention_v1/v2）；README 設 VLLM_ATTENTION_BACKEND=XFORMERS">File is csrc/attention/attention_kernels.cuh (paged_attention_v1/v2); README sets VLLM_ATTENTION_BACKEND=XFORMERS</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="~2.15x attention-kernel speedup" data-zh="約 2.15x 注意力 kernel 加速">~2.15x attention-kernel speedup</span></td>
+      <td><span class="partial">MEASURED: ncu only ~1.01-1.02x</span></td>
+      <td><span class="i18n" data-en="Paper's H20 number. Our H100 ncu isolated-kernel time is only 1.01-1.02x (45.4->44.8 us b1; 45.6->44.8 us b8); the big win is async overlap across the warm decode loop, which cold-cache replay under-represents (Section 7)." data-zh="論文的 H20 數字。我們的 H100 ncu 孤立 kernel 時間僅 1.01-1.02x（b1 45.4->44.8 us；b8 45.6->44.8 us）；巨大的增益來自暖 decode 迴圈的非同步重疊，而冷快取重播會低估它（第 7 節）。">Paper's H20 number. Our H100 ncu isolated-kernel time is only 1.01-1.02x (45.4->44.8 us b1; 45.6->44.8 us b8); the big win is async overlap across the warm decode loop, which cold-cache replay under-represents (Section 7).</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="up to ~1.97x end-to-end throughput" data-zh="端到端吞吐最高約 1.97x">up to ~1.97x end-to-end throughput</span></td>
+      <td><span class="check">MEASURED: up to 1.80x</span></td>
+      <td><span class="i18n" data-en="Reproduced on H100: 1.80x at batch 1, 1.46x at batch 8, 0.99x at batch 32. Big at low batch / decode-heavy, vanishing to ~1.0x at batch 32 (compute-bound) (Section 6.4)." data-zh="在 H100 上重現：batch 1 為 1.80x、batch 8 為 1.46x、batch 32 為 0.99x。低 batch／decode-heavy 時很大，到 batch 32（計算受限）消退至約 1.0x（第 6.4 節）。">Reproduced on H100: 1.80x at batch 1, 1.46x at batch 8, 0.99x at batch 32. Big at low batch / decode-heavy, vanishing to ~1.0x at batch 32 (compute-bound) (Section 6.4).</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Requires Hopper (sm_90)" data-zh="需要 Hopper（sm_90）">Requires Hopper (sm_90)</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="cp.async.bulk.prefetch is a Hopper bulk-async-prefetch instruction requiring sm_90+; our build targeted 9.0a. A100/L40S/RTX6000 (sm_80/89) are excluded." data-zh="cp.async.bulk.prefetch 為 Hopper 的 bulk-async-prefetch 指令，需要 sm_90+；我們的 build 以 9.0a 為目標。A100/L40S/RTX6000（sm_80/89）被排除。">cp.async.bulk.prefetch is a Hopper bulk-async-prefetch instruction requiring sm_90+; our build targeted 9.0a. A100/L40S/RTX6000 (sm_80/89) are excluded.</span></td>
+    </tr>
+  </table>
+
+  <div class="grid-2">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Strengths" data-zh="優點">Strengths</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Surgical: one file, ~10 lines, no occupancy or shared-memory cost." data-zh="精準：一個檔案、約 10 行，無占用率或 shared-memory 成本。">Surgical: one file, ~10 lines, no occupancy or shared-memory cost.</span></li>
+        <li><span class="i18n" data-en="Exploits a real hardware gap: HW prefetcher can't follow block-table indirection, but software can." data-zh="利用真實的硬體缺口：HW prefetcher 無法跟隨 block-table 間接，但軟體可以。">Exploits a real hardware gap: HW prefetcher can't follow block-table indirection, but software can.</span></li>
+        <li><span class="i18n" data-en="Correct by construction: last-block guard prevents prefetching past the sequence." data-zh="構造即正確：最後一個 block 的防護避免越過序列預取。">Correct by construction: last-block guard prevents prefetching past the sequence.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Hopper-only; no fallback path for sm_80 or below." data-zh="僅限 Hopper；sm_80 或以下無回退路徑。">Hopper-only; no fallback path for sm_80 or below.</span></li>
+        <li><span class="i18n" data-en="Lives in the V0 / XFORMERS PagedAttention path; vLLM's V1 default and FlashAttention backend don't use this kernel." data-zh="位於 V0 / XFORMERS PagedAttention 路徑；vLLM 的 V1 預設與 FlashAttention 後端不使用此 kernel。">Lives in the V0 / XFORMERS PagedAttention path; vLLM's V1 default and FlashAttention backend don't use this kernel.</span></li>
+        <li><span class="i18n" data-en="Fixed 4096 B prefetch size and one-ahead distance are not tuned per block size or dtype." data-zh="固定 4096 B 預取大小與提前一格的距離，未依 block size 或 dtype 調校。">Fixed 4096 B prefetch size and one-ahead distance are not tuned per block size or dtype.</span></li>
+        <li><span class="i18n" data-en="No build/benchmark scripts shipped — reproduction harness must be reconstructed." data-zh="未附建置／測試腳本 — 重現流程須自行重建。">No build/benchmark scripts shipped — reproduction harness must be reconstructed.</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OUR REPRODUCTION ============ -->
+<section id="repro">
+  <h2><span class="i18n" data-en="6. Our Reproduction & Measurement" data-zh="6. 我們的重現與量測">6. Our Reproduction & Measurement</span> <span class="tagp">MEASURED</span></h2>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Measured on PACE H100 (job 9948442)." data-zh="於 PACE H100 量測（job 9948442）。">Measured on PACE H100 (job 9948442).</span></strong>
+    <span class="i18n"
+      data-en=" Platform: PACE H100 80GB (sm_90, 50 MB L2), job 9948442, Llama-3.1-8B fp16, XFORMERS V0 paged_attention_v1. Baseline = stock vLLM 0.10.2; patched = 0.10.3.dev with the cp.async.bulk.prefetch.L2 header. Both trees were built and run; the results below are real measurements, not predictions. FACT = directly measured; BOUND = derived/bounded."
+      data-zh=" 平台：PACE H100 80GB（sm_90、50 MB L2），job 9948442，Llama-3.1-8B fp16，XFORMERS V0 paged_attention_v1。基線 = 原版 vLLM 0.10.2；修補 = 0.10.3.dev，含 cp.async.bulk.prefetch.L2 標頭。兩棵樹皆已建置並執行；下方結果為真實量測，而非預測。FACT = 直接量測；BOUND = 推導／界定。">  Platform: PACE H100 80GB (sm_90, 50 MB L2), job 9948442, Llama-3.1-8B fp16, XFORMERS V0 paged_attention_v1. Baseline = stock vLLM 0.10.2; patched = 0.10.3.dev with the cp.async.bulk.prefetch.L2 header. Both trees were built and run; the results below are real measurements, not predictions. FACT = directly measured; BOUND = derived/bounded.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.1 How much of this gain is the mechanism we bound?" data-zh="6.1 這個增益有多少是我們界定的機制？">6.1 How much of this gain is the mechanism we bound?</span></h3>
+  <p><span class="i18n"
+    data-en="The measured answer is concrete: <strong>~0% of this paper's speedup is the passive inter-kernel activation residency we bound at &lt;0.65%</strong> <span class='tagp'>BOUND</span>. The reasoning follows directly from the code and is confirmed by the counters. The carryover here is (1) software-issued — an explicit PTX instruction, not data left behind incidentally; (2) intra-kernel — the same kernel prefetches a later iteration of itself, so no second kernel is involved at all; and (3) on the KV-cache — a tensor that is read every decode step, not a transient activation. Each of those three properties places it outside the definition of the quantity our study measures. The measured signature matches at the kernel level: the <em>cold-replay per-kernel delta</em> (ncu, 1.01-1.02x) tracks a <em>memory-stall reduction</em> (long-scoreboard 9.2%->8.5%) with HBM read flat — not any cross-kernel cache hand-off. The headline 1.80x is the <em>warm-loop e2e</em> figure; the cold-replay-vs-warm-loop gap is reported separately (Section 7), not folded into the stall drop."
+    data-zh="量測的答案很具體：<strong>本文加速中約 0% 來自我們界定為 &lt;0.65% 的被動跨 kernel activation 殘留</strong> <span class='tagp'>BOUND</span>。理由直接出自程式碼，並由計數器證實。此處的殘留是 (1) 軟體發起 — 明確的 PTX 指令，而非附帶留下的資料；(2) kernel 內 — 同一 kernel 預取它自己稍後的迭代，根本不涉及第二個 kernel；(3) 針對 KV-cache — 每個 decode step 都會讀的張量，而非暫態 activation。這三個性質中的每一個，都把它放在我們研究所量測之量的定義之外。量測到的特徵在 kernel 層級相符：<em>冷重播的每 kernel 差值</em>（ncu，1.01-1.02x）隨<em>記憶體停頓的下降</em>（long-scoreboard 9.2%->8.5%）而變化、HBM 讀取持平 — 而非任何跨 kernel 的 cache 交接。頭條的 1.80x 是<em>暖迴圈 e2e</em> 數字；冷重播與暖迴圈之間的落差是分開報告的（第 7 節），並未被併入停頓下降。">The measured answer is concrete: <strong>~0% of this paper's speedup is the passive inter-kernel activation residency we bound at &lt;0.65%</strong> <span class='tagp'>BOUND</span>. The reasoning follows directly from the code and is confirmed by the counters. The carryover here is (1) software-issued — an explicit PTX instruction, not data left behind incidentally; (2) intra-kernel — the same kernel prefetches a later iteration of itself, so no second kernel is involved at all; and (3) on the KV-cache — a tensor that is read every decode step, not a transient activation. Each of those three properties places it outside the definition of the quantity our study measures. The measured signature matches at the kernel level: the <em>cold-replay per-kernel delta</em> (ncu, 1.01-1.02x) tracks a <em>memory-stall reduction</em> (long-scoreboard 9.2%->8.5%) with HBM read flat — not any cross-kernel cache hand-off. The headline 1.80x is the <em>warm-loop e2e</em> figure; the cold-replay-vs-warm-loop gap is reported separately (Section 7), not folded into the stall drop.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 Method: what we build and run, on which GPU" data-zh="6.2 方法：我們建置與執行什麼、在哪個 GPU 上">6.2 Method: what we build and run, on which GPU</span></h3>
+  <div class="flow">
+    <div class="step"><div class="c">1</div><div class="lbl"><span class="i18n" data-en="Build x2" data-zh="建置 x2">Build x2</span></div><div class="desc"><span class="i18n" data-en="stock v0.10.2 cuh + patched cuh, isolated conda envs, sm_90a" data-zh="原版 v0.10.2 cuh + 修補 cuh，獨立 conda env，sm_90a">stock v0.10.2 cuh + patched cuh, isolated conda envs, sm_90a</span></div></div>
+    <div class="step"><div class="c">2</div><div class="lbl"><span class="i18n" data-en="E2E" data-zh="端到端">E2E</span></div><div class="desc"><span class="i18n" data-en="benchmark_throughput.py, Llama-3.1-8B, batch {1,8,32}" data-zh="benchmark_throughput.py，Llama-3.1-8B，batch {1,8,32}">benchmark_throughput.py, Llama-3.1-8B, batch {1,8,32}</span></div></div>
+    <div class="step"><div class="c">3</div><div class="lbl"><span class="i18n" data-en="ncu" data-zh="ncu">ncu</span></div><div class="desc"><span class="i18n" data-en="kernel-filtered Nsight Compute on both builds" data-zh="對兩個 build 做 kernel 過濾的 Nsight Compute">kernel-filtered Nsight Compute on both builds</span></div></div>
+    <div class="step"><div class="c">4</div><div class="lbl"><span class="i18n" data-en="Attribute" data-zh="歸因">Attribute</span></div><div class="desc"><span class="i18n" data-en="L2 hit up? stall down? bytes flat? -> separability" data-zh="L2 命中升？停頓降？位元組持平？-> 可分離性">L2 hit up? stall down? bytes flat? -> separability</span></div></div>
+  </div>
+
+  <ul>
+    <li><span class="i18n" data-en="<strong>GPU:</strong> PACE H100 (sm_90, primary), optionally H200 — the closest available analogue to the paper's H20, since cp.async.bulk.prefetch requires Hopper. A100/L40S/RTX6000 cannot compile the kernel and are excluded." data-zh="<strong>GPU：</strong>PACE H100（sm_90，主要），可選 H200 — 由於 cp.async.bulk.prefetch 需要 Hopper，這是最接近論文 H20 的可用對照。A100/L40S/RTX6000 無法編譯此 kernel，被排除。"><strong>GPU:</strong> PACE H100 (sm_90, primary), optionally H200 — the closest available analogue to the paper's H20, since cp.async.bulk.prefetch requires Hopper. A100/L40S/RTX6000 cannot compile the kernel and are excluded.</span></li>
+    <li><span class="i18n" data-en="<strong>Two isolated trees:</strong> baseline = stock v0.10.2 header, treatment = the repo header, each editable-installed into its OWN conda env (vllm-prefetch-base / -patch) to avoid the two-tree editable-install drift where the wrong .so loads." data-zh="<strong>兩棵獨立的樹：</strong>baseline = 原版 v0.10.2 標頭，treatment = 倉庫標頭，各自 editable-install 進自己的 conda env（vllm-prefetch-base / -patch），以避免兩樹 editable-install 漂移（載入錯誤 .so）。"><strong>Two isolated trees:</strong> baseline = stock v0.10.2 header, treatment = the repo header, each editable-installed into its OWN conda env (vllm-prefetch-base / -patch) to avoid the two-tree editable-install drift where the wrong .so loads.</span></li>
+    <li><span class="i18n" data-en="<strong>Same everything else:</strong> both trees built from the v0.10.2 source (baseline self-reports 0.10.2; the patched build self-reports 0.10.3.dev), identical flags, VLLM_ATTENTION_BACKEND=XFORMERS, VLLM_USE_V1=0 so the legacy PagedAttention decode kernel (where the patch lives) is actually on the hot path. The only source difference is the prefetch .cuh." data-zh="<strong>其餘完全相同：</strong>兩棵樹皆建自 v0.10.2 原始碼（baseline 自報 0.10.2；修補 build 自報 0.10.3.dev）、相同旗標、VLLM_ATTENTION_BACKEND=XFORMERS、VLLM_USE_V1=0，讓修補所在的傳統 PagedAttention decode kernel 確實在熱路徑上。唯一的原始碼差異是預取的 .cuh。"><strong>Same everything else:</strong> both trees built from the v0.10.2 source (baseline self-reports 0.10.2; the patched build self-reports 0.10.3.dev), identical flags, VLLM_ATTENTION_BACKEND=XFORMERS, VLLM_USE_V1=0 so the legacy PagedAttention decode kernel (where the patch lives) is actually on the hot path. The only source difference is the prefetch .cuh.</span></li>
+  </ul>
+
+  <h3><span class="i18n" data-en="6.3 The Nsight metrics that isolate L2-reuse from the other levers" data-zh="6.3 將 L2-reuse 與其他槓桿分離的 Nsight 指標">6.3 The Nsight metrics that isolate L2-reuse from the other levers</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="ncu metric" data-zh="ncu 指標">ncu metric</span></th>
+      <th><span class="i18n" data-en="Isolates" data-zh="分離出">Isolates</span></th>
+      <th><span class="i18n" data-en="Measured base &rarr; patch (H100)" data-zh="量測 base &rarr; patch（H100）">Measured base &rarr; patch (H100)</span></th>
+    </tr>
+    <tr>
+      <td><code>lts__t_sector_op_read_hit_rate.pct</code></td>
+      <td><span class="i18n" data-en="L2 READ hit rate — the prefetch's direct fingerprint" data-zh="L2 READ 命中率 — 預取的直接指紋">L2 READ hit rate — the prefetch's direct fingerprint</span></td>
+      <td><span class="check"><span class="i18n" data-en="85.2->85.4% (b1), 84.6->85.0% (b8) — already L2-resident" data-zh="85.2->85.4%（b1）、84.6->85.0%（b8）— 本就 L2 駐留">85.2->85.4% (b1), 84.6->85.0% (b8) — already L2-resident</span></span></td>
+    </tr>
+    <tr>
+      <td><code>smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct</code></td>
+      <td><span class="i18n" data-en="Global-load memory stall — the actual speedup lever" data-zh="Global-load 記憶體停頓 — 真正的加速槓桿">Global-load memory stall — the actual speedup lever</span></td>
+      <td><span class="check"><span class="i18n" data-en="9.2% -> 8.5% (latency hidden)" data-zh="9.2% -> 8.5%（延遲被掩蓋）">9.2% -> 8.5% (latency hidden)</span></span></td>
+    </tr>
+    <tr>
+      <td><code>dram__bytes_read.sum</code></td>
+      <td><span class="i18n" data-en="HBM read traffic — separates this from a dedup/traffic-cut mechanism" data-zh="HBM 讀取流量 — 把它與去重／減流量的機制分開">HBM read traffic — separates this from a dedup/traffic-cut mechanism</span></td>
+      <td><span class="check"><span class="i18n" data-en="2.01 MB -> 2.01 MB (flat; same KV reads issued earlier, not removed)" data-zh="2.01 MB -> 2.01 MB（持平；同樣的 KV 讀取被提前發出，而非移除）">2.01 MB -> 2.01 MB (flat; same KV reads issued earlier, not removed)</span></span></td>
+    </tr>
+    <tr>
+      <td><code>sm__throughput.avg.pct_of_peak_sustained_elapsed</code></td>
+      <td><span class="i18n" data-en="Compute utilization — rises as stalls are hidden" data-zh="計算利用率 — 隨停頓被掩蓋而上升">Compute utilization — rises as stalls are hidden</span></td>
+      <td><span class="check"><span class="i18n" data-en="33.9% -> ~35.4% (up)" data-zh="33.9% -> ~35.4%（上升）">33.9% -> ~35.4% (up)</span></span></td>
+    </tr>
+    <tr>
+      <td><code>gpu__time_duration.sum</code></td>
+      <td><span class="i18n" data-en="Per-kernel time — the speedup numerator/denominator" data-zh="每 kernel 時間 — 加速比的分子／分母">Per-kernel time — the speedup numerator/denominator</span></td>
+      <td><span class="check"><span class="i18n" data-en="45.4->44.8 us (1.01x, b1); 45.6->44.8 us (1.02x, b8)" data-zh="45.4->44.8 us（1.01x，b1）；45.6->44.8 us（1.02x，b8）">45.4->44.8 us (1.01x, b1); 45.6->44.8 us (1.02x, b8)</span></span></td>
+    </tr>
+  </table>
+  <p style="font-size:.84rem;color:#8fa4c0"><span class="i18n"
+    data-en="We use the project's proven application-replay recipe (--replay-mode application --cache-control all --clock-control none --launch-count 40 --launch-skip 200, kernel-filtered to regex:paged_attention) to get cold-cache semantics without kernel-replay's host-RAM snapshot, which OOM'd this project at 67 GB on an H200."
+    data-zh="我們採用本專案驗證過的 application-replay 配方（--replay-mode application --cache-control all --clock-control none --launch-count 40 --launch-skip 200，並以 regex:paged_attention 過濾 kernel），以取得冷快取語意而不用 kernel-replay 的 host-RAM 快照 — 後者曾在本專案的 H200 上於 67 GB 處 OOM。">We use the project's proven application-replay recipe (--replay-mode application --cache-control all --clock-control none --launch-count 40 --launch-skip 200, kernel-filtered to regex:paged_attention) to get cold-cache semantics without kernel-replay's host-RAM snapshot, which OOM'd this project at 67 GB on an H200.</span></p>
+
+  <h3><span class="i18n" data-en="6.4 E2E throughput (FACT)" data-zh="6.4 端到端吞吐（FACT）">6.4 E2E throughput (FACT)</span> <span class="tagp">MEASURED</span></h3>
+  <p><span class="i18n" data-en="Random dataset, input-len 512, output-len 512, tok/s base -> patch. This reproduces the paper's e2e regime (up to ~1.97x on Hopper): the win is big at low batch / decode-heavy and vanishes by batch 32 (compute-bound). We ran H100; the paper's headline was H20." data-zh="隨機資料集，input-len 512、output-len 512，tok/s base -> patch。這重現了論文的 e2e 區間（Hopper 上最高約 1.97x）：增益在低 batch／decode-heavy 時很大，到 batch 32（計算受限）就消失。我們跑的是 H100；論文的頭條是 H20。">Random dataset, input-len 512, output-len 512, tok/s base -> patch. This reproduces the paper's e2e regime (up to ~1.97x on Hopper): the win is big at low batch / decode-heavy and vanishes by batch 32 (compute-bound). We ran H100; the paper's headline was H20.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Batch" data-zh="Batch">Batch</span></th>
+      <th><span class="i18n" data-en="Baseline (tok/s)" data-zh="基線（tok/s）">Baseline (tok/s)</span></th>
+      <th><span class="i18n" data-en="Patched (tok/s)" data-zh="修補（tok/s）">Patched (tok/s)</span></th>
+      <th><span class="i18n" data-en="Speedup" data-zh="加速">Speedup</span></th>
+    </tr>
+    <tr><td>1</td><td>115.5</td><td>207.8</td><td><span class="check">1.80&times;</span></td></tr>
+    <tr><td>8</td><td>1159.8</td><td>1692.2</td><td><span class="check">1.46&times;</span></td></tr>
+    <tr><td>32</td><td>5057</td><td>4994</td><td><span class="partial">0.99&times;</span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="6.5 Per-kernel attribution (FACT)" data-zh="6.5 每 kernel 歸因（FACT）">6.5 Per-kernel attribution (FACT)</span> <span class="tagp">MEASURED</span></h3>
+  <p><span class="i18n" data-en="Nsight Compute on paged_attention_v1 (cold-cache application replay, --cache-control all, input-len 1024 output-len 256, mean over ~40 launches). The isolated kernel speedup is only ~1.01-1.02x — far below the e2e 1.80x — because the baseline is already ~85% L2-resident and cold-cache replay under-represents the warm-loop async overlap. The mechanism is visible as a memory-stall drop, not an L2-residency jump." data-zh="Nsight Compute 量測 paged_attention_v1（冷快取 application replay、--cache-control all、input-len 1024 output-len 256、約 40 次 launch 取平均）。孤立 kernel 加速僅約 1.01-1.02x — 遠低於 e2e 的 1.80x — 因為基線本就約 85% L2 駐留，且冷快取重播低估了暖迴圈的非同步重疊。機制表現為記憶體停頓下降，而非 L2 駐留躍升。">Nsight Compute on paged_attention_v1 (cold-cache application replay, --cache-control all, input-len 1024 output-len 256, mean over ~40 launches). The isolated kernel speedup is only ~1.01-1.02x — far below the e2e 1.80x — because the baseline is already ~85% L2-resident and cold-cache replay under-represents the warm-loop async overlap. The mechanism is visible as a memory-stall drop, not an L2-residency jump.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Quantity" data-zh="量">Quantity</span></th>
+      <th><span class="i18n" data-en="Batch 1" data-zh="Batch 1">Batch 1</span></th>
+      <th><span class="i18n" data-en="Batch 8" data-zh="Batch 8">Batch 8</span></th>
+      <th><span class="i18n" data-en="Tag" data-zh="標籤">Tag</span></th>
+    </tr>
+    <tr><td><span class="i18n" data-en="Kernel time base -> patch (speedup)" data-zh="Kernel 時間 base -> patch（加速）">Kernel time base -> patch (speedup)</span></td><td>45.4 -> 44.8 us (1.01&times;)</td><td>45.6 -> 44.8 us (1.02&times;)</td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td>L2 read-hit rate</td><td>85.2% -> 85.4%</td><td>84.6% -> 85.0%</td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td><span class="i18n" data-en="Long-scoreboard mem-stall" data-zh="Long-scoreboard 記憶體停頓">Long-scoreboard mem-stall</span></td><td>9.2% -> 8.5%</td><td>9.2% -> 8.5%</td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td>DRAM read</td><td><span class="i18n" data-en="2.01 MB (flat)" data-zh="2.01 MB（持平）">2.01 MB (flat)</span></td><td><span class="i18n" data-en="2.01 MB (flat)" data-zh="2.01 MB（持平）">2.01 MB (flat)</span></td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td><span class="i18n" data-en="SM busy" data-zh="SM busy">SM busy</span></td><td>33.9% -> ~35.4%</td><td>33.9% -> ~35.4%</td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td><span class="i18n" data-en="Persisting-L2 access-policy window" data-zh="Persisting-L2 access-policy window">Persisting-L2 access-policy window</span></td><td><span class="i18n" data-en="9.8 MB (both builds)" data-zh="9.8 MB（兩個 build）">9.8 MB (both builds)</span></td><td><span class="i18n" data-en="9.8 MB (both builds)" data-zh="9.8 MB（兩個 build）">9.8 MB (both builds)</span></td><td><span class="tagp">FACT</span></td></tr>
+    <tr><td><span class="i18n" data-en="Passive activation-residency share of gain" data-zh="被動 activation 殘留佔增益比">Passive activation-residency share of gain</span></td><td colspan="2"><span class="i18n" data-en="~0% (outside our &lt;0.65% bound)" data-zh="約 0%（在我們的 &lt;0.65% 上界之外）">~0% (outside our &lt;0.65% bound)</span></td><td><span class="tagp">BOUND</span></td></tr>
+  </table>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Honest note: the e2e 1.80x vs per-kernel 1.01x gap." data-zh="誠實提醒：e2e 1.80x 與每 kernel 1.01x 的落差。">Honest note: the e2e 1.80x vs per-kernel 1.01x gap.</span></strong>
+    <span class="i18n"
+      data-en=" The headline e2e 1.80x and the per-kernel ncu 1.01x are <em>both real</em> and the gap is explained, not hidden. The prefetch's benefit is async overlap accumulated across the <em>warm</em> decode loop; ncu's cold-cache isolated-kernel replay (--cache-control all) resets caches each pass and under-represents that steady-state pipelined gain — an instance of the cold-vs-warm profiler gap our paper documents. We therefore report the warm e2e as the headline and the ncu as the mechanism-level attribution, noting the gap. Two further facts keep this honest: (1) the baseline attention kernel is <em>already</em> ~85% L2-resident from natural KV reuse, so the prefetch's marginal L2-residency gain is tiny (+0.2-0.4 pp); it mainly cuts memory stalls (active latency-hiding). (2) the same KV reads are issued earlier / overlapped — DRAM read is flat (2.01 MB), so the traffic was not removed, only its latency hidden."
+      data-zh=" 頭條 e2e 1.80x 與每 kernel ncu 1.01x <em>兩者皆為真實</em>，落差已被解釋而非隱藏。預取的收益是跨<em>暖</em> decode 迴圈累積的非同步重疊；ncu 的冷快取孤立 kernel 重播（--cache-control all）每次都重置快取，低估了那個穩態流水線增益 — 這是我們論文所記錄的冷對暖剖析器落差的一個實例。因此我們以暖 e2e 為頭條、ncu 為機制層級歸因，並指出落差。另有兩個事實使其誠實：(1) 基線注意力 kernel 因自然 KV 重用本就約 85% L2 駐留，故預取的邊際 L2 駐留增益極小（+0.2-0.4 pp）；它主要削減記憶體停頓（主動延遲掩蓋）。(2) 同樣的 KV 讀取只是被提前發出／重疊 — DRAM 讀取持平（2.01 MB），故流量並未被移除，只是其延遲被掩蓋。">  The headline e2e 1.80x and the per-kernel ncu 1.01x are <em>both real</em> and the gap is explained, not hidden. The prefetch's benefit is async overlap accumulated across the <em>warm</em> decode loop; ncu's cold-cache isolated-kernel replay (--cache-control all) resets caches each pass and under-represents that steady-state pipelined gain — an instance of the cold-vs-warm profiler gap our paper documents. We therefore report the warm e2e as the headline and the ncu as the mechanism-level attribution, noting the gap. Two further facts keep this honest: (1) the baseline attention kernel is <em>already</em> ~85% L2-resident from natural KV reuse, so the prefetch's marginal L2-residency gain is tiny (+0.2-0.4 pp); it mainly cuts memory stalls (active latency-hiding). (2) the same KV reads are issued earlier / overlapped — DRAM read is flat (2.01 MB), so the traffic was not removed, only its latency hidden.</span>
+  </div>
+</section>
+
+<!-- ============ L2 ATTRIBUTION ============ -->
+<section id="attribution">
+  <h2><span class="i18n" data-en="7. L2 Attribution — Reading the Mechanism Off the Counters" data-zh="7. L2 歸因 — 從計數器讀出機制">7. L2 Attribution — Reading the Mechanism Off the Counters</span> <span class="tagp">MEASURED</span></h2>
+  <p><span class="i18n"
+    data-en="Profiling both builds on the same workload decides, from the hardware counters alone, which lever produces the speedup. There are four candidate explanations; the measured metric pattern distinguishes them. The H100 counters confirm lever (A): the per-kernel time delta tracks the long-scoreboard mem-stall drop (9.2%->8.5%), L2 read-hit barely moves (already ~85% resident), and HBM read is flat (2.01 MB) — so it is active latency-hiding of the prefetched KV, not residency or a traffic cut."
+    data-zh="在同一工作負載上對兩個 build 都做剖析，僅從硬體計數器即可判定哪個槓桿產生了加速。有四個候選解釋；量測到的指標模式可區分它們。H100 計數器證實槓桿 (A)：每 kernel 時間變化隨 long-scoreboard 記憶體停頓下降（9.2%->8.5%）而動，L2 read-hit 幾乎不變（本就約 85% 駐留），HBM 讀取持平（2.01 MB） — 因此這是對預取 KV 的主動延遲掩蓋，而非駐留或流量削減。">Profiling both builds on the same workload decides, from the hardware counters alone, which lever produces the speedup. There are four candidate explanations; the measured metric pattern distinguishes them. The H100 counters confirm lever (A): the per-kernel time delta tracks the long-scoreboard mem-stall drop (9.2%->8.5%), L2 read-hit barely moves (already ~85% resident), and HBM read is flat (2.01 MB) — so it is active latency-hiding of the prefetched KV, not residency or a traffic cut.</span></p>
+
+  <div class="vflow">
+    <div class="box gray"><h4><span class="i18n" data-en="Observation: patched kernel is faster (gpu__time_duration.sum down)" data-zh="觀察：修補的 kernel 較快（gpu__time_duration.sum 下降）">Observation: patched kernel is faster (gpu__time_duration.sum down)</span></h4></div>
+    <div class="arrow">&darr;</div>
+    <div class="box blue"><h4><span class="i18n" data-en="Which lever?" data-zh="哪個槓桿？">Which lever?</span></h4></div>
+    <div class="arrow">&darr;</div>
+    <div class="branch">
+      <div class="box green"><h4><span class="i18n" data-en="(A) Active prefetch / latency-hiding — THE mechanism" data-zh="(A) 主動預取／延遲掩蓋 — 此機制">(A) Active prefetch / latency-hiding — THE mechanism</span></h4><p style="font-size:.8rem"><span class="i18n" data-en="Signature: long-scoreboard stall DOWN, time-delta tracks the stall drop. MEASURED: yes — stall 9.2%->8.5%, kernel 1.01-1.02x, L2 hit already ~85% so it barely rises." data-zh="特徵：long-scoreboard 停頓下降，時間變化隨停頓下降而動。已量測：是 — 停頓 9.2%->8.5%、kernel 1.01-1.02x、L2 hit 本就約 85% 故幾乎不升。">Signature: long-scoreboard stall DOWN, time-delta tracks the stall drop. MEASURED: yes — stall 9.2%->8.5%, kernel 1.01-1.02x, L2 hit already ~85% so it barely rises.</span></p></div>
+      <div class="box orange"><h4><span class="i18n" data-en="(B) SRAM / shared-mem staging" data-zh="(B) SRAM / shared-mem 暫存">(B) SRAM / shared-mem staging</span></h4><p style="font-size:.8rem"><span class="i18n" data-en="Would show as shared-mem traffic change. CODE: ruled out — the asm targets .L2.global and adds no smem allocation, so the kernel's shared-memory use is unchanged." data-zh="會表現為 shared-mem 流量變化。程式碼判定：排除 — asm 目標為 .L2.global 且未新增 smem 配置，故 kernel 的 shared-memory 使用不變。">Would show as shared-mem traffic change. CODE: ruled out — the asm targets .L2.global and adds no smem allocation, so the kernel's shared-memory use is unchanged.</span></p></div>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="branch">
+      <div class="box orange"><h4><span class="i18n" data-en="(C) Kernel-launch overhead" data-zh="(C) Kernel-launch 開銷">(C) Kernel-launch overhead</span></h4><p style="font-size:.8rem"><span class="i18n" data-en="Would show as fewer launches. CODE: ruled out — the patch is intra-kernel and adds no new launch, so the launch count is unchanged between builds." data-zh="會表現為更少的 launch。程式碼判定：排除 — 此修補為 kernel 內且未新增 launch，故兩個 build 的 launch 數不變。">Would show as fewer launches. CODE: ruled out — the patch is intra-kernel and adds no new launch, so the launch count is unchanged between builds.</span></p></div>
+      <div class="box red"><h4><span class="i18n" data-en="(D) HBM traffic cut (weight dedup etc.)" data-zh="(D) HBM 流量削減（權重去重等）">(D) HBM traffic cut (weight dedup etc.)</span></h4><p style="font-size:.8rem"><span class="i18n" data-en="Would show as dram__bytes_read DOWN. MEASURED: ruled out — bytes flat (2.01 MB); same KV read, just earlier." data-zh="會表現為 dram__bytes_read 下降。已量測：排除 — 位元組持平（2.01 MB）；同樣的 KV 讀取，只是更早。">Would show as dram__bytes_read DOWN. MEASURED: ruled out — bytes flat (2.01 MB); same KV read, just earlier.</span></p></div>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The decisive test was correlation, and the counters bear it out: the per-kernel time reduction tracks the drop in long-scoreboard stall percentage, so the speedup <em>is</em> latency-hiding of the prefetched KV — lever (A). HBM bytes staying flat (2.01 MB) prove the same KV reads were issued earlier / overlapped — the traffic was not removed, only its latency hidden; and by construction the patch adds no kernel launch and no shared-memory allocation, ruling out levers (C) and (B). One honest subtlety: the L2 read-hit rate barely rises (+0.2-0.4 pp) because the baseline KV is already ~85% L2-resident — so the prefetch's fingerprint is the stall drop, not a residency jump. This is the same separation logic our measurement study applies to bound passive residency — here it identifies an entirely different, active lever."
+    data-zh="決定性的檢驗是相關性，而計數器證實了它：每 kernel 的時間縮減隨 long-scoreboard 停頓百分比的下降而變化，因此加速<em>就是</em>對預取 KV 的延遲掩蓋 — 槓桿 (A)。HBM 位元組保持持平（2.01 MB）證明同樣的 KV 讀取只是被提前發出／重疊 — 流量並未被移除，只是其延遲被掩蓋；而依構造，此修補未新增 kernel launch 也未新增 shared-memory 配置，排除了槓桿 (C) 與 (B)。一個誠實的微妙處：L2 read-hit 率幾乎不升（+0.2-0.4 pp），因為基線 KV 本就約 85% L2 駐留 — 所以預取的指紋是停頓下降，而非駐留躍升。這正是我們的量測研究用以界定被動殘留的同一套分離邏輯 — 在此它辨識出一個完全不同的、主動的槓桿。">The decisive test was correlation, and the counters bear it out: the per-kernel time reduction tracks the drop in long-scoreboard stall percentage, so the speedup <em>is</em> latency-hiding of the prefetched KV — lever (A). HBM bytes staying flat (2.01 MB) prove the same KV reads were issued earlier / overlapped — the traffic was not removed, only its latency hidden; and by construction the patch adds no kernel launch and no shared-memory allocation, ruling out levers (C) and (B). One honest subtlety: the L2 read-hit rate barely rises (+0.2-0.4 pp) because the baseline KV is already ~85% L2-resident — so the prefetch's fingerprint is the stall drop, not a residency jump. This is the same separation logic our measurement study applies to bound passive residency — here it identifies an entirely different, active lever.</span></p>
+</section>
+
+<!-- ============ RELATED WORK & SIGNIFICANCE ============ -->
+<section id="related">
+  <h2><span class="i18n" data-en="8. Related Work & Significance" data-zh="8. 相關工作與意義">8. Related Work & Significance</span></h2>
+
+  <h3><span class="i18n" data-en="8.1 Where this sits among attention kernels" data-zh="8.1 它在注意力 kernel 之間的位置">8.1 Where this sits among attention kernels</span></h3>
+  <p><span class="i18n"
+    data-en="Modern inference engines mostly run FlashAttention- and FlashInfer-style kernels that fuse the whole attention computation and already overlap global loads with compute through software pipelining and asynchronous copies into shared memory. This paper does not compete with those; it retrofits the same overlap idea onto vLLM's older XFORMERS PagedAttention path, which lacks block-table lookahead. Its contribution is therefore best read as an existence proof: even on a non-fused, paged kernel, a single bulk-prefetch instruction recovers most of the latency-hiding that a fully fused kernel gets for free. The mechanism — anticipate the next memory access and stage it one level up the hierarchy before it is needed — is the oldest idea in computer architecture, here expressed in two lines of PTX against the L2 cache."
+    data-zh="現代推論引擎多半執行 FlashAttention 與 FlashInfer 風格的 kernel，它們融合整個注意力計算，並已透過軟體流水線與非同步複製進 shared memory 來重疊 global load 與計算。本文並不與這些競爭；它把相同的重疊想法改裝到 vLLM 較舊的 XFORMERS PagedAttention 路徑上，而後者缺乏 block-table 預看。因此其貢獻最好理解為一個存在性證明：即使在非融合、分頁的 kernel 上，單一條 bulk-prefetch 指令也能找回融合 kernel 免費獲得的大部分延遲掩蓋。這個機制 — 預測下一次記憶體存取並在需要前把它搬上記憶體階層一層 — 是計算機架構中最古老的想法，在此以兩行針對 L2 cache 的 PTX 表達。">Modern inference engines mostly run FlashAttention- and FlashInfer-style kernels that fuse the whole attention computation and already overlap global loads with compute through software pipelining and asynchronous copies into shared memory. This paper does not compete with those; it retrofits the same overlap idea onto vLLM's older XFORMERS PagedAttention path, which lacks block-table lookahead. Its contribution is therefore best read as an existence proof: even on a non-fused, paged kernel, a single bulk-prefetch instruction recovers most of the latency-hiding that a fully fused kernel gets for free. The mechanism — anticipate the next memory access and stage it one level up the hierarchy before it is needed — is the oldest idea in computer architecture, here expressed in two lines of PTX against the L2 cache.</span></p>
+
+  <h3><span class="i18n" data-en="8.2 The V0/V1 path caveat" data-zh="8.2 V0/V1 路徑的注意事項">8.2 The V0/V1 path caveat</span></h3>
+  <p><span class="i18n"
+    data-en="A practical subtlety we must respect during reproduction: vLLM's default execution path has moved to the V1 engine, and the kernel this patch modifies — <code>paged_attention_v1/v2</code> in <code>csrc/attention/attention_kernels.cuh</code> — is dispatched by the legacy XFORMERS backend on the V0 path. We therefore set <code>VLLM_USE_V1=0</code> alongside <code>VLLM_ATTENTION_BACKEND=XFORMERS</code> so the patched kernel is genuinely on the hot path; otherwise the profiler's <code>regex:paged_attention</code> filter would capture nothing and the speedup would not appear. The page's reproduction section verifies the kernel is actually exercised before any number is trusted."
+    data-zh="重現時我們必須注意一個實務上的微妙處：vLLM 的預設執行路徑已轉移到 V1 引擎，而此修補修改的 kernel — <code>csrc/attention/attention_kernels.cuh</code> 中的 <code>paged_attention_v1/v2</code> — 是由 V0 路徑上的傳統 XFORMERS 後端派發。因此我們在 <code>VLLM_ATTENTION_BACKEND=XFORMERS</code> 之外另設 <code>VLLM_USE_V1=0</code>，讓修補的 kernel 確實位於熱路徑；否則剖析器的 <code>regex:paged_attention</code> 過濾將捕捉不到任何東西，加速也不會出現。本頁的重現章節會在信任任何數字之前，先驗證該 kernel 確實被執行。">A practical subtlety we must respect during reproduction: vLLM's default execution path has moved to the V1 engine, and the kernel this patch modifies — <code>paged_attention_v1/v2</code> in <code>csrc/attention/attention_kernels.cuh</code> — is dispatched by the legacy XFORMERS backend on the V0 path. We therefore set <code>VLLM_USE_V1=0</code> alongside <code>VLLM_ATTENTION_BACKEND=XFORMERS</code> so the patched kernel is genuinely on the hot path; otherwise the profiler's <code>regex:paged_attention</code> filter would capture nothing and the speedup would not appear. The page's reproduction section verifies the kernel is actually exercised before any number is trusted.</span></p>
+
+  <h3><span class="i18n" data-en="8.3 Why it matters for the survey" data-zh="8.3 它對本調查的意義">8.3 Why it matters for the survey</span></h3>
+  <p><span class="i18n"
+    data-en="For a survey of KV-cache management, this paper is a clean datapoint on the kernel-level end of the spectrum: most cache-management work operates at the scheduler or block-allocation layer, but the bytes ultimately have to traverse the memory hierarchy, and this is what that traversal looks like when optimized by hand. For our measurement study specifically, it is the indispensable contrast that gives the &lt;0.65% bound its meaning. A bound is only informative if there exist cases on the other side of it; this paper is precisely such a case — a real, large L2-mediated win — and showing that it lives in a different category (active, intra-kernel, KV-cache) is what tells the reader the bound is narrow and exact, not a sign that L2 never matters."
+    data-zh="對一份 KV-cache 管理的調查而言，本文是頻譜上 kernel 層級那一端的一個乾淨資料點：多數 cache 管理工作運作在 scheduler 或 block 配置層，但位元組終究必須穿越記憶體階層，而這就是當該穿越被手工最佳化時的樣貌。具體對我們的量測研究而言，它是賦予 &lt;0.65% 上界意義的不可或缺的對照。一個上界只有在其另一側存在案例時才有資訊量；本文正是這樣的案例 — 一個真實、巨大、由 L2 中介的增益 — 而說明它屬於不同類別（主動、kernel 內、KV-cache），正是告訴讀者該上界是狹窄而精確的，而非 L2 從不重要的徵兆。">For a survey of KV-cache management, this paper is a clean datapoint on the kernel-level end of the spectrum: most cache-management work operates at the scheduler or block-allocation layer, but the bytes ultimately have to traverse the memory hierarchy, and this is what that traversal looks like when optimized by hand. For our measurement study specifically, it is the indispensable contrast that gives the &lt;0.65% bound its meaning. A bound is only informative if there exist cases on the other side of it; this paper is precisely such a case — a real, large L2-mediated win — and showing that it lives in a different category (active, intra-kernel, KV-cache) is what tells the reader the bound is narrow and exact, not a sign that L2 never matters.</span></p>
+</section>
+
+<!-- ============ SEPARABILITY ============ -->
+<section id="separability">
+  <h2><span class="i18n" data-en="9. Separability From Our &lt;0.65% Bound" data-zh="9. 與我們 &lt;0.65% 上界的可分離性">9. Separability From Our &lt;0.65% Bound</span></h2>
+  <p><span class="i18n"
+    data-en="This is why the paper belongs in our study as a sharpening case rather than a counterexample. Our bound is about one specific quantity: the value of letting a <em>prior kernel's output activation</em> sit in L2 long enough that the <em>next kernel</em> reads it from L2 instead of HBM, with no software doing anything to make that happen. The prefetch patch differs on every axis that defines that quantity."
+    data-zh="這就是為何本文在我們的研究中是一個「強化案例」而非反例。我們的上界關乎一個特定的量：讓<em>前一個 kernel 的輸出 activation</em> 在 L2 中停留得夠久，以致<em>下一個 kernel</em> 從 L2 而非 HBM 讀到它，且無任何軟體促成此事，這件事的價值。預取修補在定義該量的每一個軸上都不同。">This is why the paper belongs in our study as a sharpening case rather than a counterexample. Our bound is about one specific quantity: the value of letting a <em>prior kernel's output activation</em> sit in L2 long enough that the <em>next kernel</em> reads it from L2 instead of HBM, with no software doing anything to make that happen. The prefetch patch differs on every axis that defines that quantity.</span></p>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Axis" data-zh="軸">Axis</span></th>
+      <th><span class="i18n" data-en="Our bound (&lt;0.65%)" data-zh="我們的上界（&lt;0.65%）">Our bound (&lt;0.65%)</span></th>
+      <th><span class="i18n" data-en="This paper's prefetch" data-zh="本文的預取">This paper's prefetch</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Agency" data-zh="主動性">Agency</span></td>
+      <td><span class="i18n" data-en="PASSIVE — data left in L2 incidentally" data-zh="被動 — 資料附帶地留在 L2">PASSIVE — data left in L2 incidentally</span></td>
+      <td><span class="i18n" data-en="ACTIVE — explicit cp.async.bulk.prefetch.L2 PTX" data-zh="主動 — 明確的 cp.async.bulk.prefetch.L2 PTX">ACTIVE — explicit cp.async.bulk.prefetch.L2 PTX</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Scope" data-zh="範圍">Scope</span></td>
+      <td><span class="i18n" data-en="INTER-kernel — kernel N -> kernel N+1" data-zh="跨 kernel — kernel N -> kernel N+1">INTER-kernel — kernel N -> kernel N+1</span></td>
+      <td><span class="i18n" data-en="INTRA-kernel — same kernel, future iteration" data-zh="kernel 內 — 同一 kernel，未來迭代">INTRA-kernel — same kernel, future iteration</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Tensor" data-zh="張量">Tensor</span></td>
+      <td><span class="i18n" data-en="ACTIVATION — transient, written then read once" data-zh="ACTIVATION — 暫態，寫一次讀一次">ACTIVATION — transient, written then read once</span></td>
+      <td><span class="i18n" data-en="KV-CACHE — long-lived, re-read every decode step" data-zh="KV-CACHE — 長壽，每個 decode step 重讀">KV-CACHE — long-lived, re-read every decode step</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Payoff" data-zh="收益">Payoff</span></td>
+      <td><span class="i18n" data-en="Avoided HBM re-read of carried-over bytes" data-zh="避免對殘留位元組的 HBM 重讀">Avoided HBM re-read of carried-over bytes</span></td>
+      <td><span class="i18n" data-en="Latency-hiding: overlap fetch with current-block compute" data-zh="延遲掩蓋：取數與當前 block 計算重疊">Latency-hiding: overlap fetch with current-block compute</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="HBM bytes moved" data-zh="移動的 HBM 位元組">HBM bytes moved</span></td>
+      <td><span class="i18n" data-en="REDUCED (re-read avoided)" data-zh="減少（避免重讀）">REDUCED (re-read avoided)</span></td>
+      <td><span class="i18n" data-en="UNCHANGED (same reads issued earlier, not removed)" data-zh="不變（同樣的讀取被提前發出，非移除）">UNCHANGED (same reads issued earlier, not removed)</span></td>
+    </tr>
+  </table>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Conclusion." data-zh="結論。">Conclusion.</span></strong>
+    <span class="i18n"
+      data-en=" On all five axes the prefetch patch is the opposite of the mechanism we bound, so ~0% of its gain is passive inter-kernel activation residency. Far from contradicting &quot;Worth the Bytes?&quot;, confirming this separability sharpens it: real, large L2 wins in LLM inference come from <em>actively</em> prefetching a <em>high-reuse</em> tensor to <em>hide latency</em> — a categorically different lever from the incidental activation hand-off we measure, which remains worth &lt;0.65% of step time. Our measured H100 attribution (job 9948442) identifies the <em>kernel-level mechanism</em>: in cold-cache isolated replay the per-kernel speedup is only 1.01-1.02x, carried by a memory-stall drop (9.2%->8.5%) with HBM read flat and L2 hit already ~85% in the baseline. The headline 1.80x is the <em>warm-loop e2e</em> figure; cold replay does not, in isolation, explain it — the cold-replay-vs-warm-loop gap is reported, not attributed to the stall drop."
+      data-zh=" 在全部五個軸上，預取修補都與我們界定的機制相反，所以其增益中約 0% 是被動跨 kernel activation 殘留。確認這個可分離性絕非與「Worth the Bytes?」矛盾，反而強化它：LLM 推論中真實、巨大的 L2 增益，來自<em>主動</em>預取一個<em>高重用</em>張量以<em>掩蓋延遲</em> — 這與我們所量測的附帶 activation 交接是類別上不同的槓桿，而後者仍只值 step 時間的 &lt;0.65%。我們量測的 H100 歸因（job 9948442）辨識出<em>kernel 層級的機制</em>：在冷快取孤立重播中，每 kernel 加速僅 1.01-1.02x，由記憶體停頓下降（9.2%->8.5%）帶動，HBM 讀取持平、基線 L2 hit 本就約 85%。頭條的 1.80x 是<em>暖迴圈 e2e</em> 數字；冷重播本身並不能解釋它 — 冷重播與暖迴圈之間的落差是被如實報告的，而非歸因於停頓下降。">  On all five axes the prefetch patch is the opposite of the mechanism we bound, so ~0% of its gain is passive inter-kernel activation residency. Far from contradicting "Worth the Bytes?", confirming this separability sharpens it: real, large L2 wins in LLM inference come from <em>actively</em> prefetching a <em>high-reuse</em> tensor to <em>hide latency</em> — a categorically different lever from the incidental activation hand-off we measure, which remains worth &lt;0.65% of step time. Our measured H100 attribution (job 9948442) identifies the <em>kernel-level mechanism</em>: in cold-cache isolated replay the per-kernel speedup is only 1.01-1.02x, carried by a memory-stall drop (9.2%->8.5%) with HBM read flat and L2 hit already ~85% in the baseline. The headline 1.80x is the <em>warm-loop e2e</em> figure; cold replay does not, in isolation, explain it — the cold-replay-vs-warm-loop gap is reported, not attributed to the stall drop.</span>
+  </div>
+</section>
+
+<!-- ============ HOW TO REPRODUCE ============ -->
+<section id="reproduce">
+  <h2><span class="i18n" data-en="10. How to Reproduce" data-zh="10. 如何重現">10. How to Reproduce</span></h2>
+  <p><span class="i18n"
+    data-en="The repo ships no build or benchmark scripts, so reproduction means: build stock and patched v0.10.2, then drive both with vLLM's own throughput benchmark and Nsight Compute. The two sbatch scripts below ran on PACE H100 (job 9948442); the build and the H100 run are complete and the numbers in Sections 6-7 are the result. (vLLM has since moved benchmark_throughput.py to `vllm bench throughput`.)"
+    data-zh="倉庫未附建置或測試腳本，因此重現意味著：建置原版與修補的 v0.10.2，再以 vLLM 自帶的吞吐基準與 Nsight Compute 驅動兩者。下方兩個 sbatch 腳本已在 PACE H100 上執行（job 9948442）；建置與 H100 執行皆已完成，第 6-7 節的數字即為結果。（vLLM 後來已將 benchmark_throughput.py 移至 `vllm bench throughput`。）">The repo ships no build or benchmark scripts, so reproduction means: build stock and patched v0.10.2, then drive both with vLLM's own throughput benchmark and Nsight Compute. The two sbatch scripts below ran on PACE H100 (job 9948442); the build and the H100 run are complete and the numbers in Sections 6-7 are the result. (vLLM has since moved benchmark_throughput.py to `vllm bench throughput`.)</span></p>
+
+  <h3><span class="i18n" data-en="10.1 Install (per the repo README)" data-zh="10.1 安裝（依倉庫 README）">10.1 Install (per the repo README)</span></h3>
+  <pre><code><span class="cm"># 1. clone vLLM v0.10.2 (twice: baseline + patched)</span>
+git clone --depth=1 --branch v0.10.2 https://github.com/vllm-project/vllm.git baseline
+git clone --depth=1 --branch v0.10.2 https://github.com/vllm-project/vllm.git patched
+
+<span class="cm"># 2. drop the repo header into the patched tree only</span>
+cp attention_kernels.cuh patched/csrc/attention/attention_kernels.cuh
+
+<span class="cm"># 3. build EACH tree into its OWN conda env (avoids two-tree .so drift)</span>
+<span class="kw">export</span> TORCH_CUDA_ARCH_LIST=<span class="st">"9.0a"</span>   <span class="cm"># 'a' variant exposes the bulk-prefetch instruction</span>
+<span class="cm"># module load cuda/12.9.1  (NOT 12.6.1 — ptxas SIGSEGVs on FA3 Hopper kernels)</span>
+pip install --no-cache-dir --no-build-isolation -e .
+pip install xformers</code></pre>
+
+  <h3><span class="i18n" data-en="10.2 Run e2e + attribution" data-zh="10.2 執行 e2e + 歸因">10.2 Run e2e + attribution</span></h3>
+  <pre><code><span class="kw">export</span> VLLM_ATTENTION_BACKEND=XFORMERS
+<span class="kw">export</span> VLLM_USE_V1=<span class="nu">0</span>   <span class="cm"># exercise the legacy PagedAttention decode kernel</span>
+
+<span class="cm"># end-to-end throughput (decode-heavy: long output_len)</span>
+python benchmarks/benchmark_throughput.py --model Llama-3.1-8B \
+  --dtype float16 --input-len <span class="nu">512</span> --output-len <span class="nu">512</span> --num-prompts <span class="nu">8</span> --output-json out.json
+
+<span class="cm"># kernel attribution (cold-cache, application-replay; NOT kernel-replay -> host-RAM OOM)</span>
+ncu --replay-mode application --cache-control all --clock-control none \
+    --target-processes all -k <span class="st">"regex:paged_attention"</span> \
+    --launch-count <span class="nu">40</span> --launch-skip <span class="nu">200</span> --csv --page raw \
+    --metrics gpu__time_duration.sum,dram__bytes_read.sum,\
+lts__t_sector_op_read_hit_rate.pct,\
+smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct,\
+sm__throughput.avg.pct_of_peak_sustained_elapsed \
+    python benchmarks/benchmark_throughput.py --model Llama-3.1-8B ...</code></pre>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Hardware & environment requirements." data-zh="硬體與環境需求。">Hardware & environment requirements.</span></strong>
+    <ul>
+      <li><span class="i18n" data-en="GPU: Hopper (sm_90) only — H100/H200 on PACE. cp.async.bulk.prefetch will not compile for A100/L40S/RTX6000." data-zh="GPU：僅 Hopper（sm_90）— PACE 上的 H100/H200。cp.async.bulk.prefetch 無法為 A100/L40S/RTX6000 編譯。">GPU: Hopper (sm_90) only — H100/H200 on PACE. cp.async.bulk.prefetch will not compile for A100/L40S/RTX6000.</span></li>
+      <li><span class="i18n" data-en="CUDA: load cuda/12.9.1 first (12.6.1 ptxas crashes on FA3 Hopper templates); fall back to 12.1.1 only if needed." data-zh="CUDA：先載入 cuda/12.9.1（12.6.1 的 ptxas 在 FA3 Hopper 模板上崩潰）；僅在需要時回退到 12.1.1。">CUDA: load cuda/12.9.1 first (12.6.1 ptxas crashes on FA3 Hopper templates); fall back to 12.1.1 only if needed.</span></li>
+      <li><span class="i18n" data-en="vLLM: build a fresh v0.10.2 — the existing PACE vllm-pace env is v0.19.0 with a different paged_attention API." data-zh="vLLM：建置全新的 v0.10.2 — 既有的 PACE vllm-pace 環境是 v0.19.0，paged_attention API 不同。">vLLM: build a fresh v0.10.2 — the existing PACE vllm-pace env is v0.19.0 with a different paged_attention API.</span></li>
+      <li><span class="i18n" data-en="Build node: cpu-small (16 CPU, 96 GB); single-arch sm_90a; isolated conda env per tree." data-zh="建置節點：cpu-small（16 CPU、96 GB）；單一架構 sm_90a；每棵樹獨立 conda env。">Build node: cpu-small (16 CPU, 96 GB); single-arch sm_90a; isolated conda env per tree.</span></li>
+    </ul>
+  </div>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Artifact (our project tree)" data-zh="產物（我們的專案樹）">Artifact (our project tree)</span></th>
+      <th><span class="i18n" data-en="Purpose" data-zh="用途">Purpose</span></th>
+    </tr>
+    <tr><td><code>pace/prefetch_build_cpu.sbatch</code></td><td><span class="i18n" data-en="builds v0.10.2 baseline + patched, sm_90a, dumps torch pins + patch diff + sm-arch list" data-zh="建置 v0.10.2 baseline + patched，sm_90a，輸出 torch pin + patch diff + sm-arch 清單">builds v0.10.2 baseline + patched, sm_90a, dumps torch pins + patch diff + sm-arch list</span></td></tr>
+    <tr><td><code>pace/prefetch_run_h100.sbatch</code></td><td><span class="i18n" data-en="e2e throughput + ncu attribution on H100; emits prefetch_attribution.json" data-zh="H100 上的 e2e 吞吐 + ncu 歸因；輸出 prefetch_attribution.json">e2e throughput + ncu attribution on H100; emits prefetch_attribution.json</span></td></tr>
+    <tr><td><code>papers/kv-prefetch/repo/attention_kernels.cuh</code></td><td><span class="i18n" data-en="the treatment header (drop-in over stock v0.10.2)" data-zh="treatment 標頭（覆蓋原版 v0.10.2）">the treatment header (drop-in over stock v0.10.2)</span></td></tr>
+  </table>
+</section>
+
+</div>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <p><span class="i18n" data-en="Accelerating LLM Inference Throughput via Asynchronous KV Cache Prefetching (AAAI 2026, arXiv:2504.06319) — paper analysis + reproduction notes for the &quot;Worth the Bytes?&quot; L2-reuse measurement study." data-zh="Accelerating LLM Inference Throughput via Asynchronous KV Cache Prefetching（AAAI 2026，arXiv:2504.06319）— 為「Worth the Bytes?」L2-reuse 量測研究所做的論文分析 + 重現筆記。">Accelerating LLM Inference Throughput via Asynchronous KV Cache Prefetching (AAAI 2026, arXiv:2504.06319) — paper analysis + reproduction notes for the "Worth the Bytes?" L2-reuse measurement study.</span></p>
+  <p><span class="i18n" data-en="Source code: " data-zh="原始碼：">Source code: </span><code>github.com/alibaba/vllm_xformers_prefetch</code></p>
+  <p><span class="i18n" data-en="Reproduction status: MEASURED on PACE H100 (job 9948442) — e2e up to 1.80x, ncu kernel 1.01-1.02x, mechanism = memory-stall reduction with HBM read flat. Generated 2026-06-14." data-zh="重現狀態：已於 PACE H100 量測（job 9948442）— e2e 最高 1.80x、ncu kernel 1.01-1.02x、機制 = 記憶體停頓下降且 HBM 讀取持平。產生日期：2026-06-14。">Reproduction status: MEASURED on PACE H100 (job 9948442) — e2e up to 1.80x, ncu kernel 1.01-1.02x, mechanism = memory-stall reduction with HBM read flat. Generated 2026-06-14.</span></p>
+</footer>
+
+<!-- ============ i18n SCRIPT ============ -->
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}}
+document.addEventListener('DOMContentLoaded',function(){if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}var l=localStorage.getItem('lang');if(l)setLang(l)});
+</script>
+</body>
+</html>

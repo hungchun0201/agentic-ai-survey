@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DLRM L2-Pinning — Cross-Kernel L2 Reuse of Embedding Rows (MICRO 2024)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" crossorigin="anonymous"></script>
+<style>
+/* ===== ACCENT (Amber — cost/resource & GPU memory-hierarchy theme) ===== */
+:root{--accent:#e5a130;--accent-rgb:229,161,48;--nav-bg:rgba(40,28,8,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#c9b079;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#1e1020 0%,#1a1428 50%,#1a1030 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.18);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE BLOCKS ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+.pend{color:#ffb74d;font-style:italic;font-weight:600}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW (horizontal steps) ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent)}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step:nth-child(5) .c{background:#9b59b6}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW DIAGRAMS ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:740px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.12);border:1px solid rgba(245,166,35,.4);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:740px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== HBM/L2/SM memory-hierarchy strip ===== */
+.memhier{display:flex;flex-direction:column;gap:8px;margin:1.5rem 0}
+.memhier .lvl{display:flex;align-items:center;gap:12px;padding:.7rem 1rem;border-radius:8px;font-size:.85rem}
+.memhier .lvl .tag{font-weight:700;min-width:74px;text-align:center;padding:.2rem .4rem;border-radius:6px;font-size:.78rem}
+.memhier .sm{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35)}
+.memhier .sm .tag{background:rgba(46,204,113,.3);color:#a6e3a1}
+.memhier .l2{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.4)}
+.memhier .l2 .tag{background:rgba(var(--accent-rgb),.3);color:var(--accent)}
+.memhier .hbm{background:rgba(233,69,96,.1);border:1px solid rgba(233,69,96,.35)}
+.memhier .hbm .tag{background:rgba(233,69,96,.3);color:#e96a80}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+.pending-box{background:rgba(255,183,77,.08);border:1px dashed rgba(255,183,77,.55);border-radius:10px;padding:1.1rem 1.4rem;margin:1.2rem 0;font-size:.9rem}
+.pending-box h4{margin-top:0}
+.tag-pending{display:inline-block;background:rgba(255,183,77,.2);border:1px solid rgba(255,183,77,.55);color:#ffb74d;font-size:.7rem;font-weight:700;padding:.1rem .5rem;border-radius:10px;vertical-align:middle;letter-spacing:.04em;text-transform:uppercase}
+.tag-fact{display:inline-block;background:rgba(46,204,113,.18);border:1px solid rgba(46,204,113,.5);color:#2ecc71;font-size:.66rem;font-weight:700;padding:.05rem .45rem;border-radius:10px;vertical-align:middle;letter-spacing:.04em;text-transform:uppercase}
+.tag-bound{display:inline-block;background:rgba(110,198,255,.16);border:1px solid rgba(110,198,255,.5);color:#6ec6ff;font-size:.66rem;font-weight:700;padding:.05rem .45rem;border-radius:10px;vertical-align:middle;letter-spacing:.04em;text-transform:uppercase}
+.tag-artifact{display:inline-block;background:rgba(233,69,96,.16);border:1px solid rgba(233,69,96,.5);color:#e96a80;font-size:.66rem;font-weight:700;padding:.05rem .45rem;border-radius:10px;vertical-align:middle;letter-spacing:.04em;text-transform:uppercase}
+.fact{color:#2ecc71;font-weight:600}
+.bound{color:#6ec6ff;font-weight:600}
+.artifact-cell{color:#e96a80;font-style:italic;font-weight:600}
+.measured-box{background:rgba(46,204,113,.06);border:1px solid rgba(46,204,113,.35);border-radius:10px;padding:1.1rem 1.4rem;margin:1.2rem 0;font-size:.9rem}
+.measured-box h4{margin-top:0}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== COMPARISON INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== SIDE-BY-SIDE GRID ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#mechanism">Mechanism</a></li>
+    <li><a href="#repo">Repo</a></li>
+    <li><a href="#ablation">Ablation Ladder</a></li>
+    <li><a href="#fairness">Pin wall-clock</a></li>
+    <li><a href="#repro">Our Reproduction</a></li>
+    <li><a href="#attribution">Nsight</a></li>
+    <li><a href="#claims">Claims</a></li>
+    <li><a href="#positioning">Positioning</a></li>
+    <li><a href="#tieback">Worth the Bytes?</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>DLRM L2-Pinning</h1>
+  <p class="sub"><span class="i18n" data-en="Pushing the Performance Envelope of DNN-based Recommendation Systems Inference on GPUs &mdash; a software-only cross-kernel L2-residency technique for embedding rows, and why its own ablation makes it a small incremental slice." data-zh="在 GPU 上推進 DNN 推薦系統推論的效能上限 &mdash; 一個純軟體、跨 kernel 把 embedding row 留在 L2 的技術，以及它自己的 ablation 為何顯示它只是一個很小的增量。">Pushing the Performance Envelope of DNN-based Recommendation Systems Inference on GPUs &mdash; a software-only cross-kernel L2-residency technique for embedding rows, and why its own ablation makes it a small incremental slice.</span></p>
+  <div class="badges">
+    <span class="badge">MICRO 2024</span>
+    <span class="badge">arXiv:2410.22249</span>
+    <span class="badge">DLRM Inference</span>
+    <span class="badge">L2 Pinning (PTX prefetch)</span>
+    <span class="badge">A100 sm_80</span>
+    <span class="badge"><span class="i18n" data-en="Measured: PACE A100-80GB" data-zh="已量測：PACE A100-80GB">Measured: PACE A100-80GB</span></span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">
+    Rishabh Jain, Vivek M. Bhasi, Adwait Jog, Anand Sivasubramaniam, Mahmut T. Kandemir, Chita R. Das
+  </p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">
+    The Pennsylvania State University &middot; University of Virginia
+  </p>
+</div>
+
+<div class="container">
+
+<!-- ============ TL;DR ============ -->
+<section id="tldr">
+  <h2><span class="i18n" data-en="0. TL;DR &mdash; Why this paper is in our study" data-zh="0. 一句話總結 &mdash; 為何這篇論文在我們的研究裡">0. TL;DR &mdash; Why this paper is in our study</span></h2>
+  <p><span class="i18n"
+    data-en="This page is part of the measurement study <em>&ldquo;Worth the Bytes?&rdquo;</em>, which argues that transient <strong>inter-kernel L2 reuse of activations</strong> in eager-mode LLM inference is worth less than <strong>0.65%</strong> of step time. DLRM L2-pinning (L2P) is the most direct counterpart to that mechanism we could find in published systems work: it deliberately engineers cross-kernel L2 residency so that one GPU kernel leaves data warm in L2 for the <em>next</em> kernel to hit. The data it pins are embedding rows (weights-as-data), not transformer activations, but the hardware effect &mdash; sector hits in L2 saved across a kernel boundary &mdash; is exactly what we measure."
+    data-zh="本頁是測量研究 <em>&ldquo;Worth the Bytes?&rdquo;</em> 的一部分，該研究主張 eager 模式 LLM 推論中暫態的<strong>跨 kernel L2 activation 重用</strong>，其價值低於 step time 的 <strong>0.65%</strong>。DLRM L2-pinning（L2P）是我們在已發表系統工作中找到、最直接對應這個機制的例子：它刻意工程化跨 kernel 的 L2 residency，讓一個 GPU kernel 把資料留在 L2 給<em>下一個</em> kernel 命中。它釘住的資料是 embedding row（被當成資料用的權重），而不是 transformer activation，但硬體效應 &mdash; 跨 kernel 邊界省下的 L2 sector hit &mdash; 正是我們要量的東西。">This page is part of the measurement study <em>&ldquo;Worth the Bytes?&rdquo;</em>, which argues that transient <strong>inter-kernel L2 reuse of activations</strong> in eager-mode LLM inference is worth less than <strong>0.65%</strong> of step time. DLRM L2-pinning (L2P) is the most direct counterpart to that mechanism we could find in published systems work.</span></p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Same L2-residency phenomenon" data-zh="同一個 L2-residency 現象">Same L2-residency phenomenon</span></h4>
+      <p><span class="i18n" data-en="A dedicated pre-kernel issues PTX <code>prefetch.global.L2::evict_last</code> on hot rows, then a stream sync, then the consumer EmbeddingBag kernel reads those rows from L2. That is the same cross-kernel L2-residency hardware phenomenon &mdash; made explicit and isolatable in source &mdash; though the data semantics differ (persistent curated hot rows vs transient activations)." data-zh="一個專門的前置 kernel 對 hot row 發出 PTX <code>prefetch.global.L2::evict_last</code>，接著 stream sync，然後 consumer EmbeddingBag kernel 從 L2 讀那些 row。這就是同一個跨 kernel L2-residency 硬體現象 &mdash; 在原始碼中被明確化並可被獨立量測 &mdash; 雖然資料語意不同（持久的人工挑選 hot row vs 暫態 activation）。">A dedicated pre-kernel issues PTX <code>prefetch.global.L2::evict_last</code> on hot rows, then a stream sync, then the consumer reads those rows from L2 &mdash; the same cross-kernel L2-residency phenomenon, though the data semantics differ (persistent curated rows vs transient activations).</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Its own ablation shrinks it" data-zh="它自己的 ablation 把它縮小">Its own ablation shrinks it</span></h4>
+      <p><span class="i18n" data-en="The paper's headline is up to 62% embedding-kernel / 48% e2e (L2P+OptMT). But on the medium-reuse profile, L2P adds only ~13.5% on top of register-prefetch+occupancy tuning, and the authors expect it to vanish for random/low-reuse traces." data-zh="論文標題是最多 62% embedding kernel / 48% e2e（L2P+OptMT）。但在 medium-reuse profile 上，L2P 在 register-prefetch + occupancy tuning 之上只多加約 13.5%，而作者預期它在 random/low-reuse trace 上會消失。">The paper's headline is up to 62% embedding-kernel / 48% e2e, but on the medium-reuse profile L2P adds only ~13.5% on top of register-prefetch+occupancy tuning.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="A favorable case for L2" data-zh="一個對 L2 有利的案例">A favorable case for L2</span></h4>
+      <p><span class="i18n" data-en="Reuse here is hand-engineered from a 60K hot-index list, not naturally transient. We do not have a clean pin-charged net wall-clock result here; the usable evidence is the L2-layer Nsight attribution (L2P &asymp; RPF at the L2 layer in steady state) plus the paper's own ~13.5%-incremental ablation figure. That even this best-case, hotness-curated setting adds essentially nothing at the L2 layer over register-prefetch is consistent with our &lt;0.65% bound for genuine eager-LLM activations." data-zh="這裡的重用是從一份 60K hot-index 清單手動工程化出來的，並非自然暫態。我們在這裡並沒有乾淨的、計入 pin 的淨 wall-clock 結果；可用的證據是 L2 層的 Nsight 歸因（穩態下 L2 層上 L2P &asymp; RPF）加上論文自己的 ~13.5% 增量 ablation 數字。連這個最佳情況、被人工挑過熱度的設定，在 L2 層上都幾乎不比 register-prefetch 多加任何東西，這與我們對真正 eager-LLM activation 的 &lt;0.65% 上界一致。">Reuse here is hand-engineered from a 60K hot-index list. We have no clean pin-charged net wall-clock result; the usable evidence is the L2-layer Nsight attribution (L2P &asymp; RPF in steady state) plus the paper's own ~13.5%-incremental figure &mdash; consistent with our &lt;0.65% bound.</span></p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Status of our numbers." data-zh="我們數字的狀態。">Status of our numbers.</span></strong>
+    <span class="i18n" data-en="Measured on PACE A100-80GB (sm_80), from-source PyTorch v2.1.0, jobs 9935235 (Nsight Compute L2 attribution) + 9942760 (cudaEvent latency ladder). Config: 12 tables &times; 500K rows &times; dim 128, batch 2048, pooling 150; kernel EmbeddingBag_updateOutputKernel_sum_mean. Each result cell is tagged " data-zh="於 PACE A100-80GB（sm_80）上量測，從原始碼建置的 PyTorch v2.1.0，job 9935235（Nsight Compute L2 歸因）+ 9942760（cudaEvent 延遲階梯）。設定：12 table &times; 500K row &times; dim 128，batch 2048，pooling 150；kernel 為 EmbeddingBag_updateOutputKernel_sum_mean。每個結果格都標記為 ">Measured on PACE A100-80GB (sm_80), from-source PyTorch v2.1.0, jobs 9935235 (Nsight Compute L2 attribution) + 9942760 (cudaEvent latency ladder). Config: 12 tables &times; 500K rows &times; dim 128, batch 2048, pooling 150. Each result cell is tagged </span><span class="tag-pending">FACT</span><span class="i18n" data-en=" (directly measured), " data-zh="（直接量測）、">,</span> <span class="tag-pending">BOUND</span><span class="i18n" data-en=" (derived/bounded from the paper or our metrics), or " data-zh="（從論文或我們的指標推導/設界），或 ">,</span> <span class="tag-pending">ARTIFACT</span><span class="i18n" data-en=" (a harness artifact we explicitly do NOT report as inference latency). Static facts read directly from the artifact source (PTX, timer placement, hot-index counts) are stated as confirmed." data-zh="（一個我們明確<strong>不</strong>當作推論延遲回報的 harness artifact）。直接從 artifact 原始碼讀到的靜態事實（PTX、timer 位置、hot-index 數量）則陳述為已確認。"> Static facts read directly from the artifact source are stated as confirmed.</span>
+  </div>
+</section>
+
+<!-- ============ OVERVIEW ============ -->
+<section id="overview">
+  <h2><span class="i18n" data-en="1. Overview &mdash; the EmbeddingBag bottleneck" data-zh="1. 概述 &mdash; EmbeddingBag 瓶頸">1. Overview &mdash; the EmbeddingBag bottleneck</span></h2>
+  <p><span class="i18n"
+    data-en="Deep-learning recommendation models (DLRM) interleave dense MLPs with very large embedding tables. At inference, the dominant cost is the <strong>EmbeddingBag</strong> operation: a gather-reduce that, for each sample, looks up many rows from a multi-gigabyte table and sums (or means) them. Because the looked-up indices are data-dependent and scattered, the gather is a stream of <strong>irregular HBM reads</strong> with poor spatial locality. The kernel is latency-bound on the memory system rather than compute-bound, so the classic levers (more FLOPs, bigger tiles) do not help."
+    data-zh="深度學習推薦模型（DLRM）把 dense MLP 與超大 embedding table 交錯。在推論時，主要成本是 <strong>EmbeddingBag</strong> 運算：一個 gather-reduce，對每個樣本從多 GB 的 table 查多個 row 並求和（或平均）。由於被查的 index 是資料相依且分散的，這個 gather 是一連串<strong>不規則 HBM 讀取</strong>，空間局部性很差。這個 kernel 受限於記憶體系統的延遲而非計算，所以傳統手段（更多 FLOP、更大 tile）幫不上忙。">Deep-learning recommendation models (DLRM) interleave dense MLPs with very large embedding tables. At inference the dominant cost is the <strong>EmbeddingBag</strong> gather-reduce, a stream of irregular HBM reads that is latency-bound on the memory system.</span></p>
+
+  <h3><span class="i18n" data-en="1.1 Why now / the bad scenario" data-zh="1.1 為何現在 / 壞情境">1.1 Why now / the bad scenario</span></h3>
+  <p><span class="i18n"
+    data-en="Production recommenders serve under tight latency SLAs, and embedding tables only keep growing. The bad scenario is concrete: a single EmbeddingBag kernel with pooling factor 150 over 12 tables of 500K rows &times; 128 fp32 features issues hundreds of thousands of scattered 512-byte row reads per batch, and most of them miss every cache and go to HBM. The kernel sits waiting on memory latency, the SMs are under-occupied, and end-to-end latency is dominated by a single operator that no amount of MLP optimization touches."
+    data-zh="生產級推薦系統在嚴格的延遲 SLA 下服務，而 embedding table 只會越來越大。壞情境很具體：一個 pooling factor 150、跨 12 張 500K row &times; 128 fp32 feature 的 table 的 EmbeddingBag kernel，每個 batch 發出數十萬個分散的 512-byte row 讀取，而其中大多數錯過所有 cache 直接打到 HBM。kernel 卡在等記憶體延遲，SM 占用率不足，端到端延遲被一個任何 MLP 優化都碰不到的單一 operator 主宰。">Embedding tables keep growing under tight SLAs. A single EmbeddingBag with pooling factor 150 over twelve 500K&times;128 fp32 tables issues hundreds of thousands of scattered row reads per batch, most of which miss every cache and go to HBM.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 Baseline pain & the strawman" data-zh="1.2 baseline 的痛點與稻草人方案">1.2 Baseline pain & the strawman</span></h3>
+  <p><span class="i18n"
+    data-en="The strawman is to grow the on-chip cache or stage rows in shared memory (SRAM). But the working set (the union of rows touched in a batch) is far larger than the 40 MB L2 of an A100, and shared memory is tiny (up to 164 KB/SM) and must be filled by the same threads that are already memory-stalled. The repo even ships a shared-memory prefetch variant (<code>EmbeddingBag_shmem.txt</code>) and an L1-prefetch variant (<code>EmbeddingBag_l1dpref_rolling.txt</code>) that the paper does not adopt as headline techniques &mdash; evidence that the SRAM route was tried and found wanting."
+    data-zh="稻草人方案是把 on-chip cache 變大，或把 row 暫存到 shared memory（SRAM）。但 working set（一個 batch 觸及的 row 聯集）遠大於 A100 的 40 MB L2，而 shared memory 很小（每 SM 最多 164 KB），而且必須由同一批已經被記憶體 stall 的 thread 來填。repo 甚至附了一個 shared-memory prefetch 變體（<code>EmbeddingBag_shmem.txt</code>）和一個 L1-prefetch 變體（<code>EmbeddingBag_l1dpref_rolling.txt</code>），論文並未把它們當作標題技術 &mdash; 這正是 SRAM 路線被試過卻不夠好的證據。">The working set far exceeds the A100's 40 MB L2, and shared memory is tiny. The repo even ships shared-memory and L1-prefetch variants that the paper does not adopt &mdash; evidence the SRAM route was tried and found wanting.</span></p>
+
+  <h3><span class="i18n" data-en="1.3 The obstacle & positioning" data-zh="1.3 障礙與定位">1.3 The obstacle & positioning</span></h3>
+  <p><span class="i18n"
+    data-en="The real obstacle is that a useful slice of accesses <em>does</em> repeat &mdash; popularity is skewed, so a small set of hot rows accounts for a disproportionate share of lookups &mdash; but the baseline kernel has no way to keep that hot slice resident across kernel invocations. Each EmbeddingBag launch starts from a cold-ish cache. The paper positions its three techniques as software-only, drop-in replacements of the ATen EmbeddingBag CUDA kernel that (i) raise occupancy, (ii) hide latency inside the kernel, and (iii) keep the hot slice warm in L2 across kernels &mdash; the last being our mechanism."
+    data-zh="真正的障礙是：確實有一部分有用的存取會重複 &mdash; 熱度是偏斜的，所以一小撮 hot row 占了不成比例的查詢量 &mdash; 但 baseline kernel 沒辦法把那個 hot slice 跨 kernel 呼叫保持 resident。每次 EmbeddingBag launch 都從一個偏冷的 cache 開始。論文把它的三個技術定位為純軟體、可直接替換 ATen EmbeddingBag CUDA kernel 的方案：(i) 提升占用率、(ii) 在 kernel 內部隱藏延遲、(iii) 跨 kernel 把 hot slice 留在 L2 &mdash; 最後一項就是我們的機制。">Popularity is skewed, so a small hot slice dominates lookups, but the baseline kernel cannot keep it resident across launches. The paper's three software-only techniques raise occupancy, hide latency in-kernel, and keep the hot slice warm in L2 across kernels &mdash; the last being our mechanism.</span></p>
+
+  <h3><span class="i18n" data-en="1.4 Contributions" data-zh="1.4 貢獻">1.4 Contributions</span></h3>
+  <ol>
+    <li><span class="i18n" data-en="<strong>OptMT</strong> (Optimal Multi-Threading): an occupancy / register-budget tuning that caps registers per thread via the compiler flag <code>-maxrregcount 42</code>, raising the number of concurrent warps so memory latency is better overlapped." data-zh="<strong>OptMT</strong>（Optimal Multi-Threading）：一個占用率 / register 預算調校，透過編譯器旗標 <code>-maxrregcount 42</code> 限制每個 thread 的 register 數，提高同時的 warp 數，更好地重疊記憶體延遲。"><strong>OptMT</strong>: occupancy/register-budget tuning via <code>-maxrregcount 42</code>.</span></li>
+    <li><span class="i18n" data-en="<strong>RPF</strong> (Register Prefetch): an in-kernel software pipeline that loads the next row's value into temporary registers (<code>lv0</code>, <code>lv1</code>) ahead of use, hiding load latency &mdash; purely intra-kernel, no cross-kernel state." data-zh="<strong>RPF</strong>（Register Prefetch）：一個 kernel 內的軟體 pipeline，把下一個 row 的值預先載入暫存 register（<code>lv0</code>、<code>lv1</code>）以隱藏載入延遲 &mdash; 純 kernel 內，沒有跨 kernel 狀態。"><strong>RPF</strong>: in-kernel register prefetch into <code>lv0</code>/<code>lv1</code> &mdash; intra-kernel latency hiding, no cross-kernel state.</span></li>
+    <li><span class="i18n" data-en="<strong>L2P</strong> (L2 Pinning): a separate <code>prefetch_pin_L2</code> kernel that issues <code>prefetch.global.L2::evict_last</code> on a list of hot rows, marking them low-eviction-priority so the next EmbeddingBag kernel finds them in L2. <strong>This is the cross-kernel L2-residency mechanism our study measures.</strong>" data-zh="<strong>L2P</strong>（L2 Pinning）：一個獨立的 <code>prefetch_pin_L2</code> kernel，對一份 hot row 清單發出 <code>prefetch.global.L2::evict_last</code>，把它們標記為低驅逐優先級，讓下一個 EmbeddingBag kernel 在 L2 找到它們。<strong>這就是我們研究要量的跨 kernel L2-residency 機制。</strong>"><strong>L2P</strong>: a separate <code>prefetch_pin_L2</code> kernel issuing <code>prefetch.global.L2::evict_last</code> on hot rows. <strong>This is the cross-kernel L2-residency mechanism our study measures.</strong></span></li>
+  </ol>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">62%</div><div class="label"><span class="i18n" data-en="max embedding-kernel reduction (L2P+OptMT, paper)" data-zh="最大 embedding kernel 降幅（L2P+OptMT，論文）">max embedding-kernel reduction (paper)</span></div></div>
+    <div class="metric-box"><div class="value">48%</div><div class="label"><span class="i18n" data-en="max end-to-end reduction (paper)" data-zh="最大端到端降幅（論文）">max e2e reduction (paper)</span></div></div>
+    <div class="metric-box"><div class="value">~13.5%</div><div class="label"><span class="i18n" data-en="L2P incremental over RPF+OptMT, medium reuse" data-zh="L2P 在 RPF+OptMT 之上的增量，medium reuse">L2P incremental, med reuse</span></div></div>
+    <div class="metric-box"><div class="value">60,000</div><div class="label"><span class="i18n" data-en="hot rows per hot-index file (confirmed; reuse_low run skipped pinning, &sect;4.1)" data-zh="每個 hot-index 檔的 hot row 數（已確認；reuse_low run 略過了 pinning，&sect;4.1）">hot rows / hot-index file</span></div></div>
+  </div>
+</section>
+
+<!-- ============ MECHANISM ============ -->
+<section id="mechanism">
+  <h2><span class="i18n" data-en="2. The L2-Pinning mechanism (annotated source)" data-zh="2. L2-Pinning 機制（標註原始碼）">2. The L2-Pinning mechanism (annotated source)</span></h2>
+  <p><span class="i18n"
+    data-en="L2P works in two kernels separated by a stream synchronization, all inside one ATen op (<code>_embedding_bag_cuda</code>). First a producer pins hot rows in L2; then a consumer EmbeddingBag kernel reads them. The producer never computes anything &mdash; it exists only to issue prefetch hints that change the L2 replacement state."
+    data-zh="L2P 在一個 ATen op（<code>_embedding_bag_cuda</code>）內，用兩個被 stream synchronization 分隔的 kernel 運作。先由一個 producer 把 hot row 釘在 L2；再由一個 consumer EmbeddingBag kernel 讀它們。producer 不計算任何東西 &mdash; 它存在只為發出 prefetch hint，改變 L2 的替換狀態。">L2P uses two kernels separated by a stream sync, inside one ATen op. A producer pins hot rows in L2; a consumer EmbeddingBag kernel reads them. The producer computes nothing &mdash; it only issues prefetch hints that change L2 replacement state.</span></p>
+
+  <h3><span class="i18n" data-en="2.1 The pin kernel (the producer)" data-zh="2.1 pin kernel（producer）">2.1 The pin kernel (the producer)</span></h3>
+  <p><span class="i18n" data-en="From <code>opt_designs/l2_pinning/EmbeddingBag.cu</code>, lines 131&ndash;148. Each thread walks the hot-index list and emits a single inline-PTX prefetch per hot row, with the <code>evict_last</code> eviction-priority hint that biases the replacement policy toward evicting the row later (advisory, not a guarantee):" data-zh="出自 <code>opt_designs/l2_pinning/EmbeddingBag.cu</code> 第 131&ndash;148 行。每個 thread 走過 hot-index 清單，對每個 hot row 發出一條 inline-PTX prefetch，帶 <code>evict_last</code> 驅逐優先級提示，把替換策略偏向較晚才驅逐該 row（建議性，非保證）：">From <code>opt_designs/l2_pinning/EmbeddingBag.cu</code>, lines 131&ndash;148. The <code>evict_last</code> hint biases the replacement policy toward later eviction (advisory, not guaranteed):</span></p>
+<pre><code><span class="kw">template</span> &lt;<span class="kw">typename</span> scalar_t, <span class="kw">typename</span> index_t&gt;
+<span class="kw">__global__</span> <span class="kw">void</span> <span class="fn">prefetch_pin_L2</span>(<span class="kw">const</span> scalar_t *weight, int64_t featureSize,
+                                int64_t weight_stride0,
+                                int64_t <span class="kw">const</span>* d_hot_idx_vec, size_t pinning_size) {
+    <span class="kw">int</span> Xidx = blockIdx.x * blockDim.x + threadIdx.x;
+    <span class="kw">int</span> Yidx = threadIdx.y;
+    <span class="kw">int</span> stride = gridDim.x * blockDim.x;
+    <span class="kw">if</span> (Yidx &lt; featureSize) {
+        <span class="kw">for</span> (<span class="kw">int</span> i = Xidx; i &lt; pinning_size; i += stride) {
+            int64_t <span class="kw">const</span> lv_hot_idx = d_hot_idx_vec[i];        <span class="cm">// a hot row id</span>
+            <span class="kw">const</span> scalar_t *weightFeat = weight + Yidx;
+            <span class="cm">// insert the L2 prefetch inline PTX code</span>
+            <span class="kw">asm volatile</span> (
+                <span class="st">"prefetch.global.L2::evict_last [%0];"</span> ::<span class="st">"l"</span>(&amp;weightFeat[lv_hot_idx * weight_stride0])
+            :);
+        }
+    }
+}</code></pre>
+  <p><span class="i18n" data-en="The hot-index list is read at runtime from the file named in the <code>DATASET_FILE_PATH</code> environment variable (lines 447&ndash;471): the host opens the file, pushes every integer into a <code>std::vector&lt;int64_t&gt;</code>, <code>cudaMalloc</code>s a device buffer, and copies the list over before launching the pin kernel. Each of the four reuse profiles points at its own 60,000-line hot-index file." data-zh="hot-index 清單在執行時從 <code>DATASET_FILE_PATH</code> 環境變數指定的檔案讀入（第 447&ndash;471 行）：host 開檔，把每個整數推入 <code>std::vector&lt;int64_t&gt;</code>，<code>cudaMalloc</code> 一個 device buffer，在啟動 pin kernel 前把清單複製過去。四個 reuse profile 各自指向自己的 60,000 行 hot-index 檔。">The hot-index list is read at runtime from <code>DATASET_FILE_PATH</code> (lines 447&ndash;471); each reuse profile points at its own 60,000-line hot-index file.</span></p>
+
+  <h3><span class="i18n" data-en="2.2 The pin&rarr;sync&rarr;consume sequence (and the timer)" data-zh="2.2 pin&rarr;sync&rarr;consume 序列（與計時器）">2.2 The pin&rarr;sync&rarr;consume sequence (and the timer)</span></h3>
+  <p><span class="i18n" data-en="The launch sequence, lines 494&ndash;517. Read the comments and the timer position carefully &mdash; this is the single most important measurement detail on the page:" data-zh="啟動序列，第 494&ndash;517 行。仔細讀註解與計時器位置 &mdash; 這是本頁最重要的一個量測細節：">The launch sequence, lines 494&ndash;517. The timer position is the single most important measurement detail on this page:</span></p>
+<pre><code>      } <span class="kw">else</span> {
+        <span class="cm">// cudaEventRecord(start, stream);              &lt;-- commented out</span>
+        <span class="cm">// reduce_L2_size&lt;&lt;&lt;grid, 256, 0, stream&gt;&gt;&gt;(d_dummy_vec, size_dummy);</span>
+        dim3 block_2 = dim3(<span class="nu">2</span>, <span class="nu">128</span>);
+        <span class="fn">prefetch_pin_L2</span>&lt;scalar_t, index_t&gt;&lt;&lt;&lt;grid, block_2, <span class="nu">0</span>, stream&gt;&gt;&gt;(   <span class="cm">// PRODUCER: pin hot rows</span>
+            weight.const_data_ptr&lt;scalar_t&gt;(), featureSize, weight.stride(<span class="nu">0</span>),
+            d_hot_idx_vec, pinning_size);
+        <span class="fn">cudaStreamSynchronize</span>(stream);                <span class="cm">// wait for the pin to finish</span>
+        <span class="cm">// cudaEventRecord(stop, stream);               &lt;-- commented out</span>
+        <span class="cm">// cudaEventSynchronize(stop);                  &lt;-- commented out</span>
+
+        <span class="fn">cudaEventRecord</span>(start, stream);              <span class="cm">// &lt;== TIMER STARTS HERE, AFTER THE PIN</span>
+
+        <span class="fn">EmbeddingBag_updateOutputKernel_sum_mean</span>&lt;scalar_t, index_t&gt;&lt;&lt;&lt;grid, block, <span class="nu">0</span>, stream&gt;&gt;&gt;(
+            <span class="cm">/* CONSUMER: reads the now-warm rows from L2 */</span> ... );
+
+        <span class="fn">cudaStreamSynchronize</span>(stream);
+        <span class="fn">cudaEventRecord</span>(stop, stream);
+        <span class="fn">cudaEventSynchronize</span>(stop);
+        <span class="fn">cudaEventElapsedTime</span>(&amp;time, start, stop);   <span class="cm">// time = CONSUMER ONLY</span>
+      }</code></pre>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Confirmed attribution fact (static, from source):" data-zh="已確認的歸因事實（靜態，出自原始碼）：">Confirmed attribution fact (static, from source):</span></strong>
+    <span class="i18n"
+    data-en=" The <code>cudaEvent</code> timer brackets <em>only</em> the consumer kernel. The pin kernel and its <code>cudaStreamSynchronize</code> run <strong>before</strong> <code>cudaEventRecord(start)</code>, so the reported &lsquo;Latency of Embedding Bag kernel&rsquo; measures the L2-hit benefit while <strong>excluding the cost of producing it</strong>. The commented-out <code>cudaEventRecord</code> pair around the pin kernel (and the abandoned <code>reduce_L2_size</code> cache-thrash kernel) shows the authors had the wiring to time the pin and chose not to. A fair end-to-end accounting must re-charge that pin time."
+    data-zh=" <code>cudaEvent</code> 計時器<em>只</em>框住 consumer kernel。pin kernel 與它的 <code>cudaStreamSynchronize</code> 在 <code>cudaEventRecord(start)</code> <strong>之前</strong>執行，所以回報的「Latency of Embedding Bag kernel」量到的是 L2 命中的好處，卻<strong>排除了產生它的成本</strong>。pin kernel 周圍那對被註解掉的 <code>cudaEventRecord</code>（以及被棄用的 <code>reduce_L2_size</code> cache-thrash kernel）顯示作者本有計時 pin 的接線卻選擇不用。公平的端到端會計必須把那段 pin 時間重新計入。"> The <code>cudaEvent</code> timer brackets <em>only</em> the consumer kernel; the pin kernel and its sync run before <code>cudaEventRecord(start)</code>. The reported latency measures the L2-hit benefit while excluding the cost of producing it. A fair accounting must re-charge the pin time.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="2.3 Why evict_last, and not a residency-control API" data-zh="2.3 為何用 evict_last，而非 residency 控制 API">2.3 Why evict_last, and not a residency-control API</span></h3>
+  <p><span class="i18n"
+    data-en="The Ampere architecture exposes two ways to bias L2 retention. The first is the CUDA <code>cudaStreamAttrValue</code> / access-policy-window (APW) API, which reserves a fraction of L2 as a persisting region for a given address range. The second is the per-instruction cache hint <code>prefetch.global.L2::evict_last</code>, which both warms the line and tags it so it is biased toward later eviction. The core L2 trick the consumer benefits from is the per-instruction hint, which is finer-grained (it targets exactly the listed hot rows rather than a contiguous window) and fits a scattered hot-index list. In the measured wrapper, though, the per-batch setup also re-establishes an L2 access-policy window (see &sect;5) on top of re-reading the 60K hot-index file &mdash; so the artifact as run is PTX prefetch PLUS per-batch APW setup, not the hint in isolation. The catch is that the hint is advisory: the hardware may still evict a hinted line under pressure, and any demand traffic between the pin and the consume can knock hot rows out of L2 before they are reused &mdash; one more reason the realized benefit is bounded by how tight the pin&ndash;consume window is."
+    data-zh="Ampere 架構提供兩種偏置 L2 保留的方式。第一種是 CUDA 的 <code>cudaStreamAttrValue</code> / access-policy-window（APW）API，它為某個位址範圍保留一部分 L2 作為持久區。第二種是 per-instruction 的 cache hint <code>prefetch.global.L2::evict_last</code>，它同時把該 line 變熱並標記為偏向較晚驅逐。consumer 受益的核心 L2 把戲是 per-instruction hint，粒度更細（它精確針對清單上的 hot row，而非一段連續視窗），適合分散的 hot-index 清單。不過在量測到的 wrapper 中，每 batch 的 setup 除了重讀 60K hot-index 檔之外，還會重建一個 L2 access-policy window（見 &sect;5）&mdash; 所以實際跑的 artifact 是 PTX prefetch 加上每 batch 的 APW setup，而非孤立的 hint。代價是 hint 是建議性的：硬體在壓力下仍可能驅逐被提示的 line，而 pin 與 consume 之間的任何 demand 流量都可能在 hot row 被重用前把它擠出 L2 &mdash; 這又是實際好處被 pin&ndash;consume 視窗緊密程度所限的一個理由。">Ampere exposes two ways to bias L2 retention: the <code>cudaStreamAttrValue</code> access-policy-window (APW) API, or the per-instruction hint <code>prefetch.global.L2::evict_last</code> (warms a line and biases it toward later eviction). The core L2 trick is the per-instruction hint &mdash; finer-grained for a scattered hot-index list &mdash; but the measured wrapper also re-establishes an L2 access-policy window per batch (see &sect;5) on top of re-reading the 60K hot-index file, so the artifact as run is PTX prefetch PLUS per-batch APW setup. The hint is advisory: demand traffic between pin and consume can evict hot rows before reuse, bounding the realized benefit.</span></p>
+
+  <h3><span class="i18n" data-en="2.4 Where the bytes live: the memory hierarchy" data-zh="2.4 bytes 在哪裡：記憶體階層">2.4 Where the bytes live: the memory hierarchy</span></h3>
+  <p><span class="i18n" data-en="L2P targets the middle level. Unlike RPF (which stages in registers) or a shared-memory scheme (which stages in SRAM), L2P leaves data in the device-wide L2 so that a later, independent kernel launch hits it:" data-zh="L2P 針對的是中間層。不同於 RPF（暫存在 register）或 shared-memory 方案（暫存在 SRAM），L2P 把資料留在跨整個 device 的 L2，讓稍後一個獨立的 kernel launch 命中它：">L2P targets the middle level &mdash; the device-wide L2 &mdash; so a later, independent kernel launch hits it:</span></p>
+  <div class="memhier">
+    <div class="lvl sm"><span class="tag">SM / SRAM</span><span class="i18n" data-en="Registers + shared memory (&le;164 KB/SM). RPF stages here, intra-kernel only. Dies at kernel exit &mdash; cannot carry state to the next launch." data-zh="Register + shared memory（每 SM &le;164 KB）。RPF 暫存在此，僅限 kernel 內。kernel 結束即消失 &mdash; 無法把狀態帶到下一次 launch。">Registers + shared memory (&le;164 KB/SM). RPF stages here, intra-kernel only. Dies at kernel exit.</span></div>
+    <div class="lvl l2"><span class="tag">L2 (40 MB)</span><span class="i18n" data-en="Device-wide, persists across kernel launches. L2P pins hot rows here with evict_last so the NEXT EmbeddingBag kernel hits L2 instead of HBM. THIS IS OUR MECHANISM." data-zh="跨整個 device，跨 kernel launch 持續存在。L2P 用 evict_last 把 hot row 釘在這裡，讓下一個 EmbeddingBag kernel 命中 L2 而非 HBM。這就是我們的機制。">Device-wide, persists across kernel launches. L2P pins hot rows here so the NEXT kernel hits L2 instead of HBM. <strong>This is our mechanism.</strong></span></div>
+    <div class="lvl hbm"><span class="tag">HBM</span><span class="i18n" data-en="Multi-GB embedding tables (12 &times; 500K &times; 128 fp32 &asymp; 3 GB). Irregular row reads land here on an L2 miss; this is the traffic L2P is trying to remove." data-zh="多 GB embedding table（12 &times; 500K &times; 128 fp32 &asymp; 3 GB）。L2 miss 時不規則 row 讀取落在這裡；這就是 L2P 想消除的流量。">Multi-GB tables (&asymp;3 GB). Irregular row reads land here on an L2 miss &mdash; the traffic L2P removes.</span></div>
+  </div>
+  <div class="note">
+    <strong><span class="i18n" data-en="The analogy &mdash; and the difference." data-zh="這個類比 &mdash; 以及差異。">The analogy &mdash; and the difference.</span></strong>
+    <span class="i18n" data-en=" In eager LLM inference, our study asks whether one kernel's output activation, left warm in L2, is hit by the next kernel before it is evicted. This is the same L2-residency hardware phenomenon, but with different producer/data semantics: DLRM L2P explicitly prefetches persistent, hand-curated hot embedding ROWS (weight-as-data), whereas eager-LLM activations are naturally-produced, written-once/read-once transients. That makes DLRM L2P a <em>favorable</em> case: the reuse is curated and persistent. That even this favorable regime adds essentially nothing at the L2 layer over register-prefetch in steady state corroborates the plausibility that the transient LLM activation-reuse effect is also small / conditional." data-zh=" 在 eager LLM 推論中，我們的研究問的是：一個 kernel 的輸出 activation 留在 L2 變熱後，是否能在被驅逐前被下一個 kernel 命中。這是同一個 L2-residency 硬體現象，但 producer/資料語意不同：DLRM L2P 明確預取持久、人工挑選的 hot embedding ROW（被當資料用的權重），而 eager-LLM activation 是自然產生、寫一次讀一次的暫態。這讓 DLRM L2P 成為一個<em>有利</em>的案例：重用是被挑選且持久的。連這個有利情境在穩態下於 L2 層都幾乎不比 register-prefetch 多加任何東西，這佐證了暫態 LLM activation 重用效應也是小的 / 條件性的這個看法的合理性。"> In eager LLM inference, our study asks whether one kernel's output activation, left warm in L2, is hit by the next kernel before it is evicted. This is the same L2-residency hardware phenomenon, but with different producer/data semantics: DLRM L2P explicitly prefetches persistent, hand-curated hot embedding ROWS (weight-as-data), whereas eager-LLM activations are naturally-produced, written-once/read-once transients. That makes DLRM L2P a <em>favorable</em> case: the reuse is curated and persistent. That even this favorable regime adds essentially nothing at the L2 layer over register-prefetch in steady state corroborates the plausibility that the transient LLM activation-reuse effect is also small / conditional.</span>
+  </div>
+</section>
+
+<!-- ============ REPO ANALYSIS ============ -->
+<section id="repo">
+  <h2><span class="i18n" data-en="3. Repo analysis (artifact)" data-zh="3. Repo 分析（artifact）">3. Repo analysis (artifact)</span></h2>
+  <p><span class="i18n" data-en="The artifact is the MICRO'24 reproduction codebase. Each technique is a hand-written replacement of one ATen file, <code>aten/src/ATen/native/cuda/EmbeddingBag.cu</code>, swapped in and recompiled into a from-source PyTorch v2.1.0. There is no Python framework code for the techniques &mdash; the optimization lives entirely in the CUDA kernel and the build flags." data-zh="這個 artifact 是 MICRO'24 的重現程式庫。每個技術都是對一個 ATen 檔案 <code>aten/src/ATen/native/cuda/EmbeddingBag.cu</code> 的手寫替換，換入後重新編譯進一個從原始碼建置的 PyTorch v2.1.0。這些技術沒有 Python 框架程式碼 &mdash; 優化完全存在於 CUDA kernel 與 build flag 中。">Each technique is a hand-written replacement of <code>aten/src/ATen/native/cuda/EmbeddingBag.cu</code>, recompiled into a from-source PyTorch v2.1.0. The optimization lives entirely in the CUDA kernel and the build flags.</span></p>
+
+  <div class="diagram">
+    <div style="font-weight:700;color:#ffb74d">reproduce_MICRO24_GPU_DLRM_inference/</div>
+    <div style="margin-left:16px">
+      <div style="font-weight:600;color:#6ec6ff">opt_designs/</div>
+      <div style="margin-left:16px">
+        <div style="color:#a6e3a1">baseline/EmbeddingBag_timed.cu <span style="color:#6c7086">&mdash; reference kernel + cudaEvent timer (no maxrregcount)</span></div>
+        <div style="color:#e96a80">l2_pinning/EmbeddingBag_timed.cu <span style="color:#6c7086">&mdash; prefetch_pin_L2 + consumer (OUR MECHANISM)</span></div>
+        <div style="color:#c9b079">prefetching/EmbeddingBag_regpref.txt <span style="color:#6c7086">&mdash; RPF (register prefetch, lv0/lv1)</span></div>
+        <div style="color:#6c7086">prefetching/EmbeddingBag_shmem.txt <span style="color:#6c7086">&mdash; tried, not headline (SRAM staging)</span></div>
+        <div style="color:#6c7086">prefetching/EmbeddingBag_l1dpref_rolling.txt <span style="color:#6c7086">&mdash; tried, not headline (L1 prefetch)</span></div>
+        <div style="color:#e96a80">combined/EmbeddingBag.cu <span style="color:#6c7086">&mdash; RPF + L2P + OptMT</span></div>
+      </div>
+      <div style="font-weight:600;color:#6ec6ff;margin-top:6px">datasets/</div>
+      <div style="margin-left:16px">
+        <div style="color:#8fa4c0">reuse_high|medium|low/table_500K.txt <span style="color:#6c7086">&mdash; access traces (3.93M / 0.43M / 0.38M lines)</span></div>
+        <div style="color:#8fa4c0">random_500K.txt <span style="color:#6c7086">&mdash; ~4M random accesses (no reuse)</span></div>
+        <div style="color:#8fa4c0">pinned_indices/rj_60K_{high,medium,low}_hot_indices.txt, rj_60K_random_indices.txt <span style="color:#6c7086">&mdash; 60,000 hot rows each</span></div>
+      </div>
+      <div style="font-weight:600;color:#6ec6ff;margin-top:6px">scripts/</div>
+      <div style="margin-left:16px">
+        <div style="color:#8fa4c0">load_emb.py <span style="color:#6c7086">&mdash; builds nn.EmbeddingBag, runs the forward, prints kernel latency</span></div>
+        <div style="color:#8fa4c0">save_emb.py <span style="color:#6c7086">&mdash; regenerates test_500K_12.pt (gitignored, ~3 GB)</span></div>
+        <div style="color:#8fa4c0">quick.sh / l2_quick.sh <span style="color:#6c7086">&mdash; profile loops (l2_quick.sh sets DATASET_FILE_PATH)</span></div>
+        <div style="color:#8fa4c0">parser_Kernel_ET.py <span style="color:#6c7086">&mdash; averages kernel ET, drops the 1st (cold-miss) sample</span></div>
+      </div>
+      <div style="font-weight:600;color:#6ec6ff;margin-top:6px">env_files/</div>
+      <div style="margin-left:16px">
+        <div style="color:#8fa4c0">req.txt, pip_req_after_conda.txt, CMakeLists.txt <span style="color:#6c7086">&mdash; conda env + patched CMakeLists</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="3.1 Key kernels &amp; symbols" data-zh="3.1 關鍵 kernel 與符號">3.1 Key kernels &amp; symbols</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Symbol" data-zh="符號">Symbol</span></th>
+      <th><span class="i18n" data-en="File : lines" data-zh="檔案 : 行">File : lines</span></th>
+      <th><span class="i18n" data-en="Role" data-zh="角色">Role</span></th>
+    </tr>
+    <tr>
+      <td><code>prefetch_pin_L2</code></td>
+      <td><code>l2_pinning/EmbeddingBag.cu</code> : 131&ndash;148</td>
+      <td><span class="i18n" data-en="Producer: emits prefetch.global.L2::evict_last on each hot row." data-zh="Producer：對每個 hot row 發出 prefetch.global.L2::evict_last。">Producer: emits the L2 prefetch PTX on each hot row.</span></td>
+    </tr>
+    <tr>
+      <td><code>EmbeddingBag_updateOutputKernel_sum_mean</code></td>
+      <td><code>l2_pinning/EmbeddingBag.cu</code> : 153</td>
+      <td><span class="i18n" data-en="Consumer: the gather-reduce that benefits from warm L2." data-zh="Consumer：受益於熱 L2 的 gather-reduce。">Consumer: the gather-reduce that benefits from warm L2.</span></td>
+    </tr>
+    <tr>
+      <td><code>reduce_L2_size</code></td>
+      <td><code>l2_pinning/EmbeddingBag.cu</code> : 116&ndash;127</td>
+      <td><span class="i18n" data-en="Abandoned cache-thrash kernel (commented out at the call site)." data-zh="被棄用的 cache-thrash kernel（在呼叫處被註解掉）。">Abandoned cache-thrash kernel (call site commented out).</span></td>
+    </tr>
+    <tr>
+      <td><code>lv0</code>, <code>lv1</code></td>
+      <td><code>prefetching/EmbeddingBag_regpref.txt</code> : 141&ndash;188</td>
+      <td><span class="i18n" data-en="RPF: register temporaries holding the prefetched next-row value (intra-kernel)." data-zh="RPF：保存預取下一 row 值的暫存 register（kernel 內）。">RPF: register temporaries holding the prefetched value (intra-kernel).</span></td>
+    </tr>
+    <tr>
+      <td><code>cudaEventRecord(start)</code></td>
+      <td><code>l2_pinning/EmbeddingBag.cu</code> : 502</td>
+      <td><span class="i18n" data-en="Timer start &mdash; AFTER the pin + sync. Consumer-only timing." data-zh="計時器起點 &mdash; 在 pin + sync 之後。只計 consumer。">Timer start &mdash; AFTER the pin + sync. Consumer-only timing.</span></td>
+    </tr>
+  </table>
+
+  <h3><span class="i18n" data-en="3.2 The four reuse profiles (confirmed counts)" data-zh="3.2 四個 reuse profile（已確認的數量）">3.2 The four reuse profiles (confirmed counts)</span></h3>
+  <p><span class="i18n" data-en="The hotness sweep is what makes this artifact a stress test for our claim. The access traces differ in how concentrated the lookups are; the random profile has essentially no cross-kernel reuse:" data-zh="hotness sweep 正是讓這個 artifact 成為我們主張壓力測試的東西。access trace 在查詢集中程度上不同；random profile 基本上沒有跨 kernel 重用：">The hotness sweep is what makes this artifact a stress test for our claim:</span></p>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Profile" data-zh="Profile">Profile</span></th>
+      <th><span class="i18n" data-en="Access trace (lines)" data-zh="存取 trace（行）">Access trace (lines)</span></th>
+      <th><span class="i18n" data-en="Hot-index file (rows)" data-zh="hot-index 檔（row）">Hot-index file (rows)</span></th>
+      <th><span class="i18n" data-en="Expected cross-kernel reuse" data-zh="預期跨 kernel 重用">Expected reuse</span></th>
+    </tr>
+    <tr><td>reuse_high</td><td>3,933,215</td><td>60,000</td><td><span class="check"><span class="i18n" data-en="High" data-zh="高">High</span></span></td></tr>
+    <tr><td>reuse_medium</td><td>429,951</td><td>60,000</td><td><span class="partial"><span class="i18n" data-en="Medium" data-zh="中">Medium</span></span></td></tr>
+    <tr><td>reuse_low</td><td>379,910</td><td>60,000</td><td><span class="partial"><span class="i18n" data-en="Low" data-zh="低">Low</span></span></td></tr>
+    <tr><td>random</td><td>3,999,999</td><td>60,000</td><td><span class="cross"><span class="i18n" data-en="~None" data-zh="~無">~None</span></span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="3.3 The measurement harness" data-zh="3.3 量測 harness">3.3 The measurement harness</span></h3>
+  <p><span class="i18n"
+    data-en="The Python side is deliberately thin: <code>save_emb.py</code> regenerates the gitignored model tensor <code>test_500K_12.pt</code> (twelve 500K&times;128 fp32 tables, ~3 GB) which <code>load_emb.py</code> then <code>torch.load</code>s; building an <code>nn.EmbeddingBag(500000, 128, mode='sum', sparse=True)</code>, replaying the chosen access trace as batches of indices, and triggering the (swapped) CUDA kernel whose own <code>cudaEvent</code> print reports the latency. <code>parser_Kernel_ET.py</code> then averages the per-launch ETs across 12 batches &times; 12 tables and <strong>drops the first sample of each block as the cold-miss</strong> &mdash; meaning the reported number already assumes a warm-ish cache, which is itself favorable to the reuse story."
+    data-zh="Python 端刻意做得很薄：<code>save_emb.py</code> 重新生成被 gitignore 的模型張量 <code>test_500K_12.pt</code>（十二張 500K&times;128 fp32 table，~3 GB），<code>load_emb.py</code> 再 <code>torch.load</code> 它；建立一個 <code>nn.EmbeddingBag(500000, 128, mode='sum', sparse=True)</code>，把選定的 access trace 當成一批批 index 重播，並觸發（被替換的）CUDA kernel，其自身的 <code>cudaEvent</code> 列印回報延遲。<code>parser_Kernel_ET.py</code> 接著把每次 launch 的 ET 在 12 batch &times; 12 table 上平均，並<strong>丟掉每個區塊的第一個樣本作為 cold-miss</strong> &mdash; 也就是說回報的數字已經假設了一個偏熱的 cache，這本身就對重用故事有利。">The Python side is thin: <code>save_emb.py</code> regenerates <code>test_500K_12.pt</code> (~3 GB), <code>load_emb.py</code> builds the EmbeddingBag and replays the trace, and the swapped CUDA kernel prints its own <code>cudaEvent</code> latency. <code>parser_Kernel_ET.py</code> averages over 12&times;12 launches and <strong>drops the first (cold-miss) sample</strong> &mdash; so the reported number already assumes a warm-ish cache, itself favorable to the reuse story.</span></p>
+</section>
+
+<!-- ============ ABLATION LADDER ============ -->
+<section id="ablation">
+  <h2><span class="i18n" data-en="4. The ablation ladder &mdash; how big is the L2 slice?" data-zh="4. ablation 階梯 &mdash; L2 那一片有多大？">4. The ablation ladder &mdash; how big is the L2 slice?</span></h2>
+  <p><span class="i18n"
+    data-en="The whole point of the page is to isolate the L2-residency contribution from everything else. The ladder builds five variants and runs each across the four profiles. By <em>differencing adjacent rungs</em>, each technique's marginal effect can in principle be attributed to a specific hardware cause. In practice only the non-pinning rungs (1&ndash;3) give a clean wall-clock difference; the L2P rungs (4&ndash;5) are dominated by a per-batch pinning-setup artifact (&sect;5), so the L2P attribution below is read NOT from &sect;4.1 latency differencing but from the Nsight L2-layer comparison (&sect;7) plus the paper's own ablation:"
+    data-zh="本頁的核心目的是把 L2-residency 的貢獻從其他一切中分離出來。這個階梯建置五個變體，並把每個跑過四個 profile。透過<em>對相鄰階差分</em>，每個技術的邊際效應原則上可被歸因到一個特定的硬體成因。但實務上只有非 pinning 的階（1&ndash;3）給出乾淨的 wall-clock 差；L2P 的階（4&ndash;5）被每 batch 的 pinning-setup artifact 主宰（&sect;5），所以下面的 L2P 歸因<strong>不</strong>是從 &sect;4.1 的延遲差分讀出，而是從 Nsight 的 L2 層比較（&sect;7）加上論文自己的 ablation：">The page's whole point is to isolate the L2-residency contribution. The ladder builds five variants across four profiles; differencing adjacent rungs attributes each technique's marginal effect to a hardware cause. Only the non-pinning rungs (1&ndash;3) give a clean wall-clock difference; the L2P rungs (4&ndash;5) are artifact-dominated (&sect;5), so the L2P attribution below is read NOT from &sect;4.1 latency but from the Nsight L2 comparison (&sect;7) plus the paper's ablation:</span></p>
+
+  <div class="flow">
+    <div class="step"><div class="c">1</div><div class="lbl">baseline</div><div class="desc"><span class="i18n" data-en="reference kernel" data-zh="參考 kernel">reference kernel</span></div></div>
+    <div class="step"><div class="c">2</div><div class="lbl">+ OptMT</div><div class="desc"><span class="i18n" data-en="occupancy (maxrregcount 42)" data-zh="占用率（maxrregcount 42）">occupancy</span></div></div>
+    <div class="step"><div class="c">3</div><div class="lbl">+ RPF</div><div class="desc"><span class="i18n" data-en="register prefetch" data-zh="register prefetch">register prefetch</span></div></div>
+    <div class="step"><div class="c">4</div><div class="lbl">L2P</div><div class="desc"><span class="i18n" data-en="L2 pinning (our mechanism)" data-zh="L2 釘住（我們的機制）">L2 pinning</span></div></div>
+    <div class="step"><div class="c">5</div><div class="lbl">combined</div><div class="desc"><span class="i18n" data-en="RPF + L2P + OptMT" data-zh="RPF + L2P + OptMT">RPF+L2P+OptMT</span></div></div>
+  </div>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Difference (rung &minus; rung)" data-zh="差分（階 &minus; 階）">Difference</span></th>
+      <th><span class="i18n" data-en="Attributed cause" data-zh="歸因成因">Attributed cause</span></th>
+      <th><span class="i18n" data-en="Is it L2 reuse?" data-zh="是 L2 重用嗎？">L2 reuse?</span></th>
+    </tr>
+    <tr><td>OptMT &minus; baseline</td><td><span class="i18n" data-en="Occupancy / register budget (maxrregcount 42)" data-zh="占用率 / register 預算（maxrregcount 42）">Occupancy / register budget</span></td><td><span class="cross">NO</span></td></tr>
+    <tr><td>RPF &minus; OptMT</td><td><span class="i18n" data-en="In-kernel register prefetch (latency hiding)" data-zh="kernel 內 register prefetch（隱藏延遲）">In-kernel register prefetch</span></td><td><span class="cross">NO</span></td></tr>
+    <tr><td>L2P &minus; OptMT <span class="tag-artifact">via &sect;7</span></td><td><span class="i18n" data-en="Cross-kernel L2 residency of hot rows (read from the Nsight L2 attribution in &sect;7, NOT from &sect;4.1 wall-clock &mdash; the L2P rung is artifact-dominated)" data-zh="hot row 的跨 kernel L2 residency（從 &sect;7 的 Nsight L2 歸因讀出，<strong>非</strong>從 &sect;4.1 wall-clock &mdash; L2P 階被 artifact 主宰）">Cross-kernel L2 residency (read from &sect;7, not &sect;4.1 wall-clock)</span></td><td><span class="check">YES</span></td></tr>
+    <tr><td>combined &minus; RPF <span class="tag-artifact">via paper</span></td><td><span class="i18n" data-en="L2P increment once latency-hiding is already present (the paper's own ~13.5% med figure, NOT our artifact-dominated &sect;4.1 wall-clock)" data-zh="在已有隱藏延遲後 L2P 的增量（論文自己的 medium ~13.5% 數字，<strong>非</strong>我們被 artifact 主宰的 &sect;4.1 wall-clock）">L2P increment over RPF (paper's ~13.5%, not our wall-clock)</span></td><td><span class="check">YES</span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="4.1 Measured latency ladder (PACE A100, job 9942760)" data-zh="4.1 量測延遲階梯（PACE A100，job 9942760）">4.1 Measured latency ladder (PACE A100, job 9942760)</span></h3>
+  <div class="measured-box">
+    <h4><span class="tag-pending">Measured on PACE A100-80GB (jobs 9935235 + 9942760)</span> <span class="i18n" data-en="Average batch latency (ms) per variant &times; profile" data-zh="每變體 &times; profile 的平均 batch 延遲（ms）">Average batch latency (ms) per variant &times; profile</span></h4>
+    <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Variants 1&ndash;3 (no pinning path) are clean FACTs measured directly. Variants 4&ndash;5 (the L2P / combined pinning path) are dominated by a per-batch pinning-setup harness ARTIFACT and are NOT reported as L2P inference latency &mdash; see &sect;5 for why, and read the L2P contribution from the Nsight L2 attribution in &sect;7 instead." data-zh="變體 1&ndash;3（無 pinning path）是直接量到的乾淨 FACT。變體 4&ndash;5（L2P / combined pinning path）被一個每 batch 的 pinning-setup harness ARTIFACT 主宰，<strong>不</strong>作為 L2P 推論延遲回報 &mdash; 原因見 &sect;5，請改從 &sect;7 的 Nsight L2 歸因讀 L2P 的貢獻。">Variants 1&ndash;3 (no pinning path) are clean FACTs measured directly. Variants 4&ndash;5 (the L2P / combined pinning path) are dominated by a per-batch pinning-setup harness ARTIFACT and are NOT reported as L2P inference latency &mdash; see &sect;5 and read the L2P contribution from the Nsight L2 attribution in &sect;7.</span></p>
+    <table>
+      <tr>
+        <th><span class="i18n" data-en="Variant" data-zh="變體">Variant</span></th>
+        <th>reuse_high</th><th>reuse_medium</th><th>reuse_low</th><th>random</th>
+      </tr>
+      <tr><td>1 baseline</td><td class="fact">3.616 <span class="tag-fact">fact</span></td><td class="fact">4.699</td><td class="fact">5.680</td><td class="fact">5.875</td></tr>
+      <tr><td>2 + OptMT</td><td class="fact">3.598 <span class="tag-fact">fact</span></td><td class="fact">4.719</td><td class="fact">5.660</td><td class="fact">5.855</td></tr>
+      <tr><td>3 RPF + OptMT</td><td class="fact">3.693 <span class="tag-fact">fact</span></td><td class="fact">4.513</td><td class="fact">5.052</td><td class="fact">5.162</td></tr>
+      <tr><td>4 L2P + OptMT</td><td class="artifact-cell">99.8 <span class="tag-artifact">artifact</span></td><td class="artifact-cell">102.4</td><td class="artifact-cell">5.901&dagger;</td><td class="artifact-cell">102.5</td></tr>
+      <tr><td>5 RPF + L2P + OptMT</td><td class="artifact-cell">97.5 <span class="tag-artifact">artifact</span></td><td class="artifact-cell">100.6</td><td class="artifact-cell">5.239&dagger;</td><td class="artifact-cell">101.6</td></tr>
+    </table>
+    <p style="font-size:.82rem;color:#8fa4c0"><span class="i18n" data-en="&dagger; The reuse_low cells in variants 4&ndash;5 are fast only because l2_quick.sh's hot-path list for that profile has a leading-space path bug &rarr; the hot-index file fails to open &rarr; pinning is silently skipped (fast path). They are not a real L2P measurement either." data-zh="&dagger; 變體 4&ndash;5 的 reuse_low 格之所以快，只是因為 l2_quick.sh 該 profile 的 hot-path 清單有一個開頭空格的路徑 bug &rarr; hot-index 檔開檔失敗 &rarr; pinning 被靜默略過（快路徑）。它們也不是真正的 L2P 量測。">&dagger; The reuse_low cells in variants 4&ndash;5 are fast only because l2_quick.sh's hot-path list for that profile has a leading-space path bug &rarr; the hot-index file fails to open &rarr; pinning is silently skipped. Not a real L2P measurement either.</span></p>
+  </div>
+  <p><span class="i18n"
+    data-en="The clean rungs (1&ndash;3) show the validating shape. First, a strong reuse-profile gradient: at baseline, hot rows run at 3.616 ms and the no-reuse random profile at 5.875 ms &mdash; the cache-friendly hot profile is ~1.6&times; faster, consistent with cache/hotness effects from repeated rows (the L2-specific share is attributed by the Nsight L2 hit-rate measurement in &sect;7, not by this wall-clock alone). Second, OptMT alone (-maxrregcount 42) is essentially flat (3.616 &rarr; 3.598 ms hot); the occupancy tweak barely moves the needle here. Third, register-prefetch (RPF+OptMT) helps exactly the cache-UNfriendly profiles &mdash; reuse_low 5.680 &rarr; 5.052 ms (&minus;11%) and random 5.875 &rarr; 5.162 ms (&minus;12%) &mdash; because RPF hides the DRAM latency that L2 cannot when there is no reuse to exploit."
+    data-zh="乾淨的階（1&ndash;3）展現了驗證形狀。第一，明顯的 reuse-profile 梯度：在 baseline，hot row 跑 3.616 ms，無重用的 random profile 跑 5.875 ms &mdash; cache-friendly 的 hot profile 快 ~1.6&times;，與重複 row 的 cache/hotness 效應一致（L2 專屬的那一份由 &sect;7 的 Nsight L2 命中率量測歸因，而非單憑這個 wall-clock）。第二，OptMT 單獨（-maxrregcount 42）基本持平（hot 3.616 &rarr; 3.598 ms）；占用率微調在這裡幾乎不動。第三，register-prefetch（RPF+OptMT）剛好幫到 cache-<strong>UN</strong>friendly 的 profile &mdash; reuse_low 5.680 &rarr; 5.052 ms（&minus;11%）、random 5.875 &rarr; 5.162 ms（&minus;12%）&mdash; 因為當沒有重用可利用時，RPF 隱藏了 L2 無法隱藏的 DRAM 延遲。">The clean rungs (1&ndash;3) show the validating shape: a strong reuse gradient (baseline hot 3.616 ms vs random 5.875 ms, ~1.6&times;, consistent with cache/hotness effects &mdash; the L2-specific share is attributed by &sect;7, not this wall-clock), OptMT alone essentially flat (3.616 &rarr; 3.598 ms hot), and RPF+OptMT helping the cache-UNfriendly profiles (low &minus;11%, random &minus;12%) by hiding the DRAM latency L2 cannot when there is no reuse.</span></p>
+</section>
+
+<!-- ============ FAIRNESS ============ -->
+<section id="fairness">
+  <h2><span class="i18n" data-en="5. Why no pin-charged wall-clock is reported" data-zh="5. 為何不回報計入 pin 的 wall-clock">5. Why no pin-charged wall-clock is reported</span></h2>
+  <p><span class="i18n"
+    data-en="Recall the confirmed fact from &sect;2.2: the timer excludes the pin kernel. The repo's reported L2P speedup is therefore"
+    data-zh="回想 &sect;2.2 的已確認事實：計時器排除了 pin kernel。因此 repo 回報的 L2P speedup 是">Recall the confirmed fact from &sect;2.2: the timer excludes the pin kernel. The repo's reported L2P speedup is therefore</span></p>
+  <p style="text-align:center">$$\text{Speedup}_{\text{repo}} = \frac{T_{\text{baseline}}}{T_{\text{consumer}}^{\text{L2P}}}$$</p>
+  <p><span class="i18n"
+    data-en="which charges nothing for producing the warm L2 state. The pin kernel is not free: it touches all 60,000 hot rows in HBM (it must read them to bring them into L2), so it incurs real HBM traffic and real launch + sync overhead. In load_emb.py's harness that setup cost is re-paid every batch and cannot be cleanly separated into a one-time pin time amortizable over many consumer launches &mdash; so rather than report a per-batch setup artifact as a net pin-charged wall-clock, we read the L2P contribution from the Nsight L2-layer attribution (&sect;7) plus the paper's own ~13.5% ablation figure."
+    data-zh="它對產生熱 L2 狀態的成本一毛不收。pin kernel 並非免費：它觸及 HBM 中全部 60,000 個 hot row（必須讀它們才能帶進 L2），所以產生真實的 HBM 流量與真實的 launch + sync 開銷。但在 load_emb.py 的 harness 中，那筆 setup 成本每個 batch 都重付，無法乾淨分離成可攤到多次 consumer launch 的一次性 pin 時間 &mdash; 因此我們不把每 batch 的 setup artifact 當成計入 pin 的淨 wall-clock 回報，而是改從 Nsight 的 L2 層歸因（&sect;7）加上論文自己的 ~13.5% ablation 數字來讀 L2P 的貢獻。">which charges nothing for producing the warm L2 state. The pin kernel is not free: it touches all 60,000 hot rows in HBM, incurring real traffic and launch+sync overhead. In load_emb.py's harness that setup cost is re-paid every batch and cannot be cleanly separated into a one-time pin time &mdash; so rather than report a per-batch setup artifact as a net pin-charged wall-clock, we read the L2P contribution from the Nsight L2-layer attribution (&sect;7) plus the paper's own ~13.5% ablation figure.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Honesty: the L2P / combined wall-clock is a harness ARTIFACT, not steady-state inference." data-zh="誠實聲明：L2P / combined 的 wall-clock 是 harness ARTIFACT，不是穩態推論。">Honesty: the L2P / combined wall-clock is a harness ARTIFACT, not steady-state inference.</span></strong>
+    <span class="i18n"
+    data-en=" The ~100 ms variant-4/5 wall-clock in &sect;4.1 is NOT L2P inference latency. The L2P kernel wrapper (EmbeddingBag_timed.cu:447&ndash;460) re-reads the 60K hot-index file via getenv(DATASET_FILE_PATH) and re-establishes the L2 access-policy window on EVERY batch, so what it measures is per-call pinning SETUP, not steady-state inference &mdash; load_emb.py's tight loop never amortizes the one-time setup a real DLRM server would. (The reuse_low cells are fast only because of a leading-space path-bug that skips pinning entirely.) We therefore deliberately do NOT report a net pin-charged wall-clock speedup. Instead we present the L2P contribution via the Nsight L2-layer attribution in &sect;7 (where L2P &asymp; RPF in steady state) plus the paper's own ~13.5%-incremental figure."
+    data-zh=" &sect;4.1 中變體 4/5 的 ~100 ms wall-clock <strong>不是</strong> L2P 推論延遲。L2P kernel wrapper（EmbeddingBag_timed.cu:447&ndash;460）在<strong>每個</strong> batch 都透過 getenv(DATASET_FILE_PATH) 重讀 60K hot-index 檔，並重建 L2 access-policy window，所以它量到的是每次呼叫的 pinning SETUP，而非穩態推論 &mdash; load_emb.py 的緊湊迴圈從不攤銷真實 DLRM server 會攤銷的一次性 setup。（reuse_low 格之所以快，只是因為一個開頭空格的路徑 bug 完全略過了 pinning。）因此我們刻意<strong>不</strong>回報計入 pin 的淨 wall-clock speedup。我們改用 &sect;7 的 Nsight L2 層歸因（穩態下 L2P &asymp; RPF）加上論文自己的 ~13.5% 增量數字來呈現 L2P 的貢獻。"> The ~100 ms variant-4/5 wall-clock in &sect;4.1 is NOT L2P inference latency: the wrapper (EmbeddingBag_timed.cu:447&ndash;460) re-reads the 60K hot-index file and re-establishes the L2 access-policy window on EVERY batch, so it measures per-call pinning SETUP, not steady-state inference. We therefore do NOT report a net pin-charged wall-clock speedup; we read the L2P contribution from the Nsight L2-layer attribution in &sect;7 (L2P &asymp; RPF in steady state) plus the paper's own ~13.5% figure.</span>
+  </div>
+
+  <div class="pending-box">
+    <h4><span class="tag-pending">artifact / not reported</span> <span class="i18n" data-en="Why we do not report a net (pin-charged) wall-clock speedup" data-zh="為何我們不回報計入 pin 的淨 wall-clock speedup">Why we do not report a net (pin-charged) wall-clock speedup</span></h4>
+    <p><span class="i18n" data-en="Across every profile the pin setup and the consumer launch cannot be cleanly separated into a one-time pin time plus an amortized steady-state consumer time, so there is no honest net (pin-charged) wall-clock speedup to tabulate &mdash; the values would all be per-batch setup artifacts." data-zh="在每個 profile 上，pin setup 與 consumer launch 都無法乾淨分離成「一次性 pin 時間 + 可攤銷的穩態 consumer 時間」，所以沒有誠實的計入 pin 的淨 wall-clock speedup 可列表 &mdash; 那些值全都會是每 batch 的 setup artifact。">Across every profile the pin setup and the consumer launch cannot be cleanly separated into a one-time pin time plus an amortized steady-state consumer time, so there is no honest net (pin-charged) wall-clock speedup to tabulate &mdash; the values would all be per-batch setup artifacts.</span></p>
+    <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="In load_emb.py's harness the pin setup is re-paid every batch and cannot be cleanly separated into a one-time pin time amortizable over many consumer launches, so any net wall-clock speedup here would be a setup-cost artifact, not a steady-state inference number. The L2-layer answer is in &sect;7: at zero cache pressure, L2P adds essentially nothing over RPF (91.7% vs 91.8% L2 hit on hot)." data-zh="在 load_emb.py 的 harness 中，pin setup 每個 batch 都重付，無法乾淨分離成可攤到多次 consumer launch 的一次性 pin 時間，所以這裡任何淨 wall-clock speedup 都會是 setup 成本的 artifact，而非穩態推論數字。L2 層的答案在 &sect;7：在零 cache 壓力下，L2P 在 RPF 之上幾乎不加任何東西（hot 上 91.7% vs 91.8% L2 命中）。">In this harness the pin setup is re-paid every batch and cannot be separated into a one-time pin time, so any net wall-clock speedup here would be a setup-cost artifact. The L2-layer answer is in &sect;7: at zero pressure, L2P adds essentially nothing over RPF (91.7% vs 91.8% L2 hit on hot).</span></p>
+  </div>
+</section>
+
+<!-- ============ OUR REPRODUCTION ============ -->
+<section id="repro">
+  <h2><span class="i18n" data-en="6. Our reproduction on PACE (measured)" data-zh="6. 我們在 PACE 上的重現（已量測）">6. Our reproduction on PACE (measured)</span></h2>
+
+  <div class="measured-box">
+    <strong><span class="i18n" data-en="Reproduction status." data-zh="重現狀態。">Reproduction status.</span></strong>
+    <span class="i18n" data-en=" Completed on PACE A100-80GB (sm_80), from-source PyTorch v2.1.0. Job 9935235 captured the Nsight Compute L2-layer attribution (&sect;7); job 9942760 captured the cudaEvent latency ladder (&sect;4.1) after the taskset core-0 pinning bug was removed. The clean latency rungs (variants 1&ndash;3) and the ncu L2 attribution are FACTs; the L2P / combined wall-clock is a per-batch pinning-setup ARTIFACT we do not report as inference latency (&sect;5). This section documents the method behind those measurements." data-zh=" 已於 PACE A100-80GB（sm_80）、從原始碼建置的 PyTorch v2.1.0 上完成。Job 9935235 擷取 Nsight Compute 的 L2 層歸因（&sect;7）；job 9942760 在移除 taskset core-0 pinning bug 後擷取 cudaEvent 延遲階梯（&sect;4.1）。乾淨的延遲階（變體 1&ndash;3）與 ncu L2 歸因是 FACT；L2P / combined 的 wall-clock 是每 batch 的 pinning-setup ARTIFACT，我們不把它當作推論延遲回報（&sect;5）。本節記錄這些量測背後的方法。"> Completed on PACE A100-80GB (sm_80). Job 9935235 captured the Nsight Compute L2-layer attribution (&sect;7); job 9942760 captured the cudaEvent latency ladder (&sect;4.1). The clean rungs and the ncu attribution are FACTs; the L2P wall-clock is a pinning-setup ARTIFACT we do not report (&sect;5).</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.1 What we found (hypothesis &amp; measured outcome)" data-zh="6.1 我們的發現（假設與量測結果）">6.1 What we found (hypothesis &amp; measured outcome)</span></h3>
+  <p><span class="i18n"
+    data-en="We hypothesized that the genuine cross-kernel L2-residency contribution is a small, hotness-dependent slice, and the measurements bear this out on two fronts. First, the L2-residency payoff is entirely hotness-dependent: on reuse_high the consumer reaches ~92% L2 hit and ~7.8 MB DRAM/batch in steady state, while on random it sits at ~30% hit and ~145 MB DRAM (&asymp;18&times; more HBM traffic) &mdash; L2 reuse buys nothing without reuse (FACT, &sect;7). Second, explicit L2-pinning (L2P) adds essentially nothing over register-prefetch (RPF) at the L2 layer in this no-polluter microbench (91.7% vs 91.8% hit on hot; DRAM essentially equal) &mdash; consistent with the paper's own &lsquo;L2P only ~13.5% incremental over RPF+OptMT&rsquo; (BOUND), and a direct parallel to our own &lsquo;dirty blob survives intact at zero pressure&rsquo; result. L2 reuse only pays when the same bytes are demanded again before eviction, which requires curated hotness; strip the hot-index list (as in random) and the mechanism has nothing to keep warm."
+    data-zh="我們假設真正的跨 kernel L2-residency 貢獻是一小片、且取決於 hotness 的東西，量測在兩方面證實了這點。第一，L2-residency 的收益完全取決於 hotness：在 reuse_high，consumer 穩態達到 ~92% L2 命中與 ~7.8 MB DRAM/batch，而在 random 為 ~30% 命中與 ~145 MB DRAM（&asymp;18&times; 的 HBM 流量）&mdash; 沒有重用，L2 重用什麼也買不到（FACT，&sect;7）。第二，在這個無污染者的 microbench 中，明確的 L2-pinning（L2P）在 L2 層幾乎不比 register-prefetch（RPF）多加任何東西（hot 上 91.7% vs 91.8% 命中；DRAM 基本相等）&mdash; 與論文自己的「L2P 在 RPF+OptMT 之上只多約 13.5%」（BOUND）一致，並直接對應我們自己的「dirty blob 在零壓力下完整存活」結果。L2 重用只有在同樣的 bytes 在被驅逐前被再次需求時才划算，而這需要被挑選過的 hotness；拿掉 hot-index 清單（如 random），機制就沒東西可保溫。">We hypothesized the genuine cross-kernel L2-residency contribution is small and hotness-dependent; the measurements confirm both. (1) The L2 payoff is entirely hotness-dependent: ~92% hit / ~7.8 MB DRAM on reuse_high vs ~30% hit / ~145 MB DRAM (&asymp;18&times; HBM) on random (FACT, &sect;7). (2) L2P adds essentially nothing over RPF at the L2 layer in this no-polluter microbench (91.7% vs 91.8% hit) &mdash; consistent with the paper's ~13.5%-incremental figure (BOUND) and a parallel to our &lsquo;dirty blob survives intact at zero pressure&rsquo; result.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 Method &mdash; what we build and run" data-zh="6.2 方法 &mdash; 我們建置與執行什麼">6.2 Method &mdash; what we build and run</span></h3>
+  <p><span class="i18n" data-en="A single A100-80GB (sm_80), single-GPU, no tensor parallelism. We faithfully keep the artifact's arch scope: <code>TORCH_CUDA_ARCH_LIST=&quot;8.0&quot;</code> and <code>-maxrregcount 42</code> are tuned for A100, and the repo provides no H100 build flags, so A100 is the correct &mdash; and only bit-faithful &mdash; target. Each of the five variants is a separate from-source compile (swapping the <code>EmbeddingBag.cu</code> file and recompiling)." data-zh="單張 A100-80GB（sm_80），單 GPU，無 tensor parallelism。我們忠實保留 artifact 的 arch scope：<code>TORCH_CUDA_ARCH_LIST=&quot;8.0&quot;</code> 與 <code>-maxrregcount 42</code> 是為 A100 調的，且 repo 沒提供 H100 build flag，所以 A100 是正確 &mdash; 也是唯一 bit-faithful &mdash; 的目標。五個變體各自是一次獨立的從源編譯（換 <code>EmbeddingBag.cu</code> 並重編）。">Single A100-80GB (sm_80), single-GPU, no TP. We keep the artifact's arch scope (<code>TORCH_CUDA_ARCH_LIST=&quot;8.0&quot;</code>, <code>-maxrregcount 42</code>); the repo has no H100 flags, so A100 is the only bit-faithful target. Each of the five variants is a separate from-source compile.</span></p>
+
+  <div class="vflow">
+    <div class="box blue"><h4><span class="i18n" data-en="Build phase (per variant)" data-zh="建置階段（每變體）">Build phase (per variant)</span></h4>
+      <span class="i18n" data-en="conda env <code>ae_dlrm_gpu</code> (python 3.11.4) &rarr; clone PyTorch v2.1.0 &rarr; swap the variant's EmbeddingBag.cu into aten/ &rarr; <code>setup.py install</code> with the right CMAKE_CUDA_FLAGS. ~45&ndash;120 min each." data-zh="conda env <code>ae_dlrm_gpu</code>（python 3.11.4）&rarr; clone PyTorch v2.1.0 &rarr; 把該變體的 EmbeddingBag.cu 換入 aten/ &rarr; 以正確的 CMAKE_CUDA_FLAGS 執行 <code>setup.py install</code>。每個約 45&ndash;120 分鐘。">conda env ae_dlrm_gpu &rarr; clone PyTorch v2.1.0 &rarr; swap EmbeddingBag.cu &rarr; setup.py install. ~45&ndash;120 min each.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="Run phase (Layer A: cudaEvent latency)" data-zh="執行階段（Layer A：cudaEvent 延遲）">Run phase (Layer A: cudaEvent latency)</span></h4>
+      <span class="i18n" data-en="quick.sh (baseline/OptMT/RPF) and l2_quick.sh (L2P/combined, sets DATASET_FILE_PATH) loop the 4 profiles; parser_Kernel_ET.py averages kernel ET dropping the cold-miss 1st sample. Free attribution from prints already in every variant." data-zh="quick.sh（baseline/OptMT/RPF）與 l2_quick.sh（L2P/combined，會設定 DATASET_FILE_PATH）跑遍 4 個 profile；parser_Kernel_ET.py 平均 kernel ET 並丟掉 cold-miss 第一個樣本。歸因直接來自每個變體都已有的列印，免費。">quick.sh / l2_quick.sh loop the 4 profiles; parser_Kernel_ET.py averages kernel ET, dropping the cold-miss 1st sample. Free attribution from existing prints.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box orange"><h4><span class="i18n" data-en="Profile phase (Layer B: Nsight Compute)" data-zh="Profiling 階段（Layer B：Nsight Compute）">Profile phase (Layer B: Nsight Compute)</span></h4>
+      <span class="i18n" data-en="ncu on RPF+OptMT vs L2P+OptMT, on reuse_high and random, --launch-count 4 (warm replay, cold-cache default avoided), metrics lts__t_sector_hit_rate.pct + dram__bytes_read.sum. Isolates the L2 signal from SRAM / launch / occupancy (job 9935235)." data-zh="對 RPF+OptMT vs L2P+OptMT，在 reuse_high 與 random 上跑 ncu，--launch-count 4（暖 replay，避開 cold-cache 預設），指標 lts__t_sector_hit_rate.pct + dram__bytes_read.sum。把 L2 訊號從 SRAM / launch / occupancy 中分離（job 9935235）。">ncu on RPF+OptMT vs L2P+OptMT, on reuse_high and random, --launch-count 4 (warm replay), metrics lts__t_sector_hit_rate.pct + dram__bytes_read.sum. Isolates the L2 signal (job 9935235).</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="6.3 Confirmed static facts (verifiable now)" data-zh="6.3 已確認的靜態事實（現在即可驗證）">6.3 Confirmed static facts (verifiable now)</span></h3>
+  <p><span class="i18n" data-en="These are read directly from the artifact and need no GPU run:" data-zh="這些直接從 artifact 讀出，不需 GPU run：">These are read directly from the artifact and need no GPU run:</span></p>
+  <ul>
+    <li><span class="i18n" data-en="The L2 mechanism is exactly <code>prefetch.global.L2::evict_last</code> inline PTX on hot rows (l2_pinning/EmbeddingBag.cu:144)." data-zh="L2 機制就是對 hot row 的 <code>prefetch.global.L2::evict_last</code> inline PTX（l2_pinning/EmbeddingBag.cu:144）。">L2 mechanism = <code>prefetch.global.L2::evict_last</code> inline PTX on hot rows (l2_pinning/EmbeddingBag.cu:144).</span></li>
+    <li><span class="i18n" data-en="The timer measures the consumer kernel ONLY; the pin kernel + sync precede cudaEventRecord(start) (lines 497&ndash;502)." data-zh="計時器只量 consumer kernel；pin kernel + sync 在 cudaEventRecord(start) 之前（第 497&ndash;502 行）。">Timer measures the consumer ONLY; pin+sync precede cudaEventRecord(start) (lines 497&ndash;502).</span></li>
+    <li><span class="i18n" data-en="The authors left the pin-timing wiring commented out (lines 494, 499&ndash;500) &mdash; they could have charged it and did not." data-zh="作者把 pin 計時接線註解掉了（第 494、499&ndash;500 行）&mdash; 他們本可計入卻沒有。">Pin-timing wiring is commented out (lines 494, 499&ndash;500) &mdash; they could have charged it and did not.</span></li>
+    <li><span class="i18n" data-en="RPF stages in registers (lv0/lv1), not in L2 or SRAM &mdash; so the RPF rung is provably not our mechanism." data-zh="RPF 暫存在 register（lv0/lv1），不在 L2 或 SRAM &mdash; 所以 RPF 那階可證明不是我們的機制。">RPF stages in registers (lv0/lv1) &mdash; the RPF rung is provably not our mechanism.</span></li>
+    <li><span class="i18n" data-en="Each intended profile has a 60,000-line hot-index file (random's is 60,000 random ids, no concentrated reuse). Note: our reuse_low L2P run skipped pinning entirely because l2_quick.sh's hot-path for that profile has a leading-space path bug &rarr; the ifstream fails &rarr; pinning is silently skipped (see &sect;4.1 &dagger;)." data-zh="每個預期的 profile 都有一個 60,000 行的 hot-index 檔（random 的是 60,000 個隨機 id，無集中重用）。注意：我們的 reuse_low L2P run 完全略過了 pinning，因為 l2_quick.sh 該 profile 的 hot-path 有一個開頭空格的路徑 bug &rarr; ifstream 開檔失敗 &rarr; pinning 被靜默略過（見 &sect;4.1 &dagger;）。">Each intended profile has a 60,000-line hot-index file (random's is 60,000 random ids). Note: our reuse_low L2P run skipped pinning due to a leading-space path bug in l2_quick.sh (see &sect;4.1 &dagger;).</span></li>
+    <li><span class="i18n" data-en="Build risk (confirmed): the L2P/combined .cu use std::cout / std::setprecision / std::string / std::vector / std::getenv but do NOT explicitly #include &lt;iostream&gt;/&lt;iomanip&gt;/&lt;string&gt;/&lt;vector&gt; &mdash; they rely on PyTorch transitive includes; the build log will surface a 4-line #include patch if the toolchain does not provide them." data-zh="建置風險（已確認）：L2P/combined 的 .cu 使用 std::cout / std::setprecision / std::string / std::vector / std::getenv，卻沒有明確 #include &lt;iostream&gt;/&lt;iomanip&gt;/&lt;string&gt;/&lt;vector&gt; &mdash; 它們依賴 PyTorch 的傳遞 include；若工具鏈未提供，build log 會浮現一個 4 行的 #include 補丁。">Build risk (confirmed): L2P/combined .cu use std::cout/setprecision/string/vector/getenv without explicit #include &lt;iostream&gt;/&lt;iomanip&gt;/&lt;string&gt;/&lt;vector&gt; &mdash; relying on PyTorch transitive includes.</span></li>
+  </ul>
+
+  <h3><span class="i18n" data-en="6.4 How to reproduce (commands)" data-zh="6.4 如何重現（指令）">6.4 How to reproduce (commands)</span></h3>
+  <p><span class="i18n" data-en="After patching the hardcoded paths (16 absolute <code>/scratch1/rzj5233</code> + <code>/i3c/hpcl</code> paths across five scripts) and regenerating the model:" data-zh="在修補硬編碼路徑（五個 script 中共 16 個絕對 <code>/scratch1/rzj5233</code> + <code>/i3c/hpcl</code> 路徑）並重新生成模型後：">After patching the hardcoded paths and regenerating the model:</span></p>
+<pre><code><span class="cm"># 0. regenerate the gitignored model (12 x 500K x 128 fp32, ~3 GB)</span>
+cd scripts &amp;&amp; python save_emb.py
+
+<span class="cm"># 1. baseline: build with NO maxrregcount, then sweep the 4 profiles</span>
+cp opt_designs/baseline/EmbeddingBag_timed.cu \
+   pytorch/aten/src/ATen/native/cuda/EmbeddingBag.cu
+TORCH_CUDA_ARCH_LIST=<span class="st">"8.0"</span> python setup.py install
+bash quick.sh &gt; dummy; grep <span class="st">'Latency of Embedding Bag kernel'</span> dummy \
+  | cut -d<span class="st">' '</span> -f6 | cut -d<span class="st">'m'</span> -f1 &gt; log; python parser_Kernel_ET.py
+
+<span class="cm"># 2-3. OptMT / RPF: rebuild with CMAKE_CUDA_FLAGS="-maxrregcount 42", rerun quick.sh</span>
+
+<span class="cm"># 4. L2P: rebuild with l2_pinning .cu, run l2_quick.sh (it sets DATASET_FILE_PATH)</span>
+cp opt_designs/l2_pinning/EmbeddingBag_timed.cu \
+   pytorch/aten/src/ATen/native/cuda/EmbeddingBag.cu
+CMAKE_CUDA_FLAGS=<span class="st">"-maxrregcount 42"</span> python setup.py install
+bash l2_quick.sh &gt; dummy; ...   <span class="cm"># 60K hot rows pinned per profile</span>
+
+<span class="cm"># 5. combined (RPF+L2P+OptMT): rebuild with combined .cu, run l2_quick.sh</span></code></pre>
+  <div class="warn">
+    <strong><span class="i18n" data-en="Hardware / build budget." data-zh="硬體 / 建置預算。">Hardware / build budget.</span></strong>
+    <span class="i18n" data-en=" A100-80GB, paid account (gts-rs275-paid, qos=inferno). Five from-source PyTorch compiles dominate the wall clock (~45&ndash;120 min each); plan one variant per submission or a long chained job. ncu may require GPU performance-counter access (ERR_NVGPUCTRPERM); if blocked, Layer B falls back to nsys kernel durations while Layer A (cudaEvent latency ladder) still works fully." data-zh=" A100-80GB，付費帳號（gts-rs275-paid，qos=inferno）。五次從源 PyTorch 編譯主宰 wall clock（每個約 45&ndash;120 分鐘）；規劃每次提交一個變體或一個長串接 job。ncu 可能需要 GPU performance-counter 權限（ERR_NVGPUCTRPERM）；若被擋，Layer B 退回 nsys kernel 時長，而 Layer A（cudaEvent 延遲階梯）仍完全可用。"> A100-80GB, paid account. Five from-source compiles dominate the wall clock. If ncu is blocked (ERR_NVGPUCTRPERM), Layer B falls back to nsys durations while Layer A still works fully.</span>
+  </div>
+</section>
+
+<!-- ============ NSIGHT ATTRIBUTION ============ -->
+<section id="attribution">
+  <h2><span class="i18n" data-en="7. Nsight attribution &mdash; isolating the L2 signal" data-zh="7. Nsight 歸因 &mdash; 分離 L2 訊號">7. Nsight attribution &mdash; isolating the L2 signal</span></h2>
+  <p><span class="i18n"
+    data-en="Layer A (latency diffs) tells us how big each rung is; Layer B (Nsight Compute) tells us <em>why</em>. The validating test is to profile RPF+OptMT vs. L2P+OptMT on the hot and the random profile &mdash; comparing register-prefetch (RPF+OptMT) against explicit pinning (L2P+OptMT) as two alternative consumer-side strategies, i.e. whether explicit L2 pinning beats register-prefetch at the L2 layer (baseline is NOT the Nsight comparand) &mdash; and watch two metrics: the L2 sector hit rate on the consumer kernel, and the HBM bytes read. If explicit L2P delivers more cross-kernel L2 reuse than register-prefetch, the hit rate must be higher and HBM reads lower on hot; and the hotness sweep itself (hot vs random) shows whether the L2 payoff exists at all."
+    data-zh="Layer A（延遲差分）告訴我們每階有多大；Layer B（Nsight Compute）告訴我們<em>為什麼</em>。驗證測試是：在 hot 與 random profile 上 profile RPF+OptMT vs. L2P+OptMT &mdash; 把 register-prefetch（RPF+OptMT）與明確 pinning（L2P+OptMT）當成兩個替代的 consumer 端策略來比較，亦即明確的 L2 pinning 在 L2 層上是否勝過 register-prefetch（baseline 不是 Nsight 的比較對象）&mdash; 並盯兩個指標：consumer kernel 的 L2 sector hit rate，以及讀取的 HBM bytes。如果明確的 L2P 比 register-prefetch 帶來更多跨 kernel L2 重用，則 hot 上 hit rate 必須更高、HBM 讀取必須更低；而 hotness sweep 本身（hot vs random）則顯示 L2 收益是否存在。">Layer A (latency diffs) tells us how big each rung is; Layer B (Nsight Compute) tells us <em>why</em>. The validating test is to profile RPF+OptMT vs. L2P+OptMT on the hot and the random profile &mdash; comparing register-prefetch (RPF+OptMT) against explicit pinning (L2P+OptMT) as two alternative consumer-side strategies, i.e. whether explicit L2 pinning beats register-prefetch at the L2 layer (baseline is NOT the Nsight comparand) &mdash; and watch two metrics: the L2 sector hit rate on the consumer kernel, and the HBM bytes read. If explicit L2P delivers more cross-kernel L2 reuse than register-prefetch, the hit rate must be higher and HBM reads lower on hot; and the hotness sweep itself (hot vs random) shows whether the L2 payoff exists at all.</span></p>
+
+  <h3><span class="i18n" data-en="7.1 The metrics that separate L2 from everything else" data-zh="7.1 把 L2 與其他一切分開的指標">7.1 The metrics that separate L2 from everything else</span></h3>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="ncu metric" data-zh="ncu 指標">ncu metric</span></th>
+      <th><span class="i18n" data-en="What it isolates" data-zh="它分離什麼">What it isolates</span></th>
+    </tr>
+    <tr><td><code>lts__t_sector_hit_rate.pct</code></td><td><span class="i18n" data-en="L2 hit rate &mdash; the headline reuse signal." data-zh="L2 命中率 &mdash; 主要重用訊號。">L2 hit rate &mdash; the headline reuse signal.</span></td></tr>
+    <tr><td><code>lts__t_sectors_lookup_hit.sum</code> / <code>...miss.sum</code></td><td><span class="i18n" data-en="Absolute L2 hit / miss sectors (cross-check the rate)." data-zh="絕對 L2 命中 / miss sector（交叉檢查比率）。">Absolute L2 hit/miss sectors.</span></td></tr>
+    <tr><td><code>dram__bytes_read.sum</code></td><td><span class="i18n" data-en="HBM read bytes &mdash; the traffic L2 reuse is meant to remove." data-zh="HBM 讀取 bytes &mdash; L2 重用要消除的流量。">HBM read bytes &mdash; the traffic L2 reuse removes.</span></td></tr>
+    <tr><td><code>smsp__inst_executed_op_shared_ld.sum</code></td><td><span class="i18n" data-en="Shared-memory (SRAM) loads &mdash; should be ~0, ruling out SRAM as the win." data-zh="Shared-memory（SRAM）載入 &mdash; 應 ~0，排除 SRAM 作為勝因。">Shared-memory loads &mdash; ~0, rules out SRAM.</span></td></tr>
+    <tr><td><code>sm__warps_active.avg.pct_of_peak_sustained_active</code></td><td><span class="i18n" data-en="Occupancy &mdash; isolates OptMT's contribution." data-zh="占用率 &mdash; 分離 OptMT 的貢獻。">Occupancy &mdash; isolates OptMT.</span></td></tr>
+    <tr><td><code>launch__registers_per_thread</code></td><td><span class="i18n" data-en="Confirms the maxrregcount 42 cap (= 42 for OptMT/RPF)." data-zh="確認 maxrregcount 42 上限（OptMT/RPF = 42）。">Confirms maxrregcount 42 (= 42 for OptMT/RPF).</span></td></tr>
+    <tr><td><code>gpu__time_duration.sum</code></td><td><span class="i18n" data-en="Per-kernel time &mdash; cross-checks kernel durations; the L2P contribution itself is read from the L2-layer metrics, not from a wall-clock pin time." data-zh="每 kernel 時間 &mdash; 交叉檢查 kernel 時長；L2P 的貢獻本身是從 L2 層指標讀出，而非從 wall-clock pin 時間。">Per-kernel time &mdash; cross-checks kernel durations; the L2P contribution itself is read from the L2-layer metrics, not from a wall-clock pin time.</span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="7.2 The L2-attribution result (measured, job 9935235)" data-zh="7.2 L2 歸因結果（已量測，job 9935235）">7.2 The L2-attribution result (measured, job 9935235)</span></h3>
+  <div class="measured-box">
+    <h4><span class="tag-pending">Measured on PACE A100-80GB (job 9935235)</span> <span class="i18n" data-en="Consumer-kernel L2 hit rate &amp; HBM reads (lts__t_sector_hit_rate.pct, dram__bytes_read.sum), warming first&rarr;steady over 4 launches" data-zh="consumer kernel 的 L2 命中率與 HBM 讀取（lts__t_sector_hit_rate.pct、dram__bytes_read.sum），4 次 launch 由 first&rarr;steady 暖機">Consumer-kernel L2 hit rate &amp; HBM reads (lts__t_sector_hit_rate.pct, dram__bytes_read.sum), first&rarr;steady over 4 launches</span></h4>
+    <table>
+      <tr>
+        <th><span class="i18n" data-en="Variant &times; profile" data-zh="變體 &times; profile">Variant &times; profile</span></th>
+        <th><span class="i18n" data-en="L2 hit% first &rarr; steady" data-zh="L2 命中% first &rarr; steady">L2 hit% first&rarr;steady</span></th>
+        <th><span class="i18n" data-en="DRAM read first &rarr; steady" data-zh="DRAM 讀取 first &rarr; steady">DRAM read first&rarr;steady</span></th>
+      </tr>
+      <tr><td>reuse_high &middot; RPF+OptMT</td><td class="fact">74.0 &rarr; ~91.8 <span class="tag-fact">fact</span></td><td class="fact">27.5 &rarr; ~7.8 MB</td></tr>
+      <tr><td>reuse_high &middot; L2P+OptMT</td><td class="fact">74.6 &rarr; ~91.7 <span class="tag-fact">fact</span></td><td class="fact">27.5 &rarr; ~7.8 MB</td></tr>
+      <tr><td>random &middot; RPF+OptMT</td><td class="fact">30.4 &rarr; 30.5 <span class="tag-fact">fact</span></td><td class="fact">144.6 &rarr; 144.9 MB</td></tr>
+      <tr><td>random &middot; L2P+OptMT</td><td class="fact">30.4 &rarr; 30.6 <span class="tag-fact">fact</span></td><td class="fact">144.8 &rarr; 144.9 MB</td></tr>
+    </table>
+    <p style="font-size:.82rem;color:#8fa4c0"><span class="i18n" data-en="Raw: results/dlrml2pin_a100-80_9935235/ncu/*.csv. Warm replay across 4 launches (the cold-cache default was avoided); the first&rarr;steady columns show the warming trend." data-zh="原始資料：results/dlrml2pin_a100-80_9935235/ncu/*.csv。4 次 launch 的暖 replay（避開了 cold-cache 預設）；first&rarr;steady 欄顯示暖機趨勢。">Raw: results/dlrml2pin_a100-80_9935235/ncu/*.csv. Warm replay across 4 launches; the first&rarr;steady columns show the warming trend.</span></p>
+  </div>
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Finding 1 (FACT): L2 payoff is entirely hotness-dependent" data-zh="發現 1（FACT）：L2 收益完全取決於 hotness">Finding 1 (FACT): L2 payoff is entirely hotness-dependent</span></h4>
+      <p><span class="i18n" data-en="Hot rows reach ~92% L2 hit and ~7.8 MB DRAM/batch; random sits at ~30% hit and ~145 MB DRAM &mdash; about 18&times; more HBM traffic. L2 reuse buys nothing without reuse. This is the embedding-table analogue of our activation bound." data-zh="hot row 達到 ~92% L2 命中與 ~7.8 MB DRAM/batch；random 為 ~30% 命中與 ~145 MB DRAM &mdash; 約 18&times; 的 HBM 流量。沒有重用，L2 重用什麼也買不到。這是我們 activation 上界的 embedding-table 類比。">Hot rows reach ~92% L2 hit / ~7.8 MB DRAM; random sits at ~30% hit / ~145 MB DRAM (&asymp;18&times; more HBM). L2 reuse buys nothing without reuse &mdash; the embedding-table analogue of our activation bound.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Finding 2 (FACT + BOUND): L2P &asymp; RPF at the L2 layer" data-zh="發現 2（FACT + BOUND）：L2 層上 L2P &asymp; RPF">Finding 2 (FACT + BOUND): L2P &asymp; RPF at the L2 layer</span></h4>
+      <p><span class="i18n" data-en="Explicit L2-pinning adds essentially nothing over register-prefetch at the L2 layer in this no-polluter microbench: 91.7 vs 91.8% hit, DRAM essentially equal. Consistent with the paper's &lsquo;L2P only ~13.5% incremental over RPF+OptMT&rsquo;, and a direct parallel to our own &lsquo;dirty blob survives intact at zero pressure&rsquo; &mdash; pinning matters only under cross-kernel pollution, which the tight EmbeddingBag loop does not impose." data-zh="在這個無污染者的 microbench 中，明確的 L2-pinning 在 L2 層幾乎不比 register-prefetch 多加任何東西：91.7 vs 91.8% 命中，DRAM 基本相等。與論文的「L2P 在 RPF+OptMT 之上只多約 13.5%」一致，並直接對應我們自己的「dirty blob 在零壓力下完整存活」&mdash; pinning 只在跨 kernel 污染下才重要，而緊湊的 EmbeddingBag 迴圈並未施加污染。">L2P adds essentially nothing over RPF at the L2 layer here: 91.7 vs 91.8% hit, DRAM essentially equal. Consistent with the paper's ~13.5%-incremental figure and a parallel to our &lsquo;dirty blob survives at zero pressure&rsquo; result &mdash; pinning matters only under cross-kernel pollution the tight loop does not impose.</span></p>
+    </div>
+  </div>
+  <div class="note">
+    <strong><span class="i18n" data-en="Caveat (under-statement)." data-zh="注意（低估）。">Caveat (under-statement).</span></strong>
+    <span class="i18n" data-en=" L2P's pinning benefit is plausibly UNDERSTATED in this microbench because there is no intervening polluter kernel to evict the hot rows between the pin and the consumer &mdash; exactly the regime in which evict_last would help. We report the L2-layer attribution as measured and lean on the paper's own ~13.5%-incremental figure (BOUND) for the polluted regime." data-zh=" L2P 的 pinning 好處在這個 microbench 中很可能被<strong>低估</strong>，因為 pin 與 consumer 之間沒有插入的污染者 kernel 來驅逐 hot row &mdash; 而那正是 evict_last 會幫上忙的情境。我們照量到的回報 L2 層歸因，並對被污染的情境採用論文自己的 ~13.5% 增量數字（BOUND）。"> L2P's benefit is plausibly UNDERSTATED here because no intervening polluter evicts the hot rows between pin and consumer &mdash; the regime where evict_last would help. We report the L2-layer attribution as measured and lean on the paper's ~13.5% figure (BOUND) for the polluted regime.</span>
+  </div>
+  <p><span class="i18n"
+    data-en="This contrast &mdash; a high steady-state L2 hit on reuse_high (~92%) that collapses to ~30% with &asymp;18&times; the HBM traffic on random, and L2P essentially equal to RPF at the L2 layer &mdash; validates the thesis. The inter-kernel L2 benefit is not a property of the kernel pair but of the access pattern: remove engineered hotness and the L2 contribution disappears; remove cross-kernel pollution and explicit pinning adds nothing over plain register-prefetch."
+    data-zh="這個對比 &mdash; reuse_high 上高的穩態 L2 命中（~92%）在 random 上塌到 ~30% 並帶 &asymp;18&times; 的 HBM 流量，且 L2 層上 L2P 基本等於 RPF &mdash; 驗證了論點。跨 kernel L2 好處不是 kernel pair 的性質，而是存取模式的性質：拿掉工程化的 hotness，L2 貢獻就消失；拿掉跨 kernel 污染，明確的 pinning 就不比純 register-prefetch 多加任何東西。">This contrast &mdash; ~92% steady-state L2 hit on reuse_high collapsing to ~30% with &asymp;18&times; HBM traffic on random, and L2P &asymp; RPF at the L2 layer &mdash; validates the thesis: the inter-kernel L2 benefit is a property of the access pattern, not the kernel pair, and explicit pinning adds nothing over register-prefetch without cross-kernel pollution.</span></p>
+</section>
+
+<!-- ============ CLAIMS VS IMPLEMENTATION ============ -->
+<section id="claims">
+  <h2><span class="i18n" data-en="7b. Claims vs. implementation (honest reading)" data-zh="7b. 宣稱 vs. 實作（誠實檢視）">7b. Claims vs. implementation (honest reading)</span></h2>
+  <p><span class="i18n"
+    data-en="Because the techniques live entirely in one swappable CUDA file, we can check each paper claim against the source we read. The status column reflects what the code actually does, cross-checked against our PACE A100 measurements where relevant."
+    data-zh="由於這些技術完全存在於一個可替換的 CUDA 檔案中，我們可以把每個論文宣稱對照我們讀過的原始碼檢查。狀態欄反映程式碼實際做了什麼，並在相關處對照我們的 PACE A100 量測交叉檢查。">Because the techniques live entirely in one swappable CUDA file, we can check each paper claim against the source. The status column reflects what the code does, cross-checked against our PACE A100 measurements where relevant.</span></p>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Paper claim" data-zh="論文宣稱">Paper claim</span></th>
+      <th><span class="i18n" data-en="Status" data-zh="狀態">Status</span></th>
+      <th><span class="i18n" data-en="Code evidence" data-zh="程式碼證據">Code evidence</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2P pins hot rows in L2 via a hardware prefetch hint." data-zh="L2P 透過硬體 prefetch hint 把 hot row 釘在 L2。">L2P pins hot rows in L2 via a hardware prefetch hint.</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="prefetch.global.L2::evict_last inline PTX (l2_pinning/EmbeddingBag.cu:144)." data-zh="prefetch.global.L2::evict_last inline PTX（l2_pinning/EmbeddingBag.cu:144）。">prefetch.global.L2::evict_last inline PTX (line 144).</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2P is a software-only, drop-in EmbeddingBag replacement." data-zh="L2P 是純軟體、可直接替換的 EmbeddingBag。">L2P is a software-only, drop-in EmbeddingBag replacement.</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="Whole technique = one file swapped into aten/.../EmbeddingBag.cu + a build flag; no driver/HW changes." data-zh="整個技術 = 換入 aten/.../EmbeddingBag.cu 的一個檔案 + 一個 build flag；無 driver/HW 變更。">One file swapped into aten/.../EmbeddingBag.cu + a build flag; no driver/HW changes.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Reported &lsquo;Latency of Embedding Bag kernel&rsquo; reflects the L2P benefit." data-zh="回報的「Latency of Embedding Bag kernel」反映 L2P 的好處。">Reported kernel latency reflects the L2P benefit.</span></td>
+      <td><span class="partial">PARTIAL</span></td>
+      <td><span class="i18n" data-en="True for the consumer kernel, but the timer EXCLUDES the pin kernel + its sync (lines 497&ndash;502) &mdash; the benefit is shown without its cost." data-zh="對 consumer kernel 為真，但計時器排除了 pin kernel + 其 sync（第 497&ndash;502 行）&mdash; 好處被展示卻不含其成本。">True for the consumer, but the timer EXCLUDES the pin kernel + sync (lines 497&ndash;502).</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2P delivers up to 62% embedding / 48% e2e reduction." data-zh="L2P 帶來最多 62% embedding / 48% e2e 降幅。">L2P delivers up to 62% / 48% reduction.</span></td>
+      <td><span class="partial">PARTIAL</span></td>
+      <td><span class="i18n" data-en="Best-case and consumer-only. Our ncu shows the L2 payoff is entirely hotness-dependent (~92% hit hot vs ~30% random) and that L2P &asymp; RPF at the L2 layer in steady state (91.7% vs 91.8%); the headline reflects warm best-case reuse, not the L2P increment alone." data-zh="最佳情況且 consumer-only。我們的 ncu 顯示 L2 收益完全取決於 hotness（hot ~92% 命中 vs random ~30%），且穩態下 L2 層上 L2P &asymp; RPF（91.7% vs 91.8%）；標題反映的是暖的最佳情況重用，而非 L2P 單獨的增量。">Best-case, consumer-only. Our ncu shows the L2 payoff is entirely hotness-dependent (~92% hot vs ~30% random) and L2P &asymp; RPF at the L2 layer (91.7% vs 91.8%); the headline reflects warm best-case reuse, not the L2P increment alone.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2P benefit vanishes without reuse." data-zh="無重用時 L2P 好處消失。">L2P benefit vanishes without reuse.</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="Confirmed by our ncu hot-vs-random test: pinning a random index list gives only ~30% L2 hit / ~145 MB DRAM (no benefit) vs ~92% / ~7.8 MB for hot rows." data-zh="已由我們的 ncu hot-vs-random 測試證實：釘 random index 清單只有 ~30% L2 命中 / ~145 MB DRAM（無好處），而 hot row 為 ~92% / ~7.8 MB。">Confirmed by our ncu hot-vs-random test: pinning a random index list gives only ~30% L2 hit / ~145 MB DRAM (no benefit) vs ~92% / ~7.8 MB for hot rows.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="RPF hides latency by prefetching (a distinct mechanism from L2P)." data-zh="RPF 透過 prefetch 隱藏延遲（與 L2P 不同的機制）。">RPF hides latency by prefetching (distinct from L2P).</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="RPF stages into registers lv0/lv1 intra-kernel (regpref.txt:141&ndash;188); no cross-kernel state &mdash; confirms it is NOT L2 reuse." data-zh="RPF 在 kernel 內暫存到 register lv0/lv1（regpref.txt:141&ndash;188）；無跨 kernel 狀態 &mdash; 證實它不是 L2 重用。">Stages into registers lv0/lv1 intra-kernel (regpref.txt:141&ndash;188); not L2 reuse.</span></td>
+    </tr>
+  </table>
+
+  <div class="grid-2">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Strengths of the artifact" data-zh="artifact 的優點">Strengths of the artifact</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="The mechanism is explicit and isolatable: the PTX prefetch line is the core consumer-side hint (the producer side still re-establishes a per-batch L2 access-policy window, &sect;5)." data-zh="機制明確且可獨立：PTX prefetch 那一行是核心的 consumer 端提示（producer 端仍會在每個 batch 重建一次 L2 access-policy window，&sect;5）。">The mechanism is explicit and isolatable: the PTX prefetch line is the core consumer-side hint (the producer side still re-establishes a per-batch L2 access-policy window, &sect;5).</span></li>
+        <li><span class="i18n" data-en="A clean ablation ladder lets us difference out occupancy and register-prefetch." data-zh="乾淨的 ablation 階梯讓我們差掉占用率與 register-prefetch。">A clean ablation ladder differences out occupancy and register-prefetch.</span></li>
+        <li><span class="i18n" data-en="A built-in hotness sweep (high&rarr;random) gives the vanish test for free." data-zh="內建的 hotness sweep（high&rarr;random）免費提供消失測試。">A built-in hotness sweep gives the vanish test for free.</span></li>
+        <li><span class="i18n" data-en="cudaEvent prints make Layer-A latency attribution available without a profiler." data-zh="cudaEvent 列印讓 Layer-A 延遲歸因不需 profiler 即可取得。">cudaEvent prints enable Layer-A attribution without a profiler.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Limitations / caveats" data-zh="限制 / 注意事項">Limitations / caveats</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Headline timer excludes the pin kernel &mdash; overstates net e2e L2P value." data-zh="標題計時器排除 pin kernel &mdash; 高估淨 e2e L2P 價值。">Headline timer excludes the pin kernel &mdash; overstates net value.</span></li>
+        <li><span class="i18n" data-en="Reuse is hand-curated (60K hot list), not naturally transient." data-zh="重用是人工挑選的（60K hot 清單），非自然暫態。">Reuse is hand-curated, not naturally transient.</span></li>
+        <li><span class="i18n" data-en="Single-table microbenchmark; pin cost is amortized over one consumer launch only." data-zh="單表 microbenchmark；pin 成本只攤到一次 consumer launch。">Single-table microbenchmark; pin cost amortized over one launch.</span></li>
+        <li><span class="i18n" data-en="A100-only build flags; H100 results in the paper lack a public build recipe." data-zh="A100-only build flag；論文的 H100 結果缺公開 build recipe。">A100-only build flags; H100 lacks a public recipe.</span></li>
+        <li><span class="i18n" data-en="The L2P/combined .cu omit explicit standard-library includes (build-fragile)." data-zh="L2P/combined 的 .cu 省略明確的標準函式庫 include（建置脆弱）。">L2P/combined .cu omit explicit std-lib includes (build-fragile).</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ POSITIONING / RELATED WORK ============ -->
+<section id="positioning">
+  <h2><span class="i18n" data-en="7c. Positioning &mdash; where L2 pinning sits among reuse techniques" data-zh="7c. 定位 &mdash; L2 pinning 在重用技術中的位置">7c. Positioning &mdash; where L2 pinning sits among reuse techniques</span></h2>
+  <p><span class="i18n"
+    data-en="Cross-kernel data reuse can be attempted at every level of the GPU memory hierarchy, and each level has a different cost/benefit profile. Placing L2P among the alternatives clarifies why it is the right object of study for an inter-kernel L2 claim, and why its benefit is bounded."
+    data-zh="跨 kernel 的資料重用可以在 GPU 記憶體階層的每一層嘗試，而每一層有不同的成本/效益輪廓。把 L2P 放在這些替代方案之間，能釐清為何它是 inter-kernel L2 主張的正確研究對象，以及為何它的好處有界。">Cross-kernel reuse can be attempted at every level of the GPU memory hierarchy. Placing L2P among the alternatives clarifies why it is the right object of study for an inter-kernel L2 claim.</span></p>
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Reuse level" data-zh="重用層級">Reuse level</span></th>
+      <th><span class="i18n" data-en="Crosses a kernel boundary?" data-zh="跨 kernel 邊界？">Crosses kernel?</span></th>
+      <th><span class="i18n" data-en="Representative technique" data-zh="代表技術">Representative</span></th>
+      <th><span class="i18n" data-en="Why bounded" data-zh="為何有界">Why bounded</span></th>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Registers" data-zh="Register">Registers</span></td>
+      <td><span class="cross">NO</span></td>
+      <td>RPF (lv0/lv1)</td>
+      <td><span class="i18n" data-en="Dies at kernel exit; pure latency hiding within one kernel." data-zh="kernel 結束即消失；單一 kernel 內的純延遲隱藏。">Dies at kernel exit.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="Shared memory (SRAM)" data-zh="Shared memory（SRAM）">Shared memory (SRAM)</span></td>
+      <td><span class="cross">NO</span></td>
+      <td>EmbeddingBag_shmem (tried)</td>
+      <td><span class="i18n" data-en="Tiny capacity, per-block scope, must be re-staged each kernel; the repo did not adopt it." data-zh="容量很小、per-block 範圍、每個 kernel 都要重填；repo 未採用。">Tiny, per-block, re-staged each kernel.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="L2 cache" data-zh="L2 cache">L2 cache</span></td>
+      <td><span class="check">YES</span></td>
+      <td>L2P (evict_last) &mdash; <span class="i18n" data-en="OUR FOCUS" data-zh="我們的焦點">OUR FOCUS</span></td>
+      <td><span class="i18n" data-en="Device-wide and persistent, but small relative to the working set; pays only for re-demanded hot rows." data-zh="跨 device 且持久，但相對 working set 很小；只對被再次需求的 hot row 划算。">Persistent but small vs working set; pays only for re-demanded rows.</span></td>
+    </tr>
+    <tr>
+      <td><span class="i18n" data-en="HBM / explicit staging" data-zh="HBM / 明確暫存">HBM / explicit staging</span></td>
+      <td><span class="check">YES</span></td>
+      <td><span class="i18n" data-en="Caching hot rows in a smaller fast table" data-zh="把 hot row 快取在較小的快表">Hot-row caching tables</span></td>
+      <td><span class="i18n" data-en="Software-managed; no hardware reuse signal &mdash; outside our L2 question." data-zh="軟體管理；無硬體重用訊號 &mdash; 在我們的 L2 問題之外。">Software-managed; outside our L2 question.</span></td>
+    </tr>
+  </table>
+  <div class="note">
+    <strong><span class="i18n" data-en="Why L2P is the right probe." data-zh="為何 L2P 是正確的探針。">Why L2P is the right probe.</span></strong>
+    <span class="i18n"
+    data-en=" Among published systems, L2P is the only technique we found that (a) explicitly targets the L2 level, (b) crosses a kernel boundary by design, and (c) exposes a clean knob (the hot-index list) to dial reuse from maximal to zero. That combination makes it an almost ideal instrument to measure the ceiling of inter-kernel L2 value &mdash; and the ceiling is what bounds the eager-LLM activation case."
+    data-zh=" 在已發表的系統中，L2P 是我們找到唯一同時 (a) 明確針對 L2 層、(b) 設計上跨 kernel 邊界、(c) 暴露一個乾淨旋鈕（hot-index 清單）可把重用從最大調到零的技術。這個組合讓它幾乎是量測 inter-kernel L2 價值上限的理想工具 &mdash; 而這個上限正是 eager-LLM activation 案例的界限。"> L2P is the only technique we found that explicitly targets L2, crosses a kernel boundary by design, and exposes a clean knob to dial reuse from maximal to zero &mdash; an almost ideal instrument to measure the ceiling of inter-kernel L2 value.</span>
+  </div>
+</section>
+
+<!-- ============ TIE-BACK ============ -->
+<section id="tieback">
+  <h2><span class="i18n" data-en="8. Tie-back to &ldquo;Worth the Bytes?&rdquo;" data-zh="8. 回扣到 &ldquo;Worth the Bytes?&rdquo;">8. Tie-back to &ldquo;Worth the Bytes?&rdquo;</span></h2>
+  <p><span class="i18n"
+    data-en="Our study expresses the L2-residency contribution as a share of step time. For DLRM L2P we read that contribution from the measured L2 layer rather than from a wall-clock pin time."
+    data-zh="我們的研究把 L2-residency 貢獻表示為 step time 的占比。對 DLRM L2P，我們是從量測的 L2 層讀出這個貢獻，而非從 wall-clock pin 時間。">Our study expresses the L2-residency contribution as a share of step time. For DLRM L2P we read that contribution from the measured L2 layer rather than from a wall-clock pin time.</span></p>
+  <p><span class="i18n"
+    data-en="Because the L2P / combined wall-clock is a per-batch pinning-setup artifact (&sect;5), we do NOT compute a single wall-clock pin-charged L2 share. Instead we read the L2-layer contribution directly from the Nsight attribution (&sect;7) and the paper's own ~13.5%-incremental figure. The argument is corroborating, not a proof: DLRM L2P is among the <em>most favorable</em> settings imaginable for cross-kernel L2 reuse &mdash; the reused data are persistent weight rows, the hot set is hand-curated, and reuse is densely concentrated. Even here, at the L2 layer, explicit pinning adds essentially nothing over register-prefetch in steady state (91.7% vs 91.8% hit), and the L2 payoff itself collapses with hotness (~92% &rarr; ~30% hit, &asymp;18&times; HBM on random). For naturally-transient eager-LLM activations &mdash; no hot-index list, output activations written once and read once before the next operator overwrites the cache &mdash; this is consistent with the cross-kernel L2 benefit being a small, conditional contributor, supporting the plausibility of the &lt;0.65% bound."
+    data-zh="由於 L2P / combined 的 wall-clock 是每 batch 的 pinning-setup artifact（&sect;5），我們<strong>不</strong>計算單一 wall-clock 計入 pin 成本的 L2 share。我們改從 Nsight 歸因（&sect;7）與論文自己的 ~13.5% 增量數字直接讀 L2 層的貢獻。這個論證是佐證性的，而非證明：DLRM L2P 是可想像中對跨 kernel L2 重用<em>最有利</em>的設定之一 &mdash; 被重用的資料是持久的 weight row、hot set 是人工挑選的、重用密集集中。即便如此，在 L2 層上，明確的 pinning 在穩態下幾乎不比 register-prefetch 多加任何東西（91.7% vs 91.8% 命中），而 L2 收益本身隨 hotness 塌陷（~92% &rarr; ~30% 命中，random 上 &asymp;18&times; HBM）。對自然暫態的 eager-LLM activation &mdash; 沒有 hot-index 清單、輸出 activation 寫一次讀一次便被下個 operator 覆蓋 cache &mdash; 這與跨 kernel L2 好處是一個小的、條件性的貢獻者一致，支持 &lt;0.65% 上界的合理性。">Because the L2P wall-clock is a pinning-setup artifact (&sect;5), we do NOT compute a single pin-charged L2 share; we read the L2-layer contribution from the Nsight attribution (&sect;7) and the paper's ~13.5% figure. The argument is corroborating, not a proof: L2P is among the most favorable cases imaginable, yet even here explicit pinning adds essentially nothing over RPF at the L2 layer (91.7% vs 91.8%) and the L2 payoff collapses with hotness (~92% &rarr; ~30% hit, &asymp;18&times; HBM on random). For naturally-transient eager-LLM activations this is consistent with a small, conditional contributor &mdash; supporting the plausibility of the &lt;0.65% bound.</span></p>
+
+  <div class="measured-box">
+    <h4><span class="tag-pending">Measured on PACE A100-80GB (jobs 9935235 + 9942760)</span> <span class="i18n" data-en="The numbers this page exists to produce" data-zh="本頁存在的目的就是產出這些數字">The numbers this page exists to produce</span></h4>
+    <table>
+      <tr><th><span class="i18n" data-en="Quantity" data-zh="量">Quantity</span></th><th><span class="i18n" data-en="Value" data-zh="值">Value</span></th></tr>
+      <tr><td><span class="i18n" data-en="Steady-state L2 hit, reuse_high (favorable case)" data-zh="穩態 L2 命中，reuse_high（有利情況）">Steady-state L2 hit, reuse_high</span></td><td class="fact">~92% (RPF &amp; L2P alike); ~7.8 MB DRAM/batch <span class="tag-fact">fact</span></td></tr>
+      <tr><td><span class="i18n" data-en="Steady-state L2 hit, random (no reuse)" data-zh="穩態 L2 命中，random（無重用）">Steady-state L2 hit, random</span></td><td class="fact">~30%; ~145 MB DRAM/batch (&asymp;18&times; HBM) <span class="tag-fact">fact</span></td></tr>
+      <tr><td><span class="i18n" data-en="Measured L2-layer delta, L2P vs RPF (steady state)" data-zh="量測的 L2 層 delta，L2P vs RPF（穩態）">Measured L2-layer delta, L2P vs RPF</span></td><td class="fact">&asymp;0 (91.7% vs 91.8% hit) <span class="tag-fact">fact</span></td></tr>
+      <tr><td><span class="i18n" data-en="Paper-reported consumer-side L2P increment over RPF+OptMT (medium reuse)" data-zh="論文回報的 consumer 端 L2P 相對 RPF+OptMT 的增量（medium reuse）">Paper consumer-side L2P increment (med reuse)</span></td><td class="bound">~13.5% (paper-reported; performance/latency, not an L2 hit-rate delta) <span class="tag-bound">bound</span></td></tr>
+      <tr><td><span class="i18n" data-en="Net pin-charged wall-clock L2 share" data-zh="計入 pin 的淨 wall-clock L2 share">Net pin-charged wall-clock L2 share</span></td><td class="artifact-cell">not reported (harness artifact, &sect;5) <span class="tag-artifact">artifact</span></td></tr>
+      <tr><td><span class="i18n" data-en="Comparison to the &lt;0.65% eager-LLM bound" data-zh="與 &lt;0.65% eager-LLM 上界的比較">vs the &lt;0.65% eager-LLM bound</span></td><td class="bound"><span class="i18n" data-en="corroborates the bound's plausibility" data-zh="佐證該上界的合理性">corroborates the bound's plausibility</span> <span class="tag-bound">bound</span></td></tr>
+    </table>
+  </div>
+
+  <h3><span class="i18n" data-en="8.1 What this page proves now vs. later" data-zh="8.1 本頁現在證明了什麼 vs. 之後">8.1 What this page proves now vs. later</span></h3>
+  <div class="grid-2">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Already established (static)" data-zh="已確立（靜態）">Already established (static)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="L2P is literally cross-kernel L2-residency via evict_last PTX." data-zh="L2P 字面上就是透過 evict_last PTX 的跨 kernel L2-residency。">L2P is literally cross-kernel L2-residency via evict_last PTX.</span></li>
+        <li><span class="i18n" data-en="The repo's headline excludes the pin cost (timer placement)." data-zh="repo 標題排除了 pin 成本（計時器位置）。">The repo's headline excludes the pin cost.</span></li>
+        <li><span class="i18n" data-en="The L2P increment over RPF+OptMT is small (~13.5% med) by the paper's own numbers." data-zh="依論文自己的數字，L2P 在 RPF+OptMT 之上的增量很小（medium ~13.5%）。">L2P increment over RPF+OptMT is small (~13.5% med) by the paper's own numbers.</span></li>
+        <li><span class="i18n" data-en="Reuse is engineered (60K hot list), not transient &mdash; a favorable case." data-zh="重用是工程化的（60K hot 清單），不是暫態 &mdash; 一個有利案例。">Reuse is engineered, not transient &mdash; a favorable case.</span></li>
+      </ul>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Established by PACE runs (measured)" data-zh="由 PACE run 確立（已量測）">Established by PACE runs (measured)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Clean per-profile baseline / OptMT / RPF ms (FACT): hot 3.616 &rarr; random 5.875 ms baseline; RPF helps random &minus;12%, low &minus;11%." data-zh="乾淨的每 profile baseline / OptMT / RPF ms（FACT）：baseline hot 3.616 &rarr; random 5.875 ms；RPF 幫 random &minus;12%、low &minus;11%。">Clean baseline / OptMT / RPF ms (FACT): hot 3.616 &rarr; random 5.875 ms; RPF helps random &minus;12%, low &minus;11%.</span></li>
+        <li><span class="i18n" data-en="L2 hit-rate &amp; HBM-read, hot vs random (FACT): ~92% / ~7.8 MB hot vs ~30% / ~145 MB random." data-zh="L2 命中率與 HBM 讀取，hot vs random（FACT）：hot ~92% / ~7.8 MB vs random ~30% / ~145 MB。">L2 hit-rate &amp; HBM-read, hot vs random (FACT): ~92% / ~7.8 MB vs ~30% / ~145 MB.</span></li>
+        <li><span class="i18n" data-en="L2P &asymp; RPF at the L2 layer in steady state (FACT): 91.7% vs 91.8% hit." data-zh="穩態下 L2 層上 L2P &asymp; RPF（FACT）：91.7% vs 91.8% 命中。">L2P &asymp; RPF at the L2 layer (FACT): 91.7% vs 91.8% hit.</span></li>
+        <li><span class="i18n" data-en="The L2P / combined wall-clock is a harness ARTIFACT (per-batch pinning setup) &mdash; explicitly NOT reported as inference latency." data-zh="L2P / combined 的 wall-clock 是 harness ARTIFACT（每 batch pinning setup）&mdash; 明確<strong>不</strong>作為推論延遲回報。">The L2P / combined wall-clock is a harness ARTIFACT &mdash; explicitly NOT reported as inference latency.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="8.2 Bottom line" data-zh="8.2 結論">8.2 Bottom line</span></h3>
+  <div class="warn">
+    <strong><span class="i18n" data-en="What we can now claim (measured)." data-zh="我們現在能宣稱什麼（已量測）。">What we can now claim (measured).</span></strong>
+    <span class="i18n"
+    data-en=" DLRM L2-pinning is a published, peer-reviewed instance of the same cross-kernel L2-residency phenomenon our study questions, engineered into one of its most favorable possible forms. Three things are now settled: from the source, the headline timer excludes the pin cost; from the paper, the L2P increment over occupancy+register-prefetch is only ~13.5% on medium reuse; and from our PACE A100 Nsight runs, the L2 payoff is entirely hotness-dependent (~92% hit / ~7.8 MB DRAM on hot vs ~30% / ~145 MB &mdash; &asymp;18&times; HBM &mdash; on random) while explicit L2-pinning adds essentially nothing over register-prefetch at the L2 layer in steady state (91.7% vs 91.8% hit). The one number we deliberately withhold is a net pin-charged wall-clock speedup: the L2P / combined wall-clock is a per-batch pinning-setup harness artifact, not steady-state inference. Net: a purpose-built cross-kernel L2-residency optimization only pays under row reuse and adds ~nothing at the L2 layer over register-prefetch in steady state. For naturally-transient eager-LLM activations &mdash; no hot-index list and a far tighter reuse window &mdash; this corroborates that the inter-kernel L2 layer is a small, conditional contributor, consistent with the &lt;0.65% claim of &lsquo;Worth the Bytes?&rsquo;."
+    data-zh=" DLRM L2-pinning 是一個已發表、經同儕審查的例子，正是我們研究所質疑的同一個跨 kernel L2-residency 現象，並被工程化成它最有利的可能形式之一。三件事現已確定：從原始碼，標題計時器排除了 pin 成本；從論文，L2P 在 occupancy+register-prefetch 之上的增量在 medium reuse 只有約 13.5%；從我們的 PACE A100 Nsight run，L2 收益完全取決於 hotness（hot ~92% 命中 / ~7.8 MB DRAM vs random ~30% / ~145 MB &mdash; &asymp;18&times; HBM），而明確的 L2-pinning 在穩態下於 L2 層幾乎不比 register-prefetch 多加任何東西（91.7% vs 91.8% 命中）。我們刻意保留不報的一個數字是計入 pin 的淨 wall-clock speedup：L2P / combined 的 wall-clock 是每 batch 的 pinning-setup harness artifact，而非穩態推論。結論：一個專門打造的跨 kernel L2-residency 優化只在有 row 重用時才划算，且在穩態下於 L2 層幾乎不比 register-prefetch 多加任何東西。對自然暫態的 eager-LLM activation &mdash; 沒有 hot-index 清單、重用視窗更緊 &mdash; 這佐證了 inter-kernel L2 層是一個小的、條件性的貢獻者，與 &lsquo;Worth the Bytes?&rsquo; 的 &lt;0.65% 主張一致。"> DLRM L2-pinning is a peer-reviewed instance of the same phenomenon, in one of its most favorable forms. Our PACE A100 Nsight runs show the L2 payoff is entirely hotness-dependent (~92% / ~7.8 MB hot vs ~30% / ~145 MB &mdash; &asymp;18&times; HBM &mdash; random) and L2P &asymp; RPF at the L2 layer in steady state (91.7% vs 91.8%). We deliberately do not report a net pin-charged wall-clock speedup (the L2P wall-clock is a per-batch setup artifact). Net: a purpose-built cross-kernel L2-residency optimization only pays under row reuse and adds ~nothing over register-prefetch at the L2 layer &mdash; corroborating that the naturally-transient eager-LLM case is a small, conditional contributor, consistent with the &lt;0.65% claim.</span>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Jain et al., &ldquo;Pushing the Performance Envelope of DNN-based Recommendation Systems Inference on GPUs&rdquo; (MICRO 2024, arXiv:2410.22249) &mdash; paper analysis + reproduction page for the &lsquo;Worth the Bytes?&rsquo; L2-reuse study." data-zh="Jain 等人，《Pushing the Performance Envelope of DNN-based Recommendation Systems Inference on GPUs》（MICRO 2024, arXiv:2410.22249）&mdash; 為 &lsquo;Worth the Bytes?&rsquo; L2-reuse 研究撰寫的論文分析 + 重現頁。">Jain et al., &ldquo;Pushing the Performance Envelope of DNN-based Recommendation Systems Inference on GPUs&rdquo; (MICRO 2024, arXiv:2410.22249) &mdash; paper analysis + reproduction page.</span></p>
+  <p><span class="i18n" data-en="Artifact: " data-zh="Artifact：">Artifact: </span><code>github.com/rishucoding/reproduce_MICRO24_GPU_DLRM_inference</code></p>
+  <p><span class="i18n" data-en="Reproduction status: measured on PACE A100-80GB (sm_80), from-source PyTorch v2.1.0, jobs 9935235 (Nsight Compute L2 attribution) + 9942760 (cudaEvent latency ladder). The L2P / combined wall-clock is a per-batch pinning-setup artifact and is not reported as inference latency. Generated 2026-06-14." data-zh="重現狀態：於 PACE A100-80GB（sm_80）、從原始碼建置的 PyTorch v2.1.0 上量測，job 9935235（Nsight Compute L2 歸因）+ 9942760（cudaEvent 延遲階梯）。L2P / combined 的 wall-clock 是每 batch 的 pinning-setup artifact，不作為推論延遲回報。產生日期：2026-06-14。">Reproduction status: measured on PACE A100-80GB, jobs 9935235 (Nsight Compute L2 attribution) + 9942760 (cudaEvent latency ladder). The L2P / combined wall-clock is a per-batch pinning-setup artifact, not reported as inference latency. Generated 2026-06-14.</span></p>
+</footer>
+
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}}
+document.addEventListener('DOMContentLoaded',function(){if(window.renderMathInElement){renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}var l=localStorage.getItem('lang');if(l)setLang(l)});
+</script>
+</body>
+</html>

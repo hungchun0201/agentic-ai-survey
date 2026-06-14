@@ -1,0 +1,56 @@
+{
+  "slug": "kv-prefetch",
+  "domains": [
+    "inference-modeling"
+  ],
+  "title": "Accelerating LLM Inference Throughput via Asynchronous KV Cache Prefetching",
+  "authors": "Yanhao Dong; Yubo Miao; Weinan Li; Xiao Zheng; Chao Wang; Jiesheng Wu; Feng Lyu",
+  "year": "2025-04",
+  "venue": "AAAI",
+  "venue_full": "AAAI Conference on Artificial Intelligence 2026",
+  "arxiv": "2504.06319",
+  "url": "https://arxiv.org/abs/2504.06319",
+  "affiliations": "Alibaba Cloud, Central South University",
+  "research_focus": "LLM serving, Continuous batching, GPU memory tiering, Hardware co-design, Roofline analysis",
+  "problem_statement": {
+    "en": "LLM decode is memory-bound: each autoregressive step must reload the entire KV Cache of prior tokens from HBM into compute units, and HBM bandwidth cannot meet the throughput demand. In the native vLLM XFormers attention kernel this causes severe GPU cache misses during the KV-load phase, frequent high-latency HBM accesses, and massive warp stalls (the Long Scoreboard consuming over 72% of cycles per instruction), so memory bandwidth is underutilized and inference throughput is bottlenecked.",
+    "zh": "LLM 解碼階段屬於記憶體受限：每個自回歸步驟都必須把先前所有 token 的 KV Cache 從 HBM 重新載入計算單元，而 HBM 頻寬無法滿足吞吐需求。在原生 vLLM XFormers attention kernel 中，這會在 KV 載入階段造成嚴重的 GPU cache miss、頻繁的高延遲 HBM 存取，以及大量 warp stall（Long Scoreboard 佔據每指令週期超過 72%），導致記憶體頻寬利用率低落、推理吞吐受限。"
+  },
+  "key_innovation": {
+    "en": "An L2-cache-oriented asynchronous KV Cache prefetching method implemented inside the vLLM XFormers attention kernel. While the kernel computes attention over the current KV block, it issues the Hopper `cp.async.bulk.prefetch.L2.global` instruction to proactively stage the NEXT KV block (4096 bytes per key and per value) from HBM into the GPU's 60MB L2 cache. This is active intra-kernel prefetch of high-reuse KV: the prefetched data lands in L2 so that when the kernel reaches the next block it scores an L2 cache hit instead of paying full HBM latency, hiding HBM access latency within otherwise-idle computation windows and preventing data-dependency-induced warp stalls. Cache eviction priority is tuned so prefetched data does not cause capacity-overflow thrashing.",
+    "zh": "在 vLLM XFormers attention kernel 內部實作的「以 L2 cache 為導向的非同步 KV Cache 預取」方法。當 kernel 正在對當前 KV block 計算 attention 時，發出 Hopper 的 `cp.async.bulk.prefetch.L2.global` 指令，主動把「下一個」KV block（key 與 value 各 4096 bytes）從 HBM 預先搬進 GPU 的 60MB L2 cache。這是對高重用 KV 的主動 intra-kernel（核內）預取：預取資料落在 L2，使 kernel 處理下一個 block 時命中 L2 cache、不必承受完整 HBM 延遲，從而在原本閒置的計算視窗內隱藏 HBM 存取延遲並避免資料依賴造成的 warp stall。同時調整 cache eviction priority，避免預取資料造成容量溢位的 thrashing。"
+  },
+  "baselines_compared": "vLLM XFormers backend (native), FlashAttention-3 (FA3)",
+  "key_improvements": {
+    "en": "L2-cache reuse of the next KV block is the entire contribution: prefetching raises the attention-kernel L2 cache hit rate from the baseline 0.06-55.90% up to 43.70% / 73.01% / 82.66% / 77.11% across Llama2-7B / Llama3-8B / Qwen2.5-7B / Qwen2.5-14B, cutting Cycles-Per-Instruction by 65.8-67.5% and slashing Long-Scoreboard stall cycles (e.g. Llama2-7B 21.34 -> 4.13). This yields up to 2.15x attention-kernel speedup (1.84-2.15x range) and up to 1.97x end-to-end throughput, surpassing FlashAttention-3 by up to 110% (Qwen2.5-7B) and 4-76% on other models, on a single H20; multi-GPU TP gains are 4-59% (Llama3-8B) and 4-76% (Qwen2.5-14B), decaying as TP scales and KV heads per GPU shrink. Peak speedup at batch 128 / 8K output tokens before L2 capacity / HBM limits trigger recomputation. Effect scales with KV-head count: GQA models (more Q heads per KV block) reuse the prefetched L2 block more, so benefit; the aggressive 7:1 GQA of Qwen2.5-7B limits headroom and gives a 2-5% e2e regression vs FA3.",
+    "zh": "「下一個 KV block 的 L2-cache 重用」就是論文的全部貢獻：預取把 attention kernel 的 L2 cache 命中率從基線 0.06-55.90% 提升到 Llama2-7B / Llama3-8B / Qwen2.5-7B / Qwen2.5-14B 的 43.70% / 73.01% / 82.66% / 77.11%，使每指令週期（CPI）下降 65.8-67.5%，並大幅削減 Long-Scoreboard stall 週期（如 Llama2-7B 由 21.34 降至 4.13）。由此在單張 H20 上達到最高 2.15x 的 attention kernel 加速（1.84-2.15x 區間）與最高 1.97x 的端到端吞吐，相較 FlashAttention-3 最高勝出 110%（Qwen2.5-7B），其餘模型 4-76%；多 GPU TP 增益為 4-59%（Llama3-8B）與 4-76%（Qwen2.5-14B），隨 TP 擴展、每 GPU 的 KV head 變少而遞減。峰值加速出現在 batch 128 / 8K 輸出 token，再大則受 L2 容量與 HBM 上限觸發重算。效益與 KV head 數相關：GQA 模型（每個 KV block 服務更多 Q head）對預取進 L2 的 block 重用更多而獲益；Qwen2.5-7B 的 7:1 激進 GQA 壓縮了優化空間，相較 FA3 出現 2-5% 端到端回退。"
+  },
+  "open_source": "Yes (https://github.com/alibaba/vllm_xformers_prefetch)",
+  "evaluation_method": "Hardware Testbed",
+  "compute_memory_hw": "NVIDIA H20 (60MB L2, 96GB HBM, 4.0TB/s), Intel Xeon Platinum 8469C",
+  "gpu_count": "8x NVIDIA H20 (single-GPU and 2/4/8-GPU TP)",
+  "node_count": "1 node",
+  "modeling_approach": "Measurement only",
+  "modeling_granularity": "Kernel",
+  "phase_coverage": "Decode",
+  "reported_accuracy": "Not Reported (measured 2.15x attention-kernel speedup, 1.97x e2e throughput; L2 hit rate up to 82.66%)",
+  "workload_family": "Dense, Long-context",
+  "models_validated": "Llama-2-7B, Llama-3-8B, Qwen2.5-7B, Qwen2.5-14B",
+  "precision_coverage": "FP16/BF16",
+  "parallelism_coverage": "None, TP",
+  "batching_policy": "Continuous",
+  "kv_cache_treatment": "Tiered (DRAM/SSD)",
+  "validation_workloads": "Synthetic (input length 512; output tokens 512-8192; batch size 1-128)",
+  "tail_latency": "Mean only",
+  "downstream_use": "None",
+  "scope_assumptions": {
+    "en": "Decode-phase attention only, inside the vLLM XFormers backend (FP16); FlashAttention-3 kernel itself is not modified, only compared against. Benefit is proportional to KV-head count, so it favors GQA with more Q heads per KV block and degrades for aggressive GQA (Qwen2.5-7B 7:1 shows a 2-5% e2e regression vs FA3) and for MHA (Llama2-7B baseline L2 hit rate is near 0). Gains assume the next KV block fits in L2 and total KV fits in HBM; at batch 128 / 8K tokens, exceeding L2 capacity or HBM triggers vLLM recomputation and throughput degrades. Multi-GPU benefit decays as TP partitions attention heads (KV heads per GPU drop to 1/2, 1/4, 1/8). Prefetch size is a fixed 4096-byte bulk copy per block; only H20 (Hopper) is evaluated.",
+    "zh": "僅針對解碼階段的 attention，且在 vLLM XFormers backend（FP16）內；並未修改 FlashAttention-3 kernel 本身，只與之比較。效益與 KV head 數成正比，因此偏好「每個 KV block 服務更多 Q head」的 GQA，對激進 GQA（Qwen2.5-7B 7:1，相較 FA3 端到端回退 2-5%）與 MHA（Llama2-7B 基線 L2 命中率近乎 0）則退化。增益的前提是下一個 KV block 能放進 L2、且整體 KV 能放進 HBM；在 batch 128 / 8K token 時，一旦超出 L2 容量或 HBM 就會觸發 vLLM 重算而吞吐下降。多 GPU 下，TP 切分 attention head（每 GPU 的 KV head 降為 1/2、1/4、1/8）使效益遞減。預取大小為每個 block 固定 4096-byte 的 bulk copy；僅在 H20（Hopper）上評估。"
+  },
+  "source": {
+    "extracted_by": "paper-extract (l2_reuse study)",
+    "extracted_at": "2026-06-14",
+    "repo_cloned": "https://github.com/alibaba/vllm_xformers_prefetch",
+    "notes": "Inter-kernel/L2/cache reuse is the central contribution: cp.async.bulk.prefetch.L2.global stages the next KV block into L2 for high-speed reuse; verified in repo attention_kernels.cuh lines 281-287 (key) and 425-430 (value)."
+  }
+}
