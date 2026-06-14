@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deepdive #2 — Worth the Bytes? The Free Cache Reuse Hiding in LLM Inference | AI Infra Basics</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    /* ===== SERIES ACCENT: experiment-deepdive coral (shared across the series) ===== */
+    :root {
+      --dark: #16213e; --mid: #0f3460;
+      --phase: #ff6b6b;
+      --phase-rgb: 255,107,107;
+      --green: #2ecc71; --amber: #f5a623; --purple: #9b59b6; --cyan: #00d2d3;
+      --blue: #54a0ff; --code-bg: #1e1e2e; --text: #e0e0e0; --text-muted: #a0aec0;
+      --border: #2d3e5e; --surface: #1e2d4a; --card-bg: #1a2744;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html { overflow-x:clip; }
+    body { font-family:'Segoe UI',system-ui,-apple-system,sans-serif; background:var(--dark); color:var(--text); line-height:1.7; overflow-x:clip; }
+    nav { position:sticky; top:0; z-index:1000; background:rgba(22,33,62,0.95); backdrop-filter:blur(12px); border-bottom:1px solid rgba(var(--phase-rgb),0.25); padding:0 2rem; }
+    nav ul { display:flex; list-style:none; max-width:1200px; margin:0 auto; gap:0.25rem; overflow-x:auto; scrollbar-width:none; }
+    nav ul::-webkit-scrollbar { display:none; }
+    nav ul li a { display:block; padding:0.85rem 1rem; color:var(--text-muted); text-decoration:none; font-size:0.85rem; font-weight:500; white-space:nowrap; transition:color .2s,border-bottom .2s; border-bottom:2px solid transparent; }
+    nav ul li a:hover, nav ul li a.active { color:#fff; border-bottom:2px solid var(--phase); }
+    .lang-switch { margin-left:auto; display:flex; align-items:center; gap:6px; list-style:none; }
+    .lang-switch a { color:rgba(255,255,255,.7); text-decoration:none; padding:4px 12px; border-radius:14px; font-size:.78rem; border:1px solid rgba(255,255,255,.3); transition:all .2s; cursor:pointer; }
+    .lang-switch a:hover, .lang-switch a.active { color:#fff; background:rgba(255,255,255,.2); border-color:rgba(255,255,255,.5); }
+    .hero { background:linear-gradient(135deg,var(--dark) 0%,var(--mid) 40%,#1a1a3e 70%,var(--dark) 100%); padding:4rem 2rem 3rem; text-align:center; position:relative; overflow:hidden; }
+    .hero::before { content:''; position:absolute; top:-50%; left:-50%; width:200%; height:200%; background:radial-gradient(circle at 30% 50%,rgba(var(--phase-rgb),0.06) 0%,transparent 50%),radial-gradient(circle at 70% 50%,rgba(0,210,211,0.06) 0%,transparent 50%); animation:rotateBg 30s linear infinite; }
+    @keyframes rotateBg { to { transform:rotate(360deg); } }
+    .hero h1 { font-size:2.2rem; font-weight:800; position:relative; color:#fff; margin-bottom:0.5rem; }
+    .hero h1 span.accent { color:var(--phase); }
+    .hero .subtitle { font-size:1.02rem; color:var(--text-muted); position:relative; max-width:780px; margin:0 auto; }
+    .hero .badges { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; position:relative; margin-top:1.2rem; }
+    .hero .badge { display:inline-block; background:rgba(var(--phase-rgb),0.15); border:1px solid rgba(var(--phase-rgb),0.3); color:var(--phase); padding:0.3rem 0.9rem; border-radius:20px; font-size:0.8rem; font-weight:600; }
+    .series-badge { display:inline-block; padding:0.2rem 0.6rem; border-radius:4px; font-size:0.72rem; font-weight:700; letter-spacing:0.04em; margin-bottom:0.4rem; background:rgba(var(--phase-rgb),.15); color:var(--phase); border:1px solid rgba(var(--phase-rgb),.3); position:relative; }
+    .container { max-width:1100px; margin:0 auto; padding:2rem; }
+    .section { margin-bottom:3rem; }
+    .section-label { display:inline-block; background:rgba(var(--phase-rgb),0.12); color:var(--phase); font-size:0.75rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; padding:0.25rem 0.75rem; border-radius:4px; margin-bottom:0.75rem; }
+    h2 { font-size:1.9rem; font-weight:700; color:#fff; margin-bottom:1rem; }
+    h2.section-title { position:relative; display:inline-block; }
+    h2.section-title::after { content:''; position:absolute; bottom:-4px; left:0; width:100%; height:3px; background:linear-gradient(90deg,var(--phase),var(--cyan)); border-radius:2px; }
+    h3 { font-size:1.35rem; font-weight:600; margin:1.6rem 0 0.75rem; color:var(--blue); }
+    h4 { font-size:1.1rem; font-weight:600; margin-bottom:0.5rem; color:var(--cyan); }
+    p { margin-bottom:1rem; }
+    a { color:var(--cyan); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .card { background:var(--card-bg); border:1px solid var(--border); border-radius:12px; padding:1.75rem; margin-bottom:1.5rem; }
+    .card.highlight-blue { border-left:4px solid var(--blue); }
+    .card.highlight-green { border-left:4px solid var(--green); }
+    .card.highlight-amber { border-left:4px solid var(--amber); }
+    .card.highlight-purple { border-left:4px solid var(--purple); }
+    .card.highlight-cyan { border-left:4px solid var(--cyan); }
+    .card.highlight-coral { border-left:4px solid var(--phase); }
+    pre { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:1.25rem; overflow-x:auto; font-size:0.82rem; line-height:1.65; margin-bottom:1.5rem; font-family:'Consolas','Fira Code',monospace; }
+    code { font-family:'Consolas','Fira Code',monospace; font-size:0.85em; }
+    p code, li code, td code { background:rgba(0,210,211,0.1); color:var(--cyan); padding:0.15rem 0.4rem; border-radius:4px; }
+    .kw{color:#c678dd} .fn{color:#61afef} .cl{color:#e5c07b} .st{color:#98c379} .cm{color:#5c6370;font-style:italic} .op{color:#56b6c2} .nb{color:#e06c75} .nr{color:#d19a66}
+    table { width:100%; border-collapse:collapse; margin-bottom:1.5rem; font-size:0.85rem; }
+    th,td { padding:0.6rem 0.85rem; text-align:left; border-bottom:1px solid rgba(var(--phase-rgb),0.25); }
+    th { background:var(--surface); color:var(--phase); font-weight:600; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.05em; }
+    tr:hover { background:rgba(var(--phase-rgb),0.04); }
+    td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-bottom:1.5rem; }
+    .tw table { margin-bottom:0; min-width:560px; }
+    .callout { border-left:4px solid var(--phase); background:rgba(var(--phase-rgb),0.06); padding:1rem 1.25rem; border-radius:0 8px 8px 0; margin-bottom:1.5rem; }
+    .callout.warn { border-left-color:var(--amber); background:rgba(245,166,35,0.06); }
+    .callout.key { border-left-color:var(--green); background:rgba(46,204,113,0.06); }
+    .callout.critical { border-left-color:#e74c3c; background:rgba(231,76,60,0.06); }
+    .callout strong { color:var(--phase); }
+    .callout.key strong { color:var(--green); }
+    .callout.warn strong { color:var(--amber); }
+    .callout.critical strong { color:#e74c3c; }
+    .grid-2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:1.2rem; margin:1rem 0; }
+    .grid-3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; margin:1rem 0; }
+    ul, ol { margin:0 0 1rem 1.5rem; }
+    li { margin-bottom:0.35rem; }
+    footer { background:var(--dark); border-top:1px solid var(--border); padding:2rem; text-align:center; color:var(--text-muted); font-size:.85rem; margin-top:3rem; }
+    footer a { color:var(--cyan); }
+
+    /* ===== STAT STRIP (metric boxes) ===== */
+    .stat-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0.8rem; margin:1rem 0 1.5rem; }
+    .stat { background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:0.9rem 1rem; text-align:center; }
+    .stat .v { font-size:1.5rem; font-weight:800; color:var(--phase); font-variant-numeric:tabular-nums; line-height:1.1; }
+    .stat .v.green { color:var(--green); } .stat .v.amber { color:var(--amber); } .stat .v.cyan { color:var(--cyan); }
+    .stat .l { font-size:0.72rem; color:var(--text-muted); line-height:1.35; margin-top:0.25rem; }
+
+    /* ===== LADDER (memory hierarchy) ===== */
+    .ladder { display:flex; flex-direction:column; gap:0.5rem; margin:1.25rem 0 1.5rem; }
+    .rung { display:flex; align-items:center; gap:0.9rem; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:0.7rem 1rem; }
+    .rung .ico { flex:0 0 56px; height:44px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:0.82rem; color:#fff; }
+    .rung .meta { flex:1 1 auto; min-width:0; }
+    .rung .meta .t { font-weight:700; color:#fff; font-size:0.95rem; }
+    .rung .meta .d { font-size:0.78rem; color:var(--text-muted); }
+    .rung .sz { flex:0 0 auto; text-align:right; font-size:0.78rem; color:var(--cyan); font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .rung.hbm .ico { background:#e74c3c; } .rung.l2 .ico { background:var(--amber); color:#1a1030; }
+    .rung.smem .ico { background:var(--blue); } .rung.tc .ico { background:var(--green); color:#0b2a16; }
+
+    /* ===== HANDOFF DIAGRAM ===== */
+    .handoff { display:flex; align-items:stretch; gap:0; flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; margin:1.25rem 0 0.5rem; padding-bottom:0.5rem; }
+    .hk { flex:1 1 0; min-width:130px; border-radius:10px; padding:0.85rem 0.7rem; text-align:center; border:1px solid var(--border); background:var(--surface); }
+    .hk.prod { border-color:rgba(84,160,255,0.55); } .hk.cons { border-color:rgba(46,204,113,0.55); }
+    .hk.l2box { border-color:rgba(245,166,35,0.6); background:rgba(245,166,35,0.08); }
+    .hk .kt { font-weight:700; color:#fff; font-size:0.86rem; }
+    .hk .kd { font-size:0.7rem; color:var(--text-muted); margin-top:0.2rem; line-height:1.35; }
+    .harrow { flex:0 0 auto; width:60px; display:flex; align-items:center; justify-content:center; color:var(--phase); font-size:1.4rem; font-weight:700; }
+
+    /* ===== CSS BAR CHARTS ===== */
+    .bars { margin:1.1rem 0 1.4rem; }
+    .barrow { display:grid; grid-template-columns:160px 1fr 70px; align-items:center; gap:0.6rem; margin-bottom:0.5rem; }
+    .barrow .blab { font-size:0.78rem; color:var(--text-muted); text-align:right; }
+    .barrow .btrack { background:rgba(255,255,255,0.05); border-radius:5px; height:22px; overflow:hidden; }
+    .barrow .bfill { height:100%; border-radius:5px; background:linear-gradient(90deg,var(--phase),#ff9f7a); }
+    .barrow .bfill.green { background:linear-gradient(90deg,var(--green),#7fe6a6); }
+    .barrow .bfill.amber { background:linear-gradient(90deg,var(--amber),#ffd27a); }
+    .barrow .bfill.blue { background:linear-gradient(90deg,var(--blue),#9cc6ff); }
+    .barrow .bval { font-size:0.78rem; color:#fff; font-variant-numeric:tabular-nums; text-align:left; }
+    .chart-cap { font-size:0.76rem; color:var(--text-muted); margin:-0.6rem 0 1.4rem; }
+
+    /* ===== THERMOMETER (folklore vs measured) ===== */
+    .thermo { display:flex; flex-direction:column; gap:0.45rem; margin:1.1rem 0 0.6rem; }
+    .thermo .trow { display:grid; grid-template-columns:210px 1fr; align-items:center; gap:0.7rem; }
+    .thermo .tlab { font-size:0.8rem; color:var(--text-muted); text-align:right; }
+    .thermo .ttrack { position:relative; background:rgba(255,255,255,0.05); border-radius:5px; height:26px; }
+    .thermo .tfill { position:absolute; left:0; top:0; height:100%; border-radius:5px; display:flex; align-items:center; padding-left:8px; font-size:0.74rem; font-weight:700; color:#fff; white-space:nowrap; }
+
+    /* ===== MATH BLOCK ===== */
+    .math-block { background:rgba(30,30,46,.7); border:1px solid var(--border); border-radius:8px; padding:1rem 1.25rem; margin:1rem 0; overflow-x:auto; text-align:center; }
+
+    /* ===== TIMELINE / STEP NUMBERS ===== */
+    .flow { display:flex; gap:0; margin:1.4rem 0; overflow-x:auto; padding-bottom:8px; }
+    .flow .step { flex:1; min-width:150px; text-align:center; position:relative; padding:0 6px; }
+    .flow .step .c { width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto 8px; font-weight:700; color:#fff; background:var(--phase); }
+    .flow .step:nth-child(2) .c { background:var(--amber); color:#1a1030; }
+    .flow .step:nth-child(3) .c { background:var(--blue); }
+    .flow .step:nth-child(4) .c { background:var(--green); color:#0b2a16; }
+    .flow .step .lbl { font-weight:600; font-size:0.85rem; color:#fff; }
+    .flow .step .desc { font-size:0.74rem; color:var(--text-muted); margin-top:3px; }
+
+    @media(max-width:768px) {
+      .hero h1 { font-size:1.7rem; } .container { padding:1rem; } .card { padding:1.25rem; }
+      pre { font-size:.75rem; padding:1rem; } .grid-2,.grid-3 { grid-template-columns:1fr; }
+      .barrow { grid-template-columns:110px 1fr 56px; }
+      .thermo .trow { grid-template-columns:120px 1fr; }
+    }
+    @media(max-width:600px) {
+      .hero h1 { font-size:1.4rem; } .hero .subtitle { font-size:.9rem; }
+      nav ul { gap:0; } nav ul li a { padding:.7rem .6rem; font-size:.78rem; }
+      h2 { font-size:1.5rem; } h3 { font-size:1.15rem; }
+      table { font-size:.76rem; } th,td { padding:.45rem .55rem; }
+      .barrow { grid-template-columns:92px 1fr 50px; gap:0.4rem; }
+      .barrow .blab { font-size:0.68rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav><ul>
+  <li><a href="index.html">&larr; <span class="i18n" data-en="Deepdives" data-zh="實驗深潛">Deepdives</span></a></li>
+  <li><a href="#tldr"><span class="i18n" data-en="TL;DR" data-zh="重點">TL;DR</span></a></li>
+  <li><a href="#background"><span class="i18n" data-en="Background" data-zh="背景">Background</span></a></li>
+  <li><a href="#question"><span class="i18n" data-en="The Question" data-zh="研究問題">The Question</span></a></li>
+  <li><a href="#tools"><span class="i18n" data-en="The Tools" data-zh="量測工具">The Tools</span></a></li>
+  <li><a href="#experiments"><span class="i18n" data-en="Experiments" data-zh="實驗設計">Experiments</span></a></li>
+  <li><a href="#results"><span class="i18n" data-en="Results" data-zh="實驗結果">Results</span></a></li>
+  <li><a href="#meaning"><span class="i18n" data-en="What It Means" data-zh="研究意義">What It Means</span></a></li>
+  <li><a href="#repro"><span class="i18n" data-en="Scope" data-zh="範圍">Scope</span></a></li>
+  <li class="lang-switch">
+    <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+    <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+  </li>
+</ul></nav>
+
+<section class="hero">
+  <span class="series-badge"><span class="i18n" data-en="EXPERIMENT DEEPDIVE #2" data-zh="實驗深潛 #2">EXPERIMENT DEEPDIVE #2</span></span>
+  <h1><span class="i18n" data-en="Worth the Bytes?" data-zh="這些 Byte 值得嗎？">Worth the Bytes?</span><br><span class="accent"><span class="i18n" data-en="The Free Cache Reuse Hiding in LLM Inference" data-zh="—— 藏在 LLM 推理裡的「免費」快取重用">The Free Cache Reuse Hiding in LLM Inference</span></span></h1>
+  <p class="subtitle"><span class="i18n"
+    data-en="A widely repeated belief says that when a language model runs, the leftover data sitting in the GPU's on-chip cache between computation steps quietly saves several percent of every step's time. This study measures whether that belief is true on real datacenter GPUs. A first, careless measurement agreed — and then turned out to be wrong by a factor of seven to twenty-three. This page tells the whole story from the ground up, for a reader who has never opened a GPU."
+    data-zh="一個被廣為流傳的說法是：當語言模型運算時，計算步驟之間殘留在 GPU 晶片內快取裡的資料，會默默替每一步省下好幾個百分比的時間。本研究在真實資料中心 GPU 上量測這個說法是否成立。一次草率的初步量測「證實」了它 —— 但後來發現高估了七到二十三倍。本頁將從零開始講完整個故事，寫給從未接觸過 GPU 的讀者。">A widely repeated belief says that when a language model runs, the leftover data sitting in the GPU's on-chip cache between computation steps quietly saves several percent of every step's time. This study measures whether that belief is true on real datacenter GPUs. A first, careless measurement agreed — and then turned out to be wrong by a factor of seven to twenty-three. This page tells the whole story from the ground up, for a reader who has never opened a GPU.</span></p>
+  <div class="badges">
+    <span class="badge"><span class="i18n" data-en="A measurement study" data-zh="量測型研究">A measurement study</span></span>
+    <span class="badge"><span class="i18n" data-en="A100-80 &middot; H100 &middot; H200 (+L40S check)" data-zh="A100-80 &middot; H100 &middot; H200（+L40S 抽驗）">A100-80 &middot; H100 &middot; H200 (+L40S check)</span></span>
+    <span class="badge"><span class="i18n" data-en="Llama-3.1-8B &middot; vLLM" data-zh="Llama-3.1-8B &middot; vLLM">Llama-3.1-8B &middot; vLLM</span></span>
+    <span class="badge"><span class="i18n" data-en="Submitted to ASPLOS" data-zh="投稿 ASPLOS">Submitted to ASPLOS</span></span>
+  </div>
+</section>
+
+<div class="container">
+
+  <!-- ================= TL;DR ================= -->
+  <div class="section" id="tldr">
+    <span class="section-label"><span class="i18n" data-en="TL;DR" data-zh="重點摘要">TL;DR</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="The Whole Story in One Minute" data-zh="一分鐘看懂整個故事">The Whole Story in One Minute</span></h2>
+
+    <p><span class="i18n"
+      data-en="When a language model generates text, the chip performs the same long chain of small computations tens of thousands of times. Each computation writes its result somewhere, and the next one reads it back. The hardware has a small, fast on-chip memory — a cache — that briefly holds those results. The question this project asks is narrow but consequential: when the next computation finds its input still sitting in that cache, instead of having to fetch it from the slow main memory, how much wall-clock time does that actually save? Engineering folklore, and the first quick experiment we ran, both said &quot;a few percent.&quot; The careful answer is far smaller, and the interesting science is in why the quick experiment lied."
+      data-zh="當語言模型生成文字時，晶片會把同一條由許多小型計算組成的長鏈，重複執行數萬次。每個計算把結果寫到某處，下一個計算再把它讀回來。硬體上有一塊小而快的晶片內記憶體 —— 快取 —— 會短暫地保存這些結果。本研究問的問題很狹窄、卻很關鍵：當下一個計算發現它的輸入還留在快取裡、不必再從緩慢的主記憶體取回時，這究竟省下了多少實際時間？工程界的傳說、以及我們最初跑的快速實驗，都說「好幾個百分比」。嚴謹的答案小得多，而真正有趣的科學，在於為什麼那個快速實驗會說謊。">When a language model generates text, the chip performs the same long chain of small computations tens of thousands of times. Each computation writes its result somewhere, and the next one reads it back. The hardware has a small, fast on-chip memory — a cache — that briefly holds those results. The question this project asks is narrow but consequential: when the next computation finds its input still sitting in that cache, instead of having to fetch it from the slow main memory, how much wall-clock time does that actually save? Engineering folklore, and the first quick experiment we ran, both said "a few percent." The careful answer is far smaller, and the interesting science is in why the quick experiment lied.</span></p>
+
+    <div class="stat-strip">
+      <div class="stat"><div class="v">+4.7&ndash;5.2%</div><div class="l"><span class="i18n" data-en="what the naive first measurement claimed the reuse was worth" data-zh="草率初測「宣稱」這項重用值得的幅度">what the naive first measurement claimed the reuse was worth</span></div></div>
+      <div class="stat"><div class="v green">&lt;0.65%</div><div class="l"><span class="i18n" data-en="what it is actually worth, best case, once measured carefully" data-zh="嚴謹量測後，最樂觀情況下的真實價值">what it is actually worth, best case, once measured carefully</span></div></div>
+      <div class="stat"><div class="v amber">7&ndash;23&times;</div><div class="l"><span class="i18n" data-en="how badly the naive measurement overstated the truth" data-zh="草率量測高估真相的倍數">how badly the naive measurement overstated the truth</span></div></div>
+      <div class="stat"><div class="v cyan">73&ndash;246&times;</div><div class="l"><span class="i18n" data-en="how badly a standard profiler over-charges one kernel's memory traffic" data-zh="標準分析工具高估某類 kernel 記憶體流量的倍數">how badly a standard profiler over-charges one kernel's memory traffic</span></div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card highlight-green">
+        <h4><span class="i18n" data-en="1 &middot; The resource is real" data-zh="1 &middot; 這項資源是真的">1 &middot; The resource is real</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="The leftover data really does survive in the cache between steps when nothing disturbs it — 86&ndash;99.7% of a 25 MB block is still there when the next computation arrives. We also found a hardware control, never documented for this use, that can deliberately protect that data even under heavy interference."
+          data-zh="當沒有任何干擾時，殘留的資料確實會在步驟之間存活於快取中 —— 一塊 25 MB 的資料，當下一個計算到達時仍有 86&ndash;99.7% 留著。我們還找到一個從未被記載作此用途的硬體控制機制，能在強烈干擾下刻意保護這些資料。">The leftover data really does survive in the cache between steps when nothing disturbs it — 86&ndash;99.7% of a 25 MB block is still there when the next computation arrives. We also found a hardware control, never documented for this use, that can deliberately protect that data even under heavy interference.</span></p>
+      </div>
+      <div class="card highlight-amber">
+        <h4><span class="i18n" data-en="2 &middot; But it is worth almost nothing" data-zh="2 &middot; 但它幾乎不值錢">2 &middot; But it is worth almost nothing</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="Bytes surviving in cache is not the same as time saved. We measured how each computation actually responds to memory speed, and converted surviving bytes into saved milliseconds. The most this reuse could ever recover, on the GPUs we tested, is under two-thirds of one percent of a step — and under realistic load, essentially zero."
+          data-zh="資料留在快取裡，不等於省下時間。我們量測每個計算對記憶體速度的真實反應，把存活的 byte 換算成省下的毫秒。在我們測試的 GPU 上，這項重用最多能挽回的，不到一步的千分之 6.5 —— 而在現實負載下，基本上是零。">Bytes surviving in cache is not the same as time saved. We measured how each computation actually responds to memory speed, and converted surviving bytes into saved milliseconds. The most this reuse could ever recover, on the GPUs we tested, is under two-thirds of one percent of a step — and under realistic load, essentially zero.</span></p>
+      </div>
+      <div class="card highlight-coral">
+        <h4><span class="i18n" data-en="3 &middot; The folklore comes from broken instruments" data-zh="3 &middot; 傳說源自有缺陷的量測工具">3 &middot; The folklore comes from broken instruments</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="Three standard ways of measuring this effect each report a big number, and each is measuring the wrong thing. The errors all push in the same direction — toward over-valuing the reuse. Diagnosing exactly how each instrument fools its user is the paper's most reusable contribution."
+          data-zh="三種量測此效應的標準做法各自都報出一個大數字，而它們各自都量錯了東西。這些誤差全都偏向同一個方向 —— 高估這項重用。精準診斷每個工具如何欺騙使用者，是本論文最具再利用價值的貢獻。">Three standard ways of measuring this effect each report a big number, and each is measuring the wrong thing. The errors all push in the same direction — toward over-valuing the reuse. Diagnosing exactly how each instrument fools its user is the paper's most reusable contribution.</span></p>
+      </div>
+      <div class="card highlight-blue">
+        <h4><span class="i18n" data-en="4 &middot; The discipline is the point" data-zh="4 &middot; 研究紀律本身就是重點">4 &middot; The discipline is the point</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="Before running the decisive experiment we wrote down, in advance, four pass/fail conditions our own measurement had to meet to be trusted. It failed them. We report a bounded, honest result instead of a confident wrong one — and the self-imposed referee that caught our own flawed setup is itself a tool others can reuse."
+          data-zh="在跑決定性實驗之前，我們預先寫下了四項通過/失敗條件 —— 我們自己的量測必須滿足它們才值得信任。它沒通過。於是我們報告一個有界、誠實的結果，而非一個自信卻錯誤的結論 —— 而這個揪出我們自己有瑕疵設置的「自設裁判」，本身就是別人能再利用的工具。">Before running the decisive experiment we wrote down, in advance, four pass/fail conditions our own measurement had to meet to be trusted. It failed them. We report a bounded, honest result instead of a confident wrong one — and the self-imposed referee that caught our own flawed setup is itself a tool others can reuse.</span></p>
+      </div>
+    </div>
+
+    <div class="callout key">
+      <strong><span class="i18n" data-en="Why this is good science, not a negative result:" data-zh="為什麼這是好科學、而非失敗結果：">Why this is good science, not a negative result:</span></strong>
+      <span class="i18n"
+        data-en="A community had been making engineering decisions — whether to build special hardware controls, whether to fuse computations together, how to trust profiler numbers — on the strength of an unmeasured belief. This study replaces the belief with a measured upper bound, and shows that three instruments people routinely trust are biased under these conditions. Knowing the ceiling is low is as valuable as a speedup: it tells engineers where not to spend effort."
+        data-zh="一個社群一直在根據一個未經量測的信念，做出工程決策 —— 要不要打造特殊硬體控制、要不要把計算融合在一起、profiler 的數字能不能信。本研究用一個量測出來的上限取代了這個信念，並指出三個人們慣常信任的工具在這個情境下是有偏誤的。知道天花板很低，和一個加速成果一樣有價值：它告訴工程師「不要」把力氣花在哪裡。">A community had been making engineering decisions — whether to build special hardware controls, whether to fuse computations together, how to trust profiler numbers — on the strength of an unmeasured belief. This study replaces the belief with a measured upper bound, and shows that three instruments people routinely trust are biased under these conditions. Knowing the ceiling is low is as valuable as a speedup: it tells engineers where not to spend effort.</span>
+    </div>
+  </div>
+
+  <!-- ================= BACKGROUND ================= -->
+  <div class="section" id="background">
+    <span class="section-label"><span class="i18n" data-en="Background — start here" data-zh="背景 —— 從這裡開始">Background — start here</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="What Actually Happens When a Model Writes a Word" data-zh="模型寫出一個字時，到底發生了什麼">What Actually Happens When a Model Writes a Word</span></h2>
+
+    <p><span class="i18n"
+      data-en="This section assumes no background. To understand the question the project asks, four ideas are enough: what a GPU is, what a &quot;kernel&quot; is, why memory comes in fast-small and slow-large flavors, and what an &quot;activation handoff&quot; is. Everything afterward builds on these four."
+      data-zh="本節不預設任何背景。要理解本研究問的問題，四個概念就夠了：GPU 是什麼、「kernel」是什麼、為什麼記憶體分成「快而小」與「慢而大」兩種、以及「activation handoff（激活值交接）」是什麼。後面所有內容都建立在這四點之上。">This section assumes no background. To understand the question the project asks, four ideas are enough: what a GPU is, what a "kernel" is, why memory comes in fast-small and slow-large flavors, and what an "activation handoff" is. Everything afterward builds on these four.</span></p>
+
+    <h3><span class="i18n" data-en="1.1 A GPU is a factory floor of thousands of tiny workers" data-zh="1.1 GPU 是一座有數千名小工人的工廠">1.1 A GPU is a factory floor of thousands of tiny workers</span></h3>
+    <p><span class="i18n"
+      data-en="A large language model is, mathematically, a very long sequence of multiplications of big grids of numbers (matrices). A graphics processing unit (GPU) is a chip built to do enormous numbers of such multiplications at once: think of a factory floor with thousands of small workers, each doing one tiny piece of arithmetic in parallel. This is why GPUs, not ordinary processors, run modern AI. The specific chips in this study — NVIDIA's A100, H100, and H200 — are the datacenter GPUs that power most commercial AI services."
+      data-zh="一個大型語言模型，在數學上，是一長串對大型數字方格（矩陣）的乘法。圖形處理器(GPU)是一種專門用來同時執行海量這類乘法的晶片：可以把它想成一座有數千名小工人的工廠，每個工人平行地做一小塊算術。這就是為什麼跑現代 AI 的是 GPU、而非一般處理器。本研究用的特定晶片 —— NVIDIA 的 A100、H100、H200 —— 正是支撐多數商用 AI 服務的資料中心 GPU。">A large language model is, mathematically, a very long sequence of multiplications of big grids of numbers (matrices). A graphics processing unit (GPU) is a chip built to do enormous numbers of such multiplications at once: think of a factory floor with thousands of small workers, each doing one tiny piece of arithmetic in parallel. This is why GPUs, not ordinary processors, run modern AI. The specific chips in this study — NVIDIA's A100, H100, and H200 — are the datacenter GPUs that power most commercial AI services.</span></p>
+
+    <h3><span class="i18n" data-en="1.2 A kernel is one step of the recipe" data-zh="1.2 一個 kernel 是食譜中的一個步驟">1.2 A kernel is one step of the recipe</span></h3>
+    <p><span class="i18n"
+      data-en="The factory does not do everything at once. It runs one operation at a time, and each operation is called a kernel — a single program that the whole floor of workers executes together before moving to the next one. Producing one layer of the model means running a fixed recipe of kernels in order: combine the input, compare every word with every other word (this step is called attention), reshape, normalize, and so on. The model used here, Llama-3.1-8B, has 32 such layers, and one pass through all of them produces the next word."
+      data-zh="工廠不會一次做完所有事。它一次只執行一個運算，每個運算稱為一個 kernel —— 一支讓整個工廠的工人一起執行、做完才換下一個的程式。產出模型的一層，就是依序執行一份固定的 kernel 食譜：結合輸入、把每個字和其他每個字互相比較（這一步稱為 attention，注意力）、重新排列、正規化，以此類推。這裡用的模型 Llama-3.1-8B 有 32 個這樣的層，完整走過全部一遍，就產出下一個字。">The factory does not do everything at once. It runs one operation at a time, and each operation is called a kernel — a single program that the whole floor of workers executes together before moving to the next one. Producing one layer of the model means running a fixed recipe of kernels in order: combine the input, compare every word with every other word (this step is called attention), reshape, normalize, and so on. The model used here, Llama-3.1-8B, has 32 such layers, and one pass through all of them produces the next word.</span></p>
+    <div class="callout">
+      <strong><span class="i18n" data-en="Key fact to carry forward:" data-zh="請記住這個關鍵事實：">Key fact to carry forward:</span></strong>
+      <span class="i18n"
+        data-en="kernels run one after another, in a strict line. Kernel B cannot start until kernel A has finished and written down its result. Kernel B's input is exactly kernel A's output. That moment — A finishes, B picks up what A wrote — is the &quot;handoff&quot; this whole project is about."
+        data-zh="kernel 是一個接一個、嚴格排成一列執行的。Kernel B 必須等 kernel A 完成並寫下結果後才能開始。Kernel B 的輸入，恰好就是 kernel A 的輸出。那一刻 —— A 結束、B 接手 A 剛寫下的東西 —— 就是整個研究所談的「交接(handoff)」。">kernels run one after another, in a strict line. Kernel B cannot start until kernel A has finished and written down its result. Kernel B's input is exactly kernel A's output. That moment — A finishes, B picks up what A wrote — is the "handoff" this whole project is about.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="1.3 Two kinds of memory: the warehouse and the countertop" data-zh="1.3 兩種記憶體：倉庫與工作檯">1.3 Two kinds of memory: the warehouse and the countertop</span></h3>
+    <p><span class="i18n"
+      data-en="A worker who needs data has two places to get it. The first is main memory (called HBM, high-bandwidth memory): huge — tens of gigabytes, enough to hold the entire model — but comparatively slow and far away. Think of it as a warehouse across the yard. The second is a small on-chip cache (called L2): only tens of megabytes, roughly a thousand times smaller, but right next to the workers and several times faster. (&quot;Faster&quot; here means two things at once: data starts arriving sooner — lower latency, or waiting time — and more of it arrives each second — higher bandwidth, or flow rate.) Think of it as the countertop in the workshop. Fetching from the warehouse costs real time; finding the needed data already on the countertop costs almost none."
+      data-zh="需要資料的工人有兩個地方可拿。第一個是主記憶體（稱為 HBM，高頻寬記憶體）：非常大 —— 數十 GB，足以裝下整個模型 —— 但相對緩慢且距離遠。把它想成院子另一頭的倉庫。第二個是一小塊晶片內快取（稱為 L2）：只有數十 MB，大約小一千倍，但就在工人旁邊、快上好幾倍。（這裡的「快」同時有兩個意思：資料更早開始抵達 —— 即延遲（latency，等待時間）較低；以及每秒抵達更多 —— 即頻寬（bandwidth，流量速率）較高。）把它想成工作坊裡的工作檯。從倉庫取貨要花真實的時間；發現需要的資料已經在工作檯上，則幾乎不花時間。">A worker who needs data has two places to get it. The first is main memory (called HBM, high-bandwidth memory): huge — tens of gigabytes, enough to hold the entire model — but comparatively slow and far away. Think of it as a warehouse across the yard. The second is a small on-chip cache (called L2): only tens of megabytes, roughly a thousand times smaller, but right next to the workers and several times faster. (&quot;Faster&quot; here means two things at once: data starts arriving sooner — lower latency, or waiting time — and more of it arrives each second — higher bandwidth, or flow rate.) Think of it as the countertop in the workshop. Fetching from the warehouse costs real time; finding the needed data already on the countertop costs almost none.</span></p>
+
+    <div class="ladder">
+      <div class="rung hbm">
+        <div class="ico">HBM</div>
+        <div class="meta"><div class="t"><span class="i18n" data-en="Main memory — the warehouse" data-zh="主記憶體 —— 倉庫">Main memory — the warehouse</span></div><div class="d"><span class="i18n" data-en="Holds the whole model and all stored context. Large but slow; every byte read here costs the full waiting time (latency)." data-zh="裝下整個模型與所有儲存的上下文。大但慢；在這裡讀的每個 byte 都付出全額等待時間（延遲）。">Holds the whole model and all stored context. Large but slow; every byte read here costs the full waiting time (latency).</span></div></div>
+        <div class="sz">80&ndash;141 GB</div>
+      </div>
+      <div class="rung l2">
+        <div class="ico">L2</div>
+        <div class="meta"><div class="t"><span class="i18n" data-en="On-chip cache — the countertop (the star of this study)" data-zh="晶片內快取 —— 工作檯（本研究的主角）">On-chip cache — the countertop (the star of this study)</span></div><div class="d"><span class="i18n" data-en="Shared by all workers, several times faster than HBM. Anything written by one kernel briefly lingers here, available to the next kernel for free." data-zh="所有工人共用，比 HBM 快上數倍。任何 kernel 寫下的東西都會短暫停留於此，免費供下一個 kernel 取用。">Shared by all workers, several times faster than HBM. Anything written by one kernel briefly lingers here, available to the next kernel for free.</span></div></div>
+        <div class="sz">~40&ndash;60 MB</div>
+      </div>
+      <div class="rung smem">
+        <div class="ico">SM</div>
+        <div class="meta"><div class="t"><span class="i18n" data-en="The workers' own scratchpads" data-zh="工人自己的便條紙">The workers' own scratchpads</span></div><div class="d"><span class="i18n" data-en="Tiny per-worker memory and registers, fastest of all, but only big enough for the piece being worked on right now." data-zh="每個工人極小的記憶體與暫存器，全場最快，但只裝得下當下正在處理的那一小片。">Tiny per-worker memory and registers, fastest of all, but only big enough for the piece being worked on right now.</span></div></div>
+        <div class="sz">~256 KB</div>
+      </div>
+      <div class="rung tc">
+        <div class="ico">TC</div>
+        <div class="meta"><div class="t"><span class="i18n" data-en="Tensor Cores — where the arithmetic happens" data-zh="Tensor Core —— 算術真正發生的地方">Tensor Cores — where the arithmetic happens</span></div><div class="d"><span class="i18n" data-en="Specialized multiply units. They are starved or fed depending on how fast the levels above can supply data." data-zh="專門的乘法單元。它們是餓著還是吃飽，取決於上面各層供應資料的速度。">Specialized multiply units. They are starved or fed depending on how fast the levels above can supply data.</span></div></div>
+        <div class="sz">&mdash;</div>
+      </div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="The memory ladder every byte must climb. The L2 countertop is small but fast; the HBM warehouse is large but slow. The question is how often the next kernel finds its input still on the countertop." data-zh="每個 byte 都必須爬的記憶體階梯。L2 工作檯小而快；HBM 倉庫大而慢。問題在於下一個 kernel 有多常發現它的輸入還在工作檯上。">The memory ladder every byte must climb. The L2 countertop is small but fast; the HBM warehouse is large but slow. The question is how often the next kernel finds its input still on the countertop.</span></p>
+
+    <h3><span class="i18n" data-en="1.4 The activation handoff — the thing we measure" data-zh="1.4 激活值交接 —— 我們要量測的東西">1.4 The activation handoff — the thing we measure</span></h3>
+    <p><span class="i18n"
+      data-en="The intermediate results that kernels pass to each other are called activations. When kernel A finishes, it writes its activation out toward the warehouse — but on the way, a copy passes through and lingers on the countertop (the L2 cache). Two facts of how this cache works create the entire opportunity. First, writing puts data on the countertop and leaves it there until space runs out. Second, nothing wipes the countertop between kernels. So if kernel B launches soon enough, it may find A's freshly written activation still on the countertop and read it for almost free, skipping the slow warehouse trip entirely. That lucky, unplanned reuse is what this project calls the incidental handoff — and the question is simply: how much time does it save?"
+      data-zh="kernel 之間互相傳遞的中間結果稱為 activation（激活值）。當 kernel A 完成時，它把自己的 activation 往倉庫方向寫出 —— 但途中，有一份副本會經過工作檯（L2 快取）並停留在上面。這個快取運作方式的兩個事實，造就了整個機會。第一，寫入會把資料放上工作檯，並一直留著直到空間用盡。第二，kernel 之間沒有任何東西會清空工作檯。所以如果 kernel B 夠快啟動，它可能會發現 A 剛寫下的 activation 還在工作檯上，幾乎免費地讀取它，完全省去那趟緩慢的倉庫之旅。這種幸運、未經規劃的重用，就是本研究所稱的「附帶交接(incidental handoff)」 —— 而問題很單純：它省下多少時間？">The intermediate results that kernels pass to each other are called activations. When kernel A finishes, it writes its activation out toward the warehouse — but on the way, a copy passes through and lingers on the countertop (the L2 cache). Two facts of how this cache works create the entire opportunity. First, writing puts data on the countertop and leaves it there until space runs out. Second, nothing wipes the countertop between kernels. So if kernel B launches soon enough, it may find A's freshly written activation still on the countertop and read it for almost free, skipping the slow warehouse trip entirely. That lucky, unplanned reuse is what this project calls the incidental handoff — and the question is simply: how much time does it save?</span></p>
+
+    <div class="handoff">
+      <div class="hk prod"><div class="kt"><span class="i18n" data-en="Kernel A (producer)" data-zh="Kernel A（生產者）">Kernel A (producer)</span></div><div class="kd"><span class="i18n" data-en="writes a 25 MB activation block" data-zh="寫出一塊 25 MB 的 activation">writes a 25 MB activation block</span></div></div>
+      <div class="harrow">&rarr;</div>
+      <div class="hk l2box"><div class="kt"><span class="i18n" data-en="L2 cache (countertop)" data-zh="L2 快取（工作檯）">L2 cache (countertop)</span></div><div class="kd"><span class="i18n" data-en="the block lingers here, dirty, until space runs out" data-zh="這塊資料以「未寫回」狀態停在這裡，直到空間用盡">the block lingers here, dirty, until space runs out</span></div></div>
+      <div class="harrow">&rarr;</div>
+      <div class="hk cons"><div class="kt"><span class="i18n" data-en="Kernel B (consumer)" data-zh="Kernel B（消費者）">Kernel B (consumer)</span></div><div class="kd"><span class="i18n" data-en="reads it back — from countertop (fast) or warehouse (slow)?" data-zh="把它讀回來 —— 從工作檯（快）還是倉庫（慢）?">reads it back — from countertop (fast) or warehouse (slow)?</span></div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="The incidental handoff. The whole study is a careful accounting of how often B reads from the fast countertop instead of the slow warehouse, and what that is worth in time." data-zh="附帶交接。整個研究就是仔細核算 B 有多常從快速的工作檯、而非緩慢的倉庫讀取，以及這在時間上值多少。">The incidental handoff. The whole study is a careful accounting of how often B reads from the fast countertop instead of the slow warehouse, and what that is worth in time.</span></p>
+
+    <div class="callout warn">
+      <strong><span class="i18n" data-en="One more term to know: &quot;dirty.&quot;" data-zh="還有一個要認識的詞：「dirty」（髒，意即尚未寫回倉庫）。">One more term to know: "dirty."</span></strong>
+      <span class="i18n"
+        data-en="A freshly written block on the countertop is called dirty — it has been written but not yet permanently saved to the warehouse. This matters because protecting and reusing dirty data is a corner of the hardware that is officially undocumented. Whether the cache even keeps dirty data available across the handoff, and whether it can be deliberately protected, had simply never been measured before this project."
+        data-zh="工作檯上剛寫下的資料稱為 dirty —— 它已被寫入、但還沒永久存回倉庫。這點很重要，因為「保護並重用 dirty 資料」是硬體中官方未記載的一塊角落。快取究竟會不會在交接過程中持續保留 dirty 資料、以及它能不能被刻意保護，在本研究之前根本沒人量測過。">A freshly written block on the countertop is called dirty — it has been written but not yet permanently saved to the warehouse. This matters because protecting and reusing dirty data is a corner of the hardware that is officially undocumented. Whether the cache even keeps dirty data available across the handoff, and whether it can be deliberately protected, had simply never been measured before this project.</span>
+    </div>
+  </div>
+
+  <!-- ================= THE QUESTION ================= -->
+  <div class="section" id="question">
+    <span class="section-label"><span class="i18n" data-en="Motivation" data-zh="研究動機">Motivation</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="Why Anyone Should Care — and the Trap We Fell Into" data-zh="為什麼值得在意 —— 以及我們掉進的陷阱">Why Anyone Should Care — and the Trap We Fell Into</span></h2>
+
+    <p><span class="i18n"
+      data-en="Running large models is one of the most expensive activities in computing today; a fraction of a percent of every inference step, multiplied across billions of steps a day in a datacenter, is real money and real energy. So a belief that an effect is &quot;worth a few percent&quot; is not idle — it directs where engineers spend their effort. This section explains what the belief was, why it mattered, and how the most obvious way of checking it leads straight into a trap."
+      data-zh="跑大型模型是當今運算中最昂貴的活動之一；每一步推理省下千分之幾，乘上資料中心一天數十億步，就是真金白銀與真實能耗。所以「某效應值得好幾個百分比」這種信念並非無關緊要 —— 它會引導工程師把力氣花在哪裡。本節說明這個信念是什麼、為什麼重要、以及最直覺的查證方式如何直接通往一個陷阱。">Running large models is one of the most expensive activities in computing today; a fraction of a percent of every inference step, multiplied across billions of steps a day in a datacenter, is real money and real energy. So a belief that an effect is "worth a few percent" is not idle — it directs where engineers spend their effort. This section explains what the belief was, why it mattered, and how the most obvious way of checking it leads straight into a trap.</span></p>
+
+    <h3><span class="i18n" data-en="2.1 The folklore" data-zh="2.1 工程界的傳說">2.1 The folklore</span></h3>
+    <p><span class="i18n"
+      data-en="A whole family of engineering efforts is justified, in part, by the cost of the warehouse round trip — the slow write-out-and-read-back of activations between kernels. Some teams fuse kernels together so the handoff never has to go to memory at all. Others build elaborate machinery to pin or pre-load data into the cache. A recent simulator-based study even reported a 15.9% gain from managing this very cache traffic. Underneath all of it sits an unstated assumption: that the incidental handoff is worth a meaningful chunk of time, and therefore worth protecting, scheduling around, or engineering away."
+      data-zh="一整個家族的工程努力，有一部分是用「倉庫來回的成本」來證成其價值的 —— 也就是 activation 在 kernel 之間緩慢地寫出再讀回。有些團隊把 kernel 融合在一起，讓交接根本不必走到記憶體。有些則打造精巧的機制，把資料釘住或預先載入快取。最近一篇基於模擬器的研究甚至報告，管理這條快取流量可帶來 15.9% 的增益。所有這些底下都坐著一個未明說的假設：附帶交接值得相當一塊時間，因此值得去保護、去排程、或設法消除。">A whole family of engineering efforts is justified, in part, by the cost of the warehouse round trip — the slow write-out-and-read-back of activations between kernels. Some teams fuse kernels together so the handoff never has to go to memory at all. Others build elaborate machinery to pin or pre-load data into the cache. A recent simulator-based study even reported a 15.9% gain from managing this very cache traffic. Underneath all of it sits an unstated assumption: that the incidental handoff is worth a meaningful chunk of time, and therefore worth protecting, scheduling around, or engineering away.</span></p>
+
+    <h3><span class="i18n" data-en="2.2 The obvious experiment — and why it lies" data-zh="2.2 那個直覺的實驗 —— 以及它為何說謊">2.2 The obvious experiment — and why it lies</span></h3>
+    <p><span class="i18n"
+      data-en="The natural way to measure the handoff's value seems easy. Between kernel A and kernel B, insert a small extra kernel that deliberately wipes A's data off the countertop, forcing B to fetch from the slow warehouse. Then time the difference. If the handoff was worth a lot, destroying it should make the step noticeably slower. We ran exactly this experiment on a live system: destroying the handoff cost +4.7% of step time on the H100 GPU and +5.2% on the H200. Read at face value, the folklore looked confirmed."
+      data-zh="量測交接價值最自然的方法看起來很簡單。在 kernel A 與 kernel B 之間，插入一個小小的額外 kernel，刻意把 A 的資料從工作檯上抹掉，迫使 B 從緩慢的倉庫取回。然後計時兩者的差異。如果交接價值很高，摧毀它應該會讓這一步明顯變慢。我們在實際系統上跑了這個實驗：摧毀交接在 H100 上花費 +4.7% 的步驟時間、在 H200 上 +5.2%。照字面讀，傳說看似被證實了。">The natural way to measure the handoff's value seems easy. Between kernel A and kernel B, insert a small extra kernel that deliberately wipes A's data off the countertop, forcing B to fetch from the slow warehouse. Then time the difference. If the handoff was worth a lot, destroying it should make the step noticeably slower. We ran exactly this experiment on a live system: destroying the handoff cost +4.7% of step time on the H100 GPU and +5.2% on the H200. Read at face value, the folklore looked confirmed.</span></p>
+    <div class="callout critical">
+      <strong><span class="i18n" data-en="The trap:" data-zh="陷阱所在：">The trap:</span></strong>
+      <span class="i18n"
+        data-en="that +4.7% is almost entirely an illusion created by the measuring device. The extra wiping kernel takes time to run itself, and forcing the warehouse save-out adds traffic the untouched system never paid — both get wrongly charged to &quot;the value of the handoff.&quot; Once those two artifacts are accounted for, the real effect shrinks to within the measurement noise — far below the headline figure. The number was an overstatement of 7&ndash;23&times;. Most of this paper is the careful work of separating the real resource from the artifacts of the instruments used to measure it."
+        data-zh="那個 +4.7% 幾乎全是量測裝置製造出來的假象。那個額外的抹除 kernel 自己執行就要花時間，而強迫倉庫寫回也增加了原系統從未付出的流量 —— 這兩者都被錯誤地記到「交接的價值」帳上。一旦把這兩個假影扣掉，真實效應就縮小到量測雜訊的範圍以內 —— 遠低於那個頭條數字。那個數字高估了 7&ndash;23 倍。本論文大部分內容，就是把真實資源，從用來量測它的工具所產生的假象中，仔細分離出來的工作。">that +4.7% is almost entirely an illusion created by the measuring device. The extra wiping kernel takes time to run itself, and forcing the warehouse save-out adds traffic the untouched system never paid — both get wrongly charged to "the value of the handoff." Once those two artifacts are accounted for, the real effect shrinks to within the measurement noise — far below the headline figure. The number was an overstatement of 7&ndash;23&times;. Most of this paper is the careful work of separating the real resource from the artifacts of the instruments used to measure it.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="2.3 There was a ceiling all along — basic physics" data-zh="2.3 其實一開始就有天花板 —— 基本物理">2.3 There was a ceiling all along — basic physics</span></h3>
+    <p><span class="i18n"
+      data-en="Even before measuring anything, a back-of-envelope argument caps how much the handoff could ever be worth. The countertop is only a few times faster than the warehouse — not a thousand times. So replacing a warehouse read with a countertop read can save, per byte, only the difference between those two speeds: roughly a factor of one-and-a-half to two-and-a-half. And the kernels that dominate the step's time are limited by arithmetic, not by memory speed at all, so for them the saving is near zero regardless. This is why the project was never framed as a big-speedup paper. It was framed, from the start, as an honest accounting: when does this resource exist, when does it turn into real time, and when can nothing recover it?"
+      data-zh="甚至在量測任何東西之前，一個信封背面的估算就替交接的最大可能價值設了上限。工作檯只比倉庫快幾倍 —— 不是一千倍。所以用一次工作檯讀取取代一次倉庫讀取，每個 byte 最多只能省下這兩種速度之間的差距：大約一點五到二點五倍。而且主導步驟時間的那些 kernel 受限於算術、而非記憶體速度，所以對它們而言，無論如何省下的都接近零。這就是為什麼本研究從一開始就不被定位成一篇「大幅加速」的論文。它從頭就被定位成一份誠實的核算：這項資源何時存在、何時轉化為真實時間、何時誰都無法挽回它？">Even before measuring anything, a back-of-envelope argument caps how much the handoff could ever be worth. The countertop is only a few times faster than the warehouse — not a thousand times. So replacing a warehouse read with a countertop read can save, per byte, only the difference between those two speeds: roughly a factor of one-and-a-half to two-and-a-half. And the kernels that dominate the step's time are limited by arithmetic, not by memory speed at all, so for them the saving is near zero regardless. This is why the project was never framed as a big-speedup paper. It was framed, from the start, as an honest accounting: when does this resource exist, when does it turn into real time, and when can nothing recover it?</span></p>
+
+    <h3><span class="i18n" data-en="2.4 Where this sits among prior work" data-zh="2.4 本研究在既有工作中的位置">2.4 Where this sits among prior work</span></h3>
+    <p><span class="i18n"
+      data-en="Five lines of prior research surround this question without answering it directly, and naming them shows precisely what gap remains."
+      data-zh="有五條既有的研究路線環繞著這個問題，卻沒有直接回答它；點名它們，正好能看出剩下的缺口在哪裡。">Five lines of prior research surround this question without answering it directly, and naming them shows precisely what gap remains.</span></p>
+    <div class="tw"><table>
+      <tr>
+        <th><span class="i18n" data-en="Prior line of work" data-zh="既有研究路線">Prior line of work</span></th>
+        <th><span class="i18n" data-en="What it did" data-zh="它做了什麼">What it did</span></th>
+        <th><span class="i18n" data-en="What it left open" data-zh="它留下的空缺">What it left open</span></th>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Kernel fusion / megakernels" data-zh="Kernel 融合 / 巨型 kernel">Kernel fusion / megakernels</span></td>
+        <td><span class="i18n" data-en="Merges kernels so the handoff never goes to memory." data-zh="把 kernel 合併，讓交接根本不走記憶體。">Merges kernels so the handoff never goes to memory.</span></td>
+        <td><span class="i18n" data-en="Never measured what the handoff was worth before removing it." data-zh="在移除交接之前，從未量測它原本值多少。">Never measured what the handoff was worth before removing it.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Cache pinning / pre-loading" data-zh="快取釘選 / 預先載入">Cache pinning / pre-loading</span></td>
+        <td><span class="i18n" data-en="Pins read-only data (weights, tables) into the cache." data-zh="把唯讀資料（權重、查表）釘進快取。">Pins read-only data (weights, tables) into the cache.</span></td>
+        <td><span class="i18n" data-en="Only handles read-only data — never the freshly written, dirty handoff." data-zh="只處理唯讀資料 —— 從未處理剛寫下的 dirty 交接。">Only handles read-only data — never the freshly written, dirty handoff.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Overlap engineering" data-zh="重疊執行工程">Overlap engineering</span></td>
+        <td><span class="i18n" data-en="Practitioners overlap producer and consumer to hide latency." data-zh="實務上讓生產者與消費者重疊執行以隱藏延遲。">Practitioners overlap producer and consumer to hide latency.</span></td>
+        <td><span class="i18n" data-en="No one attributed the gain specifically to activations lingering nearby in the cache." data-zh="無人把增益明確歸因於 activation 留在快取裡的鄰近性。">No one attributed the gain specifically to activations lingering nearby in the cache.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Simulator cache-locality studies" data-zh="模擬器快取局部性研究">Simulator cache-locality studies</span></td>
+        <td><span class="i18n" data-en="Report large gains from managing inter-kernel cache traffic." data-zh="報告管理 kernel 間快取流量可帶來大幅增益。">Report large gains from managing inter-kernel cache traffic.</span></td>
+        <td><span class="i18n" data-en="Done in simulation, not on real hardware." data-zh="在模擬中完成，並非在真實硬體上。">Done in simulation, not on real hardware.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Analytical traffic models" data-zh="解析式流量模型">Analytical traffic models</span></td>
+        <td><span class="i18n" data-en="Build memory-traffic models from per-kernel counts." data-zh="用每個 kernel 的計數建立記憶體流量模型。">Build memory-traffic models from per-kernel counts.</span></td>
+        <td><span class="i18n" data-en="Structurally cannot represent state that persists across kernels." data-zh="結構上無法表達跨 kernel 持續存在的狀態。">Structurally cannot represent state that persists across kernels.</span></td>
+      </tr>
+    </table></div>
+    <p><span class="i18n"
+      data-en="As of 2026, no prior work simultaneously satisfies all five of: a real chip, an actual LLM inference workload, the official hardware cache controls, the transient dirty-activation case, and a causal attribution of the result to wall-clock time. That five-way intersection is the gap this project fills."
+      data-zh="截至 2026 年，沒有任何既有工作同時滿足以下五項：真實晶片、實際的 LLM 推理工作負載、官方硬體快取控制、短暫的 dirty-activation 情境、以及把結果因果地歸因到實際時間。這個五方交集，正是本研究填補的缺口。">As of 2026, no prior work simultaneously satisfies all five of: a real chip, an actual LLM inference workload, the official hardware cache controls, the transient dirty-activation case, and a causal attribution of the result to wall-clock time. That five-way intersection is the gap this project fills.</span></p>
+  </div>
+
+  <!-- ================= THE TOOLS ================= -->
+  <div class="section" id="tools">
+    <span class="section-label"><span class="i18n" data-en="The Tools" data-zh="量測工具">The Tools</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="Four Instruments, and How Each One Works" data-zh="四把量測工具，以及它們各自的原理">Four Instruments, and How Each One Works</span></h2>
+
+    <p><span class="i18n"
+      data-en="A measurement study is only as trustworthy as its instruments, so it is worth understanding each one in plain terms before looking at results. Four families of instrument carry the whole study. The first three each measure the resource a different way; the fourth is a referee that decides whether a measurement is allowed to be believed. None of these is exotic equipment — they are standard GPU profiling tools used with unusual care."
+      data-zh="一項量測研究的可信度，完全取決於它的工具，所以在看結果之前，值得用白話理解每一把工具。四個工具家族扛起整個研究。前三個各用不同方式量測這項資源；第四個是一位裁判，決定一筆量測是否被允許相信。這些都不是什麼奇特的設備 —— 它們是標準的 GPU 分析工具，只是被以非比尋常的謹慎來使用。">A measurement study is only as trustworthy as its instruments, so it is worth understanding each one in plain terms before looking at results. Four families of instrument carry the whole study. The first three each measure the resource a different way; the fourth is a referee that decides whether a measurement is allowed to be believed. None of these is exotic equipment — they are standard GPU profiling tools used with unusual care.</span></p>
+
+    <h3><span class="i18n" data-en="3.1 The byte counter — does the data survive?" data-zh="3.1 Byte 計數器 —— 資料活下來了嗎？">3.1 The byte counter — does the data survive?</span></h3>
+    <p><span class="i18n"
+      data-en="The first instrument answers the existence question: when kernel B reads its input, how many bytes did it pull from the slow warehouse, and how many did it find already on the countertop? Modern GPUs contain hardware counters — like odometers built into the chip — that can report exactly how many bytes a single kernel read from main memory. The technique is to run a three-kernel sequence: a producer writes a known block, an optional &quot;polluter&quot; floods the cache with junk to simulate interference, and a consumer reads the block back while the counter watches. If the consumer's main-memory reads are near zero, the data survived on the countertop; if they equal the full block size, it had been evicted to the warehouse. We call the directly counted version byte-true, because it is measured from hardware rather than inferred."
+      data-zh="第一把工具回答「存在」的問題：當 kernel B 讀取它的輸入時，它從緩慢的倉庫拉了多少 byte、又有多少是已經在工作檯上找到的？現代 GPU 內含硬體計數器 —— 就像內建在晶片裡的里程表 —— 能精確報告單一 kernel 從主記憶體讀了多少 byte。手法是執行一個三段 kernel 序列：一個生產者寫下一塊已知大小的資料、一個可選的「汙染者」用垃圾灌滿快取以模擬干擾、一個消費者在計數器盯著的情況下把資料讀回。如果消費者的主記憶體讀取接近零，代表資料在工作檯上存活了；如果等於整塊大小，代表它已被逐出到倉庫。我們把直接計數的版本稱為 byte-true（逐位元組真值），因為它是從硬體量測、而非推論得來。">The first instrument answers the existence question: when kernel B reads its input, how many bytes did it pull from the slow warehouse, and how many did it find already on the countertop? Modern GPUs contain hardware counters — like odometers built into the chip — that can report exactly how many bytes a single kernel read from main memory. The technique is to run a three-kernel sequence: a producer writes a known block, an optional "polluter" floods the cache with junk to simulate interference, and a consumer reads the block back while the counter watches. If the consumer's main-memory reads are near zero, the data survived on the countertop; if they equal the full block size, it had been evicted to the warehouse. We call the directly counted version byte-true, because it is measured from hardware rather than inferred.</span></p>
+    <div class="callout key">
+      <strong><span class="i18n" data-en="What it can do:" data-zh="它能做到什麼：">What it can do:</span></strong>
+      <span class="i18n"
+        data-en="produce a precise survival map — for any block size and any amount of interference, what fraction of the data is still on the countertop when the consumer arrives. This is the foundation everything else is built on."
+        data-zh="產出一張精確的「存活地圖」 —— 對任何資料大小、任何干擾程度，當消費者到達時還有多少比例的資料留在工作檯上。這是其餘一切的基礎。">produce a precise survival map — for any block size and any amount of interference, what fraction of the data is still on the countertop when the consumer arrives. This is the foundation everything else is built on.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="3.2 The bandwidth stealer — does surviving turn into time?" data-zh="3.2 頻寬竊取者 —— 存活能否轉化為時間？">3.2 The bandwidth stealer — does surviving turn into time?</span></h3>
+    <p><span class="i18n"
+      data-en="Knowing the data survived is not the same as knowing it saved time. A kernel that is limited by arithmetic does not care how fast its memory is, so for it, surviving bytes save nothing. The second instrument measures exactly how much each kind of kernel slows down when memory gets slower. The trick is to break the normal one-at-a-time rule on purpose and run a second kernel at the same time — a co-running&quot;stealer&quot; kernel that does nothing but consume warehouse bandwidth at an adjustable rate, deliberately starving the kernel being measured — like opening a tap to drain pressure from a shared pipe. By measuring how much each kernel slows down per unit of bandwidth stolen, the study learns each kernel's sensitivity to memory speed: a number, in milliseconds saved per gigabyte not fetched, that converts surviving bytes into saved time."
+      data-zh="知道資料存活了，不等於知道它省了時間。一個受限於算術的 kernel 不在乎記憶體有多快，所以對它而言，存活的 byte 一點都沒省到。第二把工具量測每一種 kernel 在記憶體變慢時究竟慢多少。手法是刻意打破「一次一個」的規則、讓第二個 kernel 同時執行：一個並行的「竊取者」kernel，它什麼都不做，只以可調節的速率消耗倉庫頻寬，刻意餓著被量測的 kernel —— 就像打開一個水龍頭，抽走共用水管的壓力。透過量測每個 kernel 每被竊取一單位頻寬時慢多少，本研究得出每個 kernel 對記憶體速度的「敏感度」：一個以「每少抓一 GB 省下幾毫秒」為單位的數字，能把存活的 byte 換算成省下的時間。">Knowing the data survived is not the same as knowing it saved time. A kernel that is limited by arithmetic does not care how fast its memory is, so for it, surviving bytes save nothing. The second instrument measures exactly how much each kind of kernel slows down when memory gets slower. The trick is to break the normal one-at-a-time rule on purpose and run a second kernel at the same time — a co-running"stealer" kernel that does nothing but consume warehouse bandwidth at an adjustable rate, deliberately starving the kernel being measured — like opening a tap to drain pressure from a shared pipe. By measuring how much each kernel slows down per unit of bandwidth stolen, the study learns each kernel's sensitivity to memory speed: a number, in milliseconds saved per gigabyte not fetched, that converts surviving bytes into saved time.</span></p>
+    <div class="callout warn">
+      <strong><span class="i18n" data-en="The care this requires:" data-zh="這需要的謹慎：">The care this requires:</span></strong>
+      <span class="i18n"
+        data-en="a stealer running alongside another kernel competes for more than just memory — it also occupies workers on the factory floor. To isolate the memory effect, the study runs a matched control kernel of identical size that uses almost no memory, and subtracts its slowdown. It also plants sentinels to confirm the stealer and the measured kernel really overlap in time rather than politely taking turns. One configuration where the stealer accidentally starved the real kernel of workspace was detected and discarded rather than silently believed."
+        data-zh="一個與其他 kernel 並行的竊取者，競爭的不只是記憶體 —— 它也佔用工廠裡的工人。為了隔離記憶體效應，本研究跑一個大小相同、卻幾乎不用記憶體的「對照」kernel，並把它的變慢量減掉。它還埋下哨兵，確認竊取者與被量測的 kernel 真的在時間上重疊、而非禮貌地輪流執行。有一種設置，竊取者意外地餓死了真正的 kernel 的工作空間，這被偵測到並丟棄，而非默默採信。">a stealer running alongside another kernel competes for more than just memory — it also occupies workers on the factory floor. To isolate the memory effect, the study runs a matched control kernel of identical size that uses almost no memory, and subtracts its slowdown. It also plants sentinels to confirm the stealer and the measured kernel really overlap in time rather than politely taking turns. One configuration where the stealer accidentally starved the real kernel of workspace was detected and discarded rather than silently believed.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="3.3 The scrub interposer — the live test on a real engine" data-zh="3.3 抹除插入器 —— 在真實引擎上的現場測試">3.3 The scrub interposer — the live test on a real engine</span></h3>
+    <p><span class="i18n"
+      data-en="The first two instruments work on isolated kernels in a controlled rig. The third asks the production question directly: inside a real serving engine handling real traffic, does destroying the handoff cost measurable time? This is the +4.7% experiment from Section 2 — insert a scrubbing kernel into the live model, wipe the handoff, and time the result. The study also attributes time kernel-by-kernel, so the scrubbing kernel's own runtime can be excluded from the measurement. This is the instrument most prone to the artifacts described earlier, which is exactly why it does not get to report a result on its own — it has to pass the referee described next."
+      data-zh="前兩把工具在受控裝置上處理孤立的 kernel。第三把直接問生產環境的問題：在一個處理真實流量的實際服務引擎內部，摧毀交接會花費可量測的時間嗎？這就是第 2 節那個 +4.7% 的實驗 —— 把一個抹除 kernel 插進實際運行的模型、抹掉交接、計時結果。此外，本研究逐 kernel 地歸因時間，好讓抹除 kernel 自己的執行時間能從量測中被排除。這是最容易產生前述假象的工具，而這正是為什麼它不能自己單獨報告結果 —— 它必須通過接下來描述的那位裁判。">The first two instruments work on isolated kernels in a controlled rig. The third asks the production question directly: inside a real serving engine handling real traffic, does destroying the handoff cost measurable time? This is the +4.7% experiment from Section 2 — insert a scrubbing kernel into the live model, wipe the handoff, and time the result. The study also attributes time kernel-by-kernel, so the scrubbing kernel's own runtime can be excluded from the measurement. This is the instrument most prone to the artifacts described earlier, which is exactly why it does not get to report a result on its own — it has to pass the referee described next.</span></p>
+
+    <h3><span class="i18n" data-en="3.4 The validity gate — a referee written down in advance" data-zh="3.4 有效性閘門 —— 預先寫下的裁判">3.4 The validity gate — a referee written down in advance</span></h3>
+    <p><span class="i18n"
+      data-en="The fourth instrument is the most unusual, and the one the authors are proudest of. Before running the decisive live experiment, the team wrote down — in advance, so the conditions could not be quietly relaxed afterward to fit the answer they wanted — four pass/fail checks the measurement had to satisfy to be trustworthy. This is a research technique borrowed from clinical trials, called pre-registration: you commit to what counts as a valid result before you see the data, so you cannot fool yourself."
+      data-zh="第四把工具最不尋常，也是作者最引以為傲的。在跑決定性的現場實驗之前，團隊預先寫下了 —— 而且是事先，好讓這些條件無法事後被默默放寬以迎合他們想要的答案 —— 四項通過/失敗檢查，量測必須滿足它們才值得信任。這是一種借自臨床試驗的研究技術，稱為「預先註冊(pre-registration)」：你在看到資料之前，就承諾什麼才算有效結果，如此就無法自欺。">The fourth instrument is the most unusual, and the one the authors are proudest of. Before running the decisive live experiment, the team wrote down — in advance, so the conditions could not be quietly relaxed afterward to fit the answer they wanted — four pass/fail checks the measurement had to satisfy to be trustworthy. This is a research technique borrowed from clinical trials, called pre-registration: you commit to what counts as a valid result before you see the data, so you cannot fool yourself.</span></p>
+    <div class="grid-2">
+      <div class="card">
+        <h4><span class="i18n" data-en="Check 1 &middot; Two clocks must agree" data-zh="檢查 1 &middot; 兩座時鐘必須一致">Check 1 &middot; Two clocks must agree</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="Two independent timing methods must report the same delta. If they disagree, neither can be trusted." data-zh="兩種獨立的計時方法必須報出相同的差值。若它們互相矛盾，兩者都不可信。">Two independent timing methods must report the same delta. If they disagree, neither can be trusted.</span></p>
+      </div>
+      <div class="card">
+        <h4><span class="i18n" data-en="Check 2 &middot; The artifact must scale cleanly" data-zh="檢查 2 &middot; 假象必須乾淨地隨量縮放">Check 2 &middot; The artifact must scale cleanly</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The scrubbing kernel's own time must grow predictably with its size, so it can be subtracted." data-zh="抹除 kernel 自身的時間必須隨其大小可預測地增長，才能被扣除。">The scrubbing kernel's own time must grow predictably with its size, so it can be subtracted.</span></p>
+      </div>
+      <div class="card">
+        <h4><span class="i18n" data-en="Check 3 &middot; The effect must track the cause" data-zh="檢查 3 &middot; 效應必須隨原因連動">Check 3 &middot; The effect must track the cause</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The more data destroyed, the bigger the slowdown should be. If they do not correlate, the signal is noise." data-zh="摧毀越多資料，變慢應該越大。若兩者不相關，那個訊號就是雜訊。">The more data destroyed, the bigger the slowdown should be. If they do not correlate, the signal is noise.</span></p>
+      </div>
+      <div class="card">
+        <h4><span class="i18n" data-en="Check 4 &middot; The save-out artifact must be small" data-zh="檢查 4 &middot; 寫回假象必須夠小">Check 4 &middot; The save-out artifact must be small</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The extra warehouse traffic forced by the scrub must stay under a fixed budget, or the measurement is contaminated." data-zh="抹除所強迫的額外倉庫流量必須維持在固定預算之下，否則量測就被汙染了。">The extra warehouse traffic forced by the scrub must stay under a fixed budget, or the measurement is contaminated.</span></p>
+      </div>
+    </div>
+    <div class="callout critical">
+      <strong><span class="i18n" data-en="The result of the referee:" data-zh="裁判的判決結果：">The result of the referee:</span></strong>
+      <span class="i18n"
+        data-en="our own live measurement failed these checks on every GPU. Rather than publish the tempting +4.7% number, the study honestly reports that the live experiment can only bound the effect, not claim a value — and three independent re-analyses confirmed the gate's verdict with zero disagreements. As Section 6 explains, the referee even revealed a deep subtlety: a check designed to confirm a real effect cannot, by its nature, certify the absence of an effect. That lesson is part of the contribution."
+        data-zh="我們自己的現場量測在每一張 GPU 上都沒通過這些檢查。本研究沒有發表那個誘人的 +4.7%，而是誠實地報告：現場實驗只能替效應設下界限、無法宣稱一個數值 —— 三次獨立的重新分析以零分歧確認了閘門的判決。如第 6 節所述，這位裁判甚至揭露了一個深層的微妙之處：一個設計來「確認真實效應」的檢查，就其本質而言，無法「證明效應不存在」。這個教訓本身就是貢獻的一部分。">our own live measurement failed these checks on every GPU. Rather than publish the tempting +4.7% number, the study honestly reports that the live experiment can only bound the effect, not claim a value — and three independent re-analyses confirmed the gate's verdict with zero disagreements. As Section 6 explains, the referee even revealed a deep subtlety: a check designed to confirm a real effect cannot, by its nature, certify the absence of an effect. That lesson is part of the contribution.</span>
+    </div>
+
+    <h3><span class="i18n" data-en="3.5 A fourth, observational instrument: the census" data-zh="3.5 第四把、觀察型的工具：普查">3.5 A fourth, observational instrument: the census</span></h3>
+    <p><span class="i18n"
+      data-en="The three active instruments poke the system. A final, passive one simply watches a real serving engine and records, for every handoff, how much other traffic flows across the countertop between the producer and consumer. This &quot;reuse-distance census&quot; answers a question the controlled rig cannot: in actual production, does the data even have a chance to be evicted before the consumer reads it? As the results show, the answer reframes the whole problem."
+      data-zh="三把主動工具會去戳系統。最後一把是被動的，它只是觀察一個真實的服務引擎，並記錄每一次交接中，在生產者與消費者之間，有多少其他流量流經工作檯。這份「重用距離普查」回答了受控裝置無法回答的問題：在真實生產環境裡，資料在消費者讀取之前，究竟有沒有機會被逐出？如結果所示，答案重新框定了整個問題。">The three active instruments poke the system. A final, passive one simply watches a real serving engine and records, for every handoff, how much other traffic flows across the countertop between the producer and consumer. This "reuse-distance census" answers a question the controlled rig cannot: in actual production, does the data even have a chance to be evicted before the consumer reads it? As the results show, the answer reframes the whole problem.</span></p>
+  </div>
+
+  <!-- ================= EXPERIMENTS ================= -->
+  <div class="section" id="experiments">
+    <span class="section-label"><span class="i18n" data-en="Experiments &amp; Hypotheses" data-zh="實驗與假設">Experiments &amp; Hypotheses</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="The Four Questions, Stated as Testable Claims" data-zh="四個問題，化為可檢驗的主張">The Four Questions, Stated as Testable Claims</span></h2>
+
+    <p><span class="i18n"
+      data-en="Good empirical work states, before measuring, exactly what it intends to claim — so that the evidence can be checked against the claim rather than the claim quietly bent to fit whatever the evidence turned out to be. The project organizes its entire campaign around four claims, deliberately phrased in the cautious form the eventual evidence could actually support. Each claim maps to a different instrument and a different stage of the argument: does the resource exist, is it worth anything, does it exist in production, and where does the folklore number come from?"
+      data-zh="好的實證工作會在量測之前，清楚陳述它打算主張什麼 —— 如此，證據才能對照主張來檢驗，而不是讓主張被默默彎折去迎合證據最終長成的樣子。本研究把整場行動圍繞四個主張組織起來，並刻意用最終證據真正能支持的審慎語氣來陳述它們。每個主張對應一把不同的工具、論證的一個不同階段：資源存在嗎、它值錢嗎、它在生產環境中存在嗎、那個傳說數字從哪來？">Good empirical work states, before measuring, exactly what it intends to claim — so that the evidence can be checked against the claim rather than the claim quietly bent to fit whatever the evidence turned out to be. The project organizes its entire campaign around four claims, deliberately phrased in the cautious form the eventual evidence could actually support. Each claim maps to a different instrument and a different stage of the argument: does the resource exist, is it worth anything, does it exist in production, and where does the folklore number come from?</span></p>
+
+    <div class="tw"><table>
+      <tr>
+        <th><span class="i18n" data-en="Claim" data-zh="主張">Claim</span></th>
+        <th><span class="i18n" data-en="Hypothesis in plain words" data-zh="白話假設">Hypothesis in plain words</span></th>
+        <th><span class="i18n" data-en="Instrument used" data-zh="使用的工具">Instrument used</span></th>
+      </tr>
+      <tr>
+        <td><strong>C-A</strong><br><span class="i18n" data-en="Real" data-zh="存在">Real</span></td>
+        <td><span class="i18n" data-en="The handoff data really does survive on the countertop between kernels, and a hardware control can protect it." data-zh="交接資料確實會在 kernel 之間存活於工作檯上，而且有一個硬體控制能保護它。">The handoff data really does survive on the countertop between kernels, and a hardware control can protect it.</span></td>
+        <td><span class="i18n" data-en="Byte counter (3.1)" data-zh="Byte 計數器(3.1)">Byte counter (3.1)</span></td>
+      </tr>
+      <tr>
+        <td><strong>C-B</strong><br><span class="i18n" data-en="Bounded" data-zh="有界">Bounded</span></td>
+        <td><span class="i18n" data-en="Even when it survives, the time it can save is capped at a tiny fraction of a step." data-zh="即使它存活了，它能省下的時間也被限制在一步的極小比例內。">Even when it survives, the time it can save is capped at a tiny fraction of a step.</span></td>
+        <td><span class="i18n" data-en="Bandwidth stealer (3.2)" data-zh="頻寬竊取者(3.2)">Bandwidth stealer (3.2)</span></td>
+      </tr>
+      <tr>
+        <td><strong>C-C</strong><br><span class="i18n" data-en="Already harvested" data-zh="早已收割">Already harvested</span></td>
+        <td><span class="i18n" data-en="In real production traffic, the handoff already happens naturally — there is little left to recover." data-zh="在真實生產流量中，交接早已自然發生 —— 幾乎沒有可挽回的東西了。">In real production traffic, the handoff already happens naturally — there is little left to recover.</span></td>
+        <td><span class="i18n" data-en="Census + live scrub (3.3, 3.5)" data-zh="普查 + 現場抹除(3.3, 3.5)">Census + live scrub (3.3, 3.5)</span></td>
+      </tr>
+      <tr>
+        <td><strong>C-D</strong><br><span class="i18n" data-en="Misattributed" data-zh="誤歸因">Misattributed</span></td>
+        <td><span class="i18n" data-en="The big folklore numbers come from three instruments each measuring the wrong thing." data-zh="那些大的傳說數字，來自三個各自量錯東西的工具。">The big folklore numbers come from three instruments each measuring the wrong thing.</span></td>
+        <td><span class="i18n" data-en="All three + decomposition (3.1&ndash;3.3)" data-zh="三者皆用 + 拆解分析(3.1&ndash;3.3)">All three + decomposition (3.1&ndash;3.3)</span></td>
+      </tr>
+    </table></div>
+
+    <div class="callout">
+      <strong><span class="i18n" data-en="The discipline behind every number:" data-zh="每個數字背後的紀律：">The discipline behind every number:</span></strong>
+      <span class="i18n"
+        data-en="every comparison is run as a paired contest with at least thirty repetitions, alternating between the two conditions so that slow moments of the machine affect both equally. Results are reported as medians with spread, not cherry-picked bests. The same campaign was run across three different GPU generations — A100, H100, H200 — with a fourth, the L40S, added as a spot-check, so that no claim rests on the quirks of a single chip."
+        data-zh="每一項比較都以「成對對照」的方式進行，至少重複三十次，在兩種條件之間交替，好讓機器運行緩慢的時刻平等地影響雙方。結果以中位數加離散程度呈現，而非精挑細選出來的最佳值。同一場行動在三個不同世代的 GPU 上跑過 —— A100、H100、H200 —— 並加上第四張 L40S 作為抽驗，如此沒有任何主張是建立在單一晶片的怪癖之上。">every comparison is run as a paired contest with at least thirty repetitions, alternating between the two conditions so that slow moments of the machine affect both equally. Results are reported as medians with spread, not cherry-picked bests. The same campaign was run across three different GPU generations — A100, H100, H200 — with a fourth, the L40S, added as a spot-check, so that no claim rests on the quirks of a single chip.</span>
+    </div>
+  </div>
+
+  <!-- ================= RESULTS ================= -->
+  <div class="section" id="results">
+    <span class="section-label"><span class="i18n" data-en="Results" data-zh="實驗結果">Results</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="What the Measurements Found" data-zh="量測發現了什麼">What the Measurements Found</span></h2>
+
+    <p><span class="i18n"
+      data-en="The findings line up with the four claims. The resource exists and can be protected; it is worth very little; in production there is little left to recover; and the folklore numbers are artifacts. The results below give each in turn, with the actual measured numbers from the three GPUs."
+      data-zh="這些發現對應上述四個主張。資源存在且可被保護；它的價值很低；在生產環境中幾乎沒有可挽回的東西；而那些傳說數字都是假象。以下結果逐一呈現，附上三張 GPU 的實際量測數字。">The findings line up with the four claims. The resource exists and can be protected; it is worth very little; in production there is little left to recover; and the folklore numbers are artifacts. The results below give each in turn, with the actual measured numbers from the three GPUs.</span></p>
+
+    <h3><span class="i18n" data-en="4.1 The resource is real — and it dies off a cliff" data-zh="4.1 資源是真的 —— 而且它的消亡是斷崖式的">4.1 The resource is real — and it dies off a cliff</span></h3>
+    <p><span class="i18n"
+      data-en="With no interference, a 25 MB activation block — the size produced by one real step of the model, and small enough that the countertop holds only about two of them — crosses the kernel boundary almost perfectly intact: 98.8% of it is still on the countertop on the H100, 99.7% on the H200, and 86.4% on the older A100. The resource genuinely exists. But its survival under interference does not fade gently; it falls off a cliff. As other data moving through the chip — traffic — floods the countertop, survival on the H100 drops from 85% to 52% to 3% to nearly zero as interference rises through one cache's worth of junk. Half the block is gone after only a quarter to a half of the countertop is overwritten by other work."
+      data-zh="在沒有干擾的情況下，一塊 25 MB 的 activation —— 模型真實一步所產出的大小，小到工作檯只裝得下大約兩塊 —— 幾乎完美無損地越過 kernel 邊界：在 H100 上仍有 98.8% 留在工作檯上、H200 為 99.7%、較舊的 A100 為 86.4%。資源確實存在。但它在干擾下的存活並非緩緩消退；它是斷崖式墜落。當其他流量（晶片中正在搬動的資料）灌滿工作檯，H100 上的存活率隨干擾升高至一個快取容量的垃圾量，從 85% 掉到 52%、再到 3%、再到接近零。只要工作檯被其他工作覆寫了四分之一到一半，整塊資料就少了一半。">With no interference, a 25 MB activation block — the size produced by one real step of the model, and small enough that the countertop holds only about two of them — crosses the kernel boundary almost perfectly intact: 98.8% of it is still on the countertop on the H100, 99.7% on the H200, and 86.4% on the older A100. The resource genuinely exists. But its survival under interference does not fade gently; it falls off a cliff. As other data moving through the chip — traffic — floods the countertop, survival on the H100 drops from 85% to 52% to 3% to nearly zero as interference rises through one cache's worth of junk. Half the block is gone after only a quarter to a half of the countertop is overwritten by other work.</span></p>
+    <div class="bars">
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="no interference" data-zh="無干擾">no interference</span></div><div class="btrack"><div class="bfill green" style="width:85%"></div></div><div class="bval">85%</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="¼ cache of junk" data-zh="¼ 快取的垃圾">¼ cache of junk</span></div><div class="btrack"><div class="bfill amber" style="width:52%"></div></div><div class="bval">52%</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="1 cache of junk" data-zh="1 倍快取的垃圾">1 cache of junk</span></div><div class="btrack"><div class="bfill" style="width:3%"></div></div><div class="bval">3%</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="4 caches of junk" data-zh="4 倍快取的垃圾">4 caches of junk</span></div><div class="btrack"><div class="bfill" style="width:1%"></div></div><div class="bval">~0%</div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="Survival of a 25 MB block on the H100 as interference rises (timing-implied estimate). The shape is a cliff, not a slope: a handoff either lands almost whole, or is gone entirely once roughly one cache of other traffic intervenes." data-zh="H100 上 25 MB 資料塊隨干擾升高的存活率（由時間推估）。形狀是斷崖、不是斜坡：一次交接要嘛幾乎完整抵達，要嘛在約一倍快取的其他流量介入後就完全消失。">Survival of a 25 MB block on the H100 as interference rises (timing-implied estimate). The shape is a cliff, not a slope: a handoff either lands almost whole, or is gone entirely once roughly one cache of other traffic intervenes.</span></p>
+
+    <p><span class="i18n"
+      data-en="The study also found that a hardware control called the Access Policy Window — officially documented only for protecting read-only data like lookup tables — can be repurposed to protect the freshly written, dirty handoff. With this control switched on, the block stays protected even when the countertop is flooded with four times its capacity in junk: the consumer's warehouse reads stay at zero on two of the three GPUs. To the authors' knowledge this is the first systematic measurement of what this control does to dirty data."
+      data-zh="本研究還發現，一個名為「存取政策視窗(Access Policy Window)」的硬體控制 —— 官方只記載它用來保護查表這類唯讀資料 —— 可以被改用來保護剛寫下的 dirty 交接。開啟這個控制後，即使工作檯被灌入四倍容量的垃圾，該資料塊仍受保護：在三張 GPU 中的兩張上，消費者的倉庫讀取維持為零。據作者所知，這是首次系統性地量測這個控制對 dirty 資料的作用。">The study also found that a hardware control called the Access Policy Window — officially documented only for protecting read-only data like lookup tables — can be repurposed to protect the freshly written, dirty handoff. With this control switched on, the block stays protected even when the countertop is flooded with four times its capacity in junk: the consumer's warehouse reads stay at zero on two of the three GPUs. To the authors' knowledge this is the first systematic measurement of what this control does to dirty data.</span></p>
+    <div class="bars">
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="protection OFF, 4× flood" data-zh="保護關閉，4 倍灌入">protection OFF, 4× flood</span></div><div class="btrack"><div class="bfill" style="width:1%"></div></div><div class="bval">~0%</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="protection ON, 4× flood" data-zh="保護開啟，4 倍灌入">protection ON, 4× flood</span></div><div class="btrack"><div class="bfill green" style="width:74%"></div></div><div class="bval">72&ndash;76%</div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="With the protection control on, 72–76% of the block stays on the countertop under heavy interference (and 100% by direct byte count on two GPUs), versus near zero without it. A real, controllable resource — which makes the next result, that it is barely worth anything, all the more striking." data-zh="開啟保護控制後，在強烈干擾下仍有 72–76% 的資料留在工作檯上（以直接位元組計數，兩張 GPU 達 100%），而沒有它時趨近於零。一項真實、可控的資源 —— 這讓下一個結果「它幾乎不值錢」更顯突出。">With the protection control on, 72–76% of the block stays on the countertop under heavy interference (and 100% by direct byte count on two GPUs), versus near zero without it. A real, controllable resource — which makes the next result, that it is barely worth anything, all the more striking.</span></p>
+
+    <h3><span class="i18n" data-en="4.2 The ceiling: real, but worth under two-thirds of one percent" data-zh="4.2 天花板：真實，但價值不到千分之 6.5">4.2 The ceiling: real, but worth under two-thirds of one percent</span></h3>
+    <p><span class="i18n"
+      data-en="This is the heart of the result. The study combines, for every handoff in a model layer, three measured quantities: how much of the data survives, how many bytes it is, and how sensitive the consuming kernel is to memory speed. Multiplying these and summing over all the handoffs in all 32 layers gives the most time the entire incidental handoff could possibly save in one step. The formula is just an honest bookkeeping of &quot;surviving bytes times how much each byte is worth&quot;:"
+      data-zh="這是結果的核心。本研究把模型一層中每一次交接的三個量測值結合起來：有多少資料存活、它有多少 byte、以及消費的 kernel 對記憶體速度有多敏感。把它們相乘、並對全部 32 層的所有交接求和，就得到整個附帶交接在一步內最多可能省下的時間。這個公式不過是「存活的 byte 乘以每個 byte 值多少」的誠實記帳：">This is the heart of the result. The study combines, for every handoff in a model layer, three measured quantities: how much of the data survives, how many bytes it is, and how sensitive the consuming kernel is to memory speed. Multiplying these and summing over all the handoffs in all 32 layers gives the most time the entire incidental handoff could possibly save in one step. The formula is just an honest bookkeeping of "surviving bytes times how much each byte is worth":</span></p>
+    <div class="math-block">
+      $$ \text{time saved} \;=\; \underbrace{32 \text{ layers}}_{L} \times \sum_{\text{handoffs}} \underbrace{s(b,p)}_{\text{survival}} \times \underbrace{b}_{\text{bytes}} \times \underbrace{\kappa}_{\text{time per byte}} $$
+    </div>
+    <p><span class="i18n"
+      data-en="Here $s(b,p)$ is the surviving fraction at a given block size $b$ and interference level $p$, and $\kappa$ is the consuming kernel's measured sensitivity (milliseconds per gigabyte). The answer, on all three GPUs under realistic running conditions, is small: a best case of about 0.12 to 0.31 milliseconds per step — under 0.65% of the step. Under any realistic interference it drops below 0.1%. Even if every uncertain assumption is pushed in the direction most favorable to the handoff, the bound stays at or below 1.6%. The 5% folklore had no room to be true."
+      data-zh="這裡 $s(b,p)$ 是在給定資料大小 $b$ 與干擾程度 $p$ 下的存活比例，$\kappa$ 是消費 kernel 量測到的敏感度（每 GB 幾毫秒）。在所有三張 GPU、現實的運作條件下，答案很小：最樂觀情況約為每步 0.12 至 0.31 毫秒 —— 不到一步的 0.65%。在任何現實干擾下，它都掉到 0.1% 以下。即使把每個不確定假設都往最有利於交接的方向推，這個上限仍維持在 1.6% 或更低。那個 5% 的傳說，根本沒有為真的空間。">Here $s(b,p)$ is the surviving fraction at a given block size $b$ and interference level $p$, and $\kappa$ is the consuming kernel's measured sensitivity (milliseconds per gigabyte). The answer, on all three GPUs under realistic running conditions, is small: a best case of about 0.12 to 0.31 milliseconds per step — under 0.65% of the step. Under any realistic interference it drops below 0.1%. Even if every uncertain assumption is pushed in the direction most favorable to the handoff, the bound stays at or below 1.6%. The 5% folklore had no room to be true.</span></p>
+    <div class="thermo">
+      <div class="trow"><div class="tlab"><span class="i18n" data-en="Folklore / naive measurement" data-zh="傳說 / 草率量測">Folklore / naive measurement</span></div><div class="ttrack"><div class="tfill" style="width:100%;background:linear-gradient(90deg,#e74c3c,#ff9f7a)">~5% of a step</div></div></div>
+      <div class="trow"><div class="tlab"><span class="i18n" data-en="Measured best-case ceiling" data-zh="量測出的最樂觀天花板">Measured best-case ceiling</span></div><div class="ttrack"><div class="tfill" style="width:13%;background:linear-gradient(90deg,var(--amber),#ffd27a);color:#1a1030">&lt;0.65%</div></div></div>
+      <div class="trow"><div class="tlab"><span class="i18n" data-en="Under realistic interference" data-zh="現實干擾下">Under realistic interference</span></div><div class="ttrack"><div class="tfill" style="width:3%;background:linear-gradient(90deg,var(--green),#7fe6a6)">&lt;0.1%</div></div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="The gap between belief and measurement. Bars scaled to the ~5% folklore figure. The real ceiling is roughly one-eighth of the folklore value at best, and a fiftieth of it under realistic load." data-zh="信念與量測之間的落差。長條以約 5% 的傳說數字為基準縮放。真實天花板最多只有傳說值的約八分之一，在現實負載下則是其五十分之一。">The gap between belief and measurement. Bars scaled to the ~5% folklore figure. The real ceiling is roughly one-eighth of the folklore value at best, and a fiftieth of it under realistic load.</span></p>
+
+    <h3><span class="i18n" data-en="4.3 In production, there is almost nothing left to recover" data-zh="4.3 在生產環境中，幾乎沒有可挽回的東西">4.3 In production, there is almost nothing left to recover</span></h3>
+    <p><span class="i18n"
+      data-en="The census — passively watching a real serving engine — adds a second, independent reason the handoff is not a lever. It found that in production, dependent kernels run essentially back-to-back: the typical amount of other traffic between a producer and its consumer is between near-zero and 8 megabytes, far below the tens of megabytes it would take to evict the data. In other words, the handoff already succeeds naturally almost every time; there is nothing for a clever protection scheme to rescue. This pattern held identically across nine different serving configurations and concurrency levels, because the engine runs its kernels in a fixed serial line — changing the workload changes what is computed, not the order things sit in the cache. And real requests are small to begin with: a typical request produces handoff blocks of well under 5 megabytes, comfortably cache-resident."
+      data-zh="普查 —— 被動觀察一個真實的服務引擎 —— 為「交接不是一個有用槓桿」提供了第二個獨立理由。它發現在生產環境中，相依的 kernel 基本上是背靠背執行的：生產者與其消費者之間，其他流量的典型量介於趨近零到 8 MB，遠低於逐出資料所需的數十 MB。換句話說，交接幾乎每次都已自然成功；沒有什麼留給聰明的保護機制去搶救。這個模式在九種不同的服務設定與並行程度下完全一致，因為引擎是以固定的序列方式執行 kernel —— 改變工作負載改變的是「算什麼」，而非東西在快取裡擺放的順序。而且真實請求本來就小：典型請求產生的交接資料塊遠低於 5 MB，輕鬆地常駐於快取。">The census — passively watching a real serving engine — adds a second, independent reason the handoff is not a lever. It found that in production, dependent kernels run essentially back-to-back: the typical amount of other traffic between a producer and its consumer is between near-zero and 8 megabytes, far below the tens of megabytes it would take to evict the data. In other words, the handoff already succeeds naturally almost every time; there is nothing for a clever protection scheme to rescue. This pattern held identically across nine different serving configurations and concurrency levels, because the engine runs its kernels in a fixed serial line — changing the workload changes what is computed, not the order things sit in the cache. And real requests are small to begin with: a typical request produces handoff blocks of well under 5 megabytes, comfortably cache-resident.</span></p>
+    <div class="stat-strip">
+      <div class="stat"><div class="v green">0&ndash;8 MB</div><div class="l"><span class="i18n" data-en="typical traffic between a producer and its consumer in production (vs ~50 MB needed to evict)" data-zh="生產環境中生產者與消費者之間的典型流量（逐出需約 50 MB）">typical traffic between a producer and its consumer in production (vs ~50 MB needed to evict)</span></div></div>
+      <div class="stat"><div class="v cyan">9 / 9</div><div class="l"><span class="i18n" data-en="serving configurations where the pattern was identical" data-zh="模式完全一致的服務設定數">serving configurations where the pattern was identical</span></div></div>
+      <div class="stat"><div class="v amber">&lt;5 MB</div><div class="l"><span class="i18n" data-en="typical handoff block size for a real request" data-zh="真實請求的典型交接資料塊大小">typical handoff block size for a real request</span></div></div>
+    </div>
+
+    <h3><span class="i18n" data-en="4.4 Three instruments, three ways to be fooled" data-zh="4.4 三把工具，三種被愚弄的方式">4.4 Three instruments, three ways to be fooled</span></h3>
+    <p><span class="i18n"
+      data-en="The last result is the one with the broadest reach beyond this specific question. Three standard measurement techniques each report a large number for the handoff's value, and the study shows each is measuring the wrong thing — and all three err in the same direction, toward overvaluing the handoff. This is why careful engineers, using trusted tools, arrived at a wrong folklore figure."
+      data-zh="最後一個結果，是超出這個特定問題、影響面最廣的一個。三種標準量測技術各自替交接的價值報出一個大數字，而本研究指出它們各自都量錯了東西 —— 而且三者都朝同一個方向犯錯，亦即高估交接。這就是為什麼謹慎的工程師，用著值得信任的工具，卻得出了一個錯誤的傳說數字。">The last result is the one with the broadest reach beyond this specific question. Three standard measurement techniques each report a large number for the handoff's value, and the study shows each is measuring the wrong thing — and all three err in the same direction, toward overvaluing the handoff. This is why careful engineers, using trusted tools, arrived at a wrong folklore figure.</span></p>
+    <div class="grid-3">
+      <div class="card highlight-coral">
+        <h4><span class="i18n" data-en="Trap 1 &middot; Insertion timing" data-zh="陷阱 1 &middot; 插入計時">Trap 1 &middot; Insertion timing</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The wiping kernel's own runtime, plus the warehouse save-out it forces, get charged to the handoff. Overstates the truth by 7–23×. Tell-tale sign: the apparent effect is largest when the least data is destroyed — backwards from a real effect." data-zh="抹除 kernel 自身的執行時間，加上它強迫的倉庫寫回，都被記到交接帳上。高估真相 7–23 倍。破綻：當摧毀的資料最少時，表面效應反而最大 —— 與真實效應相反。">The wiping kernel's own runtime, plus the warehouse save-out it forces, get charged to the handoff. Overstates the truth by 7–23×. Tell-tale sign: the apparent effect is largest when the least data is destroyed — backwards from a real effect.</span></p>
+      </div>
+      <div class="card highlight-coral">
+        <h4><span class="i18n" data-en="Trap 2 &middot; Reordering tricks" data-zh="陷阱 2 &middot; 重排序技巧">Trap 2 &middot; Reordering tricks</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="Reordering a kernel to read recently written data first gives a real +4.6% — but the gain survives even when that data is fully evicted first. So it is not cross-kernel reuse at all; it is an internal effect of how one kernel walks its own data, misread as handoff reuse." data-zh="把一個 kernel 重排成先讀最近寫下的資料，確實帶來真實的 +4.6% —— 但即使先把那些資料完全逐出，增益依然存在。所以它根本不是跨 kernel 的重用；而是單一 kernel 走訪自身資料的內部效應，被誤讀成交接重用。">Reordering a kernel to read recently written data first gives a real +4.6% — but the gain survives even when that data is fully evicted first. So it is not cross-kernel reuse at all; it is an internal effect of how one kernel walks its own data, misread as handoff reuse.</span></p>
+      </div>
+      <div class="card highlight-coral">
+        <h4><span class="i18n" data-en="Trap 3 &middot; Cold-cache profilers" data-zh="陷阱 3 &middot; 冷快取分析工具">Trap 3 &middot; Cold-cache profilers</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The standard profiler measures each kernel with a wiped cache, converting cache hits into warehouse reads that never happen in real running. It over-charges the attention kernel's memory traffic by 73–246×. Traffic models built from these counts inherit the error exactly where the handoff operates." data-zh="標準分析工具在快取被清空的狀態下量測每個 kernel，把快取命中換算成實際執行時根本不會發生的倉庫讀取。它把 attention kernel 的記憶體流量高估 73–246 倍。用這些計數建立的流量模型，恰好在交接運作之處繼承了這個誤差。">The standard profiler measures each kernel with a wiped cache, converting cache hits into warehouse reads that never happen in real running. It over-charges the attention kernel's memory traffic by 73–246×. Traffic models built from these counts inherit the error exactly where the handoff operates.</span></p>
+      </div>
+    </div>
+    <p><span class="i18n"
+      data-en="The third trap is worth a number to feel its size. When the standard profiler measures the attention kernel — which reads data the previous kernel just wrote — it reports that kernel reading up to 246 times more data from the warehouse than it really does in normal running, because the profiler wiped the countertop before measuring. The plain kernels that read the model's permanent weights, by contrast, measure honestly at roughly 1×. The lesson is that adding up per-kernel profiler numbers double-counts exactly the traffic the handoff absorbs — so the very models people use to argue the handoff is valuable are biased toward that conclusion."
+      data-zh="第三個陷阱值得用一個數字來感受它的規模。當標準分析工具量測 attention kernel —— 它讀的是前一個 kernel 剛寫下的資料 —— 它報告該 kernel 從倉庫讀取的資料量，高達正常執行時的 246 倍，因為分析工具在量測前清空了工作檯。相對地，讀取模型永久權重的那些單純 kernel，量測起來是誠實的、約 1 倍。教訓是：把每個 kernel 的分析數字加總，恰好重複計算了交接所吸收的那部分流量 —— 所以人們用來論證「交接很有價值」的那些模型本身，就偏向這個結論。">The third trap is worth a number to feel its size. When the standard profiler measures the attention kernel — which reads data the previous kernel just wrote — it reports that kernel reading up to 246 times more data from the warehouse than it really does in normal running, because the profiler wiped the countertop before measuring. The plain kernels that read the model's permanent weights, by contrast, measure honestly at roughly 1×. The lesson is that adding up per-kernel profiler numbers double-counts exactly the traffic the handoff absorbs — so the very models people use to argue the handoff is valuable are biased toward that conclusion.</span></p>
+    <div class="bars">
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="attention kernel" data-zh="attention kernel">attention kernel</span></div><div class="btrack"><div class="bfill" style="width:100%"></div></div><div class="bval">73&ndash;246&times;</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="normalization kernel" data-zh="正規化 kernel">normalization kernel</span></div><div class="btrack"><div class="bfill amber" style="width:6%"></div></div><div class="bval">2&ndash;4&times;</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="weight-reading kernel" data-zh="讀權重的 kernel">weight-reading kernel</span></div><div class="btrack"><div class="bfill green" style="width:2%"></div></div><div class="bval">~1&times;</div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="How much the standard cold-cache profiler over-charges each kernel's warehouse traffic (log-like scale). Kernels reading freshly written handoff data are inflated up to 246×; kernels reading permanent weights stay honest. The bias lands exactly where the handoff lives." data-zh="標準冷快取分析工具高估每類 kernel 倉庫流量的程度（類對數刻度）。讀取剛寫下的交接資料的 kernel 被灌水到 246 倍；讀取永久權重的 kernel 維持誠實。這個偏誤恰好落在交接所在之處。">How much the standard cold-cache profiler over-charges each kernel's warehouse traffic (log-like scale). Kernels reading freshly written handoff data are inflated up to 246×; kernels reading permanent weights stay honest. The bias lands exactly where the handoff lives.</span></p>
+  </div>
+
+  <!-- ================= WHAT IT MEANS ================= -->
+  <div class="section" id="meaning">
+    <span class="section-label"><span class="i18n" data-en="What It Means" data-zh="研究意義">What It Means</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="Why a Small Number Is a Big Result" data-zh="為什麼一個小數字是一個大成果">Why a Small Number Is a Big Result</span></h2>
+
+    <p><span class="i18n"
+      data-en="It is tempting to read &quot;the effect is under 0.65%&quot; as a disappointing result. It is the opposite: it is a decision that several groups of engineers can now make with confidence instead of folklore. The contributions below are what a reader from outside the field should take away."
+      data-zh="把「效應不到 0.65%」讀成令人失望的結果，是很誘人的。事實恰好相反：它是好幾群工程師現在能以信心、而非傳說來下的一個決定。以下這些貢獻，是領域外的讀者應當帶走的重點。">It is tempting to read "the effect is under 0.65%" as a disappointing result. It is the opposite: it is a decision that several groups of engineers can now make with confidence instead of folklore. The contributions below are what a reader from outside the field should take away.</span></p>
+
+    <div class="grid-2">
+      <div class="card highlight-green">
+        <h4><span class="i18n" data-en="It re-costs a family of engineering efforts" data-zh="它重新評估了一整個家族的工程努力">It re-costs a family of engineering efforts</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="Teams spend real effort fusing kernels and building cache-protection machinery, justified partly by the handoff's cost. This study shows that, for this workload, the incidental handoff already absorbs almost all of that cost on its own — so that part of the justification needs to be re-priced. The effort may still be worth it for other reasons, but not this one." data-zh="團隊投入真實的力氣去融合 kernel、打造快取保護機制，其理由有一部分是交接的成本。本研究指出，對這個工作負載而言，附帶交接早已靠自己吸收了那成本的絕大部分 —— 所以那部分理由需要重新定價。那些努力或許因其他理由仍然值得，但不是這一個。">Teams spend real effort fusing kernels and building cache-protection machinery, justified partly by the handoff's cost. This study shows that, for this workload, the incidental handoff already absorbs almost all of that cost on its own — so that part of the justification needs to be re-priced. The effort may still be worth it for other reasons, but not this one.</span></p>
+      </div>
+      <div class="card highlight-blue">
+        <h4><span class="i18n" data-en="It gives a reusable correction for a common tool" data-zh="它為一個常用工具提供了可再利用的修正">It gives a reusable correction for a common tool</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="Anyone who builds memory-traffic models from a standard profiler is, without knowing it, over-counting the traffic that the handoff absorbs — by up to 246× for one kernel class. The paper publishes a per-kernel correction factor and a capture recipe that others can apply directly to avoid inheriting the bias." data-zh="任何用標準分析工具建立記憶體流量模型的人，都在不自覺地高估交接所吸收的流量 —— 某類 kernel 高達 246 倍。本論文發表了一套逐 kernel 的修正係數與擷取配方，別人可直接套用，以避免繼承這個偏誤。">Anyone who builds memory-traffic models from a standard profiler is, without knowing it, over-counting the traffic that the handoff absorbs — by up to 246× for one kernel class. The paper publishes a per-kernel correction factor and a capture recipe that others can apply directly to avoid inheriting the bias.</span></p>
+      </div>
+      <div class="card highlight-purple">
+        <h4><span class="i18n" data-en="It documents undocumented hardware" data-zh="它記載了未被記載的硬體">It documents undocumented hardware</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The first systematic measurement of how a hardware cache-protection control behaves on freshly written, dirty data — a corner of the chip that the official documentation does not cover. Even though the protected bytes turn out to be worth little here, the characterization is new knowledge about the machine." data-zh="首次系統性量測一個硬體快取保護控制在剛寫下的 dirty 資料上的行為 —— 那是官方文件未涵蓋的晶片角落。即使被保護的 byte 在此值不了多少，這份刻畫仍是關於這台機器的新知識。">The first systematic measurement of how a hardware cache-protection control behaves on freshly written, dirty data — a corner of the chip that the official documentation does not cover. Even though the protected bytes turn out to be worth little here, the characterization is new knowledge about the machine.</span></p>
+      </div>
+      <div class="card highlight-amber">
+        <h4><span class="i18n" data-en="It contributes a method, not just a number" data-zh="它貢獻了一套方法，不只是一個數字">It contributes a method, not just a number</span></h4>
+        <p style="margin:0"><span class="i18n" data-en="The pre-registered validity gate — committing in advance to what makes a measurement believable — caught the team's own flawed setup and prevented a confident wrong claim. It also exposed a genuine limitation of such gates: a test built to confirm an effect cannot certify its absence. Both the tool and that lesson are offered for others to reuse." data-zh="預先註冊的有效性閘門 —— 事先承諾什麼才讓一筆量測可信 —— 揪出了團隊自己有瑕疵的設置，阻止了一個自信卻錯誤的主張。它也揭露了這類閘門的一個真實限制：一個用來確認效應的檢查，無法證明效應不存在。這個工具與這個教訓，都提供給別人再利用。">The pre-registered validity gate — committing in advance to what makes a measurement believable — caught the team's own flawed setup and prevented a confident wrong claim. It also exposed a genuine limitation of such gates: a test built to confirm an effect cannot certify its absence. Both the tool and that lesson are offered for others to reuse.</span></p>
+      </div>
+    </div>
+
+    <div class="callout key">
+      <strong><span class="i18n" data-en="The one-sentence thesis:" data-zh="一句話的論點：">The one-sentence thesis:</span></strong>
+      <span class="i18n"
+        data-en="transient inter-kernel cache reuse of activations is a real but bounded architectural resource — this study measures, with controlled experiments and a self-checking methodology, when it exists, when it converts to wall-clock time, when no mechanism can recover it, and why the standard instruments make it look far more valuable than it is."
+        data-zh="activation 在 kernel 之間短暫的快取重用，是一項真實但有界的架構資源 —— 本研究以受控實驗與一套自我檢核的方法，量測它何時存在、何時轉化為實際時間、何時沒有任何機制能挽回它，以及為什麼標準工具會讓它看起來遠比實際有價值。">transient inter-kernel cache reuse of activations is a real but bounded architectural resource — this study measures, with controlled experiments and a self-checking methodology, when it exists, when it converts to wall-clock time, when no mechanism can recover it, and why the standard instruments make it look far more valuable than it is.</span>
+    </div>
+  </div>
+
+  <!-- ================= SCOPE / REPRODUCE ================= -->
+  <div class="section" id="repro">
+    <span class="section-label"><span class="i18n" data-en="Scope &amp; Honesty" data-zh="範圍與誠實">Scope &amp; Honesty</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="What This Study Does Not Claim" data-zh="本研究「不」主張什麼">What This Study Does Not Claim</span></h2>
+
+    <p><span class="i18n"
+      data-en="An honest measurement study is precise about its own boundaries. The numbers on this page hold for the cells that were actually measured, and the paper says so explicitly rather than over-generalizing. A professor evaluating this work should know exactly how far the claims reach."
+      data-zh="一項誠實的量測研究，對自己的邊界是精確的。本頁的數字，適用於實際被量測的情境，而論文是明確地這麼說、而非過度推廣。評估這項工作的教授，應當清楚知道這些主張延伸到多遠。">An honest measurement study is precise about its own boundaries. The numbers on this page hold for the cells that were actually measured, and the paper says so explicitly rather than over-generalizing. A professor evaluating this work should know exactly how far the claims reach.</span></p>
+
+    <div class="grid-2">
+      <div class="card">
+        <h4><span class="i18n" data-en="Scope of the claims" data-zh="主張的範圍">Scope of the claims</span></h4>
+        <ul style="margin-bottom:0">
+          <li><span class="i18n" data-en="Three GPU generations (A100-80, H100, H200), plus an L40S spot-check that agrees." data-zh="三個 GPU 世代(A100-80、H100、H200)，加上一張意見一致的 L40S 抽驗。">Three GPU generations (A100-80, H100, H200), plus an L40S spot-check that agrees.</span></li>
+          <li><span class="i18n" data-en="One model family (Llama-3.1-8B) in eager mode — one kernel at a time, the common research configuration." data-zh="一個模型家族(Llama-3.1-8B),eager 模式 —— 一次一個 kernel，即常見的研究設定。">One model family (Llama-3.1-8B) in eager mode — one kernel at a time, the common research configuration.</span></li>
+          <li><span class="i18n" data-en="The production census is on the H100 only; the long-block case is covered by the controlled rig." data-zh="生產普查僅在 H100 上進行；長資料塊的情境由受控裝置補足。">The production census is on the H100 only; the long-block case is covered by the controlled rig.</span></li>
+          <li><span class="i18n" data-en="The ceiling is a bound for the tested running conditions, not a universal cap on all cache reuse everywhere." data-zh="天花板是針對受測運作條件的界限，而非對所有地方、所有快取重用的普世上限。">The ceiling is a bound for the tested running conditions, not a universal cap on all cache reuse everywhere.</span></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4><span class="i18n" data-en="What is deliberately withheld" data-zh="刻意保留不主張的部分">What is deliberately withheld</span></h4>
+        <ul style="margin-bottom:0">
+          <li><span class="i18n" data-en="No causal value for the live handoff — the validity gate failed, so only a range is reported, never a single confident number (a point estimate)." data-zh="不主張現場交接的因果價值 —— 有效性閘門未通過，故只報告一個範圍、絕不報告單一的確定數值（點估計）。">No causal value for the live handoff — the validity gate failed, so only a range is reported, never a single confident number (a point estimate).</span></li>
+          <li><span class="i18n" data-en="The near-zero live deltas are not proof of zero effect — only that any effect is smaller than the experiment's own background wobble (its noise floor)." data-zh="趨近零的現場差值不是「零效應」的證明 —— 只代表任何效應都小於實驗本身的背景擾動（雜訊地板）。">The near-zero live deltas are not proof of zero effect — only that any effect is smaller than the experiment's own background wobble (its noise floor).</span></li>
+          <li><span class="i18n" data-en="The protection control's exact internal mechanism is inferred by contrast, not directly probed (that is future work)." data-zh="保護控制的確切內部機制是經由對比推論、而非直接探測得出（那是未來工作）。">The protection control's exact internal mechanism is inferred by contrast, not directly probed (that is future work).</span></li>
+          <li><span class="i18n" data-en="No scheduler, runtime, or fusion pass is proposed — this is a measurement study, not an optimization paper." data-zh="不提出任何排程器、執行期系統或融合處理 —— 這是一項量測研究，而非一篇優化論文。">No scheduler, runtime, or fusion pass is proposed — this is a measurement study, not an optimization paper.</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout warn">
+      <strong><span class="i18n" data-en="A worked example of the honesty:" data-zh="誠實性的一個實例：">A worked example of the honesty:</span></strong>
+      <span class="i18n"
+        data-en="during the peer-review response, the team found a bug of their own: the worst-case time budget had used one uniform step time for every chip, which over-charged the slowest chip — the A100, whose real step is far longer. Giving each chip its true step time lowered the study's overall worst-case bound from 2.3% to 1.6%. The error was caught, fixed, and reported — which is exactly the behavior the whole methodology is built to produce."
+        data-zh="在回應同行評審期間，團隊發現了自己的一個錯誤：最差情況的時間預算對所有晶片都用了單一統一的步驟時間，因而高估了最慢的那張晶片 —— A100，它真實的一步時間長得多。改用每張晶片各自真實的步驟時間後，本研究整體的最差情況上限從 2.3% 降到 1.6%。這個錯誤被抓到、被修正、並被報告 —— 而這正是整套方法所要產生的行為。">during the peer-review response, the team found a bug of their own: the worst-case time budget had used one uniform step time for every chip, which over-charged the slowest chip — the A100, whose real step is far longer. Giving each chip its true step time lowered the study's overall worst-case bound from 2.3% to 1.6%. The error was caught, fixed, and reported — which is exactly the behavior the whole methodology is built to produce.</span>
+    </div>
+
+    <div class="callout key">
+      <strong><span class="i18n" data-en="Related reading on this site:" data-zh="本站相關閱讀：">Related reading on this site:</span></strong>
+      <a href="gpu-datapath.html"><span class="i18n" data-en="Deepdive #1: GPU Datapath — where every byte moves in one inference step" data-zh="深潛 #1:GPU 資料通路 —— 推理一步內每個 byte 的移動">Deepdive #1: GPU Datapath — where every byte moves in one inference step</span> &rarr;</a>
+      &middot;
+      <a href="../hands-on/index.html"><span class="i18n" data-en="Hands-On Week 3: the Roofline model" data-zh="實作第 3 週：Roofline 模型">Hands-On Week 3: the Roofline model</span> &rarr;</a>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  <p><a href="index.html"><span class="i18n" data-en="&larr; Back to Experiment Deepdives" data-zh="&larr; 返回實驗深潛系列">&larr; Back to Experiment Deepdives</span></a> &middot; <a href="../index.html"><span class="i18n" data-en="AI Infra Basics" data-zh="AI 基礎設施">AI Infra Basics</span></a></p>
+  <p><span class="i18n"
+    data-en="Experiment Deepdive #2 — a plain-language companion to the research paper &ldquo;Worth the Bytes? Measuring and Bounding Transient Inter-Kernel L2 Reuse in LLM Inference&rdquo; (submitted to ASPLOS). Measured on PACE (Georgia Tech) A100-80GB, H100, H200 &amp; L40S nodes; Llama-3.1-8B-Instruct under eager vLLM."
+    data-zh="實驗深潛 #2 —— 研究論文《Worth the Bytes? Measuring and Bounding Transient Inter-Kernel L2 Reuse in LLM Inference》（投稿 ASPLOS）的白話導讀。於 PACE(Georgia Tech)A100-80GB、H100、H200 與 L40S 節點實測；Llama-3.1-8B-Instruct,eager vLLM。">Experiment Deepdive #2 — a plain-language companion to the research paper &ldquo;Worth the Bytes? Measuring and Bounding Transient Inter-Kernel L2 Reuse in LLM Inference&rdquo; (submitted to ASPLOS). Measured on PACE (Georgia Tech) A100-80GB, H100, H200 &amp; L40S nodes; Llama-3.1-8B-Instruct under eager vLLM.</span></p>
+</footer>
+
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}
+(function(){setLang(localStorage.getItem('lang')||'en')})();
+</script>
+</body>
+</html>
