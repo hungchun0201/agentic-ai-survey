@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deepdive #5 — Why Analytical TP-Decode Latency Models Fail in Eager LLM Serving | AI Infra Basics</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})"></script>
+  <style>
+    /* ===== SERIES ACCENT: experiment-deepdive coral (shared across the series) ===== */
+    :root {
+      --dark: #16213e; --mid: #0f3460;
+      --phase: #ff6b6b;
+      --phase-rgb: 255,107,107;
+      --green: #2ecc71; --amber: #f5a623; --purple: #9b59b6; --cyan: #00d2d3;
+      --blue: #54a0ff; --code-bg: #1e1e2e; --text: #e0e0e0; --text-muted: #a0aec0;
+      --border: #2d3e5e; --surface: #1e2d4a; --card-bg: #1a2744;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    html { overflow-x:clip; }
+    body { font-family:'Segoe UI',system-ui,-apple-system,sans-serif; background:var(--dark); color:var(--text); line-height:1.7; overflow-x:clip; }
+    nav { position:sticky; top:0; z-index:1000; background:rgba(22,33,62,0.95); backdrop-filter:blur(12px); border-bottom:1px solid rgba(var(--phase-rgb),0.25); padding:0 2rem; }
+    nav ul { display:flex; list-style:none; max-width:1200px; margin:0 auto; gap:0.25rem; overflow-x:auto; scrollbar-width:none; }
+    nav ul::-webkit-scrollbar { display:none; }
+    nav ul li a { display:block; padding:0.85rem 1rem; color:var(--text-muted); text-decoration:none; font-size:0.85rem; font-weight:500; white-space:nowrap; transition:color .2s,border-bottom .2s; border-bottom:2px solid transparent; }
+    nav ul li a:hover, nav ul li a.active { color:#fff; border-bottom:2px solid var(--phase); }
+    .lang-switch { margin-left:auto; display:flex; align-items:center; gap:6px; list-style:none; }
+    .lang-switch a { color:rgba(255,255,255,.7); text-decoration:none; padding:4px 12px; border-radius:14px; font-size:.78rem; border:1px solid rgba(255,255,255,.3); transition:all .2s; cursor:pointer; }
+    .lang-switch a:hover, .lang-switch a.active { color:#fff; background:rgba(255,255,255,.2); border-color:rgba(255,255,255,.5); }
+    .hero { background:linear-gradient(135deg,var(--dark) 0%,var(--mid) 40%,#1a1a3e 70%,var(--dark) 100%); padding:4rem 2rem 3rem; text-align:center; position:relative; overflow:hidden; }
+    .hero::before { content:''; position:absolute; top:-50%; left:-50%; width:200%; height:200%; background:radial-gradient(circle at 30% 50%,rgba(var(--phase-rgb),0.06) 0%,transparent 50%),radial-gradient(circle at 70% 50%,rgba(0,210,211,0.06) 0%,transparent 50%); animation:rotateBg 30s linear infinite; }
+    @keyframes rotateBg { to { transform:rotate(360deg); } }
+    .hero h1 { font-size:2.2rem; font-weight:800; position:relative; color:#fff; margin-bottom:0.5rem; }
+    .hero h1 span.accent { color:var(--phase); }
+    .hero .subtitle { font-size:1.02rem; color:var(--text-muted); position:relative; max-width:780px; margin:0 auto; }
+    .hero .badges { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; position:relative; margin-top:1.2rem; }
+    .hero .badge { display:inline-block; background:rgba(var(--phase-rgb),0.15); border:1px solid rgba(var(--phase-rgb),0.3); color:var(--phase); padding:0.3rem 0.9rem; border-radius:20px; font-size:0.8rem; font-weight:600; }
+    .series-badge { display:inline-block; padding:0.2rem 0.6rem; border-radius:4px; font-size:0.72rem; font-weight:700; letter-spacing:0.04em; margin-bottom:0.4rem; background:rgba(var(--phase-rgb),.15); color:var(--phase); border:1px solid rgba(var(--phase-rgb),.3); position:relative; }
+    .container { max-width:1100px; margin:0 auto; padding:2rem; }
+    .section { margin-bottom:3rem; }
+    .section-label { display:inline-block; background:rgba(var(--phase-rgb),0.12); color:var(--phase); font-size:0.75rem; font-weight:700; letter-spacing:0.1em; text-transform:uppercase; padding:0.25rem 0.75rem; border-radius:4px; margin-bottom:0.75rem; }
+    h2 { font-size:1.9rem; font-weight:700; color:#fff; margin-bottom:1rem; }
+    h2.section-title { position:relative; display:inline-block; }
+    h2.section-title::after { content:''; position:absolute; bottom:-4px; left:0; width:100%; height:3px; background:linear-gradient(90deg,var(--phase),var(--cyan)); border-radius:2px; }
+    h3 { font-size:1.35rem; font-weight:600; margin:1.6rem 0 0.75rem; color:var(--blue); }
+    h4 { font-size:1.1rem; font-weight:600; margin-bottom:0.5rem; color:var(--cyan); }
+    p { margin-bottom:1rem; }
+    a { color:var(--cyan); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .card { background:var(--card-bg); border:1px solid var(--border); border-radius:12px; padding:1.75rem; margin-bottom:1.5rem; }
+    .card.highlight-blue { border-left:4px solid var(--blue); }
+    .card.highlight-green { border-left:4px solid var(--green); }
+    .card.highlight-amber { border-left:4px solid var(--amber); }
+    .card.highlight-purple { border-left:4px solid var(--purple); }
+    .card.highlight-cyan { border-left:4px solid var(--cyan); }
+    .card.highlight-coral { border-left:4px solid var(--phase); }
+    .card.highlight-red { border-left:4px solid #e74c3c; }
+    pre { background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:1.25rem; overflow-x:auto; font-size:0.82rem; line-height:1.65; margin-bottom:1.5rem; font-family:'Consolas','Fira Code',monospace; }
+    code { font-family:'Consolas','Fira Code',monospace; font-size:0.85em; }
+    p code, li code, td code { background:rgba(0,210,211,0.1); color:var(--cyan); padding:0.15rem 0.4rem; border-radius:4px; }
+    table { width:100%; border-collapse:collapse; margin-bottom:1.5rem; font-size:0.85rem; }
+    th,td { padding:0.6rem 0.85rem; text-align:left; border-bottom:1px solid rgba(var(--phase-rgb),0.25); }
+    th { background:var(--surface); color:var(--phase); font-weight:600; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.05em; }
+    tr:hover { background:rgba(var(--phase-rgb),0.04); }
+    td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+    td.pos { color:var(--green); } td.neg { color:#e74c3c; }
+    .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-bottom:1.5rem; }
+    .tw table { margin-bottom:0; min-width:640px; }
+    .callout { border-left:4px solid var(--phase); background:rgba(var(--phase-rgb),0.06); padding:1rem 1.25rem; border-radius:0 8px 8px 0; margin-bottom:1.5rem; }
+    .callout.warn { border-left-color:var(--amber); background:rgba(245,166,35,0.06); }
+    .callout.key { border-left-color:var(--green); background:rgba(46,204,113,0.06); }
+    .callout.critical { border-left-color:#e74c3c; background:rgba(231,76,60,0.06); }
+    .callout strong { color:var(--phase); }
+    .callout.key strong { color:var(--green); }
+    .callout.warn strong { color:var(--amber); }
+    .callout.critical strong { color:#e74c3c; }
+    .grid-2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:1.2rem; margin:1rem 0; }
+    .grid-3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; margin:1rem 0; }
+    ul, ol { margin:0 0 1rem 1.5rem; }
+    li { margin-bottom:0.35rem; }
+    footer { background:var(--dark); border-top:1px solid var(--border); padding:2rem; text-align:center; color:var(--text-muted); font-size:.85rem; margin-top:3rem; }
+    footer a { color:var(--cyan); }
+
+    /* ===== STAT STRIP (metric boxes) ===== */
+    .stat-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0.8rem; margin:1rem 0 1.5rem; }
+    .stat { background:var(--card-bg); border:1px solid var(--border); border-radius:10px; padding:0.9rem 1rem; text-align:center; }
+    .stat .v { font-size:1.5rem; font-weight:800; color:var(--phase); font-variant-numeric:tabular-nums; line-height:1.1; }
+    .stat .v.green { color:var(--green); } .stat .v.amber { color:var(--amber); } .stat .v.cyan { color:var(--cyan); } .stat .v.blue { color:var(--blue); } .stat .v.red { color:#e74c3c; }
+    .stat .l { font-size:0.72rem; color:var(--text-muted); line-height:1.35; margin-top:0.25rem; }
+
+    /* ===== FIGURE (white background for matplotlib PNGs on dark theme) ===== */
+    .figbox { background:#fff; padding:12px; border-radius:8px; max-width:100%; margin:1.1rem auto 0.4rem; }
+    .figbox img { display:block; width:100%; height:auto; border-radius:4px; }
+    .fig-cap { font-size:0.78rem; color:var(--text-muted); margin:0 0 1.4rem; text-align:center; }
+
+    /* ===== VERTICAL FLOW ===== */
+    .vflow { display:flex; flex-direction:column; gap:0; align-items:center; margin:1.25rem 0; }
+    .vflow .box { width:100%; max-width:740px; padding:0.85rem 1.15rem; border-radius:10px; font-size:0.86rem; }
+    .vflow .box.blue { background:rgba(84,160,255,.1); border:1px solid rgba(84,160,255,.35); }
+    .vflow .box.cyan { background:rgba(0,210,211,.1); border:1px solid rgba(0,210,211,.35); }
+    .vflow .box.green { background:rgba(46,204,113,.1); border:1px solid rgba(46,204,113,.35); }
+    .vflow .box.gray { background:rgba(160,174,192,.08); border:1px solid rgba(160,174,192,.3); }
+    .vflow .box h4 { margin:0 0 .25rem; font-size:.95rem; color:#fff; }
+    .vflow .arrow { color:var(--phase); font-size:1.3rem; line-height:1; padding:3px 0; }
+
+    /* ===== CSS BAR CHARTS ===== */
+    .bars { margin:1.1rem 0 1.4rem; }
+    .barrow { display:grid; grid-template-columns:160px 1fr 70px; align-items:center; gap:0.6rem; margin-bottom:0.5rem; }
+    .barrow .blab { font-size:0.78rem; color:var(--text-muted); text-align:right; }
+    .barrow .btrack { background:rgba(255,255,255,0.05); border-radius:5px; height:22px; overflow:hidden; }
+    .barrow .bfill { height:100%; border-radius:5px; background:linear-gradient(90deg,var(--phase),#ff9f7a); }
+    .barrow .bfill.green { background:linear-gradient(90deg,var(--green),#7fe6a6); }
+    .barrow .bfill.amber { background:linear-gradient(90deg,var(--amber),#ffd27a); }
+    .barrow .bfill.blue { background:linear-gradient(90deg,var(--blue),#9cc6ff); }
+    .barrow .bfill.ideal { background:repeating-linear-gradient(45deg,rgba(160,174,192,.55),rgba(160,174,192,.55) 6px,rgba(160,174,192,.3) 6px,rgba(160,174,192,.3) 12px); }
+    .barrow .bval { font-size:0.78rem; color:#fff; font-variant-numeric:tabular-nums; text-align:left; }
+    .chart-cap { font-size:0.76rem; color:var(--text-muted); margin:-0.6rem 0 1.4rem; }
+
+    /* ===== MATH BLOCK ===== */
+    .math-block { background:rgba(30,30,46,.7); border:1px solid var(--border); border-radius:8px; padding:1rem 1.25rem; margin:1rem 0; overflow-x:auto; text-align:center; }
+    .math-block .eq-label { float:right; color:var(--text-muted); font-size:0.85rem; }
+
+    @media(max-width:768px) {
+      .hero h1 { font-size:1.7rem; } .container { padding:1rem; } .card { padding:1.25rem; }
+      pre { font-size:.75rem; padding:1rem; } .grid-2,.grid-3 { grid-template-columns:1fr; }
+      .barrow { grid-template-columns:110px 1fr 56px; }
+    }
+    @media(max-width:600px) {
+      .hero h1 { font-size:1.4rem; } .hero .subtitle { font-size:.9rem; }
+      nav ul { gap:0; } nav ul li a { padding:.7rem .6rem; font-size:.78rem; }
+      h2 { font-size:1.5rem; } h3 { font-size:1.15rem; }
+      table { font-size:.76rem; } th,td { padding:.45rem .55rem; }
+      .barrow { grid-template-columns:92px 1fr 50px; gap:0.4rem; }
+      .barrow .blab { font-size:0.68rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav><ul>
+  <li><a href="../index.html">&larr; <span class="i18n" data-en="AI Infra Basics" data-zh="AI 基礎設施">AI Infra Basics</span></a></li>
+  <li><a href="index.html"><span class="i18n" data-en="Deepdives" data-zh="實驗深潛">Deepdives</span></a></li>
+  <li><a href="#tldr"><span class="i18n" data-en="TL;DR" data-zh="重點">TL;DR</span></a></li>
+  <li><a href="#background"><span class="i18n" data-en="Background" data-zh="背景">Background</span></a></li>
+  <li><a href="#method"><span class="i18n" data-en="Method" data-zh="方法">Method</span></a></li>
+  <li><a href="#results"><span class="i18n" data-en="Results" data-zh="結果">Results</span></a></li>
+  <li><a href="#meaning"><span class="i18n" data-en="What It Means" data-zh="研究意義">What It Means</span></a></li>
+  <li><a href="#limits"><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></a></li>
+  <li class="lang-switch">
+    <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+    <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+  </li>
+</ul></nav>
+
+<section class="hero">
+  <span class="series-badge"><span class="i18n" data-en="EXPERIMENT DEEPDIVE #5" data-zh="實驗深潛 #5">EXPERIMENT DEEPDIVE #5</span></span>
+  <h1><span class="i18n" data-en="Why Analytical TP-Decode Latency Models" data-zh="為何分析式 TP-Decode 延遲模型">Why Analytical TP-Decode Latency Models</span><br><span class="accent"><span class="i18n" data-en="Fail in Eager LLM Serving" data-zh="在 Eager LLM 服務中失效">Fail in Eager LLM Serving</span></span></h1>
+  <p class="subtitle"><span class="i18n"
+    data-en="To predict one decode step under tensor parallelism, the natural model shards the single-GPU compute so it falls as one over k, and adds the all-reduce cost the shards must pay. The all-reduce term, calibrated in isolation, is faithful. The composition is not: it is accurate at TP-2 and fails at TP-4, because the measured step barely shrinks as GPUs are added. This page presents that negative result as the contribution and localizes the missing term."
+    data-zh="要在 tensor parallelism 下預測單一 decode step，最自然的模型會將單 GPU 的計算分片，使其隨 1/k 縮減，再加上分片所需付出的 all-reduce 成本。單獨校準的 all-reduce 項是忠實的；但整個組合並非如此：它在 TP-2 準確，在 TP-4 失效，因為實測的單步在加入 GPU 後幾乎不縮減。本頁將此負面結果作為貢獻提出，並定位出缺失的項。">To predict one decode step under tensor parallelism, the natural model shards the single-GPU compute so it falls as one over k, and adds the all-reduce cost the shards must pay. The all-reduce term, calibrated in isolation, is faithful. The composition is not: it is accurate at TP-2 and fails at TP-4, because the measured step barely shrinks as GPUs are added. This page presents that negative result as the contribution and localizes the missing term.</span></p>
+  <div class="badges">
+    <span class="badge"><span class="i18n" data-en="Submitted to IISWC 2026" data-zh="投稿 IISWC 2026">Submitted to IISWC 2026</span></span>
+    <span class="badge"><span class="i18n" data-en="Llama-3.1-70B &middot; vLLM" data-zh="Llama-3.1-70B &middot; vLLM">Llama-3.1-70B &middot; vLLM</span></span>
+    <span class="badge"><span class="i18n" data-en="H100 &middot; H200 &middot; TP-2 / TP-4 &middot; NVLink" data-zh="H100 &middot; H200 &middot; TP-2 / TP-4 &middot; NVLink">H100 &middot; H200 &middot; TP-2 / TP-4 &middot; NVLink</span></span>
+    <span class="badge"><span class="i18n" data-en="Pre-registered kill-switch (fired)" data-zh="預先登錄 kill-switch（已觸發）">Pre-registered kill-switch (fired)</span></span>
+  </div>
+</section>
+
+<div class="container">
+
+  <!-- ================= TL;DR ================= -->
+  <div class="section" id="tldr">
+    <span class="section-label"><span class="i18n" data-en="TL;DR" data-zh="重點摘要">TL;DR</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="The Whole Story in One Minute" data-zh="一分鐘看懂整個故事">The Whole Story in One Minute</span></h2>
+
+    <p><span class="i18n"
+      data-en="To serve a 70B model, tensor parallelism splits each layer across $k$ GPUs, and after each attention and MLP block the shards exchange their partial results in a collective all-reduce. The natural latency model adds two terms: the single-GPU compute divided by $k$, because each GPU now does a fraction of the work, plus the all-reduce cost the recombination requires. This study calibrates the all-reduce term on its own and confirms it is faithful, then tests the full composition against real eager-mode vLLM decode measurements on H100 and H200. The consequence is a primarily negative result alongside one solid positive component."
+      data-zh="要服務 70B 模型，tensor parallelism 將每層分片至 $k$ 個 GPU，並在每個 attention 與 MLP block 之後，以一次集合 all-reduce 交換各自的部分結果。最自然的延遲模型相加兩項：單 GPU 計算除以 $k$（因為每個 GPU 現在只做一部分工作），加上重組所需的 all-reduce 成本。本研究先單獨校準 all-reduce 項並確認其忠實，再以 H100 與 H200 上真實 eager 模式的 vLLM decode 量測檢驗整個組合。其結果是一個以負面為主、並伴隨一個穩固正面成分的發現。">To serve a 70B model, tensor parallelism splits each layer across $k$ GPUs, and after each attention and MLP block the shards exchange their partial results in a collective all-reduce. The natural latency model adds two terms: the single-GPU compute divided by $k$, because each GPU now does a fraction of the work, plus the all-reduce cost the recombination requires. This study calibrates the all-reduce term on its own and confirms it is faithful, then tests the full composition against real eager-mode vLLM decode measurements on H100 and H200. The consequence is a primarily negative result alongside one solid positive component.</span></p>
+
+    <div class="stat-strip">
+      <div class="stat"><div class="v green">2.86%</div><div class="l"><span class="i18n" data-en="composed-model MAPE at TP-2 (H100) — accurate" data-zh="組合模型在 TP-2（H100）的 MAPE —— 準確">composed-model MAPE at TP-2 (H100) — accurate</span></div></div>
+      <div class="stat"><div class="v red">42.3%</div><div class="l"><span class="i18n" data-en="composed-model MAPE at TP-4 (H100) — fails the 15% kill-switch" data-zh="組合模型在 TP-4（H100）的 MAPE —— 未通過 15% kill-switch">composed-model MAPE at TP-4 (H100) — fails the 15% kill-switch</span></div></div>
+      <div class="stat"><div class="v amber">1.12&times;</div><div class="l"><span class="i18n" data-en="measured step-shrink TP-2 to TP-4, versus the ideal 2x" data-zh="實測 TP-2 至 TP-4 的 step-shrink，相對理想的 2×">measured step-shrink TP-2 to TP-4, versus the ideal 2x</span></div></div>
+      <div class="stat"><div class="v blue">R&sup2; &gt; 0.999</div><div class="l"><span class="i18n" data-en="standalone NCCL all-reduce fit (global) — the validated positive term" data-zh="獨立 NCCL all-reduce 擬合（全域）—— 獲驗證的正面項">standalone NCCL all-reduce fit (global) — the validated positive term</span></div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card highlight-green">
+        <h4><span class="i18n" data-en="Positive: a refit-free all-reduce model" data-zh="正面：一個免重擬合的 all-reduce 模型">Positive: a refit-free all-reduce model</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="The closed form $\lambda + \tfrac{2(k-1)}{k}\,b/\beta$ fits a standalone NCCL message-size sweep to a global $R^2$ above 0.999 on all three configurations, recovering a per-call latency of 21 to 25 microseconds and an effective ring bandwidth of 307 to 335 GB/s, with no fit to any serving trace. This term is the part the paper recommends reusing."
+          data-zh="封閉式 $\lambda + \tfrac{2(k-1)}{k}\,b/\beta$ 在三個配置上將獨立的 NCCL message-size sweep 擬合至高於 0.999 的全域 $R^2$，回復出 21 至 25 微秒的每次呼叫延遲與 307 至 335 GB/s 的有效 ring 頻寬，且未擬合任何 serving trace。此項是本文建議重用的部分。">The closed form $\lambda + \tfrac{2(k-1)}{k}\,b/\beta$ fits a standalone NCCL message-size sweep to a global $R^2$ above 0.999 on all three configurations, recovering a per-call latency of 21 to 25 microseconds and an effective ring bandwidth of 307 to 335 GB/s, with no fit to any serving trace. This term is the part the paper recommends reusing.</span></p>
+      </div>
+      <div class="card highlight-red">
+        <h4><span class="i18n" data-en="Negative (headline): the composition does not predict TP-decode latency" data-zh="負面（標題）：此組合無法預測 TP-decode 延遲">Negative (headline): the composition does not predict TP-decode latency</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="On the trusted H100 grid the additive composition is accurate at TP-2 (2.86% MAPE) but fails its pre-registered 15% kill-switch at TP-4 (42.3% MAPE), under-predicting all twelve TP-4 cells by 32 to 45 percent. The paper does not retro-fit a correction and does not present the TP-2 pass as a working model."
+          data-zh="在受信任的 H100 網格上，加性組合在 TP-2 準確（2.86% MAPE），卻在 TP-4 未通過其預先登錄的 15% kill-switch（42.3% MAPE），低估全部十二個 TP-4 cell 共 32 至 45 個百分點。本文不事後擬合修正，也不將 TP-2 的通過呈現為一個可用的模型。">On the trusted H100 grid the additive composition is accurate at TP-2 (2.86% MAPE) but fails its pre-registered 15% kill-switch at TP-4 (42.3% MAPE), under-predicting all twelve TP-4 cells by 32 to 45 percent. The paper does not retro-fit a correction and does not present the TP-2 pass as a working model.</span></p>
+      </div>
+      <div class="card highlight-amber">
+        <h4><span class="i18n" data-en="The diagnosis: a per-step term that does not shrink with k" data-zh="診斷：一個不隨 k 縮減的每步項">The diagnosis: a per-step term that does not shrink with k</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="Subtracting the measured communication term and the predicted one-over-k compute leaves a per-step residual that is not constant in $k$: about minus 2.5 milliseconds at TP-2 but an implied plus 8.0 milliseconds at TP-4, a roughly ten-millisecond upward shift. This is presented as evidence, consistent with a non-shrinking eager host or dispatch cost, not as a proven mechanism."
+          data-zh="減去實測通訊項與預測的 1/k 計算後，留下的每步殘差在 $k$ 上並非常數：TP-2 約為 −2.5 毫秒，TP-4 卻隱含為 +8.0 毫秒，向上偏移約十毫秒。此項作為證據提出，與一個不縮減的 eager host 或 dispatch 成本相一致，而非作為一個已證明的機制。">Subtracting the measured communication term and the predicted one-over-k compute leaves a per-step residual that is not constant in $k$: about minus 2.5 milliseconds at TP-2 but an implied plus 8.0 milliseconds at TP-4, a roughly ten-millisecond upward shift. This is presented as evidence, consistent with a non-shrinking eager host or dispatch cost, not as a proven mechanism.</span></p>
+      </div>
+      <div class="card highlight-blue">
+        <h4><span class="i18n" data-en="De-confounded: it is TP scaling, not node variance" data-zh="已去除混淆：這是 TP scaling，而非節點變異">De-confounded: it is TP scaling, not node variance</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="Because the original H100 TP-2 and TP-4 grids ran on different nodes, a dedicated single-node control measured both degrees back-to-back on one H100 node. The failure reproduces, with a step-shrink of 1.08 times and a TP-4 MAPE of 44 percent, so the negative result is a genuine TP-scaling effect and not a slow or co-tenanted TP-4 node."
+          data-zh="由於原始的 H100 TP-2 與 TP-4 網格在不同節點上執行，一項專門的單節點對照在同一個 H100 節點上背對背量測兩個度數。失效重現，step-shrink 為 1.08 倍、TP-4 MAPE 為 44%，因此該負面結果是真正的 TP-scaling 效應，而非一個緩慢或共用租戶的 TP-4 節點。">Because the original H100 TP-2 and TP-4 grids ran on different nodes, a dedicated single-node control measured both degrees back-to-back on one H100 node. The failure reproduces, with a step-shrink of 1.08 times and a TP-4 MAPE of 44 percent, so the negative result is a genuine TP-scaling effect and not a slow or co-tenanted TP-4 node.</span></p>
+      </div>
+    </div>
+
+    <div class="callout critical">
+      <strong><span class="i18n" data-en="Pre-registered kill-switch — fired." data-zh="預先登錄的 kill-switch —— 已觸發。">Pre-registered kill-switch — fired.</span></strong>
+      <span class="i18n"
+        data-en="The test asked, before measurement, whether the additive form matches the measured TP scaling within 15 percent. It does not: the form misses H100 TP-4 by 42.3 percent MAPE, passing only at TP-2. As pre-specified, the paper reports the negative outcome as the result rather than tuning a correction until the form passes."
+        data-zh="此檢驗在量測之前便問道：加性形式是否在 15% 以內匹配實測的 TP scaling。答案為否：該形式在 H100 TP-4 偏離 42.3% MAPE，僅在 TP-2 通過。如預先設定，本文將此負面結果作為結果回報，而非反覆調校修正直至該形式通過。">The test asked, before measurement, whether the additive form matches the measured TP scaling within 15 percent. It does not: the form misses H100 TP-4 by 42.3 percent MAPE, passing only at TP-2. As pre-specified, the paper reports the negative outcome as the result rather than tuning a correction until the form passes.</span>
+    </div>
+  </div>
+
+  <!-- ================= BACKGROUND ================= -->
+  <div class="section" id="background">
+    <span class="section-label"><span class="i18n" data-en="Background — start here" data-zh="背景 —— 從這裡開始">Background — start here</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="What Happens in One TP Decode Step" data-zh="一個 TP decode step 裡發生什麼">What Happens in One TP Decode Step</span></h2>
+
+    <p><span class="i18n"
+      data-en="To read the result, one needs a clear picture of where time goes in a single tensor-parallel decode step. This section builds that picture in plain terms before any equation: what tensor parallelism does to the work, what the all-reduce is for, and why one might reasonably expect the step to shrink as GPUs are added. The expectation built here is exactly the one the measurement later overturns."
+      data-zh="要讀懂這個結果，需要先清楚理解單一 tensor-parallel decode step 中時間花在何處。本節在任何方程式之前，先以淺白語言建立此圖像：tensor parallelism 對工作做了什麼、all-reduce 的用途，以及為何人們會合理地預期 step 隨 GPU 增加而縮減。此處建立的預期，正是稍後量測所推翻的那一個。">To read the result, one needs a clear picture of where time goes in a single tensor-parallel decode step. This section builds that picture in plain terms before any equation: what tensor parallelism does to the work, what the all-reduce is for, and why one might reasonably expect the step to shrink as GPUs are added. The expectation built here is exactly the one the measurement later overturns.</span></p>
+
+    <h3><span class="i18n" data-en="Sharding the layer, then recombining with an all-reduce" data-zh="將層分片，再以 all-reduce 重組">Sharding the layer, then recombining with an all-reduce</span></h3>
+    <p><span class="i18n"
+      data-en="A BF16 Llama-3.1-70B checkpoint is roughly 140 GB of weights, well past the 80 GB of an H100 and the 141 GB of an H200 once activations, the KV cache, and CUDA workspace are accounted for. Tensor parallelism (TP) is therefore not an optional knob; it is the precondition for serving the model at all. In TP each transformer layer's projection matrices and attention heads are split across the $k$ GPUs, so every GPU holds a slice of the weights and computes a slice of the result. Because the slices are partial, they must be summed back together before the next sub-layer can proceed — a collective all-reduce over the $k$ ranks. A Llama-3.1-70B layer performs two such all-reduces (one after attention, one after the MLP), and the model has 80 layers, so a single decode step issues 160 all-reduce collectives on the critical path. The intuition the additive model encodes is that splitting the weights across twice as many GPUs should halve the per-GPU compute, while the all-reduce adds a comparatively small recombination cost on top."
+      data-zh="BF16 的 Llama-3.1-70B 權重約 140 GB，遠超 H100 的 80 GB 與 H200 的 141 GB —— 在計入 activation、KV cache 與 CUDA workspace 之後更是如此。因此 tensor parallelism（TP）並非可選的旋鈕，而是服務該模型的前提。在 TP 中，每個 transformer 層的投影矩陣與 attention head 會分割至 $k$ 個 GPU，因此每個 GPU 持有一片權重並計算一片結果。由於這些片段是部分的，必須先相加合併，下一個子層才能繼續 —— 即對 $k$ 個 rank 的一次集合 all-reduce。一個 Llama-3.1-70B 層執行兩次這樣的 all-reduce（一次在 attention 後、一次在 MLP 後），而模型有 80 層，因此單一 decode step 在關鍵路徑上發出 160 次 all-reduce 集合通訊。加性模型所編碼的直覺是：將權重分散到兩倍數量的 GPU，應使每 GPU 計算減半，而 all-reduce 在其上附加一個相對較小的重組成本。">A BF16 Llama-3.1-70B checkpoint is roughly 140 GB of weights, well past the 80 GB of an H100 and the 141 GB of an H200 once activations, the KV cache, and CUDA workspace are accounted for. Tensor parallelism (TP) is therefore not an optional knob; it is the precondition for serving the model at all. In TP each transformer layer's projection matrices and attention heads are split across the $k$ GPUs, so every GPU holds a slice of the weights and computes a slice of the result. Because the slices are partial, they must be summed back together before the next sub-layer can proceed — a collective all-reduce over the $k$ ranks. A Llama-3.1-70B layer performs two such all-reduces (one after attention, one after the MLP), and the model has 80 layers, so a single decode step issues 160 all-reduce collectives on the critical path. The intuition the additive model encodes is that splitting the weights across twice as many GPUs should halve the per-GPU compute, while the all-reduce adds a comparatively small recombination cost on top.</span></p>
+
+    <div class="vflow">
+      <div class="box blue"><h4>1. <span class="i18n" data-en="Sharded compute (the model expects this to shrink as 1/k)" data-zh="分片計算（模型預期此項隨 1/k 縮減）">Sharded compute (the model expects this to shrink as 1/k)</span></h4><span class="i18n" data-en="Each GPU computes its slice of the attention and MLP projections. With twice the GPUs, the model assumes each does half the work." data-zh="每個 GPU 計算它那一片 attention 與 MLP 投影。GPU 加倍時，模型假設每個各做一半工作。">Each GPU computes its slice of the attention and MLP projections. With twice the GPUs, the model assumes each does half the work.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box cyan"><h4>2. <span class="i18n" data-en="All-reduce after attention (160 collectives per step at 80 layers)" data-zh="attention 後的 all-reduce（80 層下每步 160 次集合通訊）">All-reduce after attention (160 collectives per step at 80 layers)</span></h4><span class="i18n" data-en="The partial slices are summed across ranks over NVLink. This is the new cost tensor parallelism adds, and the paper measures it directly." data-zh="部分片段透過 NVLink 跨 rank 相加。這是 tensor parallelism 新增的成本，本文直接量測它。">The partial slices are summed across ranks over NVLink. This is the new cost tensor parallelism adds, and the paper measures it directly.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box cyan"><h4>3. <span class="i18n" data-en="All-reduce after MLP" data-zh="MLP 後的 all-reduce">All-reduce after MLP</span></h4><span class="i18n" data-en="A second collective recombines the MLP slices, completing one layer; this repeats 80 times per decode step." data-zh="第二次集合通訊重組 MLP 片段，完成一層；此過程在每個 decode step 重複 80 次。">A second collective recombines the MLP slices, completing one layer; this repeats 80 times per decode step.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box gray"><h4>4. <span class="i18n" data-en="Host and dispatch work (assumed negligible or shrinking)" data-zh="host 與 dispatch 工作（被假設可忽略或會縮減）">Host and dispatch work (assumed negligible or shrinking)</span></h4><span class="i18n" data-en="In eager mode the Python runtime launches every kernel and collective each step. The additive model has no growing term here; the measurement suggests this is where the missing time lives." data-zh="在 eager 模式下，Python runtime 每一步都啟動每個 kernel 與集合通訊。加性模型在此沒有增長項；量測顯示缺失的時間正落在此處。">In eager mode the Python runtime launches every kernel and collective each step. The additive model has no growing term here; the measurement suggests this is where the missing time lives.</span></div>
+    </div>
+
+    <h3><span class="i18n" data-en="Eager mode keeps the host on the critical path" data-zh="Eager 模式使 host 留在關鍵路徑上">Eager mode keeps the host on the critical path</span></h3>
+    <p><span class="i18n"
+      data-en="The measurements are taken in eager mode — the execution mode in which the Python runtime issues each kernel and each collective launch individually on every step rather than replaying a captured CUDA graph. This matters because in eager mode the kernel-dispatch and collective-launch work sits on the critical path and is paid afresh on every decode step. When the GPU count doubles, the compute slice each GPU owns may halve, but the number of launches the host must issue does not fall, and the 160 collective launches per step are if anything more numerous to coordinate. The paper does not assert in advance which component dominates; it builds the additive model on the assumption that the non-communication remainder shrinks with $k$ and then asks the measurement whether that assumption holds."
+      data-zh="這些量測在 eager 模式下取得 —— 在此執行模式中，Python runtime 在每一步個別發出每個 kernel 與每次集合通訊啟動，而非重播已錄製的 CUDA graph。這之所以重要，是因為在 eager 模式下，kernel dispatch 與集合通訊啟動的工作位於關鍵路徑上，且在每個 decode step 都重新支付。當 GPU 數加倍時，每個 GPU 所擁有的計算片段或許減半，但 host 必須發出的啟動次數並未減少，而每步 160 次的集合通訊啟動，要協調的數量若有變化也只會更多。本文並不預先斷言哪個成分主導；它在「非通訊剩餘量隨 $k$ 縮減」的假設上建構加性模型，再向量測詢問該假設是否成立。">The measurements are taken in eager mode — the execution mode in which the Python runtime issues each kernel and each collective launch individually on every step rather than replaying a captured CUDA graph. This matters because in eager mode the kernel-dispatch and collective-launch work sits on the critical path and is paid afresh on every decode step. When the GPU count doubles, the compute slice each GPU owns may halve, but the number of launches the host must issue does not fall, and the 160 collective launches per step are if anything more numerous to coordinate. The paper does not assert in advance which component dominates; it builds the additive model on the assumption that the non-communication remainder shrinks with $k$ and then asks the measurement whether that assumption holds.</span></p>
+    <div class="callout warn"><span class="i18n" data-en="The eager-mode choice is deliberate and is also the boundary of the claim. A serving stack that captures CUDA graphs would fold most of the per-step host launches into a single replay, which could change both the level and the scaling of the residual the paper isolates. The negative result here is a statement about eager-mode TP decode — the mode in which the host stays on the critical path." data-zh="選擇 eager 模式是刻意的，也是主張的邊界。一個會錄製 CUDA graph 的 serving 堆疊，會將大部分每步 host 啟動折疊進單次重播，這可能同時改變本文所隔離殘差的量級與其 scaling。此處的負面結果，是關於 eager 模式 TP decode 的陳述 —— 即 host 留在關鍵路徑上的那個模式。">The eager-mode choice is deliberate and is also the boundary of the claim. A serving stack that captures CUDA graphs would fold most of the per-step host launches into a single replay, which could change both the level and the scaling of the residual the paper isolates. The negative result here is a statement about eager-mode TP decode — the mode in which the host stays on the critical path.</span></div>
+  </div>
+
+  <!-- ================= METHOD ================= -->
+  <div class="section" id="method">
+    <span class="section-label"><span class="i18n" data-en="The Core Idea" data-zh="核心構想">The Core Idea</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="The Composition Under Test" data-zh="受檢的組合">The Composition Under Test</span></h2>
+
+    <p><span class="i18n"
+      data-en="The method has two halves that mirror the two terms of the model. The first is the closed-form all-reduce cost, calibrated in isolation so the communication term is never tuned against serving data. The second is the full additive composition, confronted with a measured eager-mode decode grid through a pre-registered kill-switch."
+      data-zh="方法分為兩半，對應模型的兩個項。第一半是封閉式 all-reduce 成本，單獨校準，使通訊項從不對 serving 資料調校。第二半是完整的加性組合，透過一個預先登錄的 kill-switch 與實測 eager 模式 decode 網格對質。">The method has two halves that mirror the two terms of the model. The first is the closed-form all-reduce cost, calibrated in isolation so the communication term is never tuned against serving data. The second is the full additive composition, confronted with a measured eager-mode decode grid through a pre-registered kill-switch.</span></p>
+
+    <h3><span class="i18n" data-en="The all-reduce term: a textbook closed form, calibrated alone" data-zh="all-reduce 項：一個教科書式封閉形式，單獨校準">The all-reduce term: a textbook closed form, calibrated alone</span></h3>
+    <p><span class="i18n"
+      data-en="The communication cost of a ring all-reduce over $k$ ranks is captured by a textbook model with two physical constants: a fixed per-call latency $\lambda$ that every collective pays once, and a bandwidth-limited transfer time that depends on the message size $b$ and the effective ring bandwidth $\beta$. The constants are recovered by a standalone NCCL microbenchmark that sweeps the message size from 32 KiB to 256 MiB on the same NVLink allocation the 70B run uses, so the bandwidth that calibrates the term is the bandwidth the serving step actually sees."
+      data-zh="對 $k$ 個 rank 的 ring all-reduce 通訊成本，由一個帶有兩個物理常數的教科書模型刻畫：一個每次集合通訊都支付一次的固定每次呼叫延遲 $\lambda$，以及一個取決於 message 大小 $b$ 與有效 ring 頻寬 $\beta$ 的頻寬受限傳輸時間。這些常數由一個獨立的 NCCL microbenchmark 回復，它在 70B 執行所用的同一 NVLink 配置上，將 message 大小從 32 KiB 掃至 256 MiB，因此校準此項的頻寬，正是 serving step 實際所見的頻寬。">The communication cost of a ring all-reduce over $k$ ranks is captured by a textbook model with two physical constants: a fixed per-call latency $\lambda$ that every collective pays once, and a bandwidth-limited transfer time that depends on the message size $b$ and the effective ring bandwidth $\beta$. The constants are recovered by a standalone NCCL microbenchmark that sweeps the message size from 32 KiB to 256 MiB on the same NVLink allocation the 70B run uses, so the bandwidth that calibrates the term is the bandwidth the serving step actually sees.</span></p>
+    <div class="math-block">
+      <span class="eq-label">(1)</span>
+      $$T_{\mathrm{allreduce}}(b,k) \;=\; \lambda \;+\; \frac{2(k-1)}{k}\,\frac{b}{\beta}$$
+    </div>
+    <p><span class="i18n"
+      data-en="Fitting Equation (1) to the message-size sweep recovers a per-call latency $\lambda$ of 21 to 25 microseconds and an effective ring bandwidth $\beta$ of 307 to 335 GB/s, with a global $R^2$ above 0.999 on all three configurations. One honest caveat applies: the high global $R^2$ is dominated by the large messages in the sweep, and at the 32 to 256 KiB payloads a 70B decode step actually produces, the linear fit over-predicts the raw per-call NCCL time by about 7 to 10 percent on H100 TP-2 and by about 22 to 27 percent on H100 TP-4. The term is a faithful first-order standalone description of the collective, with a known small-message bias rather than a perfect match in the decode-relevant regime."
+      data-zh="將方程式 (1) 擬合至 message-size sweep，回復出 21 至 25 微秒的每次呼叫延遲 $\lambda$ 與 307 至 335 GB/s 的有效 ring 頻寬 $\beta$，在三個配置上皆有高於 0.999 的全域 $R^2$。一個誠實的但書適用：此高全域 $R^2$ 由 sweep 中的大 message 主導，而在一個 70B decode step 實際產生的 32 至 256 KiB 載荷處，該線性擬合在 H100 TP-2 高估原始每次呼叫 NCCL 時間約 7 至 10%、在 H100 TP-4 高估約 22 至 27%。此項是對集合通訊忠實的一階獨立描述，帶有已知的小 message 偏差，而非在 decode 相關區間的完美匹配。">Fitting Equation (1) to the message-size sweep recovers a per-call latency $\lambda$ of 21 to 25 microseconds and an effective ring bandwidth $\beta$ of 307 to 335 GB/s, with a global $R^2$ above 0.999 on all three configurations. One honest caveat applies: the high global $R^2$ is dominated by the large messages in the sweep, and at the 32 to 256 KiB payloads a 70B decode step actually produces, the linear fit over-predicts the raw per-call NCCL time by about 7 to 10 percent on H100 TP-2 and by about 22 to 27 percent on H100 TP-4. The term is a faithful first-order standalone description of the collective, with a known small-message bias rather than a perfect match in the decode-relevant regime.</span></p>
+
+    <h3><span class="i18n" data-en="The full composition and the pre-registered kill-switch" data-zh="完整組合與預先登錄的 kill-switch">The full composition and the pre-registered kill-switch</span></h3>
+    <p><span class="i18n"
+      data-en="The composition under test takes the single-GPU compute model, divides the sharded shapes by $k$ so the compute term falls as one over $k$, and adds the two all-reduces per layer across all 80 layers. A single per-step constant $R_0$, calibrated from one TP-2 cell, stands in for any fixed dispatch floor. The kill-switch was specified before the decode measurements were read: the composition passes if its predicted TP scaling matches the measured step within 15 percent MAPE, and otherwise the paper reports the negative outcome without retro-fitting a correction."
+      data-zh="受檢的組合取單 GPU 計算模型，將分片後的形狀除以 $k$，使計算項隨 1/k 下降，並加上跨全部 80 層每層兩次的 all-reduce。一個單一的每步常數 $R_0$（由一個 TP-2 cell 校準）代表任何固定的 dispatch 基準。kill-switch 在讀取 decode 量測之前便已指定：若組合所預測的 TP scaling 在 15% MAPE 以內匹配實測 step，則通過，否則本文回報負面結果，且不事後擬合修正。">The composition under test takes the single-GPU compute model, divides the sharded shapes by $k$ so the compute term falls as one over $k$, and adds the two all-reduces per layer across all 80 layers. A single per-step constant $R_0$, calibrated from one TP-2 cell, stands in for any fixed dispatch floor. The kill-switch was specified before the decode measurements were read: the composition passes if its predicted TP scaling matches the measured step within 15 percent MAPE, and otherwise the paper reports the negative outcome without retro-fitting a correction.</span></p>
+    <div class="math-block">
+      <span class="eq-label">(2)</span>
+      $$T_{\mathrm{step}}(k) \;\stackrel{?}{=}\; \underbrace{\tfrac{1}{k}\,T_{\mathrm{compute}}(1)}_{\text{assumed to shrink as }1/k} \;+\; \underbrace{2\,N_{\mathrm{layers}}\,T_{\mathrm{allreduce}}(b,k)}_{\text{added, does not shrink}} \;+\; R_0$$
+    </div>
+    <p><span class="i18n"
+      data-en="The question mark over the equality is the whole paper. Equation (2) is the hypothesis, not a result, and the kill-switch is the instrument that decides it. Because the all-reduce term is calibrated independently and the per-step constant is fit from a single cell rather than tuned per configuration, a failure cannot be blamed on an over-flexible network model or on hidden free parameters; it has to come from the structural assumption that the one-over-$k$ compute term carries the step. The per-decode-step latency is obtained by a difference method — the wall-clock time of a 33-token generation minus the wall-clock time of a 1-token generation, divided by 32 — and fragile cells, where the 1-token wall spills extra time, are gated out."
+      data-zh="等號上的問號就是整篇論文。方程式 (2) 是假設，而非結果，而 kill-switch 是裁決它的工具。由於 all-reduce 項獨立校準，且每步常數由單一 cell 擬合而非逐配置調校，失效便不能歸咎於過度彈性的網路模型或隱藏的自由參數；它必然來自「1/k 計算項承載整個 step」這個結構性假設。每 decode step 延遲由差分法取得 —— 33 token 生成的 wall-clock 時間減去 1 token 生成的 wall-clock 時間，再除以 32 —— 而 1 token wall 溢出額外時間的脆弱 cell 被設閘排除。">The question mark over the equality is the whole paper. Equation (2) is the hypothesis, not a result, and the kill-switch is the instrument that decides it. Because the all-reduce term is calibrated independently and the per-step constant is fit from a single cell rather than tuned per configuration, a failure cannot be blamed on an over-flexible network model or on hidden free parameters; it has to come from the structural assumption that the one-over-$k$ compute term carries the step. The per-decode-step latency is obtained by a difference method — the wall-clock time of a 33-token generation minus the wall-clock time of a 1-token generation, divided by 32 — and fragile cells, where the 1-token wall spills extra time, are gated out.</span></p>
+  </div>
+
+  <!-- ================= RESULTS ================= -->
+  <div class="section" id="results">
+    <span class="section-label"><span class="i18n" data-en="Results" data-zh="實驗結果">Results</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="What the Measurements Show" data-zh="量測顯示什麼">What the Measurements Show</span></h2>
+
+    <p><span class="i18n"
+      data-en="Three pre-specified claims resolve here: one passes, one fails as the headline, and the third explains the failure. The figure below shows all four faces of the result at once: the NCCL fit (a), measured versus composed step (b), the step that barely shrinks with TP degree (c), and the same-node de-confounding control (d)."
+      data-zh="本節中三項預先指定的主張獲得裁決：一項通過、一項作為標題失敗、第三項解釋該失敗。下圖一次展示結果的全部四個面向：NCCL 擬合 (a)、實測對組合 step (b)、隨 TP 度數幾乎不縮減的 step (c)，以及同節點去混淆對照 (d)。">Three pre-specified claims resolve here: one passes, one fails as the headline, and the third explains the failure. The figure below shows all four faces of the result at once: the NCCL fit (a), measured versus composed step (b), the step that barely shrinks with TP degree (c), and the same-node de-confounding control (d).</span></p>
+
+    <div class="figbox"><img src="figs/tp-decode-measured.png" alt="Four panels: NCCL all-reduce fit R2 over 0.999; measured vs composed step showing TP-2 within band and TP-4 far below; H100 decode step barely shrinking from TP-2 to TP-4; same-node control bars near 1.09x against ideal 2x"></div>
+    <p class="fig-cap"><span class="i18n"
+      data-en="(a) Standalone NCCL all-reduce: the closed form fits the message-size sweep to R² > 0.999 (λ ≈ 21–25 µs, β ≈ 307–335 GB/s). (b) Measured vs composed step on H100: TP-2 lands inside the ±15% band (MAPE 3%); TP-4 sits far below the diagonal (MAPE 42%). (c) The H100 decode step barely shrinks from TP-2 to TP-4 — measured (red) stays near 26 ms while ideal 1/k (dashed) and the mechanism compute/k (blue) fall toward 14 ms. (d) Same-node control: the measured TP-2→TP-4 step-shrink is a median 1.09× against the ideal 2×."
+      data-zh="(a) 獨立 NCCL all-reduce：封閉式擬合 message-size sweep 至 R² > 0.999（λ ≈ 21–25 µs、β ≈ 307–335 GB/s）。(b) H100 上實測對組合 step：TP-2 落於 ±15% 帶內（MAPE 3%）；TP-4 遠在對角線下方（MAPE 42%）。(c) H100 decode step 從 TP-2 到 TP-4 幾乎不縮減 —— 實測（紅）維持在約 26 ms，而理想 1/k（虛線）與機制 compute/k（藍）降向 14 ms。(d) 同節點對照：實測 TP-2→TP-4 step-shrink 中位數為 1.09×，相對理想的 2×。">(a) Standalone NCCL all-reduce: the closed form fits the message-size sweep to R² > 0.999 (λ ≈ 21–25 µs, β ≈ 307–335 GB/s). (b) Measured vs composed step on H100: TP-2 lands inside the ±15% band (MAPE 3%); TP-4 sits far below the diagonal (MAPE 42%). (c) The H100 decode step barely shrinks from TP-2 to TP-4 — measured (red) stays near 26 ms while ideal 1/k (dashed) and the mechanism compute/k (blue) fall toward 14 ms. (d) Same-node control: the measured TP-2→TP-4 step-shrink is a median 1.09× against the ideal 2×.</span></p>
+
+    <h3><span class="i18n" data-en="The communication term is validated (as a first-order standalone term)" data-zh="通訊項獲得驗證（作為一階獨立項）">The communication term is validated (as a first-order standalone term)</span></h3>
+    <p><span class="i18n"
+      data-en="The residual of the measured H100 TP-2 step over the predicted sharded compute is small and positive (0.14 to 1.87 ms across batch sizes at context 2048), the same order as the microbenchmark-predicted communication time of about 3.45 to 3.51 ms. At TP-2 the communication term is only about 11.7 to 12.5 percent of the measured step. The all-reduce fit is a faithful, serving-trace-free description of the collective cost, recommended for reuse, with the disclosed small-message over-prediction as its one known limitation."
+      data-zh="實測 H100 TP-2 step 相對於預測分片計算的殘差，是小而為正的（在 context 2048 下跨 batch 大小介於 0.14 至 1.87 ms），與 microbenchmark 預測的約 3.45 至 3.51 ms 通訊時間屬同一量級。在 TP-2，通訊項僅約占實測 step 的 11.7 至 12.5%。此 all-reduce 擬合是對集合通訊成本忠實、免 serving trace 的描述，建議重用，其唯一已知限制是已揭露的小 message 高估。">The residual of the measured H100 TP-2 step over the predicted sharded compute is small and positive (0.14 to 1.87 ms across batch sizes at context 2048), the same order as the microbenchmark-predicted communication time of about 3.45 to 3.51 ms. At TP-2 the communication term is only about 11.7 to 12.5 percent of the measured step. The all-reduce fit is a faithful, serving-trace-free description of the collective cost, recommended for reuse, with the disclosed small-message over-prediction as its one known limitation.</span></p>
+
+    <h3><span class="i18n" data-en="The composition fails the kill-switch at TP-4 (the headline)" data-zh="組合在 TP-4 未通過 kill-switch（標題）">The composition fails the kill-switch at TP-4 (the headline)</span></h3>
+    <p><span class="i18n"
+      data-en="On the clean H100 grid the composed model achieves a MAPE of 2.86 percent at TP-2 but 42.3 percent at TP-4, under-predicting every one of the twelve cells by 32 to 45 percent. The table below lists the per-decode step at context 2048 for the two configurations, alongside the model's prediction and the signed error."
+      data-zh="在乾淨的 H100 網格上，組合模型在 TP-2 達到 2.86% 的 MAPE，但在 TP-4 達到 42.3%，低估全部十二個 cell 共 32 至 45%。下表列出兩個配置在 context 2048 下的每 decode step，以及模型的預測與帶號誤差。">On the clean H100 grid the composed model achieves a MAPE of 2.86 percent at TP-2 but 42.3 percent at TP-4, under-predicting every one of the twelve cells by 32 to 45 percent. The table below lists the per-decode step at context 2048 for the two configurations, alongside the model's prediction and the signed error.</span></p>
+    <p class="chart-cap"><span class="i18n" data-en="Scroll right → for predicted communication, full prediction, and signed error." data-zh="向右捲動 → 可查看預測通訊、完整預測與帶號誤差。">Scroll right → for predicted communication, full prediction, and signed error.</span></p>
+    <div class="tw">
+    <table>
+      <thead>
+        <tr><th><span class="i18n" data-en="Config" data-zh="配置">Config</span></th><th class="num">N</th><th class="num"><span class="i18n" data-en="Measured (ms)" data-zh="實測 (ms)">Measured (ms)</span></th><th class="num"><span class="i18n" data-en="Pred. compute (ms)" data-zh="預測計算 (ms)">Pred. compute (ms)</span></th><th class="num"><span class="i18n" data-en="Pred. comm (ms)" data-zh="預測通訊 (ms)">Pred. comm (ms)</span></th><th class="num"><span class="i18n" data-en="Full pred. (ms)" data-zh="完整預測 (ms)">Full pred. (ms)</span></th><th class="num"><span class="i18n" data-en="Error (%)" data-zh="誤差 (%)">Error (%)</span></th></tr>
+      </thead>
+      <tbody>
+        <tr><td>H100 TP-2</td><td class="num">1</td><td class="num">27.77</td><td class="num">27.62</td><td class="num">3.45</td><td class="num">27.77</td><td class="num">+0.0</td></tr>
+        <tr><td>H100 TP-2</td><td class="num">2</td><td class="num">29.64</td><td class="num">27.77</td><td class="num">3.46</td><td class="num">27.92</td><td class="num neg">&minus;5.8</td></tr>
+        <tr><td>H100 TP-2</td><td class="num">4</td><td class="num">29.46</td><td class="num">28.06</td><td class="num">3.48</td><td class="num">28.23</td><td class="num neg">&minus;4.2</td></tr>
+        <tr><td>H100 TP-2</td><td class="num">8</td><td class="num">29.24</td><td class="num">28.64</td><td class="num">3.51</td><td class="num">28.84</td><td class="num neg">&minus;1.3</td></tr>
+        <tr><td>H100 TP-4</td><td class="num">1</td><td class="num">25.60</td><td class="num">13.81</td><td class="num">3.98</td><td class="num">14.49</td><td class="num neg">&minus;43.4</td></tr>
+        <tr><td>H100 TP-4</td><td class="num">2</td><td class="num">25.97</td><td class="num">13.89</td><td class="num">3.99</td><td class="num">14.57</td><td class="num neg">&minus;43.9</td></tr>
+        <tr><td>H100 TP-4</td><td class="num">4</td><td class="num">26.74</td><td class="num">14.04</td><td class="num">4.01</td><td class="num">14.74</td><td class="num neg">&minus;44.9</td></tr>
+        <tr><td>H100 TP-4</td><td class="num">8</td><td class="num">25.91</td><td class="num">14.33</td><td class="num">4.06</td><td class="num">15.09</td><td class="num neg">&minus;41.8</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p><span class="i18n"
+      data-en="The table makes the mechanism visible. At TP-2 the predicted compute alone already nearly matches the measured step, so the small communication term completes an accurate prediction. At TP-4 the model halves the predicted compute to about 14 ms, but the measured step holds near 26 ms, so the full prediction lands more than 40 percent low on every cell. The communication term is not the problem; the predicted compute saving is the part that fails to materialize."
+      data-zh="此表使機制顯而易見。在 TP-2，僅預測計算便已幾乎匹配實測 step，因此小小的通訊項完成了一個準確的預測。在 TP-4，模型將預測計算減半至約 14 ms，但實測 step 維持在約 26 ms 附近，因此完整預測在每個 cell 都低出 40% 以上。通訊項不是問題所在；預測的計算節省，才是那個未能兌現的部分。">The table makes the mechanism visible. At TP-2 the predicted compute alone already nearly matches the measured step, so the small communication term completes an accurate prediction. At TP-4 the model halves the predicted compute to about 14 ms, but the measured step holds near 26 ms, so the full prediction lands more than 40 percent low on every cell. The communication term is not the problem; the predicted compute saving is the part that fails to materialize.</span></p>
+
+    <h3><span class="i18n" data-en="Why it fails: the step does not shrink with k" data-zh="為何失效：step 不隨 k 縮減">Why it fails: the step does not shrink with k</span></h3>
+    <p><span class="i18n"
+      data-en="The mechanism model predicts the per-GPU compute halves from TP-2 to TP-4, falling from about 27.6 to about 13.8 ms. The measured step does not follow: the raw H100 TP-2 to TP-4 step ratio is only about 1.12, far from the ideal 2.00. The bars below contrast the step the model expects against the step actually measured at the cleanest cell, making the gap concrete."
+      data-zh="機制模型預測每 GPU 計算從 TP-2 到 TP-4 減半，從約 27.6 降至約 13.8 ms。實測 step 並未跟隨：原始 H100 TP-2 至 TP-4 的 step 比值僅約 1.12，遠不及理想的 2.00。下方長條對比模型所預期的 step 與在最乾淨 cell 實際量測的 step，使此落差具體可見。">The mechanism model predicts the per-GPU compute halves from TP-2 to TP-4, falling from about 27.6 to about 13.8 ms. The measured step does not follow: the raw H100 TP-2 to TP-4 step ratio is only about 1.12, far from the ideal 2.00. The bars below contrast the step the model expects against the step actually measured at the cleanest cell, making the gap concrete.</span></p>
+    <div class="bars">
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="Measured TP-2 step" data-zh="實測 TP-2 step">Measured TP-2 step</span></div><div class="btrack"><div class="bfill" style="width:100%"></div></div><div class="bval">27.8 ms</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="Model expects at TP-4" data-zh="模型在 TP-4 的預期">Model expects at TP-4</span></div><div class="btrack"><div class="bfill ideal" style="width:52%"></div></div><div class="bval">14.5 ms</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="Measured TP-4 step" data-zh="實測 TP-4 step">Measured TP-4 step</span></div><div class="btrack"><div class="bfill" style="width:92%"></div></div><div class="bval">25.6 ms</div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="The compute saving the model predicts (dashed) never materializes: the measured TP-4 step (25.6 ms) stays close to the TP-2 step (27.8 ms), a 1.12× shrink against the ideal 2×." data-zh="模型預測的計算節省（虛線）從未兌現：實測 TP-4 step（25.6 ms）貼近 TP-2 step（27.8 ms），1.12× 縮減相對理想的 2×。">The compute saving the model predicts (dashed) never materializes: the measured TP-4 step (25.6 ms) stays close to the TP-2 step (27.8 ms), a 1.12× shrink against the ideal 2×.</span></p>
+
+    <p><span class="i18n"
+      data-en="Subtracting the predicted communication term and the one-parameter per-step constant exposes the shape of the gap. The implied per-step residual is not constant in $k$: about minus 2.5 ms at TP-2 but an implied plus 8.0 ms at TP-4, so the constant that fits TP-2 does not transfer to TP-4. The additive decomposition is structurally insufficient because it assumes a per-step term fixed in $k$, while the data say that term shifts by roughly ten milliseconds as $k$ grows. This non-transfer — and not the communication term — is the negative result."
+      data-zh="減去預測通訊項與單參數每步常數，便揭露此落差的形狀。隱含的每步殘差在 $k$ 上並非常數：TP-2 約為 −2.5 ms，TP-4 卻隱含為 +8.0 ms，因此擬合 TP-2 的常數無法轉移至 TP-4。加性分解之所以結構性不足，是因為它假設一個在 $k$ 上固定的每步項，而資料顯示該項隨 $k$ 增長偏移約十毫秒。這項不可轉移性 —— 而非通訊項 —— 才是負面結果。">Subtracting the predicted communication term and the one-parameter per-step constant exposes the shape of the gap. The implied per-step residual is not constant in $k$: about minus 2.5 ms at TP-2 but an implied plus 8.0 ms at TP-4, so the constant that fits TP-2 does not transfer to TP-4. The additive decomposition is structurally insufficient because it assumes a per-step term fixed in $k$, while the data say that term shifts by roughly ten milliseconds as $k$ grows. This non-transfer — and not the communication term — is the negative result.</span></p>
+
+    <h3><span class="i18n" data-en="The same-node control: the failure is not node variance" data-zh="同節點對照：失效不是節點變異">The same-node control: the failure is not node variance</span></h3>
+    <p><span class="i18n"
+      data-en="The original H100 TP-2 and TP-4 grids ran on different nodes, leaving one alternative reading open: the TP-4 under-prediction could be a slow or co-tenanted TP-4 node rather than a TP-scaling effect. To settle this, a dedicated same-node control measured TP-2 and TP-4 back-to-back on the single H100 node, with the identical NCCL sweep and 70B decode grid. The original failure reproduces: the composed model again tracks TP-2 to a MAPE of 2.2 percent and again fails hard at TP-4 with a MAPE of 44.4 percent, under-predicting every clean cell by 42 to 46 percent. Across the ten clean same-node cells the measured step-shrink is only about 1.08 times against the ideal 2.00, and the implied per-step residual makes the same shift it does cross-node (about minus 2.6 ms at TP-2 to about plus 8.7 ms at TP-4). Because there is only one node, the TP-4 failure cannot be cross-node variance, so the failure of the composition is a genuine TP-scaling effect."
+      data-zh="原始的 H100 TP-2 與 TP-4 網格在不同節點上執行，留下一種替代解讀：TP-4 的低估可能是一個緩慢或共用租戶的 TP-4 節點，而非 TP-scaling 效應。為定案此事，一項專門的同節點對照在單一 H100 節點上背對背量測 TP-2 與 TP-4，使用相同的 NCCL sweep 與 70B decode 網格。原始失效重現：組合模型再次將 TP-2 追蹤至 2.2% 的 MAPE，並再次在 TP-4 嚴重失效，MAPE 為 44.4%，低估每個乾淨 cell 共 42 至 46%。在十個乾淨的同節點 cell 上，實測 step-shrink 僅約 1.08 倍，相對理想的 2.00，而隱含的每步殘差做出與跨節點相同的偏移（從 TP-2 約 −2.6 ms 到 TP-4 約 +8.7 ms）。由於只有一個節點，TP-4 失效不可能是跨節點變異，因此此組合的失效是真正的 TP-scaling 效應。">The original H100 TP-2 and TP-4 grids ran on different nodes, leaving one alternative reading open: the TP-4 under-prediction could be a slow or co-tenanted TP-4 node rather than a TP-scaling effect. To settle this, a dedicated same-node control measured TP-2 and TP-4 back-to-back on the single H100 node, with the identical NCCL sweep and 70B decode grid. The original failure reproduces: the composed model again tracks TP-2 to a MAPE of 2.2 percent and again fails hard at TP-4 with a MAPE of 44.4 percent, under-predicting every clean cell by 42 to 46 percent. Across the ten clean same-node cells the measured step-shrink is only about 1.08 times against the ideal 2.00, and the implied per-step residual makes the same shift it does cross-node (about minus 2.6 ms at TP-2 to about plus 8.7 ms at TP-4). Because there is only one node, the TP-4 failure cannot be cross-node variance, so the failure of the composition is a genuine TP-scaling effect.</span></p>
+    <div class="bars">
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="ideal 1/k shrink" data-zh="理想 1/k 縮減">ideal 1/k shrink</span></div><div class="btrack"><div class="bfill ideal" style="width:100%"></div></div><div class="bval">2.00&times;</div></div>
+      <div class="barrow"><div class="blab"><span class="i18n" data-en="measured (same node)" data-zh="實測（同節點）">measured (same node)</span></div><div class="btrack"><div class="bfill amber" style="width:54%"></div></div><div class="bval">1.08&times;</div></div>
+    </div>
+    <p class="chart-cap"><span class="i18n" data-en="Same-node step-shrink TP-2→TP-4: the median measured 1.08× is barely above no shrink at all, far below the ideal 2× the one-over-k compute term assumes." data-zh="同節點 step-shrink TP-2→TP-4：實測中位數 1.08× 僅略高於毫無縮減，遠低於 1/k 計算項所假設的理想 2×。">Same-node step-shrink TP-2→TP-4: the median measured 1.08× is barely above no shrink at all, far below the ideal 2× the one-over-k compute term assumes.</span></p>
+  </div>
+
+  <!-- ================= WHAT IT MEANS ================= -->
+  <div class="section" id="meaning">
+    <span class="section-label"><span class="i18n" data-en="What It Means" data-zh="研究意義">What It Means</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="Why a Negative Result Is Worth Reading" data-zh="為何一個負面結果值得一讀">Why a Negative Result Is Worth Reading</span></h2>
+
+    <p><span class="i18n"
+      data-en="The value of this study is that it is a faithful negative characterization rather than a tuned model. It tells the next person where not to spend effort, hands them one reusable term, and localizes the missing physics precisely enough to aim the follow-up experiment."
+      data-zh="本研究的價值在於它是一個忠實的負面特徵分析，而非一個經調校的模型。它告訴下一個人不該把心力花在何處、交給他們一個可重用的項，並將缺失的物理定位得夠精確，以瞄準後續實驗。">The value of this study is that it is a faithful negative characterization rather than a tuned model. It tells the next person where not to spend effort, hands them one reusable term, and localizes the missing physics precisely enough to aim the follow-up experiment.</span></p>
+
+    <div class="grid-2">
+      <div class="card highlight-blue">
+        <h4><span class="i18n" data-en="The takeaway: aim at the per-step term, not the network" data-zh="結論：瞄準每步項，而非網路">The takeaway: aim at the per-step term, not the network</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="A practitioner extending a single-GPU decode model to tensor parallelism would naturally invest in a more detailed network model, because communication is the visibly new cost. This study shows that investment is misplaced for eager TP decode: the all-reduce term is already faithful and accounts for only about an eighth of the step at TP-2, while the 42 percent error at TP-4 comes entirely from a non-communication per-step term the additive form assumed would shrink with $k$ and does not. The reusable artifact is the refit-free all-reduce model."
+          data-zh="一位將單 GPU decode 模型擴展至 tensor parallelism 的實務者，會很自然地投入更細緻的網路模型，因為通訊是顯而易見的新成本。本研究顯示這份投入對 eager TP decode 是放錯了位置：all-reduce 項已經忠實，在 TP-2 僅占 step 約八分之一，而 TP-4 的 42% 誤差完全來自一個非通訊的每步項 —— 加性形式假設它隨 $k$ 縮減，但它並未。可重用的產物是那個免重擬合的 all-reduce 模型。">A practitioner extending a single-GPU decode model to tensor parallelism would naturally invest in a more detailed network model, because communication is the visibly new cost. This study shows that investment is misplaced for eager TP decode: the all-reduce term is already faithful and accounts for only about an eighth of the step at TP-2, while the 42 percent error at TP-4 comes entirely from a non-communication per-step term the additive form assumed would shrink with $k$ and does not. The reusable artifact is the refit-free all-reduce model.</span></p>
+      </div>
+      <div class="card highlight-amber">
+        <h4><span class="i18n" data-en="What stays an inference: the cause is a candidate, not a proof" data-zh="何者仍屬推論：成因是候選，而非證明">What stays an inference: the cause is a candidate, not a proof</span></h4>
+        <p style="margin:0"><span class="i18n"
+          data-en="The roughly ten-millisecond upward shift of the per-step residual is reported as evidence rather than a proven mechanism. It is consistent with a non-shrinking per-step host or dispatch cost — in eager mode the 160 collective launches and the kernel dispatch sit on the critical path and do not fold away when ranks are added — but it is only one explanation among several. No Nsight Systems traces were collected, so the paper localizes the residual and names the candidates without claiming a single proven cause; a CUDA-event or Nsight-timed per-step cross-check is the framed follow-up."
+          data-zh="每步殘差約十毫秒的向上偏移，以證據而非已證明機制的方式回報。它與一個不縮減的每步 host 或 dispatch 成本相一致 —— 在 eager 模式下，160 次集合通訊啟動與 kernel dispatch 位於關鍵路徑上，且在加入 rank 時並不折疊消失 —— 但它只是數個解釋中的一個。未收集 Nsight Systems trace，因此本文定位殘差並列舉候選，而不聲稱單一已證明的成因；CUDA-event 或 Nsight 計時的每步交叉檢核是所定位的後續。">The roughly ten-millisecond upward shift of the per-step residual is reported as evidence rather than a proven mechanism. It is consistent with a non-shrinking per-step host or dispatch cost — in eager mode the 160 collective launches and the kernel dispatch sit on the critical path and do not fold away when ranks are added — but it is only one explanation among several. No Nsight Systems traces were collected, so the paper localizes the residual and names the candidates without claiming a single proven cause; a CUDA-event or Nsight-timed per-step cross-check is the framed follow-up.</span></p>
+      </div>
+    </div>
+
+    <p><span class="i18n" data-en="Two companion deepdives test the single-GPU version of this mechanism model along orthogonal axes — execution mode (CUDA graphs) and model family (fit-free transfer)." data-zh="兩篇姊妹深潛沿正交軸線檢驗此機制模型的單 GPU 版本 —— 執行模式（CUDA graph）與模型家族（fit-free 轉移）。">Two companion deepdives test the single-GPU version of this mechanism model along orthogonal axes — execution mode (CUDA graphs) and model family (fit-free transfer).</span> <a href="cudagraph-host-term.html"><span class="i18n" data-en="Deepdive #3: CUDA-Graph capture" data-zh="深潛 #3：CUDA-Graph capture">Deepdive #3: CUDA-Graph capture</span></a> &middot; <a href="fitfree-transfer.html"><span class="i18n" data-en="Deepdive #4: fit-free transfer" data-zh="深潛 #4：fit-free 轉移">Deepdive #4: fit-free transfer</span></a></p>
+  </div>
+
+  <!-- ================= LIMITATIONS ================= -->
+  <div class="section" id="limits">
+    <span class="section-label"><span class="i18n" data-en="Limitations — read before citing" data-zh="限制 —— 引用前必讀">Limitations — read before citing</span></span>
+    <h2 class="section-title"><span class="i18n" data-en="Exactly What Was Measured" data-zh="確切量測了什麼">Exactly What Was Measured</span></h2>
+
+    <p><span class="i18n"
+      data-en="The conclusions are deliberately bounded, and the boundaries are part of the contribution. The negative result is robust within its scope, and the scope is stated plainly so the claim is neither over- nor under-read."
+      data-zh="結論是刻意有界的，而這些邊界正是貢獻的一部分。負面結果在其範圍內是穩健的，而該範圍被平實陳述，使主張既不被過度解讀也不被低估。">The conclusions are deliberately bounded, and the boundaries are part of the contribution. The negative result is robust within its scope, and the scope is stated plainly so the claim is neither over- nor under-read.</span></p>
+
+    <div class="grid-2">
+      <div class="card highlight-green">
+        <h4><span class="i18n" data-en="Strengths" data-zh="強項">Strengths</span></h4>
+        <ul style="margin-bottom:0">
+          <li><span class="i18n" data-en="The kill-switch was pre-registered, and the negative outcome is reported without retro-fitting a correction." data-zh="kill-switch 為預先登錄，且負面結果在不事後擬合修正的情況下回報。">The kill-switch was pre-registered, and the negative outcome is reported without retro-fitting a correction.</span></li>
+          <li><span class="i18n" data-en="The communication term is calibrated in isolation, so a failure cannot be hidden in an over-flexible network model." data-zh="通訊項單獨校準，因此失效無法藏於過度彈性的網路模型中。">The communication term is calibrated in isolation, so a failure cannot be hidden in an over-flexible network model.</span></li>
+          <li><span class="i18n" data-en="A same-node control reproduces the failure on one node, ruling out cross-node variance as the cause." data-zh="同節點對照在單一節點上重現失效，排除跨節點變異作為成因。">A same-node control reproduces the failure on one node, ruling out cross-node variance as the cause.</span></li>
+          <li><span class="i18n" data-en="The NCCL benchmark, decode harness, analysis, and sbatch scripts are released with the paper." data-zh="NCCL benchmark、decode harness、分析與 sbatch 腳本隨論文釋出。">The NCCL benchmark, decode harness, analysis, and sbatch scripts are released with the paper.</span></li>
+        </ul>
+      </div>
+      <div class="card highlight-amber">
+        <h4><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></h4>
+        <ul style="margin-bottom:0">
+          <li><span class="i18n" data-en="The decode conclusion is H100-only. The H200 decode grid is excluded as pathological (the node ran identical prefill 6 to 12 times slower than H100); only its NCCL fit is retained." data-zh="decode 結論僅限 H100。H200 decode 網格因病態被排除（該節點以相同 prefill 比 H100 慢 6 至 12 倍）；僅保留其 NCCL 擬合。">The decode conclusion is H100-only. The H200 decode grid is excluded as pathological (the node ran identical prefill 6 to 12 times slower than H100); only its NCCL fit is retained.</span></li>
+          <li><span class="i18n" data-en="Only two TP degrees were measured, so the TP-2 pass is one data point and is not presented as a working model." data-zh="僅量測兩個 TP 度數，因此 TP-2 的通過是一個資料點，並不被呈現為一個可用的模型。">Only two TP degrees were measured, so the TP-2 pass is one data point and is not presented as a working model.</span></li>
+          <li><span class="i18n" data-en="The cause is an inference. No Nsight traces were collected; the non-shrinking host cost is one candidate among several." data-zh="成因是一項推論。未收集 Nsight trace；不縮減的 host 成本是數個候選中的一個。">The cause is an inference. No Nsight traces were collected; the non-shrinking host cost is one candidate among several.</span></li>
+          <li><span class="i18n" data-en="The result is for eager mode; a CUDA-graph serving stack could change both the level and the scaling of the residual. The all-reduce fit's headline R² > 0.999 is global; at decode-relevant 32–256 KiB payloads it over-predicts the raw collective by 7 to 27 percent." data-zh="此結果針對 eager 模式；一個 CUDA-graph serving 堆疊可能同時改變殘差的量級與其 scaling。all-reduce 擬合的標題 R² > 0.999 是全域數字；在 decode 相關的 32–256 KiB 載荷處，它高估原始集合通訊 7 至 27%。">The result is for eager mode; a CUDA-graph serving stack could change both the level and the scaling of the residual. The all-reduce fit's headline R² > 0.999 is global; at decode-relevant 32–256 KiB payloads it over-predicts the raw collective by 7 to 27 percent.</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <p><span class="i18n"
+      data-en="The decode conclusion holds for Llama-3.1-70B in BF16 on PACE H100, at TP-2 and TP-4, in eager mode, over the gated grid where the difference-method subtraction is clean, with the same-node control confirming the effect on a single node. The H200 contributes only its NCCL fit. The central finding — that the additive one-over-k composition does not predict eager TP-decode latency because the per-step term does not shrink with k — is the part expected to generalize beyond this grid, while the absolute levels are specific to this model and these SKUs."
+      data-zh="decode 結論成立於 BF16 的 Llama-3.1-70B、PACE H100、TP-2 與 TP-4、eager 模式，以及差分法相減乾淨的設閘網格之上，並由同節點對照在單一節點上確認此效應。H200 僅貢獻其 NCCL 擬合。核心發現 —— 加性的 1/k 組合無法預測 eager TP-decode 延遲，因為每步項不隨 k 縮減 —— 才是預期能超越此網格而泛化的部分，而絕對量級則特定於此模型與這些 SKU。">The decode conclusion holds for Llama-3.1-70B in BF16 on PACE H100, at TP-2 and TP-4, in eager mode, over the gated grid where the difference-method subtraction is clean, with the same-node control confirming the effect on a single node. The H200 contributes only its NCCL fit. The central finding — that the additive one-over-k composition does not predict eager TP-decode latency because the per-step term does not shrink with k — is the part expected to generalize beyond this grid, while the absolute levels are specific to this model and these SKUs.</span></p>
+  </div>
+
+</div>
+
+<footer>
+  <p><a href="index.html"><span class="i18n" data-en="&larr; Back to Experiment Deepdives" data-zh="&larr; 返回實驗深潛系列">&larr; Back to Experiment Deepdives</span></a> &middot; <a href="../index.html"><span class="i18n" data-en="AI Infra Basics" data-zh="AI 基礎設施">AI Infra Basics</span></a></p>
+  <p><span class="i18n"
+    data-en="Experiment Deepdive #5 — a plain-language companion to the research paper &ldquo;Why Analytical TP-Decode Latency Models Fail in Eager LLM Serving&rdquo; (submitted to IEEE IISWC 2026). Measured on PACE (Georgia Tech) H100 &amp; H200 NVLink nodes; Llama-3.1-70B-Instruct, eager vLLM, TP-2 / TP-4."
+    data-zh="實驗深潛 #5 —— 研究論文《Why Analytical TP-Decode Latency Models Fail in Eager LLM Serving》（投稿 IEEE IISWC 2026）的白話導讀。於 PACE(Georgia Tech)H100 與 H200 NVLink 節點實測；Llama-3.1-70B-Instruct，eager vLLM，TP-2 / TP-4。">Experiment Deepdive #5 — a plain-language companion to the research paper &ldquo;Why Analytical TP-Decode Latency Models Fail in Eager LLM Serving&rdquo; (submitted to IEEE IISWC 2026). Measured on PACE (Georgia Tech) H100 &amp; H200 NVLink nodes; Llama-3.1-70B-Instruct, eager vLLM, TP-2 / TP-4.</span></p>
+</footer>
+
+<script>
+function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}
+(function(){setLang(localStorage.getItem('lang')||'en')})();
+</script>
+</body>
+</html>
