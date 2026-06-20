@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Predicting LLM Inference Latency: A Roofline-Driven ML Method</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+/* ===== ACCENT (Cyan — distributed / infrastructure latency) ===== */
+:root{--accent:#29b6f6;--accent-rgb:41,182,246;--nav-bg:rgba(10,28,40,0.95);--rose:#e94560;--rose-rgb:233,69,96}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px;overflow-x:clip}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7;overflow-x:clip}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#9fc4dd;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#0c1a26 0%,#101828 50%,#0e1430 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none;letter-spacing:normal}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px;overflow-wrap:anywhere}
+p{margin:0 0 1rem}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;max-width:100%;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em;overflow-wrap:anywhere}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+.tbl-wrap{overflow-x:auto;max-width:100%;margin:1rem 0}
+.scroll-hint{display:none;font-size:.78rem;color:#8fa4c0;margin:.4rem 0 -.2rem;font-style:italic}
+.scroll-hint::before{content:'\2194\00a0'}
+table{width:100%;border-collapse:collapse;margin:0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top;overflow-wrap:anywhere}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;max-width:100%;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent);color:#08222e}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(var(--rose-rgb),.12);border:1px solid rgba(var(--rose-rgb),.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.cyan{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.4);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#15131c;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto;max-width:100%}
+
+/* ===== PAPER FIGURE ===== */
+.paper-fig{margin:1.5rem auto;text-align:center;max-width:100%}
+.paper-fig img{display:block;width:100%;max-width:560px;height:auto;margin:0 auto;background:#fff;border:1px solid #2d2d44;border-radius:10px;padding:12px}
+.paper-fig.fig-wide img{max-width:840px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin:.7rem auto 0;max-width:680px;line-height:1.6;overflow-wrap:anywhere}
+.paper-fig .fig-cap strong{color:#cdd6f4}
+
+/* ===== ROOFLINE PLOT (CSS) — fluid, percentage-based so it never clips ===== */
+.roofplot{position:relative;width:100%;max-width:640px;height:320px;margin:1.2rem auto;background:linear-gradient(180deg,#12131c,#0f0d16);border:1px solid #2d2d44;border-radius:10px;overflow:hidden}
+.roofplot .axis-x{position:absolute;left:7.5%;right:2.2%;bottom:34px;height:1px;background:rgba(255,255,255,.25)}
+.roofplot .axis-y{position:absolute;left:7.5%;top:14px;bottom:34px;width:1px;background:rgba(255,255,255,.25)}
+.roofplot .mem{position:absolute;left:7.5%;bottom:34px;width:36%;height:206px;border-bottom:0;background:linear-gradient(45deg,transparent 49.4%,rgba(110,198,255,.85) 49.4%,rgba(110,198,255,.85) 50.6%,transparent 50.6%);}
+.roofplot .compute{position:absolute;left:43.5%;right:2.2%;top:14px;height:2px;background:var(--accent)}
+.roofplot .ridge{position:absolute;left:42.2%;top:14px;bottom:34px;width:1px;border-left:1px dashed rgba(245,166,35,.6)}
+.roofplot .lbl{position:absolute;font-size:.72rem;color:#8fa4c0}
+.roofplot .lbl.mem{position:absolute;left:14%;bottom:150px;color:#6ec6ff;background:transparent;width:auto;height:auto}
+.roofplot .lbl.comp{left:51.5%;top:24px;color:var(--accent)}
+.roofplot .lbl.ridge{left:36%;bottom:8px;color:#f5a623}
+.roofplot .lbl.xa{right:2.2%;bottom:12px}
+.roofplot .lbl.ya{left:6px;top:14px}
+.roofplot .pt{position:absolute;width:11px;height:11px;border-radius:50%;transform:translate(-50%,50%)}
+.roofplot .pt.ceil{background:#f5a623;box-shadow:0 0 0 3px rgba(245,166,35,.2)}
+.roofplot .pt.real{background:var(--rose);box-shadow:0 0 0 3px rgba(var(--rose-rgb),.2)}
+.roofplot .gap{position:absolute;border-left:2px dotted var(--rose)}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+.ours{background:rgba(46,204,113,.07);border-left:4px solid #2ecc71;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.ours strong{color:#fff}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:var(--rose);font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== GRID-2 ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== LATEX ===== */
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;max-width:100%;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .roofplot{height:260px}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  .scroll-hint{display:block}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../../index.html"><span class="i18n" data-en="&larr; Agentic Survey" data-zh="&larr; Agentic 綜述">&larr; Agentic Survey</span></a></li>
+    <li><a href="#motivation"><span class="i18n" data-en="Motivation" data-zh="動機">Motivation</span></a></li>
+    <li><a href="#position"><span class="i18n" data-en="Prior Work" data-zh="先前工作">Prior Work</span></a></li>
+    <li><a href="#contributions"><span class="i18n" data-en="Contributions" data-zh="貢獻">Contributions</span></a></li>
+    <li><a href="#roofline"><span class="i18n" data-en="Roofline Model" data-zh="Roofline 模型">Roofline Model</span></a></li>
+    <li><a href="#method"><span class="i18n" data-en="Method" data-zh="方法">Method</span></a></li>
+    <li><a href="#results"><span class="i18n" data-en="Results" data-zh="結果">Results</span></a></li>
+    <li><a href="#gpt2"><span class="i18n" data-en="gpt2-xl Case" data-zh="gpt2-xl 案例">gpt2-xl Case</span></a></li>
+    <li><a href="#relevance"><span class="i18n" data-en="Relevance to Us" data-zh="與我們的關聯">Relevance to Us</span></a></li>
+    <li><a href="#limits"><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></a></li>
+    <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1><span class="i18n" data-en="Predicting LLM Inference Latency" data-zh="預測 LLM 推理延遲">Predicting LLM Inference Latency</span></h1>
+  <p class="sub"><span class="i18n" data-en="A Roofline-Driven ML Method &mdash; calibrating an analytical hardware ceiling with a learned residual regressor" data-zh="Roofline 驅動的機器學習方法 &mdash; 以學習式殘差迴歸校正解析硬體上界">A Roofline-Driven ML Method &mdash; calibrating an analytical hardware ceiling with a learned residual regressor</span></p>
+  <div class="badges">
+    <span class="badge"><span class="i18n" data-en="NeurIPS 2024 ML for Systems Workshop" data-zh="NeurIPS 2024 ML for Systems Workshop">NeurIPS 2024 ML for Systems Workshop</span></span>
+    <span class="badge"><span class="i18n" data-en="Roofline + Regression" data-zh="Roofline + 迴歸">Roofline + Regression</span></span>
+    <span class="badge"><span class="i18n" data-en="vLLM &amp; Triton" data-zh="vLLM 與 Triton">vLLM &amp; Triton</span></span>
+    <span class="badge"><span class="i18n" data-en="A100 &middot; OpenShift" data-zh="A100 &middot; OpenShift">A100 &middot; OpenShift</span></span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Saki Imai, Rina Nakazawa, Marcelo Amaral, Sunyanan Choochotkaew, Tatsuhiro Chiba</p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">Northeastern University &middot; IBM Research</p>
+</div>
+
+<div class="container">
+
+<!-- ====== 1. MOTIVATION ====== -->
+<section id="motivation">
+  <h2><span class="i18n" data-en="1. Why Predict Inference Latency at All?" data-zh="1. 為何需要預測推理延遲？">1. Why Predict Inference Latency at All?</span></h2>
+
+  <p><span class="i18n"
+    data-en="A cluster operator who serves large language models must decide, before any request lands, how many GPUs to provision for a given model, which model to place on which accelerator, and what concurrency limit to admit. Each of these decisions presupposes an answer to a single question: how long will one inference take under this configuration? The historical way to obtain that answer was to run the model under every candidate configuration and record the measured latency. This paper argues that the historical way no longer scales, and proposes a predictor that fuses an analytical hardware ceiling with a learned correction so that the answer can be computed rather than measured."
+    data-zh="部署大型語言模型的叢集管理者必須在任何請求抵達之前，決定為某一模型配置多少張 GPU、將哪個模型放在哪張加速器上、以及容許多高的並發上限。這些決策都預設了同一個問題的答案：在此配置下單次推理需要多久？傳統取得答案的方式，是在每一種候選配置下實際執行模型並記錄量測延遲。本文主張此一傳統方式已不再具可擴展性，並提出一個融合解析硬體上界與學習式校正的預測器，使該答案得以計算而非量測取得。">A cluster operator who serves large language models must decide, before any request lands, how many GPUs to provision for a given model, which model to place on which accelerator, and what concurrency limit to admit. Each of these decisions presupposes an answer to a single question: how long will one inference take under this configuration? The historical way to obtain that answer was to run the model under every candidate configuration and record the measured latency. This paper argues that the historical way no longer scales, and proposes a predictor that fuses an analytical hardware ceiling with a learned correction so that the answer can be computed rather than measured.</span></p>
+
+  <h3><span class="i18n" data-en="1.1 Why now: the configuration space has outgrown brute-force measurement" data-zh="1.1 為何是現在：配置空間已超出窮舉量測的負荷">1.1 Why now: the configuration space has outgrown brute-force measurement</span></h3>
+  <p><span class="i18n"
+    data-en="The pace of model release changed the economics of profiling. Hugging Face crossed one million hosted models in 2024 and adds on the order of tens of thousands of new checkpoints per month, and each base model spawns frequent algorithmic revisions, so any latency table built by exhaustive measurement is stale within weeks. The number of cells that must be characterised is itself combinatorial: take the very grid this paper measures and read off its size, where 4 models &times; 2 serving frameworks &times; 3 concurrency levels (8, 16, 32) &times; 3 generation lengths (32, 64, 128) is already 72 cells, and each cell is a five-minute load test repeated three times, which is 18 GPU-hours of A100 time for one snapshot of four sub-3B models on a single accelerator. Widen that to the operational reality &mdash; add GPU type, batch size, and prompt length, and scale model count from 4 to the hundreds an operator actually fields &mdash; and the cross-product runs to millions of cells, each consuming the scarcest and most expensive resource in the datacentre at roughly two to three US dollars per A100-hour. The paper frames this as the core driver: the brute-force approach of running and learning the optimal configuration has become impractical, which creates the necessity for a predictive performance model that returns an answer in milliseconds of CPU arithmetic without occupying an accelerator at all."
+    data-zh="模型發布的速度改變了效能剖析的經濟成本。Hugging Face 於 2024 年突破一百萬個託管模型，且每月新增數以萬計的新 checkpoint，而每個基礎模型又衍生頻繁的演算法修訂，因此任何以窮舉量測建立的延遲表格在數週內即已過時。需要刻畫的格數本身即為組合性的：以本文實際量測的網格為例讀出其規模，4 個模型 &times; 2 個 serving 框架 &times; 3 個並發層級（8、16、32）&times; 3 個生成長度（32、64、128）已是 72 格，而每格皆為一次五分鐘的負載測試重複三次，對於單張加速器上四個小於 3B 的模型而言，單一快照即耗費 18 個 A100 GPU 小時。將其擴展至運維現實 &mdash; 加入 GPU 型號、batch size 與 prompt 長度，並將模型數由 4 擴增至管理者實際所部署的數百個 &mdash; 交叉乘積即達數百萬格，每格皆以每 A100 小時約二至三美元的代價消耗資料中心最稀缺且最昂貴的資源。本文將此視為核心驅動力：以反覆執行並學習最佳配置的窮舉做法已不再可行，這便產生了對一個能以毫秒級 CPU 運算回傳答案、完全無需占用加速器的預測式效能模型之需求。">The pace of model release changed the economics of profiling. Hugging Face crossed one million hosted models in 2024 and adds on the order of tens of thousands of new checkpoints per month, and each base model spawns frequent algorithmic revisions, so any latency table built by exhaustive measurement is stale within weeks. The number of cells that must be characterised is itself combinatorial: take the very grid this paper measures and read off its size, where 4 models &times; 2 serving frameworks &times; 3 concurrency levels (8, 16, 32) &times; 3 generation lengths (32, 64, 128) is already 72 cells, and each cell is a five-minute load test repeated three times, which is 18 GPU-hours of A100 time for one snapshot of four sub-3B models on a single accelerator. Widen that to the operational reality &mdash; add GPU type, batch size, and prompt length, and scale model count from 4 to the hundreds an operator actually fields &mdash; and the cross-product runs to millions of cells, each consuming the scarcest and most expensive resource in the datacentre at roughly two to three US dollars per A100-hour. The paper frames this as the core driver: the brute-force approach of running and learning the optimal configuration has become impractical, which creates the necessity for a predictive performance model that returns an answer in milliseconds of CPU arithmetic without occupying an accelerator at all.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 A concrete failure of the analytical-only approach" data-zh="1.2 純解析方法的具體失敗案例">1.2 A concrete failure of the analytical-only approach</span></h3>
+  <p><span class="i18n"
+    data-en="Make the failure concrete with one trace from this paper's own grid. A capacity planner &mdash; call her the on-call SRE for a chat product &mdash; must admit facebook/opt-1.3b on vLLM under a per-request service-level objective of, say, 500 ms end-to-end for the standard probe &ldquo;What is artificial intelligence?&rdquo; generating 128 tokens at a concurrency of 32 users on one A100. She declines to run the load test and instead reads the textbook Roofline ceiling, which assumes the GPU holds peak FLOP/s and peak HBM bandwidth for every one of the 128 decode steps and reports a comfortably-under-SLO figure. The served reality is the rose marker in this paper's data: the regression-only baseline at this operating point lands at a coefficient of determination of just 0.800 with a mean squared error of 24282 ms&sup2; against the measured latencies &mdash; meaning the typical mispredict is on the order of &radic;24282 &asymp; 156 ms, enough to convert a 480 ms prediction into a 636 ms reality and silently breach the 500 ms SLO. The paper attributes the gap to the Roofline model lacking critical runtime information and therefore producing performance overestimation: the analytical ceiling describes a machine that never contends for memory, never queues a kernel launch, and never deviates from its rated clock, whereas the served machine does all three. The SRE who trusted the ceiling under-provisions, admits all 32 users, and misses the target on a request the model promised would be fast &mdash; which is exactly the cell where folding the analytical estimate back in as a feature later lifts the coefficient of determination from 0.800 to 0.974 and cuts the mean squared error by 87% to 3163 ms&sup2;."
+    data-zh="以本文自有網格中的一條 trace 將此失敗具體化。一位容量規劃者 &mdash; 設想她是某聊天產品的值班 SRE &mdash; 須在每請求服務水準目標（例如標準探針「What is artificial intelligence?」於並發 32 位使用者、單張 A100、生成 128 token 之端到端 500 ms）下接納部署於 vLLM 的 facebook/opt-1.3b。她拒絕執行負載測試，轉而讀取教科書 Roofline 上界，該上界假設 GPU 在 128 個 decode 步驟的每一步皆維持峰值 FLOP/s 與峰值 HBM 頻寬，並回報一個舒適地低於 SLO 的數字。但服務的現實是本文資料中的玫瑰色標記：此運作點上的純迴歸基線判定係數僅 0.800、相對量測延遲的均方誤差為 24282 ms&sup2; &mdash; 意即典型誤判約為 &radic;24282 &asymp; 156 ms，足以將 480 ms 的預測變為 636 ms 的現實，並無聲地突破 500 ms 的 SLO。本文將此落差歸因於 Roofline 模型缺乏關鍵的執行期資訊，因而產生效能高估：解析上界所描述的是一台從不爭用記憶體、從不排隊 kernel 啟動、且從不偏離其額定時脈的機器，而實際服務的機器三者皆會發生。信任此上界的 SRE 將配置不足、接納全部 32 位使用者，並在模型承諾會很快的請求上錯失目標 &mdash; 而這正是事後將解析估計作為特徵重新納入後，判定係數由 0.800 提升至 0.974、均方誤差下降 87% 至 3163 ms&sup2; 的那一格。">Make the failure concrete with one trace from this paper's own grid. A capacity planner &mdash; call her the on-call SRE for a chat product &mdash; must admit facebook/opt-1.3b on vLLM under a per-request service-level objective of, say, 500 ms end-to-end for the standard probe &ldquo;What is artificial intelligence?&rdquo; generating 128 tokens at a concurrency of 32 users on one A100. She declines to run the load test and instead reads the textbook Roofline ceiling, which assumes the GPU holds peak FLOP/s and peak HBM bandwidth for every one of the 128 decode steps and reports a comfortably-under-SLO figure. The served reality is the rose marker in this paper's data: the regression-only baseline at this operating point lands at a coefficient of determination of just 0.800 with a mean squared error of 24282 ms&sup2; against the measured latencies &mdash; meaning the typical mispredict is on the order of &radic;24282 &asymp; 156 ms, enough to convert a 480 ms prediction into a 636 ms reality and silently breach the 500 ms SLO. The paper attributes the gap to the Roofline model lacking critical runtime information and therefore producing performance overestimation: the analytical ceiling describes a machine that never contends for memory, never queues a kernel launch, and never deviates from its rated clock, whereas the served machine does all three. The SRE who trusted the ceiling under-provisions, admits all 32 users, and misses the target on a request the model promised would be fast &mdash; which is exactly the cell where folding the analytical estimate back in as a feature later lifts the coefficient of determination from 0.800 to 0.974 and cuts the mean squared error by 87% to 3163 ms&sup2;.</span></p>
+
+  <h3><span class="i18n" data-en="1.3 The baseline pain: how far apart the two worlds are" data-zh="1.3 基線痛點：兩個世界相距多遠">1.3 The baseline pain: how far apart the two worlds are</span></h3>
+  <p><span class="i18n"
+    data-en="The magnitude of the gap is what makes the problem worth a paper rather than a footnote. When the analytical Roofline estimate is folded in as a feature and the regressor is retrained, the coefficient of determination for opt-1.3b on the vLLM server rises by seventeen points, and the mean squared error falls by eighty-seven percent relative to the same regressor trained without that feature. A latency model whose error can be cut by a factor of roughly eight once the analytical ceiling is reconciled with reality is, by construction, a model that was missing most of the physics beforehand. Across the four studied models the inclusion of the analytical estimate raised the average coefficient of determination by 12.93 percent and reduced the mean squared error by 80.08 percent on vLLM. The residual that the regressor must absorb is therefore not a rounding error; it is the dominant component of the prediction."
+    data-zh="此一落差的量級，正是讓此問題值得一篇論文而非一個註腳的原因。當解析 Roofline 估計被納入作為特徵並重新訓練迴歸器後，opt-1.3b 於 vLLM 伺服器上的判定係數上升了十七個百分點，且均方誤差相對於未使用該特徵的同一迴歸器下降了百分之八十七。一個誤差能在解析上界與現實調和後減少約八倍的延遲模型，依其建構方式而言，正是事前缺漏了大部分物理機制的模型。在四個受測模型上，納入解析估計使 vLLM 上的平均判定係數提升 12.93%，並使均方誤差下降 80.08%。因此迴歸器必須吸收的殘差並非捨入誤差，而是預測中的主導成分。">The magnitude of the gap is what makes the problem worth a paper rather than a footnote. When the analytical Roofline estimate is folded in as a feature and the regressor is retrained, the coefficient of determination for opt-1.3b on the vLLM server rises by seventeen points, and the mean squared error falls by eighty-seven percent relative to the same regressor trained without that feature. A latency model whose error can be cut by a factor of roughly eight once the analytical ceiling is reconciled with reality is, by construction, a model that was missing most of the physics beforehand. Across the four studied models the inclusion of the analytical estimate raised the average coefficient of determination by 12.93 percent and reduced the mean squared error by 80.08 percent on vLLM. The residual that the regressor must absorb is therefore not a rounding error; it is the dominant component of the prediction.</span></p>
+
+  <h3><span class="i18n" data-en="1.4 Strawman: why not measure a small sample and interpolate?" data-zh="1.4 草案方案：為何不取小樣本量測再內插？">1.4 Strawman: why not measure a small sample and interpolate?</span></h3>
+  <p><span class="i18n"
+    data-en="An obvious response is to abandon the analytical model entirely and instead measure a handful of configurations per model, then fit a pure regression over the operational parameters. The paper evaluates exactly this strawman as its in-domain baseline, training Random Forest, XGBoost, and Linear Regression on nine configurations per model that vary concurrency and generation length. The pure regressor performs adequately when it is asked only to interpolate within a single model it has already seen, reaching a coefficient of determination above 0.8 for every model and server. It fails in the two situations that matter operationally. When asked to generalise to a model never seen in training, the out-of-domain regressor degrades sharply on the smallest model, and even within a single model the pure regressor cannot explain the systematic offset between configurations because it has no representation of where the hardware ceiling lies. Interpolation cannot recover a quantity that is never measured; it can only smooth between the points it was given."
+    data-zh="一個顯而易見的回應是完全放棄解析模型，改為每個模型量測少數幾個配置，再對操作參數擬合純迴歸。本文正是以此草案方案作為其域內基線，在每個模型九個改變並發數與生成長度的配置上訓練 Random Forest、XGBoost 與 Linear Regression。當僅要求純迴歸器在已見過的單一模型內進行內插時，其表現尚可，每個模型與伺服器的判定係數皆超過 0.8。但它在兩個於運維上至關重要的情境中失效。當被要求泛化至訓練中從未見過的模型時，域外迴歸器在最小的模型上顯著退化；即便在單一模型內，純迴歸器也無法解釋配置之間的系統性偏移，因為它對硬體上界所在位置毫無表徵。內插無法還原一個從未被量測的量；它只能在給定的點之間進行平滑。">An obvious response is to abandon the analytical model entirely and instead measure a handful of configurations per model, then fit a pure regression over the operational parameters. The paper evaluates exactly this strawman as its in-domain baseline, training Random Forest, XGBoost, and Linear Regression on nine configurations per model that vary concurrency and generation length. The pure regressor performs adequately when it is asked only to interpolate within a single model it has already seen, reaching a coefficient of determination above 0.8 for every model and server. It fails in the two situations that matter operationally. When asked to generalise to a model never seen in training, the out-of-domain regressor degrades sharply on the smallest model, and even within a single model the pure regressor cannot explain the systematic offset between configurations because it has no representation of where the hardware ceiling lies. Interpolation cannot recover a quantity that is never measured; it can only smooth between the points it was given.</span></p>
+
+  <h3><span class="i18n" data-en="1.5 The fundamental obstacle: the analytical ceiling and the measured floor disagree by construction" data-zh="1.5 根本障礙：解析上界與量測下界在結構上即不一致">1.5 The fundamental obstacle: the analytical ceiling and the measured floor disagree by construction</span></h3>
+  <p><span class="i18n"
+    data-en="The structural reason a naive combination cannot work is that the analytical Roofline estimate and the served latency answer two different questions. The Roofline estimate answers what the hardware could do if it were dedicated, contention-free, and clocked at its rated frequency; the served latency answers what the hardware did under a multi-tenant cloud scheduler that shares memory bandwidth, queues kernel launches, and throttles the clock under thermal and power constraints. The paper names this residual the variability introduced by cloud infrastructure and dynamic workloads. Because that variability is a runtime property that no static model can read off a configuration file, it cannot be added to the analytical estimate as a closed-form correction; it has to be learned from historical execution data. The design is therefore forced into a hybrid: the analytical model supplies the shape of the latency surface, and a regressor trained on real executions supplies the offset between that shape and the machine."
+    data-zh="樸素組合無法奏效的結構性原因在於，解析 Roofline 估計與服務延遲回答的是兩個不同的問題。Roofline 估計回答的是：若硬體獨佔、無爭用且運行於額定頻率，它能做到什麼；服務延遲回答的是：在共享記憶體頻寬、排隊 kernel 啟動、並在熱與功耗限制下降頻的多租戶雲端排程器之下，硬體實際做了什麼。本文將此殘差命名為雲端基礎設施與動態工作負載所引入的變異性。由於該變異性是任何靜態模型都無法從配置檔讀取的執行期屬性，它無法以封閉形式校正項加到解析估計上；它必須由歷史執行資料中習得。因此設計被迫採用混合形式：解析模型提供延遲曲面的形狀，而在真實執行上訓練的迴歸器則提供該形狀與機器之間的偏移。">The structural reason a naive combination cannot work is that the analytical Roofline estimate and the served latency answer two different questions. The Roofline estimate answers what the hardware could do if it were dedicated, contention-free, and clocked at its rated frequency; the served latency answers what the hardware did under a multi-tenant cloud scheduler that shares memory bandwidth, queues kernel launches, and throttles the clock under thermal and power constraints. The paper names this residual the variability introduced by cloud infrastructure and dynamic workloads. Because that variability is a runtime property that no static model can read off a configuration file, it cannot be added to the analytical estimate as a closed-form correction; it has to be learned from historical execution data. The design is therefore forced into a hybrid: the analytical model supplies the shape of the latency surface, and a regressor trained on real executions supplies the offset between that shape and the machine.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="The residual is the paper, and it is also the opening for ours." data-zh="殘差即是本文，也是我們研究的切入口。">The residual is the paper, and it is also the opening for ours.</span></strong>
+    <span class="i18n"
+      data-en=" The authors observe that the analytical ceiling over-predicts performance, and they absorb the gap with a learned regressor whose explanatory variable they describe only as cloud variability. Section&nbsp;8 returns to this: one large, structured, input-token-driven component of that residual is the GPU streaming-multiprocessor clock falling under sustained load. This paper sees the residual clearly and never names its mechanism."
+      data-zh=" 作者觀察到解析上界高估了效能，並以一個學習式迴歸器吸收此落差，而他們對該迴歸器解釋變數的描述僅止於雲端變異性。第 8 節將回到此處：該殘差中一個大型、結構化、由輸入 token 驅動的成分，正是 GPU 串流多處理器時脈在持續負載下的下降。本文清楚看見了此殘差，卻從未指明其機制。"> The authors observe that the analytical ceiling over-predicts performance, and they absorb the gap with a learned regressor whose explanatory variable they describe only as cloud variability. Section&nbsp;8 returns to this: one large, structured, input-token-driven component of that residual is the GPU streaming-multiprocessor clock falling under sustained load. This paper sees the residual clearly and never names its mechanism.</span>
+  </div>
+</section>
+
+<!-- ====== 2. POSITION VS PRIOR WORK ====== -->
+<section id="position">
+  <h2><span class="i18n" data-en="2. Position Relative to Prior Work" data-zh="2. 相對於先前工作的定位">2. Position Relative to Prior Work</span></h2>
+
+  <p><span class="i18n"
+    data-en="The paper sits at the confluence of two research lines that had previously been pursued in isolation: analytical performance modelling rooted in the Roofline tradition, and data-driven latency prediction for serving. Placing it against the immediate prior work clarifies what each line left unsolved and why a hybrid was the natural next step. The most directly comparable systems are summarised below; the paper aligns most closely with the simulation-and-roofline line and departs from it by grounding the analytical estimate in real execution data."
+    data-zh="本文位於兩條先前各自獨立發展的研究脈絡之交會處：植根於 Roofline 傳統的解析效能建模，以及面向 serving 的資料驅動延遲預測。將其置於緊鄰的先前工作之中，可釐清各脈絡尚未解決之處，以及為何混合方法是自然的下一步。最直接可比的系統整理如下；本文與模擬暨 roofline 脈絡最為相近，並透過將解析估計奠基於真實執行資料而與之有所區別。">The paper sits at the confluence of two research lines that had previously been pursued in isolation: analytical performance modelling rooted in the Roofline tradition, and data-driven latency prediction for serving. Placing it against the immediate prior work clarifies what each line left unsolved and why a hybrid was the natural next step. The most directly comparable systems are summarised below; the paper aligns most closely with the simulation-and-roofline line and departs from it by grounding the analytical estimate in real execution data.</span></p>
+
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Prior work" data-zh="先前工作">Prior work</span></th>
+      <th><span class="i18n" data-en="Approach" data-zh="方法">Approach</span></th>
+      <th><span class="i18n" data-en="What it left on the table" data-zh="尚未處理之處">What it left on the table</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>Williams et&nbsp;al., Roofline (2009)</td>
+        <td><span class="i18n" data-en="The original analytical ceiling relating compute throughput to memory bandwidth via arithmetic intensity." data-zh="以算術強度將計算吞吐與記憶體頻寬關聯的原始解析上界。">The original analytical ceiling relating compute throughput to memory bandwidth via arithmetic intensity.</span></td>
+        <td><span class="i18n" data-en="Built for multicore CPUs; assumes a dedicated, contention-free machine and says nothing about cloud runtime overhead." data-zh="為多核 CPU 所設計；假設一台獨佔、無爭用的機器，且對雲端執行期額外開銷隻字未提。">Built for multicore CPUs; assumes a dedicated, contention-free machine and says nothing about cloud runtime overhead.</span></td>
+      </tr>
+      <tr>
+        <td>LLM-Viewer / Inference-Unveiled (Yuan et&nbsp;al.)</td>
+        <td><span class="i18n" data-en="Applies the Roofline model to LLM layers to estimate inference latency from prompt length, batch size, and generation length." data-zh="將 Roofline 模型套用於 LLM 各層，依 prompt 長度、batch size 與生成長度估計推理延遲。">Applies the Roofline model to LLM layers to estimate inference latency from prompt length, batch size, and generation length.</span></td>
+        <td><span class="i18n" data-en="Acknowledges that the analytical estimate over-predicts under cloud variability, but offers no calibration against measured serving latency." data-zh="承認解析估計在雲端變異下高估，但未提供針對量測服務延遲的校正。">Acknowledges that the analytical estimate over-predicts under cloud variability, but offers no calibration against measured serving latency.</span></td>
+      </tr>
+      <tr>
+        <td>Vidur (Agrawal et&nbsp;al., 2024)</td>
+        <td><span class="i18n" data-en="A large-scale simulation framework that also produces high-fidelity latency predictions for LLM inference." data-zh="一個大規模模擬框架，同樣為 LLM 推理產生高保真延遲預測。">A large-scale simulation framework that also produces high-fidelity latency predictions for LLM inference.</span></td>
+        <td><span class="i18n" data-en="Relies on extensive simulation rather than a closed-form ceiling reconciled with real-time execution data; the paper positions itself as the lighter-weight hybrid." data-zh="倚賴大量模擬而非與即時執行資料調和的封閉形式上界；本文將自身定位為更輕量的混合方法。">Relies on extensive simulation rather than a closed-form ceiling reconciled with real-time execution data; the paper positions itself as the lighter-weight hybrid.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Length-predictor line (Zheng; Qiu; Cheng et&nbsp;al.)" data-zh="長度預測脈絡（Zheng；Qiu；Cheng 等）">Length-predictor line (Zheng; Qiu; Cheng et&nbsp;al.)</span></td>
+        <td><span class="i18n" data-en="Predict output sequence length to inform scheduling, using response-length perception or proxy models." data-zh="以回應長度感知或代理模型預測輸出序列長度以指導排程。">Predict output sequence length to inform scheduling, using response-length perception or proxy models.</span></td>
+        <td><span class="i18n" data-en="Predict a workload property (length), not the wall-clock latency of a step; orthogonal input to a latency model rather than a latency model." data-zh="預測的是工作負載屬性（長度），而非單步的牆鐘延遲；屬延遲模型的正交輸入而非延遲模型本身。">Predict a workload property (length), not the wall-clock latency of a step; orthogonal input to a latency model rather than a latency model.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Cluster-management systems (DynamoLLM; Melange)" data-zh="叢集管理系統（DynamoLLM；Melange）">Cluster-management systems (DynamoLLM; Melange)</span></td>
+        <td><span class="i18n" data-en="Optimise scheduling, energy efficiency, and GPU-heterogeneity placement for serving clusters." data-zh="為 serving 叢集優化排程、能源效率與 GPU 異質性配置。">Optimise scheduling, energy efficiency, and GPU-heterogeneity placement for serving clusters.</span></td>
+        <td><span class="i18n" data-en="Consume a latency estimate as an input but do not provide a unified, interpretable prediction framework for it." data-zh="將延遲估計作為輸入消費，但並未為其提供一個統一、可解釋的預測框架。">Consume a latency estimate as an input but do not provide a unified, interpretable prediction framework for it.</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The contribution is therefore not a new analytical model and not a new regressor, but the reconciliation of the two: taking the over-predicting Roofline ceiling that LLM-Viewer exposes, and calibrating it against measured serving latency with a regressor, so that the resulting estimate is both interpretable through its analytical core and accurate through its learned correction. The cluster-management systems above are the intended consumers of that estimate."
+    data-zh="因此貢獻既非一個新的解析模型，也非一個新的迴歸器，而是兩者的調和：取用 LLM-Viewer 所揭露的高估 Roofline 上界，並以迴歸器針對量測服務延遲加以校正，使得到的估計既透過其解析核心而可解釋，又透過其學習式校正而準確。上述叢集管理系統正是此估計的目標消費者。">The contribution is therefore not a new analytical model and not a new regressor, but the reconciliation of the two: taking the over-predicting Roofline ceiling that LLM-Viewer exposes, and calibrating it against measured serving latency with a regressor, so that the resulting estimate is both interpretable through its analytical core and accurate through its learned correction. The cluster-management systems above are the intended consumers of that estimate.</span></p>
+</section>
+
+<!-- ====== 3. CONTRIBUTIONS ====== -->
+<section id="contributions">
+  <h2><span class="i18n" data-en="3. What the Paper Contributes" data-zh="3. 本文的貢獻">3. What the Paper Contributes</span></h2>
+
+  <p><span class="i18n"
+    data-en="Having established that the analytical ceiling over-predicts and that pure regression cannot recover the missing physics, the paper proposes an end-to-end predictor that is theoretical at its core and empirically grounded at its surface. The two stated contributions and the headline numbers they produce are summarised here; the mechanism that makes the hybrid work is developed in the sections that follow."
+    data-zh="在確立了解析上界會高估、且純迴歸無法還原缺漏物理機制之後，本文提出一個核心為理論、表層以經驗為基礎的端到端預測器。此處整理兩項陳述的貢獻及其產生的代表性數據；使該混合方法奏效的機制將在後續各節展開。">Having established that the analytical ceiling over-predicts and that pure regression cannot recover the missing physics, the paper proposes an end-to-end predictor that is theoretical at its core and empirically grounded at its surface. The two stated contributions and the headline numbers they produce are summarised here; the mechanism that makes the hybrid work is developed in the sections that follow.</span></p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C1. A hybrid theoretical + empirical predictor" data-zh="C1. 理論 + 經驗混合預測器">C1. A hybrid theoretical + empirical predictor</span></h4>
+      <p><span class="i18n"
+        data-en="An end-to-end latency prediction method that is both theoretical and grounded in real-world execution data. The analytical Roofline estimate is computed per configuration and supplied to a regression model as an additional feature, so the regressor calibrates the theoretical ceiling against measured runtime overhead rather than learning the latency surface from scratch."
+        data-zh="一個既具理論性又奠基於真實世界執行資料的端到端延遲預測方法。解析 Roofline 估計依配置逐一計算並作為附加特徵提供給迴歸模型，使迴歸器針對量測的執行期額外開銷校正理論上界，而非從零學習延遲曲面。">An end-to-end latency prediction method that is both theoretical and grounded in real-world execution data. The analytical Roofline estimate is computed per configuration and supplied to a regression model as an additional feature, so the regressor calibrates the theoretical ceiling against measured runtime overhead rather than learning the latency surface from scratch.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C2. Validation across servers and models" data-zh="C2. 跨伺服器與模型的驗證">C2. Validation across servers and models</span></h4>
+      <p><span class="i18n"
+        data-en="The method is validated by evaluating four open-source Hugging Face LLMs deployed on both the vLLM and Triton inference servers, with a set of controlled load-testing experiments on the authors' own single-A100 OpenShift cluster, isolating the effect of the analytical feature against regression-only baselines."
+        data-zh="該方法透過在 vLLM 與 Triton 兩種推理伺服器上部署四個開源 Hugging Face LLM 進行驗證，並在作者自有的單張 A100 OpenShift 叢集上進行一組受控負載測試實驗，以隔離解析特徵相對於純迴歸基線的效果。">The method is validated by evaluating four open-source Hugging Face LLMs deployed on both the vLLM and Triton inference servers, with a set of controlled load-testing experiments on the authors' own single-A100 OpenShift cluster, isolating the effect of the analytical feature against regression-only baselines.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="3.1 Headline numbers" data-zh="3.1 代表性數據">3.1 Headline numbers</span></h3>
+  <p><span class="i18n"
+    data-en="The gain from reconciling the analytical ceiling with measured latency is reported as an improvement in the coefficient of determination and a reduction in mean squared error, averaged across the four models and stated separately per server because the two stacks expose different amounts of runtime overhead."
+    data-zh="將解析上界與量測延遲調和所得的增益，以判定係數的提升與均方誤差的下降來報告，於四個模型上取平均，並依伺服器分別陳述，因為兩種堆疊所暴露的執行期額外開銷量不同。">The gain from reconciling the analytical ceiling with measured latency is reported as an improvement in the coefficient of determination and a reduction in mean squared error, averaged across the four models and stated separately per server because the two stacks expose different amounts of runtime overhead.</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">+12.93%</div><div class="label"><span class="i18n" data-en="avg R² gain, vLLM (RLM vs ID)" data-zh="平均 R² 增益，vLLM（RLM vs ID）">avg R² gain, vLLM (RLM vs ID)</span></div></div>
+    <div class="metric-box"><div class="value">&minus;80.08%</div><div class="label"><span class="i18n" data-en="avg MSE reduction, vLLM" data-zh="平均 MSE 下降，vLLM">avg MSE reduction, vLLM</span></div></div>
+    <div class="metric-box"><div class="value">+4.25%</div><div class="label"><span class="i18n" data-en="avg R² gain, Triton" data-zh="平均 R² 增益，Triton">avg R² gain, Triton</span></div></div>
+    <div class="metric-box"><div class="value">&minus;61.98%</div><div class="label"><span class="i18n" data-en="avg MSE reduction, Triton" data-zh="平均 MSE 下降，Triton">avg MSE reduction, Triton</span></div></div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="These averages reconcile exactly with the per-model table below." data-zh="這些平均值與下方逐模型表格完全吻合。">These averages reconcile exactly with the per-model table below.</span></strong>
+    <span class="i18n"
+      data-en=" The four figures above are quoted verbatim from the paper's own reported aggregates (paper §3.3 / Figure 1, which states +12.93% / &minus;80.08% on vLLM and +4.25% / &minus;61.98% on Triton): the per-server average of R² and MSE across the four models is taken first, and the relative gain is computed on those server-level means. Recomputing from Section 6.1's already-rounded table cells reproduces these to the last decimal &mdash; the server-mean R² gains land at 12.92% (vLLM) and 4.24% (Triton), differing only in the final digit from the paper's unrounded 12.93% and 4.25%. They are also not the same as a per-model mean of the relative gains, which yields roughly +13.5% R² / &minus;75% MSE on vLLM and +4.3% R² / &minus;70% MSE on Triton. All three views summarise the same eight cells, and the table reproduces the per-cell values so the reader can recompute any of them directly."
+      data-zh=" 上方四個數字逐字引用本文自身報告的彙總值（論文 §3.3 / 圖 1，其陳述 vLLM 為 +12.93% / &minus;80.08%、Triton 為 +4.25% / &minus;61.98%）：先取四個模型在各伺服器上的 R² 與 MSE 平均，再於該伺服器層級的平均上計算相對增益。由第 6.1 節已四捨五入的表格格值重算，可重現至最後一位 &mdash; 伺服器平均 R² 增益為 12.92%（vLLM）與 4.24%（Triton），僅在末位與本文未捨入的 12.93% 與 4.25% 相差。它們亦與逐模型相對增益的平均不同，後者於 vLLM 約為 +13.5% R² / &minus;75% MSE、於 Triton 約為 +4.3% R² / &minus;70% MSE。三種視角彙總的是同樣的八格資料，表格重現逐格數值，使讀者可直接重算其中任一。"> The four figures above are quoted verbatim from the paper's own reported aggregates (paper §3.3 / Figure 1, which states +12.93% / &minus;80.08% on vLLM and +4.25% / &minus;61.98% on Triton): the per-server average of R² and MSE across the four models is taken first, and the relative gain is computed on those server-level means. Recomputing from Section 6.1's already-rounded table cells reproduces these to the last decimal &mdash; the server-mean R² gains land at 12.92% (vLLM) and 4.24% (Triton), differing only in the final digit from the paper's unrounded 12.93% and 4.25%. They are also not the same as a per-model mean of the relative gains, which yields roughly +13.5% R² / &minus;75% MSE on vLLM and +4.3% R² / &minus;70% MSE on Triton. All three views summarise the same eight cells, and the table reproduces the per-cell values so the reader can recompute any of them directly.</span>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The single most striking cell is opt-1.3b on vLLM, whose coefficient of determination rises by seventeen points and whose mean squared error falls by eighty-seven percent once the analytical feature is added. The asymmetry between vLLM and Triton is itself informative: vLLM, with its continuous batching and paged attention, exposes a larger runtime residual for the analytical feature to correct, which is why its gains exceed Triton's."
+    data-zh="最為醒目的單一格是 vLLM 上的 opt-1.3b，其判定係數在加入解析特徵後上升十七個百分點，均方誤差下降百分之八十七。vLLM 與 Triton 之間的不對稱本身即具資訊性：vLLM 憑其連續批次與分頁注意力，暴露出更大的執行期殘差供解析特徵校正，這正是其增益超過 Triton 的原因。">The single most striking cell is opt-1.3b on vLLM, whose coefficient of determination rises by seventeen points and whose mean squared error falls by eighty-seven percent once the analytical feature is added. The asymmetry between vLLM and Triton is itself informative: vLLM, with its continuous batching and paged attention, exposes a larger runtime residual for the analytical feature to correct, which is why its gains exceed Triton's.</span></p>
+</section>
+
+<!-- ====== 4. ROOFLINE MODEL ====== -->
+<section id="roofline">
+  <h2><span class="i18n" data-en="4. The Roofline Model as the Analytical Core" data-zh="4. 作為解析核心的 Roofline 模型">4. The Roofline Model as the Analytical Core</span></h2>
+
+  <p><span class="i18n"
+    data-en="The analytical half of the predictor is the Roofline model, a framework that relates the computational capability of hardware, expressed in operations per second, to the bandwidth of memory access. Before reproducing the equations it is worth stating the plain idea: every kernel either spends its time moving data or spends its time computing, and which of the two dominates is decided by a single ratio. The Roofline model turns that ratio into a performance ceiling, and the paper uses that ceiling as the backbone of its latency estimate."
+    data-zh="預測器的解析半部是 Roofline 模型，一個將硬體計算能力（以每秒運算數表示）與記憶體存取頻寬相關聯的框架。在重現方程式之前，值得先陳述其樸素概念：每個 kernel 不是花時間搬移資料，就是花時間計算，而二者孰為主導由單一比值決定。Roofline 模型將該比值轉化為效能上界，本文即以該上界作為其延遲估計的骨幹。">The analytical half of the predictor is the Roofline model, a framework that relates the computational capability of hardware, expressed in operations per second, to the bandwidth of memory access. Before reproducing the equations it is worth stating the plain idea: every kernel either spends its time moving data or spends its time computing, and which of the two dominates is decided by a single ratio. The Roofline model turns that ratio into a performance ceiling, and the paper uses that ceiling as the backbone of its latency estimate.</span></p>
+
+  <h3><span class="i18n" data-en="4.1 Arithmetic intensity and the two-piece ceiling" data-zh="4.1 算術強度與兩段式上界">4.1 Arithmetic intensity and the two-piece ceiling</span></h3>
+  <p><span class="i18n"
+    data-en="Arithmetic intensity is the ratio of operations performed to bytes moved through memory. A kernel with low arithmetic intensity is starved by memory bandwidth and a kernel with high arithmetic intensity is limited only by peak compute throughput; the crossover between the two regimes is the ridge point. The paper writes arithmetic intensity as the quotient of operations and memory access."
+    data-zh="算術強度是所執行的運算數與通過記憶體所搬移的位元組數之比。算術強度低的 kernel 受記憶體頻寬所限，算術強度高的 kernel 僅受峰值計算吞吐所限；兩種區間之間的交越點即為脊點（ridge point）。本文將算術強度寫為運算數與記憶體存取的商。">Arithmetic intensity is the ratio of operations performed to bytes moved through memory. A kernel with low arithmetic intensity is starved by memory bandwidth and a kernel with high arithmetic intensity is limited only by peak compute throughput; the crossover between the two regimes is the ridge point. The paper writes arithmetic intensity as the quotient of operations and memory access.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$\text{AI} = \frac{\text{OPs}}{\text{memory\_access}}$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="The achievable performance is then the smaller of two ceilings: the memory-bound ceiling, which scales linearly with arithmetic intensity at a slope equal to the memory bandwidth, and the compute-bound ceiling, which is the flat peak operations-per-second of the hardware. The piecewise form makes the ridge point explicit as the arithmetic intensity at which the two ceilings meet."
+    data-zh="可達效能即為兩個上界中的較小者：記憶體受限上界，其隨算術強度線性增長且斜率等於記憶體頻寬；以及計算受限上界，即硬體的水平峰值每秒運算數。此分段形式使脊點明確地呈現為兩個上界相交時的算術強度。">The achievable performance is then the smaller of two ceilings: the memory-bound ceiling, which scales linearly with arithmetic intensity at a slope equal to the memory bandwidth, and the compute-bound ceiling, which is the flat peak operations-per-second of the hardware. The piecewise form makes the ridge point explicit as the arithmetic intensity at which the two ceilings meet.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(2)</span>
+    $$\text{performance} = \begin{cases} \text{AI} \times \text{bandwidth}, & \text{if } \text{AI} < \dfrac{\text{max\_OPS}}{\text{bandwidth}} \\[1.2em] \text{max\_OPS}, & \text{otherwise} \end{cases}$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="The Roofline diagram below renders this two-piece ceiling. The sloped segment is the memory-bound regime, the flat segment is the compute-bound regime, and the dashed vertical line is the ridge point that separates them. The amber marker is the analytical ceiling the Roofline model predicts; the rose marker is the latency the server actually delivers, which sits below the ceiling because of the runtime overhead the analytical model omits."
+    data-zh="下方的 Roofline 圖描繪了此兩段式上界。斜段為記憶體受限區間，平段為計算受限區間，虛線垂直線為分隔二者的脊點。琥珀色標記為 Roofline 模型所預測的解析上界；玫瑰色標記為伺服器實際交付的延遲，因解析模型所略去的執行期額外開銷而位於上界之下。">The Roofline diagram below renders this two-piece ceiling. The sloped segment is the memory-bound regime, the flat segment is the compute-bound regime, and the dashed vertical line is the ridge point that separates them. The amber marker is the analytical ceiling the Roofline model predicts; the rose marker is the latency the server actually delivers, which sits below the ceiling because of the runtime overhead the analytical model omits.</span></p>
+
+  <div class="diagram">
+    <div class="roofplot">
+      <div class="axis-y"></div>
+      <div class="axis-x"></div>
+      <div class="mem"></div>
+      <div class="compute"></div>
+      <div class="ridge"></div>
+      <div class="lbl ya"><span class="i18n" data-en="attainable perf (OPs/s)" data-zh="可達效能 (OPs/s)">attainable perf (OPs/s)</span></div>
+      <div class="lbl xa"><span class="i18n" data-en="arithmetic intensity (OPs/byte)" data-zh="算術強度 (OPs/byte)">arithmetic intensity (OPs/byte)</span></div>
+      <div class="lbl mem"><span class="i18n" data-en="memory-bound (slope = bandwidth)" data-zh="記憶體受限（斜率 = 頻寬）">memory-bound (slope = bandwidth)</span></div>
+      <div class="lbl comp"><span class="i18n" data-en="compute-bound (max_OPS)" data-zh="計算受限 (max_OPS)">compute-bound (max_OPS)</span></div>
+      <div class="lbl ridge"><span class="i18n" data-en="ridge point" data-zh="脊點">ridge point</span></div>
+      <div class="pt ceil" style="left:67.2%;top:30px"></div>
+      <div class="pt real" style="left:67.2%;top:120px"></div>
+      <div class="gap" style="left:67.2%;top:36px;height:84px"></div>
+    </div>
+    <p style="font-size:.78rem;color:#8fa4c0;text-align:center;margin:.3rem 0 0"><span class="i18n" data-en="The vertical dotted line is the residual the regressor must learn: the distance between the analytical ceiling (amber) and the served latency (rose)." data-zh="垂直點線即為迴歸器必須學習的殘差：解析上界（琥珀）與服務延遲（玫瑰）之間的距離。">The vertical dotted line is the residual the regressor must learn: the distance between the analytical ceiling (amber) and the served latency (rose).</span></p>
+  </div>
+
+  <h3><span class="i18n" data-en="4.2 From ceiling to per-phase inference time" data-zh="4.2 由上界到分階段推理時間">4.2 From ceiling to per-phase inference time</span></h3>
+  <p><span class="i18n"
+    data-en="Once the attainable performance is known, the inference time for any operation or layer is the number of operations divided by that performance. The paper then composes the per-layer times into a total inference time that respects the two phases of LLM serving: a prefill phase that processes the prompt in parallel, and a decode phase that emits one token per step. The total is the sum of the prefill layer times plus, for each generated position, the sum of the decode layer times."
+    data-zh="一旦可達效能已知，任一運算或層的推理時間即為運算數除以該效能。本文接著將各層時間組合為一個尊重 LLM serving 兩階段的總推理時間：平行處理 prompt 的 prefill 階段，以及每步驟發出一個 token 的 decode 階段。總時間為 prefill 各層時間之和，加上每一生成位置的 decode 各層時間之和。">Once the attainable performance is known, the inference time for any operation or layer is the number of operations divided by that performance. The paper then composes the per-layer times into a total inference time that respects the two phases of LLM serving: a prefill phase that processes the prompt in parallel, and a decode phase that emits one token per step. The total is the sum of the prefill layer times plus, for each generated position, the sum of the decode layer times.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(3)</span>
+    $$\text{inference\_time} = \frac{\text{OPs}}{\text{performance}}$$
+  </div>
+
+  <div class="math-block">
+    <span class="eq-label">(4)</span>
+    $$\text{total\_inference\_time} = \sum_{l=1}^{L_\text{prefill}} \text{inference\_time}_l^{\text{prefill}} \;+\; \sum_{i=\text{prompt\_len}}^{\text{prompt\_len}+\text{gen\_len}} \left( \sum_{l=1}^{L_\text{decode}} \text{inference\_time}_l^{\text{decode}} \right)$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="The decode summation runs over each generated position from the end of the prompt to the end of generation, which captures the fact that the key-value cache grows with every emitted token and that the per-step memory traffic therefore rises monotonically through the decode loop. This composed quantity is the analytical latency the paper computes per configuration; it is correct in shape but optimistic in magnitude, which is exactly the property the learned correction must repair."
+    data-zh="decode 加總自 prompt 結尾至生成結尾，逐一遍歷每個生成位置，這刻畫了 key-value cache 隨每個發出的 token 而增長、因而每步驟記憶體流量在 decode 迴圈中單調上升的事實。此組合量即為本文逐配置計算的解析延遲；其形狀正確但量級過於樂觀，這正是學習式校正所須修復的屬性。">The decode summation runs over each generated position from the end of the prompt to the end of generation, which captures the fact that the key-value cache grows with every emitted token and that the per-step memory traffic therefore rises monotonically through the decode loop. This composed quantity is the analytical latency the paper computes per configuration; it is correct in shape but optimistic in magnitude, which is exactly the property the learned correction must repair.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="The analytical ceiling is sourced from an external tool, not re-derived." data-zh="解析上界源自外部工具，而非重新推導。">The analytical ceiling is sourced from an external tool, not re-derived.</span></strong>
+    <span class="i18n"
+      data-en=" The paper does not re-derive these per-layer operation counts. It obtains the analytical estimate from the open-source LLM-Viewer tool, which already applies the Roofline model to a chosen LLM and hardware pair given input length, batch size, and generation length. Because LLM-Viewer supports only a subset of models, the authors extended its codebase to cover three additional LLMs of interest before harvesting the analytical latency as a feature."
+      data-zh=" 本文並未重新推導這些逐層運算數。它由開源工具 LLM-Viewer 取得解析估計，該工具在給定輸入長度、batch size 與生成長度後，已將 Roofline 模型套用於所選的 LLM 與硬體配對。由於 LLM-Viewer 僅支援部分模型，作者在擷取解析延遲作為特徵之前，擴充了其程式庫以涵蓋三個額外的目標 LLM。"> The paper does not re-derive these per-layer operation counts. It obtains the analytical estimate from the open-source LLM-Viewer tool, which already applies the Roofline model to a chosen LLM and hardware pair given input length, batch size, and generation length. Because LLM-Viewer supports only a subset of models, the authors extended its codebase to cover three additional LLMs of interest before harvesting the analytical latency as a feature.</span>
+  </div>
+</section>
+
+<!-- ====== 5. METHOD ====== -->
+<section id="method">
+  <h2><span class="i18n" data-en="5. The Hybrid Method End to End" data-zh="5. 端到端的混合方法">5. The Hybrid Method End to End</span></h2>
+
+  <p><span class="i18n"
+    data-en="The method joins three data sources into one feature vector per configuration and trains a standard regressor to predict the measured latency. The first source describes the model, the second describes the operational request, and the third is the analytical Roofline estimate from Section 4. The pipeline below shows how the analytical estimate enters as one feature alongside the static and operational features rather than replacing them."
+    data-zh="該方法將三個資料來源合併為每個配置一個特徵向量，並訓練一個標準迴歸器以預測量測延遲。第一個來源描述模型，第二個描述操作性請求，第三個則為第 4 節的解析 Roofline 估計。下方流程展示解析估計如何作為一個特徵，與靜態及操作性特徵並列進入，而非取代它們。">The method joins three data sources into one feature vector per configuration and trains a standard regressor to predict the measured latency. The first source describes the model, the second describes the operational request, and the third is the analytical Roofline estimate from Section 4. The pipeline below shows how the analytical estimate enters as one feature alongside the static and operational features rather than replacing them.</span></p>
+
+  <div class="vflow">
+    <div class="box blue">
+      <h4><span class="i18n" data-en="Static model features (9)" data-zh="靜態模型特徵（9 項）">Static model features (9)</span></h4>
+      <span class="i18n" data-en="Categorical: model name, architecture, model type, hidden activation. Numerical: number of parameters, hidden size, number of heads, number of layers, vocabulary size &mdash; all read from the model's Hugging Face config file." data-zh="類別型：模型名稱、架構、模型類型、隱藏激活函數。數值型：參數量、隱藏維度、注意力頭數、層數、詞彙表大小 &mdash; 皆由模型的 Hugging Face 配置檔讀取。">Categorical: model name, architecture, model type, hidden activation. Numerical: number of parameters, hidden size, number of heads, number of layers, vocabulary size &mdash; all read from the model's Hugging Face config file.</span>
+    </div>
+    <div class="arrow">&#x2193;</div>
+    <div class="box orange">
+      <h4><span class="i18n" data-en="Operational parameters (3)" data-zh="操作性參數（3 項）">Operational parameters (3)</span></h4>
+      <span class="i18n" data-en="Number of concurrent users, generation length, and average content size in megabytes &mdash; collected under load testing while sweeping concurrency over 8, 16, 32 and generation length over 32, 64, 128 tokens." data-zh="並發使用者數、生成長度，以及以 MB 計的平均內容大小 &mdash; 在負載測試下、以並發數於 8、16、32 與生成長度於 32、64、128 token 之掃描中收集。">Number of concurrent users, generation length, and average content size in megabytes &mdash; collected under load testing while sweeping concurrency over 8, 16, 32 and generation length over 32, 64, 128 tokens.</span>
+    </div>
+    <div class="arrow">&#x2193;</div>
+    <div class="box cyan">
+      <h4><span class="i18n" data-en="Analytical Roofline latency (the key extra feature)" data-zh="解析 Roofline 延遲（關鍵的附加特徵）">Analytical Roofline latency (the key extra feature)</span></h4>
+      <span class="i18n" data-en="The theoretical inference time from Equation (4), computed by the extended LLM-Viewer for each configuration's input length, batch size, and generation length. This single feature carries the hardware ceiling into the regressor." data-zh="由方程式 (4) 得出的理論推理時間，由擴充後的 LLM-Viewer 針對每個配置的輸入長度、batch size 與生成長度計算。此單一特徵將硬體上界帶入迴歸器。">The theoretical inference time from Equation (4), computed by the extended LLM-Viewer for each configuration's input length, batch size, and generation length. This single feature carries the hardware ceiling into the regressor.</span>
+    </div>
+    <div class="arrow">&#x2193;</div>
+    <div class="box green">
+      <h4><span class="i18n" data-en="Regressor &rarr; predicted latency (ms)" data-zh="迴歸器 &rarr; 預測延遲（毫秒）">Regressor &rarr; predicted latency (ms)</span></h4>
+      <span class="i18n" data-en="Random Forest, XGBoost, or Linear Regression in their default scikit-learn configuration, with no fine-tuning, trained to map the combined feature vector to the measured end-to-end latency." data-zh="採用 scikit-learn 預設配置、未經微調的 Random Forest、XGBoost 或 Linear Regression，訓練以將合併特徵向量映射至量測的端到端延遲。">Random Forest, XGBoost, or Linear Regression in their default scikit-learn configuration, with no fine-tuning, trained to map the combined feature vector to the measured end-to-end latency.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.1 How the latency labels were measured" data-zh="5.1 延遲標籤的量測方式">5.1 How the latency labels were measured</span></h3>
+  <p><span class="i18n"
+    data-en="The training labels come from controlled load tests rather than synthetic estimates, which is what allows the regressor to learn the runtime residual. Each experiment fixes the generation prompt to the single string &ldquo;What is artificial intelligence?&rdquo; and varies only the number of concurrent users and the generation length, so that the measured latency reflects concurrency and decode length cleanly. Each configuration is a single-pass, non-multiturn run driven by the Locust load-testing tool for five minutes, repeated three times, with the reported latency taken as the average of the three runs because the authors observed minimal variation across repetitions on identical setups. The three collected operational parameters and the measured execution latency in milliseconds become the supervised target."
+    data-zh="訓練標籤來自受控負載測試而非合成估計，這正是迴歸器得以學習執行期殘差的原因。每個實驗將生成 prompt 固定為單一字串「What is artificial intelligence?」，且僅改變並發使用者數與生成長度，使量測延遲能乾淨地反映並發與 decode 長度。每個配置為由 Locust 負載測試工具驅動、單趟非多輪、執行五分鐘並重複三次的執行，報告延遲取三次執行之平均，因為作者觀察到在相同設置下各次重複之間的變異極小。所收集的三項操作性參數與以毫秒計的量測執行延遲成為監督式目標。">The training labels come from controlled load tests rather than synthetic estimates, which is what allows the regressor to learn the runtime residual. Each experiment fixes the generation prompt to the single string &ldquo;What is artificial intelligence?&rdquo; and varies only the number of concurrent users and the generation length, so that the measured latency reflects concurrency and decode length cleanly. Each configuration is a single-pass, non-multiturn run driven by the Locust load-testing tool for five minutes, repeated three times, with the reported latency taken as the average of the three runs because the authors observed minimal variation across repetitions on identical setups. The three collected operational parameters and the measured execution latency in milliseconds become the supervised target.</span></p>
+
+  <h3><span class="i18n" data-en="5.2 Two evaluation regimes: in-domain and out-of-domain" data-zh="5.2 兩種評測機制：域內與域外">5.2 Two evaluation regimes: in-domain and out-of-domain</span></h3>
+  <p><span class="i18n"
+    data-en="The paper separates two questions a deployed predictor must answer, because they stress the model differently. In-domain prediction trains and tests on a single LLM, isolating the impact of the operational parameters when the architecture is held constant; with only nine configurations per model the authors use three-fold cross-validation. Out-of-domain prediction trains on a set of LLMs and predicts the latency of a model excluded from training, which measures whether the static model features and the analytical ceiling together generalise to an architecture the regressor has never seen. The distinction matters operationally: the in-domain regime is what an operator faces when scaling a known model, while the out-of-domain regime is what an operator faces on the day a new model is released."
+    data-zh="本文區分了一個部署中的預測器必須回答的兩個問題，因為二者對模型施加不同的壓力。域內預測在單一 LLM 上訓練與測試，在架構固定時隔離操作性參數的影響；由於每個模型僅有九個配置，作者採用三折交叉驗證。域外預測在一組 LLM 上訓練，並預測一個被排除於訓練之外的模型之延遲，藉此衡量靜態模型特徵與解析上界是否能共同泛化至迴歸器從未見過的架構。此區分在運維上至關重要：域內機制是管理者在擴展一個已知模型時所面對的情境，而域外機制則是管理者在新模型發布當天所面對的情境。">The paper separates two questions a deployed predictor must answer, because they stress the model differently. In-domain prediction trains and tests on a single LLM, isolating the impact of the operational parameters when the architecture is held constant; with only nine configurations per model the authors use three-fold cross-validation. Out-of-domain prediction trains on a set of LLMs and predicts the latency of a model excluded from training, which measures whether the static model features and the analytical ceiling together generalise to an architecture the regressor has never seen. The distinction matters operationally: the in-domain regime is what an operator faces when scaling a known model, while the out-of-domain regime is what an operator faces on the day a new model is released.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Linear Regression becomes the most effective method once the ceiling is a feature." data-zh="一旦上界成為特徵，Linear Regression 即成為最有效的方法。">Linear Regression becomes the most effective method once the ceiling is a feature.</span></strong>
+    <span class="i18n"
+      data-en=" The paper reasons that the Roofline feature already encodes the two physical bottlenecks the regressor would otherwise have to discover &mdash; the compute-bound and the memory-bandwidth-bound regimes. With those two regimes supplied analytically, the regressor's remaining job is to model the third, overhead bound, which it does by introducing a constant offset. A linear model is the most effective form for that residual, which is why Linear Regression is the best method in every cell once the analytical feature is present."
+      data-zh=" 本文推論，Roofline 特徵已編碼了迴歸器否則須自行發現的兩個物理瓶頸 &mdash; 計算受限與記憶體頻寬受限區間。在此二區間以解析方式提供後，迴歸器剩餘的工作是建模第三個額外開銷上界，其以引入常數偏移完成。線性模型是該殘差最有效的形式，這正是解析特徵存在後 Linear Regression 在每一格皆為最佳方法的原因。"> The paper reasons that the Roofline feature already encodes the two physical bottlenecks the regressor would otherwise have to discover &mdash; the compute-bound and the memory-bandwidth-bound regimes. With those two regimes supplied analytically, the regressor's remaining job is to model the third, overhead bound, which it does by introducing a constant offset. A linear model is the most effective form for that residual, which is why Linear Regression is the best method in every cell once the analytical feature is present.</span>
+  </div>
+</section>
+
+<!-- ====== 6. RESULTS ====== -->
+<section id="results">
+  <h2><span class="i18n" data-en="6. Results: How Much the Ceiling Helps" data-zh="6. 結果：上界帶來多少幫助">6. Results: How Much the Ceiling Helps</span></h2>
+
+  <p><span class="i18n"
+    data-en="The evaluation reports the coefficient of determination and the mean squared error for the best regressor in each of three settings: out-of-domain, in-domain, and in-domain augmented with the analytical Roofline feature. The first table reproduces the paper's main comparison, where every analytical-feature column uses Linear Regression as its best method. Reading across a row shows the progression from generalising to an unseen model, through interpolating within a seen model, to the reconciled hybrid estimate."
+    data-zh="評測報告了三種設置中各自最佳迴歸器的判定係數與均方誤差：域外、域內，以及加入解析 Roofline 特徵的域內。第一個表格重現了本文的主要比較，其中每個解析特徵欄皆以 Linear Regression 作為最佳方法。橫向閱讀一列可見從泛化至未見模型、經由已見模型內的內插、至調和後混合估計的進程。">The evaluation reports the coefficient of determination and the mean squared error for the best regressor in each of three settings: out-of-domain, in-domain, and in-domain augmented with the analytical Roofline feature. The first table reproduces the paper's main comparison, where every analytical-feature column uses Linear Regression as its best method. Reading across a row shows the progression from generalising to an unseen model, through interpolating within a seen model, to the reconciled hybrid estimate.</span></p>
+
+  <h3><span class="i18n" data-en="6.1 Main comparison across settings" data-zh="6.1 跨設置的主要比較">6.1 Main comparison across settings</span></h3>
+  <p><span class="i18n"
+    data-en="The columns report the best coefficient of determination (higher is better) and the best mean squared error (lower is better) for each model under each setting; the analytical-feature columns are labelled RLM for Roofline model. The decisive observation is that the RLM column is closest to a perfect coefficient of determination for every model on both servers, and that its mean squared error is the smallest of the three settings in every row."
+    data-zh="各欄報告每個模型在每種設置下的最佳判定係數（越高越好）與最佳均方誤差（越低越好）；解析特徵欄標記為 RLM，代表 Roofline 模型。決定性的觀察是：RLM 欄在兩種伺服器上的每個模型皆最接近完美判定係數，且其均方誤差在每一列中皆為三種設置中最小者。">The columns report the best coefficient of determination (higher is better) and the best mean squared error (lower is better) for each model under each setting; the analytical-feature columns are labelled RLM for Roofline model. The decisive observation is that the RLM column is closest to a perfect coefficient of determination for every model on both servers, and that its mean squared error is the smallest of the three settings in every row.</span></p>
+
+  <p class="scroll-hint"><span class="i18n" data-en="Scroll the table sideways to see all six metric columns." data-zh="左右捲動表格以檢視全部六個指標欄位。">Scroll the table sideways to see all six metric columns.</span></p>
+  <div class="tbl-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th rowspan="2"><span class="i18n" data-en="Server" data-zh="伺服器">Server</span></th>
+        <th rowspan="2"><span class="i18n" data-en="Model" data-zh="模型">Model</span></th>
+        <th colspan="2"><span class="i18n" data-en="OOD (unseen model)" data-zh="OOD（未見模型）">OOD (unseen model)</span></th>
+        <th colspan="2"><span class="i18n" data-en="ID (seen model)" data-zh="ID（已見模型）">ID (seen model)</span></th>
+        <th colspan="2"><span class="i18n" data-en="RLM (+ ceiling)" data-zh="RLM（+ 上界）">RLM (+ ceiling)</span></th>
+      </tr>
+      <tr>
+        <th>R&sup2; &uarr;</th><th>MSE &darr;</th>
+        <th>R&sup2; &uarr;</th><th>MSE &darr;</th>
+        <th>R&sup2; &uarr;</th><th>MSE &darr;</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td rowspan="4">vLLM</td><td>opt-1.3b</td><td>0.903</td><td>11748</td><td>0.800</td><td>24282</td><td><strong>0.974</strong></td><td><strong>3163</strong></td></tr>
+      <tr><td>phi-2</td><td>0.908</td><td>18580</td><td>0.805</td><td>39215</td><td><strong>0.987</strong></td><td><strong>2535</strong></td></tr>
+      <tr><td>pythia-1.4b</td><td>0.950</td><td>5840</td><td>0.929</td><td>8157</td><td><strong>0.985</strong></td><td><strong>1687</strong></td></tr>
+      <tr><td>gpt2-xl</td><td>0.724</td><td>58505</td><td>0.917</td><td>17527</td><td><strong>0.951</strong></td><td><strong>10384</strong></td></tr>
+      <tr><td rowspan="4">Triton</td><td>opt-1.3b</td><td>0.961</td><td>12374</td><td>0.940</td><td>19463</td><td><strong>0.986</strong></td><td><strong>4538</strong></td></tr>
+      <tr><td>phi-2</td><td>0.974</td><td>8878</td><td>0.919</td><td>27314</td><td><strong>0.987</strong></td><td><strong>4392</strong></td></tr>
+      <tr><td>pythia-1.4b</td><td>0.859</td><td>41883</td><td>0.966</td><td>10115</td><td><strong>0.995</strong></td><td><strong>1458</strong></td></tr>
+      <tr><td>gpt2-xl</td><td>0.454</td><td>415931</td><td>0.948</td><td>39675</td><td><strong>0.965</strong></td><td><strong>26326</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <figure class="paper-fig fig-wide">
+    <img src="fig1_scatter.png" alt="Figure 1 from Imai et al.: scatter plots of average R-squared versus average MSE for vLLM (top) and Triton (bottom), showing OOD, ID, and RLM points moving toward the ideal corner.">
+    <figcaption class="fig-cap"><span class="i18n"
+      data-en="<strong>Figure 1 (Imai et al.).</strong> Average R&sup2; versus average MSE across the four models, per server (vLLM top, Triton bottom). Each point is a setting &mdash; OOD (blue), ID (orange), RLM (green) &mdash; and the red star marks the ideal corner of perfect R&sup2; and zero MSE. The blue arrow traces the move from ID to RLM: adding the analytical Roofline feature pulls every server toward the ideal. These per-server averaged points are exactly the quantities behind the four headline boxes above (paper &sect;3.3 / Figure 1)."
+      data-zh="<strong>圖 1（Imai 等）。</strong> 四個模型的平均 R&sup2; 對平均 MSE，依伺服器分列（vLLM 上、Triton 下）。每個點代表一種設置 &mdash; OOD（藍）、ID（橙）、RLM（綠）&mdash; 紅星標記完美 R&sup2; 與零 MSE 的理想角落。藍色箭頭描繪由 ID 至 RLM 的移動：加入解析 Roofline 特徵使每個伺服器皆趨向理想。這些逐伺服器平均的點，正是上方四個代表性方框背後的量（論文 &sect;3.3 / 圖 1）。"><strong>Figure 1 (Imai et al.).</strong> Average R&sup2; versus average MSE across the four models, per server (vLLM top, Triton bottom). Each point is a setting &mdash; OOD (blue), ID (orange), RLM (green) &mdash; and the red star marks the ideal corner of perfect R&sup2; and zero MSE. The blue arrow traces the move from ID to RLM: adding the analytical Roofline feature pulls every server toward the ideal. These per-server averaged points are exactly the quantities behind the four headline boxes above (paper &sect;3.3 / Figure 1).</span></figcaption>
+  </figure>
+
+  <p><span class="i18n"
+    data-en="Two patterns are worth drawing out. First, the analytical feature lifts the in-domain coefficient of determination toward the high-0.9 range for every model, confirming that the residual it corrects is consistent enough to be learned. Second, the mean squared error reductions are large in absolute terms, not merely in ratio: for pythia-1.4b on Triton the error falls from 10115 to 1458, very nearly a 7&times; reduction that an operator would feel directly as a tighter latency guarantee."
+    data-zh="有兩個模式值得指出。其一，解析特徵將每個模型的域內判定係數提升至 0.9 高段，證實其所校正的殘差一致到足以被學習。其二，均方誤差的下降在絕對值上而非僅在比值上即為可觀：Triton 上的 pythia-1.4b 誤差由 10115 降至 1458，接近 7 倍的下降，管理者將直接感受為更緊的延遲保證。">Two patterns are worth drawing out. First, the analytical feature lifts the in-domain coefficient of determination toward the high-0.9 range for every model, confirming that the residual it corrects is consistent enough to be learned. Second, the mean squared error reductions are large in absolute terms, not merely in ratio: for pythia-1.4b on Triton the error falls from 10115 to 1458, very nearly a 7&times; reduction that an operator would feel directly as a tighter latency guarantee.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 The compute-bound check" data-zh="6.2 計算受限的查驗">6.2 The compute-bound check</span></h3>
+  <p><span class="i18n"
+    data-en="A natural worry is that the method only works because LLM decoding is overwhelmingly memory-bound, which a linear model captures easily. The authors address this directly by analysing each model at the layer level with LLM-Viewer and computing the proportion of compute-bound operations for the entire model across configurations. The average compute-bound ratio exceeded 19.5 percent for every LLM, which means a non-trivial fraction of the work sits in the flat compute-bound region of the Roofline. The hybrid retains its accuracy in that region, demonstrating that the predictor is not limited to memory-bound operations and remains applicable regardless of arithmetic intensity."
+    data-zh="一個自然的疑慮是：此方法之所以奏效，僅因 LLM 解碼壓倒性地受記憶體限制，而線性模型能輕易捕捉之。作者直接處理此疑慮，以 LLM-Viewer 在層級層次分析每個模型，並計算整個模型在各配置下計算受限運算的比例。每個 LLM 的平均計算受限比例皆超過 19.5%，意味著有相當一部分的工作位於 Roofline 的平坦計算受限區。混合方法在該區域仍保有其準確度，證明該預測器不限於記憶體受限運算，且不論算術強度為何皆仍適用。">A natural worry is that the method only works because LLM decoding is overwhelmingly memory-bound, which a linear model captures easily. The authors address this directly by analysing each model at the layer level with LLM-Viewer and computing the proportion of compute-bound operations for the entire model across configurations. The average compute-bound ratio exceeded 19.5 percent for every LLM, which means a non-trivial fraction of the work sits in the flat compute-bound region of the Roofline. The hybrid retains its accuracy in that region, demonstrating that the predictor is not limited to memory-bound operations and remains applicable regardless of arithmetic intensity.</span></p>
+
+  <div class="ours">
+    <strong><span class="i18n" data-en="This 19.5% compute-bound fraction is exactly the regime our mechanism addresses." data-zh="此 19.5% 的計算受限比例正是我們的機制所針對的區間。">This 19.5% compute-bound fraction is exactly the regime our mechanism addresses.</span></strong>
+    <span class="i18n"
+      data-en=" The compute-bound region is precisely the regime in which a GPU draws the most power, heats up the fastest, and is most likely to throttle its streaming-multiprocessor clock. The paper proves a fifth of the work lives there and then absorbs the resulting latency offset into an unexplained constant. Section 8 develops why that constant is not constant: it grows with input-token count as the clock droops."
+      data-zh=" 計算受限區正是 GPU 耗電最多、升溫最快、且最可能降低其串流多處理器時脈的區間。本文證明有五分之一的工作位於該區，繼而將所產生的延遲偏移吸收為一個未解釋的常數。第 8 節將闡述為何該常數並非常數：它隨輸入 token 數增長，因時脈下垂而變動。"> The compute-bound region is precisely the regime in which a GPU draws the most power, heats up the fastest, and is most likely to throttle its streaming-multiprocessor clock. The paper proves a fifth of the work lives there and then absorbs the resulting latency offset into an unexplained constant. Section 8 develops why that constant is not constant: it grows with input-token count as the clock droops.</span>
+  </div>
+</section>
+
+<!-- ====== 7. GPT2 CASE ====== -->
+<section id="gpt2">
+  <h2><span class="i18n" data-en="7. The gpt2-xl Outlier and What It Reveals" data-zh="7. gpt2-xl 離群案例及其揭示">7. The gpt2-xl Outlier and What It Reveals</span></h2>
+
+  <p><span class="i18n"
+    data-en="One model behaves unlike the other three under out-of-domain prediction, and the paper's diagnosis of why is instructive for understanding the limits of static features. Three of the four models generalise strongly to an unseen architecture, with out-of-domain coefficients of determination above 0.85, but gpt2-xl collapses to 0.724 on vLLM and 0.454 on Triton. The explanation the authors give connects the failure to a structural property of the model rather than to noise."
+    data-zh="在域外預測下，有一個模型的行為與其他三者迥異，而本文對其原因的診斷對於理解靜態特徵的極限頗具啟發。四個模型中有三個能強力泛化至未見架構，域外判定係數高於 0.85，但 gpt2-xl 在 vLLM 上降至 0.724、在 Triton 上降至 0.454。作者給出的解釋將此失敗連結至模型的結構性屬性而非雜訊。">One model behaves unlike the other three under out-of-domain prediction, and the paper's diagnosis of why is instructive for understanding the limits of static features. Three of the four models generalise strongly to an unseen architecture, with out-of-domain coefficients of determination above 0.85, but gpt2-xl collapses to 0.724 on vLLM and 0.454 on Triton. The explanation the authors give connects the failure to a structural property of the model rather than to noise.</span></p>
+
+  <p><span class="i18n"
+    data-en="Using LLM-Viewer, the authors compared the average number of operations across the four models. The gpt2-xl model has the fewest operations, averaging roughly 6.4 trillion, which is substantially smaller than the 10.4 to 16.1 trillion of the other three. The authors attribute this discrepancy to its small hidden size of 1600, which places gpt2-xl outside the operation-count range the regressor learned from the other models. When the out-of-domain regressor is asked to extrapolate to a model whose total work is far below anything in its training set, it has no anchor, and the analytical ceiling becomes the only feature carrying reliable signal. Both better-conditioned settings recover gpt2-xl: the in-domain column lifts it back above 0.91 on each server (0.917 on vLLM, 0.948 on Triton), and the RLM column lifts it above 0.94 on each server (0.951 on vLLM, 0.965 on Triton), confirming that the failure was extrapolation across operation-count scale, not an intrinsic difficulty of the model."
+    data-zh="作者運用 LLM-Viewer 比較了四個模型的平均運算數。gpt2-xl 的運算數最少，平均約 6.4 兆，明顯小於其他三者的 10.4 至 16.1 兆。作者將此差異歸因於其僅 1600 的小隱藏維度，這使 gpt2-xl 落在迴歸器由其他模型所學運算數範圍之外。當域外迴歸器被要求外推至一個總工作量遠低於其訓練集中任何項目的模型時，它失去了錨點，而解析上界成為唯一攜帶可靠訊號的特徵。兩種條件較佳的設置皆恢復了 gpt2-xl：域內欄在各伺服器上將其拉回 0.91 以上（vLLM 為 0.917、Triton 為 0.948），RLM 欄則在各伺服器上將其提升至 0.94 以上（vLLM 為 0.951、Triton 為 0.965），證實該失敗是跨運算數尺度的外推，而非模型本身的固有困難。">Using LLM-Viewer, the authors compared the average number of operations across the four models. The gpt2-xl model has the fewest operations, averaging roughly 6.4 trillion, which is substantially smaller than the 10.4 to 16.1 trillion of the other three. The authors attribute this discrepancy to its small hidden size of 1600, which places gpt2-xl outside the operation-count range the regressor learned from the other models. When the out-of-domain regressor is asked to extrapolate to a model whose total work is far below anything in its training set, it has no anchor, and the analytical ceiling becomes the only feature carrying reliable signal. Both better-conditioned settings recover gpt2-xl: the in-domain column lifts it back above 0.91 on each server (0.917 on vLLM, 0.948 on Triton), and the RLM column lifts it above 0.94 on each server (0.951 on vLLM, 0.965 on Triton), confirming that the failure was extrapolation across operation-count scale, not an intrinsic difficulty of the model.</span></p>
+
+  <h3><span class="i18n" data-en="7.1 The four studied models" data-zh="7.1 四個受測模型">7.1 The four studied models</span></h3>
+  <p><span class="i18n"
+    data-en="The four open-source models were chosen to span a range of architectures while remaining small enough to characterise on a single A100, so that the experiment isolates architectural variation rather than parameter scale. The table lists the static specifications the regressor reads from each model's configuration file; the hidden-size column is the one that explains the gpt2-xl outlier."
+    data-zh="這四個開源模型的選擇旨在涵蓋一系列架構，同時保持足夠小以在單張 A100 上刻畫，使實驗隔離的是架構變異而非參數規模。下表列出迴歸器由各模型配置檔讀取的靜態規格；隱藏維度欄即為解釋 gpt2-xl 離群現象的那一欄。">The four open-source models were chosen to span a range of architectures while remaining small enough to characterise on a single A100, so that the experiment isolates architectural variation rather than parameter scale. The table lists the static specifications the regressor reads from each model's configuration file; the hidden-size column is the one that explains the gpt2-xl outlier.</span></p>
+
+  <p class="scroll-hint"><span class="i18n" data-en="Scroll the table sideways to see all seven specification columns." data-zh="左右捲動表格以檢視全部七個規格欄位。">Scroll the table sideways to see all seven specification columns.</span></p>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Model" data-zh="模型">Model</span></th>
+      <th><span class="i18n" data-en="Hidden size" data-zh="隱藏維度">Hidden size</span></th>
+      <th><span class="i18n" data-en="Hidden act" data-zh="隱藏激活">Hidden act</span></th>
+      <th><span class="i18n" data-en="Heads" data-zh="頭數">Heads</span></th>
+      <th><span class="i18n" data-en="Layers" data-zh="層數">Layers</span></th>
+      <th><span class="i18n" data-en="Vocab" data-zh="詞彙表">Vocab</span></th>
+      <th><span class="i18n" data-en="Params" data-zh="參數量">Params</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>facebook/opt-1.3b</td><td>2048</td><td>relu</td><td>32</td><td>24</td><td>50272</td><td>1.3B</td></tr>
+      <tr><td>microsoft/phi-2</td><td>2560</td><td>gelu_new</td><td>32</td><td>32</td><td>51200</td><td>2.7B</td></tr>
+      <tr><td>EleutherAI/pythia-1.4b</td><td>2048</td><td>gelu</td><td>16</td><td>24</td><td>50304</td><td>1.4B</td></tr>
+      <tr><td>openai-community/gpt2-xl</td><td><strong>1600</strong></td><td>gelu_new</td><td>25</td><td>48</td><td>50257</td><td>1.6B</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The lesson generalises beyond this one model. Static configuration features predict latency well only within the operation-count range they were trained on; the analytical ceiling is what lets the predictor extrapolate, because it recomputes the work from the architecture rather than memorising it. This is the same property that makes the hybrid robust on the day a genuinely new model arrives."
+    data-zh="此教訓可推廣至此單一模型之外。靜態配置特徵僅在其受訓的運算數範圍內能良好預測延遲；解析上界才是讓預測器得以外推的關鍵，因為它由架構重新計算工作量而非加以記憶。這正是使混合方法在真正的新模型到來當天仍具穩健性的同一屬性。">The lesson generalises beyond this one model. Static configuration features predict latency well only within the operation-count range they were trained on; the analytical ceiling is what lets the predictor extrapolate, because it recomputes the work from the architecture rather than memorising it. This is the same property that makes the hybrid robust on the day a genuinely new model arrives.</span></p>
+</section>
+
+<!-- ====== 8. RELEVANCE TO OUR PREDICTOR ====== -->
+<section id="relevance">
+  <h2><span class="i18n" data-en="8. Relevance to Our Predictor" data-zh="8. 與我們預測器的關聯">8. Relevance to Our Predictor</span></h2>
+
+  <p><span class="i18n"
+    data-en="This paper is the closest prior art to our own per-step vLLM serving-latency predictor, and the relationship is best stated precisely. We are building a predictor that folds the GPU streaming-multiprocessor clock into the latency model as a hidden, involuntary, input-token-driven term. This paper builds a latency predictor whose analytical core over-predicts performance, and it absorbs the resulting gap with a learned regressor whose explanatory variable the authors describe only as the variability introduced by cloud infrastructure and dynamic workloads. The two papers are therefore looking at the same residual from opposite ends: this paper measures it and labels it cloud noise; we measure it and identify its mechanism."
+    data-zh="本文是我們自有逐步 vLLM 服務延遲預測器最接近的先前工作，而此關係最好精確陳述。我們正在建構一個將 GPU 串流多處理器時脈作為隱藏、非自願、由輸入 token 驅動之項納入延遲模型的預測器。本文建構的延遲預測器其解析核心高估了效能，並以一個學習式迴歸器吸收所產生的落差，而作者對該迴歸器解釋變數的描述僅止於雲端基礎設施與動態工作負載所引入的變異性。因此兩篇論文是從相反兩端觀察同一個殘差：本文量測之並標記為雲端雜訊；我們量測之並指認其機制。">This paper is the closest prior art to our own per-step vLLM serving-latency predictor, and the relationship is best stated precisely. We are building a predictor that folds the GPU streaming-multiprocessor clock into the latency model as a hidden, involuntary, input-token-driven term. This paper builds a latency predictor whose analytical core over-predicts performance, and it absorbs the resulting gap with a learned regressor whose explanatory variable the authors describe only as the variability introduced by cloud infrastructure and dynamic workloads. The two papers are therefore looking at the same residual from opposite ends: this paper measures it and labels it cloud noise; we measure it and identify its mechanism.</span></p>
+
+  <h3><span class="i18n" data-en="8.1 The residual they call cloud noise has a name" data-zh="8.1 他們稱為雲端雜訊的殘差有一個名字">8.1 The residual they call cloud noise has a name</span></h3>
+  <p><span class="i18n"
+    data-en="The paper's own framing supplies the opening. The analytical Roofline ceiling assumes the hardware runs at its rated clock for the entire computation; that assumption is what makes it over-predict performance. Our measurements show that on H100, H200, A100-80, and Blackwell accelerators the streaming-multiprocessor clock falls by 19 to 31 percent as it moves from boost to throttle when the input-token count rises, and that the clock correlates with on-die temperature at a coefficient between negative 0.93 and negative 0.98. A clock that has fallen by a quarter under load delivers a quarter less compute than the rated peak the Roofline ceiling assumed, which is a first-order contributor to the very overestimation this paper reports. What the authors absorb into an unexplained constant offset is, in substantial part, the clock droop our predictor models explicitly."
+    data-zh="本文自身的框架提供了切入口。解析 Roofline 上界假設硬體在整個計算過程中以其額定時脈運行；該假設正是使其高估效能的原因。我們的量測顯示，在 H100、H200、A100-80 與 Blackwell 加速器上，當輸入 token 數上升時，串流多處理器時脈會自 boost 降至 throttle，下降 19 至 31%，且時脈與晶片溫度的相關係數介於 -0.93 至 -0.98 之間。一個在負載下已下降四分之一的時脈，所交付的計算比 Roofline 上界所假設的額定峰值少四分之一，這正是本文所報告之高估的一階貢獻來源。作者吸收進一個未解釋常數偏移之物，有相當一部分正是我們預測器明確建模的時脈下垂。">The paper's own framing supplies the opening. The analytical Roofline ceiling assumes the hardware runs at its rated clock for the entire computation; that assumption is what makes it over-predict performance. Our measurements show that on H100, H200, A100-80, and Blackwell accelerators the streaming-multiprocessor clock falls by 19 to 31 percent as it moves from boost to throttle when the input-token count rises, and that the clock correlates with on-die temperature at a coefficient between negative 0.93 and negative 0.98. A clock that has fallen by a quarter under load delivers a quarter less compute than the rated peak the Roofline ceiling assumed, which is a first-order contributor to the very overestimation this paper reports. What the authors absorb into an unexplained constant offset is, in substantial part, the clock droop our predictor models explicitly.</span></p>
+
+  <h3><span class="i18n" data-en="8.2 Why their constant offset should have been a function of input tokens" data-zh="8.2 為何他們的常數偏移本應是輸入 token 的函數">8.2 Why their constant offset should have been a function of input tokens</span></h3>
+  <p><span class="i18n"
+    data-en="The paper's reasoning that Linear Regression suffices because the residual is an overhead bound modelled by a constant is precisely the point at which our work diverges. The clock droop is not constant: it is driven by the input-token count, because more input tokens mean more compute-bound prefill work, which draws more power, raises temperature, and pushes the clock further into throttle. The paper itself establishes that more than 19.5 percent of the work is compute-bound, which is the regime where this thermal coupling is strongest. A model that treats the residual as a constant offset will therefore be systematically wrong in the high-input-token, prefill-heavy, compute-bound corner of the configuration space &mdash; the same corner where our term matters most. Folding the clock in as an explicit term that depends on input-token count is the modelling step this paper did not take."
+    data-zh="本文主張 Linear Regression 已足夠、因殘差為一個由常數建模的額外開銷上界，這一論點正是我們工作分歧之處。時脈下垂並非常數：它由輸入 token 數驅動，因為更多輸入 token 意味著更多計算受限的 prefill 工作，這會耗用更多功率、提升溫度，並將時脈進一步推入 throttle。本文自身確立了超過 19.5% 的工作為計算受限，而這正是此熱耦合最強的區間。因此一個將殘差視為常數偏移的模型，將在高輸入 token、prefill 密集、計算受限的配置空間角落中系統性地出錯 &mdash; 而這正是我們的項最為重要的同一角落。將時脈作為一個依賴輸入 token 數的明確項納入，正是本文未採取的建模步驟。">The paper's reasoning that Linear Regression suffices because the residual is an overhead bound modelled by a constant is precisely the point at which our work diverges. The clock droop is not constant: it is driven by the input-token count, because more input tokens mean more compute-bound prefill work, which draws more power, raises temperature, and pushes the clock further into throttle. The paper itself establishes that more than 19.5 percent of the work is compute-bound, which is the regime where this thermal coupling is strongest. A model that treats the residual as a constant offset will therefore be systematically wrong in the high-input-token, prefill-heavy, compute-bound corner of the configuration space &mdash; the same corner where our term matters most. Folding the clock in as an explicit term that depends on input-token count is the modelling step this paper did not take.</span></p>
+
+  <h3><span class="i18n" data-en="8.3 What we borrow and where our novelty is partial" data-zh="8.3 我們借用什麼，以及我們的新穎性為何是部分的">8.3 What we borrow and where our novelty is partial</span></h3>
+  <p><span class="i18n"
+    data-en="We are explicit that our novelty is partial, and this paper is part of the reason. The hybrid recipe of an analytical ceiling reconciled with a learned residual is established here, and the learnability of latency from a Roofline feature is established here; we adopt both. What we add is the identification and explicit modelling of the involuntary clock droop as a function of input-token count inside a general serving predictor, where prior work either assumed a fixed clock or folded the droop into opaque noise. The comparison below states the division of labour between this paper and ours."
+    data-zh="我們明確表示我們的新穎性是部分的，而本文正是原因之一。將解析上界與學習式殘差調和的混合配方在此已被確立，且由 Roofline 特徵學習延遲的可學習性在此亦已確立；二者我們皆採納。我們所增添的，是在一個通用 serving 預測器內，將非自願時脈下垂作為輸入 token 數的函數加以指認並明確建模，而先前工作或假設固定時脈、或將下垂折入不透明的雜訊之中。下方比較陳述了本文與我們之間的分工。">We are explicit that our novelty is partial, and this paper is part of the reason. The hybrid recipe of an analytical ceiling reconciled with a learned residual is established here, and the learnability of latency from a Roofline feature is established here; we adopt both. What we add is the identification and explicit modelling of the involuntary clock droop as a function of input-token count inside a general serving predictor, where prior work either assumed a fixed clock or folded the droop into opaque noise. The comparison below states the division of labour between this paper and ours.</span></p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="This paper (Imai et al.)" data-zh="本文（Imai 等）">This paper (Imai et al.)</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Analytical Roofline ceiling as a regressor feature." data-zh="解析 Roofline 上界作為迴歸器特徵。">Analytical Roofline ceiling as a regressor feature.</span></li>
+        <li><span class="i18n" data-en="Residual learned, attributed to generic cloud variability." data-zh="殘差以學習取得，歸因於泛化的雲端變異性。">Residual learned, attributed to generic cloud variability.</span></li>
+        <li><span class="i18n" data-en="Residual treated as a constant overhead offset." data-zh="殘差被視為常數額外開銷偏移。">Residual treated as a constant overhead offset.</span></li>
+        <li><span class="i18n" data-en="Clock assumed at rated frequency throughout." data-zh="時脈全程假設為額定頻率。">Clock assumed at rated frequency throughout.</span></li>
+      </ul>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Our predictor" data-zh="我們的預測器">Our predictor</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Same analytical-plus-learned structure, adopted." data-zh="採納相同的解析加學習式結構。">Same analytical-plus-learned structure, adopted.</span></li>
+        <li><span class="i18n" data-en="Residual decomposed; the clock-droop component named." data-zh="殘差被分解；指明時脈下垂成分。">Residual decomposed; the clock-droop component named.</span></li>
+        <li><span class="i18n" data-en="Droop modelled as a function of input-token count M." data-zh="下垂被建模為輸入 token 數 M 的函數。">Droop modelled as a function of input-token count M.</span></li>
+        <li><span class="i18n" data-en="Clock measured to fall 19&ndash;31% boost-to-throttle." data-zh="量測時脈自 boost 至 throttle 下降 19&ndash;31%。">Clock measured to fall 19&ndash;31% boost-to-throttle.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="ours">
+    <strong><span class="i18n" data-en="The selection rationale reduces to one sentence." data-zh="選擇此文的理由可化約為一句話。">The selection rationale reduces to one sentence.</span></strong>
+    <span class="i18n"
+      data-en=" We selected this paper because it is the prior work that comes nearest to our hypothesis and stops one step short of it: it sees the residual our term explains, validates that the residual is learnable, and then names the wrong cause. Our contribution is to replace cloud variability with a measured, mechanistic, input-token-driven clock term inside the same hybrid the authors pioneered."
+      data-zh=" 我們選擇本文，因為它是最接近我們假設、卻在抵達前停下一步的先前工作：它看見了我們的項所解釋的殘差，驗證了該殘差可學習，繼而指認了錯誤的成因。我們的貢獻，是在作者所開創的同一混合方法內，以一個量測的、機制性的、由輸入 token 驅動的時脈項取代雲端變異性。"> We selected this paper because it is the prior work that comes nearest to our hypothesis and stops one step short of it: it sees the residual our term explains, validates that the residual is learnable, and then names the wrong cause. Our contribution is to replace cloud variability with a measured, mechanistic, input-token-driven clock term inside the same hybrid the authors pioneered.</span>
+  </div>
+</section>
+
+<!-- ====== 9. LIMITATIONS ====== -->
+<section id="limits">
+  <h2><span class="i18n" data-en="9. Limitations and Open Questions" data-zh="9. 限制與未解問題">9. Limitations and Open Questions</span></h2>
+
+  <p><span class="i18n"
+    data-en="The paper is a four-page workshop contribution, and its scope is bounded accordingly. The limitations below are not criticisms of the result but markers of where a full predictor would need to go further, several of which our own work takes up directly."
+    data-zh="本文是一篇四頁的 workshop 貢獻，其範疇相應有所限定。下列限制並非對結果的批評，而是標示一個完整預測器需要更進一步之處，其中若干點我們自身的工作正是直接承接。">The paper is a four-page workshop contribution, and its scope is bounded accordingly. The limitations below are not criticisms of the result but markers of where a full predictor would need to go further, several of which our own work takes up directly.</span></p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="Strengths" data-zh="優點">Strengths</span></h4>
+      <ul>
+        <li><span class="check">&#10003;</span> <span class="i18n" data-en="An interpretable analytical core combined with an accurate learned correction, the best of both modelling traditions." data-zh="可解釋的解析核心結合準確的學習式校正，兼取兩種建模傳統之長。">An interpretable analytical core combined with an accurate learned correction, the best of both modelling traditions.</span></li>
+        <li><span class="check">&#10003;</span> <span class="i18n" data-en="Validated on two serving stacks and four architectures rather than a single configuration." data-zh="在兩種 serving 堆疊與四種架構上驗證，而非單一配置。">Validated on two serving stacks and four architectures rather than a single configuration.</span></li>
+        <li><span class="check">&#10003;</span> <span class="i18n" data-en="The compute-bound check rules out the easy explanation that the gains are an artefact of memory-bound decoding." data-zh="計算受限查驗排除了增益僅為記憶體受限解碼之產物此一簡單解釋。">The compute-bound check rules out the easy explanation that the gains are an artefact of memory-bound decoding.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></h4>
+      <ul>
+        <li><span class="cross">&#10007;</span> <span class="i18n" data-en="The residual is attributed to undifferentiated cloud variability; its mechanism, including clock droop, is never decomposed." data-zh="殘差被歸因於未加區分的雲端變異性；其機制（含時脈下垂）從未被分解。">The residual is attributed to undifferentiated cloud variability; its mechanism, including clock droop, is never decomposed.</span></li>
+        <li><span class="cross">&#10007;</span> <span class="i18n" data-en="Only nine configurations per model and four sub-2.7B models on a single A100; concurrency tops out at 32 users." data-zh="每模型僅九個配置、四個小於 2.7B 的模型於單張 A100；並發上限為 32 位使用者。">Only nine configurations per model and four sub-2.7B models on a single A100; concurrency tops out at 32 users.</span></li>
+        <li><span class="partial">&#9650;</span> <span class="i18n" data-en="The fixed prompt and single-pass, non-multiturn runs do not exercise the long-context, prefill-heavy regime where clock droop is largest." data-zh="固定 prompt 與單趟、非多輪執行未涵蓋時脈下垂最大的長 context、prefill 密集區間。">The fixed prompt and single-pass, non-multiturn runs do not exercise the long-context, prefill-heavy regime where clock droop is largest.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The most consequential gap for a downstream predictor is the treatment of the residual as a structureless constant. Because the experiments fix the prompt and cap concurrency at thirty-two users, they never enter the operating point at which the streaming-multiprocessor clock droops most, so the constant-offset assumption is never stress-tested. A predictor that intends to serve long-context, high-input-token workloads &mdash; which is the regime our work targets &mdash; cannot inherit that assumption, and must instead model the residual as a function of the input-token count that drives the droop."
+    data-zh="對下游預測器而言最具影響的缺口，是將殘差視為無結構常數的處理方式。由於實驗固定了 prompt 並將並發上限定於三十二位使用者，它們從未進入串流多處理器時脈下垂最劇的運作點，因此常數偏移假設從未被壓力測試。一個意圖服務長 context、高輸入 token 工作負載的預測器 &mdash; 此正是我們工作所針對的區間 &mdash; 無法繼承該假設，而必須改將殘差建模為驅動下垂之輸入 token 數的函數。">The most consequential gap for a downstream predictor is the treatment of the residual as a structureless constant. Because the experiments fix the prompt and cap concurrency at thirty-two users, they never enter the operating point at which the streaming-multiprocessor clock droops most, so the constant-offset assumption is never stress-tested. A predictor that intends to serve long-context, high-input-token workloads &mdash; which is the regime our work targets &mdash; cannot inherit that assumption, and must instead model the residual as a function of the input-token count that drives the droop.</span></p>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Predicting LLM Inference Latency: A Roofline-Driven ML Method &mdash; Imai, Nakazawa, Amaral, Choochotkaew, Chiba (NeurIPS 2024 ML for Systems Workshop, paper 28)" data-zh="Predicting LLM Inference Latency: A Roofline-Driven ML Method &mdash; Imai、Nakazawa、Amaral、Choochotkaew、Chiba（NeurIPS 2024 ML for Systems Workshop，paper 28）">Predicting LLM Inference Latency: A Roofline-Driven ML Method &mdash; Imai, Nakazawa, Amaral, Choochotkaew, Chiba (NeurIPS 2024 ML for Systems Workshop, paper 28)</span></p>
+  <p><span class="i18n" data-en="Analysis page generated 2026-06-20 &middot; part of the agentic-LLM-infrastructure survey, Section 7 (Adjacent Area Optimizations)" data-zh="分析頁產生於 2026-06-20 &middot; 屬 agentic LLM 基礎設施綜述第 7 節（鄰近領域優化）">Analysis page generated 2026-06-20 &middot; part of the agentic-LLM-infrastructure survey, Section 7 (Adjacent Area Optimizations)</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  document.documentElement.lang = (l === 'zh') ? 'zh-Hant' : 'en';
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$',  right: '$',  display: false}
+      ]
+    });
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>

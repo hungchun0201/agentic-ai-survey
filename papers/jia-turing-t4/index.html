@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dissecting the NVIDIA Turing T4 GPU via Microbenchmarking</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+/* ===== ACCENT (Coral — performance microbenchmarking) ===== */
+:root{--accent:#e87461;--accent-rgb:232,116,97;--nav-bg:rgba(45,18,14,0.95);
+  /* secondary palette */
+  --link:#6ec6ff;--link-hover:#ff9f43;--accent-warm:#ffb74d;
+  /* semantic status colors */
+  --status-pos:#2ecc71;--status-neg:#e94560;--status-mid:var(--accent-warm)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px;overflow-x:clip}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7;overflow-x:clip}
+a{color:var(--link);text-decoration:none;transition:color .2s}
+a:hover{color:var(--link-hover)}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#d8b4ad;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#1e1020 0%,#241410 50%,#2a1410 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none;letter-spacing:normal}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,var(--link),var(--link-hover))}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:var(--accent-warm);margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+p{margin:0 0 1rem}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;max-width:100%;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em;overflow-wrap:anywhere}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+.tbl-wrap{overflow-x:auto;max-width:100%;margin:1rem 0}
+.tbl-wrap .scroll-hint{display:none}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:var(--accent-warm)}
+
+/* ===== VERTICAL FLOW ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:700px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(var(--accent-rgb),.14);border:1px solid rgba(var(--accent-rgb),.4);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:700px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid var(--accent-warm);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:1.9rem;font-weight:700;color:var(--accent);line-height:1.15;overflow-wrap:anywhere}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== INDICATORS ===== */
+.check{color:var(--status-pos);font-weight:bold}
+.cross{color:var(--status-neg);font-weight:bold}
+.partial{color:var(--status-mid);font-weight:bold}
+
+/* ===== GRID-2 ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== PAPER FIGURES ===== */
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{display:block;margin:0 auto;max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:620px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:800px;display:inline-block;text-align:left;line-height:1.5}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+
+/* ===== LATEX ===== */
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:var(--link)}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .metric-box .value{font-size:1.5rem}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav{padding:0}
+  nav ul{gap:0}
+  nav{padding:0 .4rem}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  .tbl-wrap .scroll-hint{display:block;font-size:.72rem;color:rgba(var(--accent-rgb),0.85);margin-bottom:.3rem;text-align:right}
+}
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#motivation">Motivation</a></li>
+    <li><a href="#method">Method</a></li>
+    <li><a href="#hierarchy">Memory &amp; Cores</a></li>
+    <li><a href="#tensor">Tensor Cores</a></li>
+    <li><a href="#throttle">Clock Throttling</a></li>
+    <li><a href="#relevance">Relevance to Us</a></li>
+    <li><a href="#limits">Limitations</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>Dissecting the NVIDIA Turing T4 GPU</h1>
+  <p class="sub"><span class="i18n" data-en="A microbenchmark dissection of the Turing T4 that documents, instruction by instruction and cache by cache, how a small-form-factor inference GPU behaves under load — and shows the SM clock falling as cuBLAS matrix size grows under a 70 W power cap." data-zh="以微基準對 Turing T4 進行逐指令、逐層快取的剖析；記錄這款小尺寸推理 GPU 在負載下的行為，並指出當 cuBLAS 矩陣尺寸增大、撞上 70 W 功耗上限時，SM 時脈隨之下降。">A microbenchmark dissection of the Turing T4 that documents, instruction by instruction and cache by cache, how a small-form-factor inference GPU behaves under load — and shows the SM clock falling as cuBLAS matrix size grows under a 70 W power cap.</span></p>
+  <div class="badges">
+    <span class="badge">arXiv:1903.07486</span>
+    <span class="badge">GTC 2019</span>
+    <span class="badge">Microbenchmarking</span>
+    <span class="badge">Power-Limit Throttling</span>
+    <span class="badge">Tensor Cores</span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Zhe Jia, Marco Maggioni, Jeffrey Smith, Daniele Paolo Scarpazza</p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">Citadel, High Performance Computing Group</p>
+</div>
+
+<div class="container">
+
+<!-- ============================ MOTIVATION ============================ -->
+<section id="motivation">
+  <h2><span class="i18n" data-en="1. Why Dissect a GPU at All?" data-zh="1. 為什麼要剖析一顆 GPU？">1. Why Dissect a GPU at All?</span></h2>
+
+  <p><span class="i18n" data-en="When NVIDIA introduced the Turing architecture in 2018, it paired the familiar full-height training boards with a new device class aimed squarely at inference: the small-form-factor, single-slot, passively cooled T4, rated at 70 W rather than the 250–300 W of a full-height datacenter card. A low-power board exists only because inference, not training, dominates the volume of GPU cycles a deployed service consumes, and the economics of that volume are decided in tens of watts. The architectural reference manuals that ship with such a device disclose almost none of the quantities a performance engineer actually needs — the true latency of an instruction, the size and associativity of each cache, the precise conditions under which the advertised boost clock is sustained. This paper exists because that gap between the published datasheet and the silicon's measured behavior had widened with every generation, and the gap is precisely where deployed inference throughput is won or lost." data-zh="當 NVIDIA 於 2018 年推出 Turing 架構時，它在熟悉的全高訓練卡之外，搭配了一個專為推理而設的新裝置類別：小尺寸、單槽、被動散熱的 T4，額定功耗為 70 W，而非全高資料中心卡的 250–300 W。一張低功耗卡之所以存在，正是因為主宰一個已部署服務所消耗 GPU 週期量的是推理而非訓練，而這個量的經濟性是在數十瓦的範圍內被決定的。這類裝置隨附的架構參考手冊幾乎不揭露效能工程師真正需要的量：一條指令的真實延遲、各層快取的大小與相聯度、宣稱的 boost 時脈在何種條件下能持續維持。本論文之所以存在，正是因為已公布規格與矽晶片實測行為之間的差距，隨著每一代而擴大，而部署推理吞吐量的成敗恰恰就決定在這個差距上。">When NVIDIA introduced the Turing architecture in 2018, it paired the familiar full-height training boards with a new device class aimed squarely at inference: the small-form-factor, single-slot, passively cooled T4, rated at 70 W rather than the 250–300 W of a full-height datacenter card. The architectural reference manuals that ship with such a device disclose almost none of the quantities a performance engineer actually needs — the true latency of an instruction, the size and associativity of each cache, the precise conditions under which the advertised boost clock is sustained. This paper exists because that gap between the published datasheet and the silicon's measured behavior had widened with every generation, and the gap is precisely where deployed inference throughput is won or lost.</span></p>
+
+  <h3><span class="i18n" data-en="1.1 A concrete failure: the datasheet TFLOPS that never arrive" data-zh="1.1 一個具體的失效案例：永遠等不到的規格 TFLOPS">1.1 A concrete failure: the datasheet TFLOPS that never arrive</span></h3>
+  <p><span class="i18n" data-en="Consider an engineer who provisions a T4 inference fleet against NVIDIA's datasheet Tensor-Core peak of 65 TFLOPS FP16 (the vendor's published mixed-precision ceiling, external to this paper) and then runs the obvious workload — a stream of half-precision cuBLAS matrix multiplications, the kernel underneath nearly every transformer layer. The application clock is explicitly pinned to the maximum 1,590 MHz. What the paper actually measures at that pinned clock is already well short of the datasheet ceiling — a representative cuBLAS half-precision rate of about 41.6 TFLOPS (41,616 GFLOPS, Section 4) — but the more damaging effect is dynamic. As the matrices grow, the measured cuBLAS throughput climbs to a mid-size peak and then, instead of holding there, turns over and falls — and it falls because the silicon has silently lowered its own clock from 1,590 MHz toward roughly 1,330 MHz to stay inside the 70 W envelope (Figure 4.3). The engineer never issued a clock-change command and the profiler reports no error; the only symptom is that the largest, most compute-bound layers run measurably slower than mid-size ones, the opposite of what a constant-clock roofline model predicts." data-zh="設想一位工程師依照 NVIDIA 規格書中 Tensor-Core 的 65 TFLOPS FP16 峰值（廠商公布的混合精度天花板，屬本論文之外的外部數據）來規劃 T4 推理叢集，然後執行最直接的工作負載——一連串半精度 cuBLAS 矩陣乘法，也就是幾乎每個 transformer 層底下的核心運算。應用時脈被明確固定在最高的 1,590 MHz。在該固定時脈下，論文實際量測到的數值早已遠低於規格天花板——半精度 cuBLAS 的代表性速率約為 41.6 TFLOPS（41,616 GFLOPS，見第 4 節）——但更具破壞性的是其動態效應。隨著矩陣增大，實測 cuBLAS 吞吐量先攀升到一個中等尺寸的峰值，接著並未維持在該處，而是反轉下降；下降的原因是矽晶片默默地把自己的時脈從 1,590 MHz 降到約 1,330 MHz，以維持在 70 W 範圍內（圖 4.3）。工程師從未下達任何變更時脈的指令，分析工具也未回報任何錯誤；唯一的徵兆是：最大型、最計算受限的層竟比中等尺寸的層執行得更慢，與固定時脈的 roofline 模型的預測恰好相反。">Consider an engineer who provisions a T4 inference fleet against NVIDIA's datasheet Tensor-Core peak of 65 TFLOPS FP16 (the vendor's published mixed-precision ceiling, external to this paper) and then runs the obvious workload — a stream of half-precision cuBLAS matrix multiplications, the kernel underneath nearly every transformer layer. The application clock is explicitly pinned to the maximum 1,590 MHz. As the matrices grow, the measured cuBLAS throughput climbs to a mid-size peak and then, instead of holding there, turns over and falls — and it falls because the silicon has silently lowered its own clock from 1,590 MHz toward roughly 1,330 MHz to stay inside the 70 W envelope (Figure 4.3). The engineer never issued a clock-change command and the profiler reports no error; the only symptom is that the largest, most compute-bound layers run measurably slower than mid-size ones, the opposite of what a constant-clock roofline model predicts.</span></p>
+
+  <p><span class="i18n" data-en="This abstraction has a sharp present-day edge. The T4's 70 W envelope still makes it one of the cheapest rentable inference accelerators per hour, so the throttling magnitudes the paper measures — the clock falling from 1,590 MHz toward 1,330 MHz, then below 800 MHz at 85 °C — propagate directly into the latency budget of any modern LLM-serving deployment. The following illustrative trace is not from the paper; it is a worked example that applies the paper's measured 16% power-limit clock reduction and its thermal step-down to a typical serving SLO, to show why the effect matters at the application level. Suppose a chat-completion service commits to a 200 ms time-to-first-token target and, provisioning against the constant-1,590 MHz assumption, budgets its prefill GEMM at roughly 150 ms. Applying the paper's 16% clock reduction stretches that same prefill to about 175 ms; applying the further thermal step-down below 800 MHz more than doubles it, so the first token arrives only after the target has already been missed. The end user sees a chat box that stalls before any text appears, and the operator sees a latency-target violation rate that climbs with operand size for reasons no profiler counter explains — which is precisely the gap the paper's measurements close." data-zh="這個抽象有一個鋒利的當下意義。T4 的 70 W 功耗使它至今仍是每小時最便宜的可租用推理加速器之一，因此論文所量測的節流幅度——時脈從 1,590 MHz 降到 1,330 MHz，並在 85 °C 跌破 800 MHz——會直接傳導進任何現代 LLM 服務部署的延遲預算。以下這段說明性的 trace 並非取自論文；它是一個將論文實測的 16% 功耗上限時脈降幅與其熱階梯式下降套用到典型服務 SLO 的範例，用以說明該效應在應用層為何重要。設想一個聊天補全服務承諾 200 ms 的首字延遲（TTFT）目標，並依固定 1,590 MHz 假設將其 prefill GEMM 編列約 150 ms。套用論文的 16% 時脈降幅後，同一次 prefill 被拉長到約 175 ms；再套用跌破 800 MHz 的進一步熱降幅，則使其延遲超過兩倍，因此首字只在目標早已被違反之後才送達。終端使用者看到的是聊天框在任何文字出現前就卡住，而營運者看到的是延遲目標違反率隨運算元尺寸攀升，卻沒有任何 profiler 計數器能解釋原因——而這正是論文的量測所填補的缺口。">This abstraction has a sharp present-day edge. The T4's 70 W envelope still makes it one of the cheapest rentable inference accelerators per hour, so the throttling magnitudes the paper measures — the clock falling from 1,590 MHz toward 1,330 MHz, then below 800 MHz at 85 °C — propagate directly into the latency budget of any modern LLM-serving deployment. The following illustrative trace is not from the paper; it is a worked example that applies the paper's measured 16% power-limit clock reduction and its thermal step-down to a typical serving SLO, to show why the effect matters at the application level. Suppose a chat-completion service commits to a 200 ms time-to-first-token target and, provisioning against the constant-1,590 MHz assumption, budgets its prefill GEMM at roughly 150 ms. Applying the paper's 16% clock reduction stretches that same prefill to about 175 ms; applying the further thermal step-down below 800 MHz more than doubles it, so the first token arrives only after the target has already been missed. The end user sees a chat box that stalls before any text appears, and the operator sees a latency-target violation rate that climbs with operand size for reasons no profiler counter explains — which is precisely the gap the paper's measurements close.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 The baseline pain: how far the achieved clock falls" data-zh="1.2 基準的痛點：實際時脈下降的幅度">1.2 The baseline pain: how far the achieved clock falls</span></h3>
+  <p><span class="i18n" data-en="The magnitude is not a rounding error. In the paper's own measurement, the sustained graphics clock under a continuous large-matrix cuBLAS load drops from the pinned 1,590 MHz to roughly 1,330 MHz — a reduction on the order of 16% from power-limit throttling alone, before any thermal effect is involved. Once the die also reaches its 85 °C limit, a second, sharper step-down follows, and the clock dips intermittently below 800 MHz, which is less than half of the nominal rate. Any capacity plan, latency SLO, or cost-per-token estimate built on the constant-clock assumption is therefore wrong by a margin large enough to violate a service contract." data-zh="這個幅度並非捨入誤差。在論文自身的量測中，持續大矩陣 cuBLAS 負載下的維持圖形時脈，從固定的 1,590 MHz 降到約 1,330 MHz——僅功耗上限節流一項，降幅就達約 16%，這還在任何熱效應介入之前。一旦晶片也達到 85 °C 上限，第二個、更陡的階梯式下降隨之而來，時脈會間歇性地跌破 800 MHz，不到標稱速率的一半。因此，任何建立在固定時脈假設上的容量規劃、延遲 SLO 或每 token 成本估算，其誤差幅度都大到足以違反服務合約。">The magnitude is not a rounding error. In the paper's own measurement, the sustained graphics clock under a continuous large-matrix cuBLAS load drops from the pinned 1,590 MHz to roughly 1,330 MHz — a reduction on the order of 16% from power-limit throttling alone, before any thermal effect is involved. Once the die also reaches its 85 °C limit, a second, sharper step-down follows, and the clock dips intermittently below 800 MHz, which is less than half of the nominal rate. Any capacity plan, latency SLO, or cost-per-token estimate built on the constant-clock assumption is therefore wrong by a margin large enough to violate a service contract.</span></p>
+
+  <h3><span class="i18n" data-en="1.3 The strawman: just read the datasheet, or just set the application clock" data-zh="1.3 表面解法：直接讀規格，或直接設定應用時脈">1.3 The strawman: just read the datasheet, or just set the application clock</span></h3>
+  <p><span class="i18n" data-en="The obvious response is that NVIDIA already publishes peak FLOPS, cache sizes, and a base and boost clock, so a careful reader needs no microbenchmarks. This fails for two structural reasons. First, the datasheet peak is a ceiling that assumes a clock the device will not sustain under a sustained compute-bound load on a 70 W board — the very condition an inference server operates in. Second, the natural mitigation, pinning the application clock to its maximum with the management API, does not prevent throttling at all; the paper pins the clock to 1,590 MHz and the hardware overrides it downward anyway, because power-limit and thermal protection sit below the application-clock setting in the device's control hierarchy. The published numbers describe a regime the production workload never enters." data-zh="直接的回應是：NVIDIA 已公布峰值 FLOPS、快取大小，以及 base 與 boost 時脈，因此細心的讀者不需要微基準。這個想法因兩個結構性原因而失效。第一，規格峰值是一個天花板，它假設了一個在 70 W 卡上、持續計算受限負載下裝置無法維持的時脈——而這正是推理伺服器所處的條件。第二，最自然的緩解手段——以管理 API 將應用時脈固定到最高值——根本無法阻止節流；論文將時脈固定在 1,590 MHz，硬體仍然將其向下覆寫，因為在裝置的控制層級中，功耗上限與熱保護位於應用時脈設定之下。公布的數字描述的是一個生產工作負載從未進入的區間。">The obvious response is that NVIDIA already publishes peak FLOPS, cache sizes, and a base and boost clock, so a careful reader needs no microbenchmarks. This fails for two structural reasons. First, the datasheet peak is a ceiling that assumes a clock the device will not sustain under a sustained compute-bound load on a 70 W board — the very condition an inference server operates in. Second, the natural mitigation, pinning the application clock to its maximum with the management API, does not prevent throttling at all; the paper pins the clock to 1,590 MHz and the hardware overrides it downward anyway, because power-limit and thermal protection sit below the application-clock setting in the device's control hierarchy. The published numbers describe a regime the production workload never enters.</span></p>
+
+  <h3><span class="i18n" data-en="1.4 The fundamental obstacle: the control loop is undocumented and closed" data-zh="1.4 根本障礙：這個控制迴路未被記錄且封閉">1.4 The fundamental obstacle: the control loop is undocumented and closed</span></h3>
+  <p><span class="i18n" data-en="The structural difficulty is that the relationship between an instruction stream and the clock the hardware will grant it is governed by a closed, on-die control loop that NVIDIA does not document and the user cannot inspect. Latency, throughput, cache geometry, and the clock-versus-load curve are not exposed through any interface; they are emergent properties of the silicon that can only be recovered by constructing workloads whose timing isolates one variable at a time. This is why the paper's method is empirical rather than analytical: there is no specification to read, so the behavior must be measured. The clock-throttling curve in particular cannot be derived from first principles, because the power model, the voltage-frequency table, and the throttle thresholds are all proprietary." data-zh="結構性的困難在於：指令流與硬體將給予它的時脈之間的關係，由一個封閉的、晶片上的控制迴路所支配，NVIDIA 並未記錄它，使用者也無法檢視。延遲、吞吐量、快取幾何，以及時脈對負載的曲線，都未透過任何介面揭露；它們是矽晶片的湧現性質，只能透過建構在時序上一次只隔離一個變數的工作負載來還原。這就是為什麼本論文的方法是經驗式而非分析式的：沒有規格可讀，因此行為必須被量測。時脈節流曲線尤其無法由第一原理推導，因為功耗模型、電壓—頻率對照表，以及節流閾值，全都是專有的。">The structural difficulty is that the relationship between an instruction stream and the clock the hardware will grant it is governed by a closed, on-die control loop that NVIDIA does not document and the user cannot inspect. Latency, throughput, cache geometry, and the clock-versus-load curve are not exposed through any interface; they are emergent properties of the silicon that can only be recovered by constructing workloads whose timing isolates one variable at a time. This is why the paper's method is empirical rather than analytical: there is no specification to read, so the behavior must be measured. The clock-throttling curve in particular cannot be derived from first principles, because the power model, the voltage-frequency table, and the throttle thresholds are all proprietary.</span></p>
+
+  <h3><span class="i18n" data-en="1.5 Position relative to prior microbenchmark studies" data-zh="1.5 相對於先前微基準研究的定位">1.5 Position relative to prior microbenchmark studies</span></h3>
+  <p><span class="i18n" data-en="The paper sits in a lineage of GPU dissection-by-microbenchmark studies and states explicitly what each predecessor left uncovered for the Turing inference part." data-zh="本論文承接一系列以微基準剖析 GPU 的研究，並明確指出對於 Turing 推理晶片，每一份前作各自未涵蓋的部分。">The paper sits in a lineage of GPU dissection-by-microbenchmark studies and states explicitly what each predecessor left uncovered for the Turing inference part.</span></p>
+  <div class="tbl-wrap">
+  <div class="scroll-hint"><span class="i18n" data-en="scroll table &rarr;" data-zh="左右滑動表格 &rarr;">scroll table &rarr;</span></div>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Prior work" data-zh="前作">Prior work</span></th>
+      <th><span class="i18n" data-en="What it dissected" data-zh="它剖析了什麼">What it dissected</span></th>
+      <th><span class="i18n" data-en="Left on the table for the T4" data-zh="對 T4 而言未涵蓋之處">Left on the table for the T4</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>Wong et al. (ISPASS'10)</td><td><span class="i18n" data-en="Demystified the early GT200 pipeline, caches, and TLBs via microbenchmarks." data-zh="以微基準揭示早期 GT200 的管線、快取與 TLB。">Demystified the early GT200 pipeline, caches, and TLBs via microbenchmarks.</span></td><td><span class="i18n" data-en="Predates Tensor Cores, the SASS encoding of modern parts, and any power-cap throttling analysis." data-zh="早於 Tensor Cores、現代晶片的 SASS 編碼，以及任何功耗上限節流分析。">Predates Tensor Cores, the SASS encoding of modern parts, and any power-cap throttling analysis.</span></td></tr>
+      <tr><td>Mei &amp; Chu (TPDS'17)</td><td><span class="i18n" data-en="Fine-grained memory-hierarchy benchmarking across Fermi–Maxwell." data-zh="跨 Fermi 至 Maxwell 的細粒度記憶體階層基準測試。">Fine-grained memory-hierarchy benchmarking across Fermi–Maxwell.</span></td><td><span class="i18n" data-en="Stops before Volta/Turing cache redesign; no instruction-encoding or clock-versus-load study." data-zh="止於 Volta/Turing 快取重新設計之前；無指令編碼或時脈對負載的研究。">Stops before Volta/Turing cache redesign; no instruction-encoding or clock-versus-load study.</span></td></tr>
+      <tr><td>Jia et al., Volta (2018)</td><td><span class="i18n" data-en="The authors' own prior dissection of the 300 W V100 datacenter part." data-zh="作者群自己先前對 300 W V100 資料中心晶片的剖析。">The authors' own prior dissection of the 300 W V100 datacenter part.</span></td><td><span class="i18n" data-en="Full-size board barely throttles; the inference-class power-cap behavior was never characterized." data-zh="全尺寸卡幾乎不節流；推理級的功耗上限行為從未被刻畫。">Full-size board barely throttles; the inference-class power-cap behavior was never characterized.</span></td></tr>
+      <tr><td>NVIDIA Turing whitepaper</td><td><span class="i18n" data-en="Vendor-published peak FLOPS, cache sizes, and the boost-clock figure." data-zh="廠商公布的峰值 FLOPS、快取大小與 boost 時脈數字。">Vendor-published peak FLOPS, cache sizes, and the boost-clock figure.</span></td><td><span class="i18n" data-en="Reports a ceiling, not the sustained clock under a compute-bound 70 W load — the regime this paper measures." data-zh="報告的是天花板，而非計算受限的 70 W 負載下的維持時脈——也就是本論文量測的區間。">Reports a ceiling, not the sustained clock under a compute-bound 70 W load — the regime this paper measures.</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><span class="i18n" data-en="With the pain established, the paper's deliverables can now be stated as the antidote to that pain: a per-instruction latency and throughput map, an exhaustive cache-geometry measurement, the new Turing Tensor-Core instruction encodings, and — most relevant to deployed inference — an empirical characterization of how the SM clock is throttled as a function of operand size on the 70 W board." data-zh="痛點既已確立，論文的產出便可被陳述為對該痛點的解藥：逐指令的延遲與吞吐量地圖、徹底的快取幾何量測、Turing 全新的 Tensor-Core 指令編碼，以及——對部署推理最相關的——對 SM 時脈如何隨運算元尺寸在 70 W 卡上被節流的經驗式刻畫。">With the pain established, the paper's deliverables can now be stated as the antidote to that pain: a per-instruction latency and throughput map, an exhaustive cache-geometry measurement, the new Turing Tensor-Core instruction encodings, and — most relevant to deployed inference — an empirical characterization of how the SM clock is throttled as a function of operand size on the 70 W board.</span></p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C1 — Instruction map" data-zh="C1 — 指令地圖">C1 — Instruction map</span></h4>
+      <p><span class="i18n" data-en="Latency and inverse-throughput (CPI) for the arithmetic, memory, and control instructions, with the Turing SASS encoding shown to extend Volta's and add uniform-register and new Tensor-Core forms." data-zh="算術、記憶體與控制指令的延遲與反吞吐量（CPI），並指出 Turing 的 SASS 編碼擴充自 Volta，新增了 uniform-register 與全新的 Tensor-Core 指令型式。">Latency and inverse-throughput (CPI) for the arithmetic, memory, and control instructions, with the Turing SASS encoding shown to extend Volta's and add uniform-register and new Tensor-Core forms.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C2 — Memory hierarchy" data-zh="C2 — 記憶體階層">C2 — Memory hierarchy</span></h4>
+      <p><span class="i18n" data-en="Measured latency, bandwidth, and capacity of L1, L2, shared memory, and global memory; the TU104 has the same hierarchy depth as the GV100, with several cache levels twice the size of the Pascal GP104." data-zh="L1、L2、shared memory 與 global memory 的實測延遲、頻寬與容量；TU104 的階層深度與 GV100 相同，多個快取層的大小是 Pascal GP104 的兩倍。">Measured latency, bandwidth, and capacity of L1, L2, shared memory, and global memory; the TU104 has the same hierarchy depth as the GV100, with several cache levels twice the size of the Pascal GP104.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C3 — Tensor-Core throughput" data-zh="C3 — Tensor-Core 吞吐量">C3 — Tensor-Core throughput</span></h4>
+      <p><span class="i18n" data-en="Achieved GEMM throughput across FP64, FP32, FP16, INT8, INT4, and INT1, with the reduced-precision rates far exceeding the Pascal P4 thanks to the refreshed Tensor Cores." data-zh="跨 FP64、FP32、FP16、INT8、INT4、INT1 的實測 GEMM 吞吐量；得益於更新後的 Tensor Cores，低精度速率遠超 Pascal P4。">Achieved GEMM throughput across FP64, FP32, FP16, INT8, INT4, and INT1, with the reduced-precision rates far exceeding the Pascal P4 thanks to the refreshed Tensor Cores.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C4 — Clock throttling" data-zh="C4 — 時脈節流">C4 — Clock throttling</span></h4>
+      <p><span class="i18n" data-en="A direct measurement that the SM clock falls as cuBLAS operand size grows under the 70 W cap, with power-limit throttling triggering first and thermal throttling adding a sharper step at 85 °C." data-zh="一項直接量測：在 70 W 上限下，SM 時脈隨 cuBLAS 運算元尺寸增大而下降；功耗上限節流先觸發，而熱節流在 85 °C 增加一個更陡的階梯。">A direct measurement that the SM clock falls as cuBLAS operand size grows under the 70 W cap, with power-limit throttling triggering first and thermal throttling adding a sharper step at 85 °C.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="The four quantities below summarize the regime the rest of the page measures. The 70 W cap, the sustained-clock collapse from about 1,590 MHz to about 1,330 MHz, the 85 °C thermal threshold, and the 41.6 TFLOPS (41,616 GFLOPS) achieved FP16 cuBLAS rate are all the paper's own measurements; they should be read against — not confused with — NVIDIA's external datasheet Tensor-Core ceiling of 65 TFLOPS FP16, which the achieved rate never reaches." data-zh="以下四項數值總結了本頁其餘部分所量測的區間。70 W 上限、維持時脈從約 1,590 MHz 崩落到約 1,330 MHz、85 °C 熱閾值，以及 41.6 TFLOPS（41,616 GFLOPS）的實測 FP16 cuBLAS 速率，全都是論文自身的量測；它們應與 NVIDIA 外部規格書中 65 TFLOPS FP16 的 Tensor-Core 天花板對照閱讀——而非與之混淆——而實測速率從未達到該天花板。">The four quantities below summarize the regime the rest of the page measures. The 70 W cap, the sustained-clock collapse from about 1,590 MHz to about 1,330 MHz, the 85 °C thermal threshold, and the 41.6 TFLOPS (41,616 GFLOPS) achieved FP16 cuBLAS rate are all the paper's own measurements; they should be read against — not confused with — NVIDIA's external datasheet Tensor-Core ceiling of 65 TFLOPS FP16, which the achieved rate never reaches.</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">70 W</div><div class="label"><span class="i18n" data-en="T4 power cap (vs 250–300 W full-size)" data-zh="T4 功耗上限（對比全尺寸 250–300 W）">T4 power cap (vs 250–300 W full-size)</span></div></div>
+    <div class="metric-box"><div class="value">~1,590&rarr;~1,330</div><div class="label"><span class="i18n" data-en="MHz under sustained cuBLAS, approx. read from Fig. 4.3 (power-limit)" data-zh="持續 cuBLAS 下的 MHz，依圖 4.3 約略讀數（功耗上限）">MHz under sustained cuBLAS, approx. read from Fig. 4.3 (power-limit)</span></div></div>
+    <div class="metric-box"><div class="value">85 °C</div><div class="label"><span class="i18n" data-en="Thermal-throttle threshold" data-zh="熱節流閾值">Thermal-throttle threshold</span></div></div>
+    <div class="metric-box"><div class="value">41.6</div><div class="label"><span class="i18n" data-en="TFLOPS FP16 cuBLAS achieved (peak clock)" data-zh="峰值時脈下實測 FP16 cuBLAS TFLOPS">TFLOPS FP16 cuBLAS achieved (peak clock)</span></div></div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Key insight" data-zh="關鍵洞見">Key insight</span></strong>
+    <span class="i18n" data-en=" — On a power-capped inference board, the SM clock is not a constant set by the user but a dependent variable driven by the instantaneous power draw of the workload. Because larger operands raise sustained power, the clock the hardware grants is itself a function of operand size, and the advertised peak applies only to the small-matrix transient." data-zh="——在功耗受限的推理卡上，SM 時脈不是使用者設定的常數，而是由工作負載瞬時功耗驅動的應變量。由於較大的運算元提高了持續功耗，硬體所給予的時脈本身就是運算元尺寸的函數，而宣稱的峰值只適用於小矩陣的暫態。">&nbsp;— On a power-capped inference board, the SM clock is not a constant set by the user but a dependent variable driven by the instantaneous power draw of the workload. Because larger operands raise sustained power, the clock the hardware grants is itself a function of operand size, and the advertised peak applies only to the small-matrix transient.</span>
+  </div>
+</section>
+
+<!-- ============================ METHOD ============================ -->
+<section id="method">
+  <h2><span class="i18n" data-en="2. The Microbenchmark Method" data-zh="2. 微基準方法">2. The Microbenchmark Method</span></h2>
+
+  <p><span class="i18n" data-en="Because the device exposes no specification of the quantities of interest, every result in the paper is the output of a purpose-built kernel whose timing isolates a single architectural variable. This section describes the two instruments that underlie the whole study — a clock-cycle latency probe and a sustained-throughput sweep — and the principle that ties them together: each measurement perturbs exactly one degree of freedom and reads the silicon's response through the on-chip clock register." data-zh="由於裝置未揭露所關注量的任何規格，論文中的每一項結果都是一個專門建構的核心的輸出，其時序隔離了單一架構變數。本節描述支撐整項研究的兩個工具——時脈週期延遲探針與持續吞吐量掃描——以及將它們聯繫起來的原則：每次量測恰好擾動一個自由度，並透過晶片上的時脈暫存器讀取矽晶片的回應。">Because the device exposes no specification of the quantities of interest, every result in the paper is the output of a purpose-built kernel whose timing isolates a single architectural variable. This section describes the two instruments that underlie the whole study — a clock-cycle latency probe and a sustained-throughput sweep — and the principle that ties them together: each measurement perturbs exactly one degree of freedom and reads the silicon's response through the on-chip clock register.</span></p>
+
+  <h3><span class="i18n" data-en="2.1 The latency probe: reading the cycle counter around one dependent chain" data-zh="2.1 延遲探針：在單一相依鏈周圍讀取週期計數器">2.1 The latency probe: reading the cycle counter around one dependent chain</span></h3>
+  <p><span class="i18n" data-en="To measure the latency of a memory access or an instruction, the kernel constructs a dependent chain so that each operation cannot begin until its predecessor retires, then brackets the chain with reads of the SM's free-running cycle counter via the %clock special register. The elapsed cycle count divided by the chain length yields the per-operation latency in clocks, free of any scheduling overlap. The same probe, applied to a pointer-chasing chain whose stride sweeps through ever-larger working sets, reveals each cache level as a discontinuity where the measured latency jumps." data-zh="為了量測一次記憶體存取或一條指令的延遲，核心建構一條相依鏈，使每個運算必須等其前驅退役後才能開始，然後以對 SM 自由運行週期計數器的讀取（透過 %clock 特殊暫存器）將該鏈括起來。經過的週期計數除以鏈長，得到以時脈為單位、不含任何排程重疊的每運算延遲。同一探針施用於指標追逐鏈——其步幅掃過越來越大的工作集——便會將每一層快取顯示為一個量測延遲跳升的不連續點。">To measure the latency of a memory access or an instruction, the kernel constructs a dependent chain so that each operation cannot begin until its predecessor retires, then brackets the chain with reads of the SM's free-running cycle counter via the <code>%clock</code> special register. The elapsed cycle count divided by the chain length yields the per-operation latency in clocks, free of any scheduling overlap. The same probe, applied to a pointer-chasing chain whose stride sweeps through ever-larger working sets, reveals each cache level as a discontinuity where the measured latency jumps.</span></p>
+  <p><span class="i18n" data-en="The probe is shown in its essential form below. The reader should first understand its intent: it is a stopwatch wrapped tightly around a single chain of dependent operations, with nothing else in flight that could hide latency behind concurrency." data-zh="探針的核心形式如下所示。讀者應先理解其意圖：它是一個緊緊包覆在單一相依運算鏈周圍的碼錶，沒有任何其他進行中的運算能藉由併發來隱藏延遲。">The probe is shown in its essential form below. The reader should first understand its intent: it is a stopwatch wrapped tightly around a single chain of dependent operations, with nothing else in flight that could hide latency behind concurrency.</span></p>
+  <pre><code><span class="cm">// Bracket a dependent chain with the SM cycle counter.</span>
+<span class="kw">uint32_t</span> start, stop;
+<span class="fn">asm volatile</span>(<span class="st">"mov.u32 %0, %%clock;"</span> : <span class="st">"=r"</span>(start) :: <span class="st">"memory"</span>);
+<span class="cm">// dependent pointer-chase: each load address depends on the prior load</span>
+<span class="kw">for</span> (<span class="kw">int</span> i = 0; i &lt; CHAIN_LEN; ++i) p = *(<span class="kw">const void</span>**)p;
+<span class="fn">asm volatile</span>(<span class="st">"mov.u32 %0, %%clock;"</span> : <span class="st">"=r"</span>(stop) :: <span class="st">"memory"</span>);
+latency_cycles = (stop - start) / CHAIN_LEN;</code></pre>
+  <p><span class="i18n" data-en="The subtlety that makes this faithful is the dependency edge between successive loads: without it, the warp scheduler would issue independent loads back to back and the measured interval would report throughput, not latency. The "memory" clobber prevents the compiler from reordering the clock reads across the chain. With this instrument the paper reports, for example, an L1 hit latency of about 32 cycles and a shared-memory latency of about 19 cycles on the T4." data-zh="使這項量測忠實的微妙之處，在於連續載入之間的相依邊：若無此邊，warp 排程器會背靠背地發射彼此獨立的載入，量測到的區間將報告吞吐量而非延遲。「memory」clobber 防止編譯器跨越該鏈重排時脈讀取。憑藉這項工具，論文報告了例如 T4 上約 32 週期的 L1 命中延遲與約 19 週期的 shared-memory 延遲。">The subtlety that makes this faithful is the dependency edge between successive loads: without it, the warp scheduler would issue independent loads back to back and the measured interval would report throughput, not latency. The <code>"memory"</code> clobber prevents the compiler from reordering the clock reads across the chain. With this instrument the paper reports, for example, an L1 hit latency of about 32 cycles and a shared-memory latency of about 19 cycles on the T4.</span></p>
+
+  <h3><span class="i18n" data-en="2.2 The throughput sweep: driving power with operand size" data-zh="2.2 吞吐量掃描：以運算元尺寸驅動功耗">2.2 The throughput sweep: driving power with operand size</span></h3>
+  <p><span class="i18n" data-en="The clock-throttling result requires a different instrument: a sustained-load sweep rather than a single-shot latency probe. The kernel repeatedly invokes cublas&lt;t&gt;gemm with input matrices of monotonically growing size while a companion host thread polls the device's clock and power telemetry. Because the application clock is pinned to its maximum, any observed clock reduction can be attributed to the hardware's own protection loop rather than to a user command, which is exactly the property needed to isolate involuntary throttling." data-zh="時脈節流結果需要另一種工具：持續負載掃描，而非單次延遲探針。核心以單調增長尺寸的輸入矩陣反覆調用 cublas&lt;t&gt;gemm，同時一個伴隨的主機執行緒輪詢裝置的時脈與功耗遙測。由於應用時脈被固定在最高值，任何觀察到的時脈下降都可歸因於硬體自身的保護迴路，而非使用者指令——這正是隔離非自願節流所需的性質。">The clock-throttling result requires a different instrument: a sustained-load sweep rather than a single-shot latency probe. The kernel repeatedly invokes <code>cublas&lt;t&gt;gemm</code> with input matrices of monotonically growing size while a companion host thread polls the device's clock and power telemetry. Because the application clock is pinned to its maximum, any observed clock reduction can be attributed to the hardware's own protection loop rather than to a user command, which is exactly the property needed to isolate involuntary throttling.</span></p>
+  <div class="diagram">
+    <div class="vflow">
+      <div class="box blue"><h4><span class="i18n" data-en="1 · Pin the application clock" data-zh="1 · 固定應用時脈">1 · Pin the application clock</span></h4><span class="i18n" data-en="Set the graphics clock to its maximum (1,590 MHz) so that any later reduction is involuntary, not commanded." data-zh="將圖形時脈設為最高（1,590 MHz），使任何後續下降皆為非自願、而非被指令的。">Set the graphics clock to its maximum (1,590 MHz) so that any later reduction is involuntary, not commanded.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box orange"><h4><span class="i18n" data-en="2 · Sweep operand size upward" data-zh="2 · 向上掃描運算元尺寸">2 · Sweep operand size upward</span></h4><span class="i18n" data-en="Issue cuBLAS GEMM on matrices whose per-operand footprint grows from kilobytes to several megabytes, holding precision fixed." data-zh="在每運算元佔用空間從數 KB 增長到數 MB 的矩陣上發出 cuBLAS GEMM，並固定精度。">Issue cuBLAS GEMM on matrices whose per-operand footprint grows from kilobytes to several megabytes, holding precision fixed.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box red"><h4><span class="i18n" data-en="3 · Read back the granted clock" data-zh="3 · 讀回實際給予的時脈">3 · Read back the granted clock</span></h4><span class="i18n" data-en="Poll the actual SM clock and instantaneous power per step; record the achieved cuBLAS throughput alongside the clock." data-zh="逐步輪詢實際 SM 時脈與瞬時功耗；記錄實測 cuBLAS 吞吐量與時脈。">Poll the actual SM clock and instantaneous power per step; record the achieved cuBLAS throughput alongside the clock.</span></div>
+      <div class="arrow">&darr;</div>
+      <div class="box green"><h4><span class="i18n" data-en="4 · Recover the clock-vs-size curve" data-zh="4 · 還原時脈對尺寸曲線">4 · Recover the clock-vs-size curve</span></h4><span class="i18n" data-en="The granted clock plotted against operand size is the involuntary throttling response the device never documents." data-zh="實際給予的時脈對運算元尺寸作圖，即是裝置從未記錄的非自願節流回應。">The granted clock plotted against operand size is the involuntary throttling response the device never documents.</span></div>
+    </div>
+  </div>
+  <p><span class="i18n" data-en="The reason this sweep recovers a meaningful curve, and not noise, is that operand size is a clean proxy for sustained power: larger matrices keep more functional units busy for longer, raising average draw toward the 70 W ceiling until the protection loop intervenes. The experiment therefore turns an inaccessible internal control loop into an observable input–output relation, where the input is operand size and the output is the clock the hardware is willing to sustain." data-zh="這項掃描之所以還原出有意義的曲線而非雜訊，是因為運算元尺寸是持續功耗的乾淨代理：較大的矩陣讓更多功能單元忙碌更久，將平均功耗推向 70 W 天花板，直到保護迴路介入。因此這項實驗把一個無法存取的內部控制迴路，轉化為一個可觀察的輸入—輸出關係，其中輸入是運算元尺寸，輸出是硬體願意維持的時脈。">The reason this sweep recovers a meaningful curve, and not noise, is that operand size is a clean proxy for sustained power: larger matrices keep more functional units busy for longer, raising average draw toward the 70 W ceiling until the protection loop intervenes. The experiment therefore turns an inaccessible internal control loop into an observable input–output relation, where the input is operand size and the output is the clock the hardware is willing to sustain.</span></p>
+
+  <h3><span class="i18n" data-en="2.3 What the method buys: a worked optimization" data-zh="2.3 方法的回報：一個實作優化案例">2.3 What the method buys: a worked optimization</span></h3>
+  <p><span class="i18n" data-en="The paper opens with a worked example that justifies the entire dissection effort, and it is worth restating because it establishes the standard the rest of the measurements are held to. The chosen workload is the BLAS saxpy operation, a scaled element-wise vector sum that underlies countless numerical kernels and is defined below." data-zh="論文以一個實作範例開場，為整項剖析工作提供正當性，值得在此重述，因為它確立了其餘量測所遵循的標準。所選工作負載是 BLAS saxpy 運算，一個尺度化的逐元素向量加總，是無數數值核心的基礎，定義如下。">The paper opens with a worked example that justifies the entire dissection effort, and it is worth restating because it establishes the standard the rest of the measurements are held to. The chosen workload is the BLAS saxpy operation, a scaled element-wise vector sum that underlies countless numerical kernels and is defined below.</span></p>
+  <div class="math-block">
+    <span class="eq-label">(0)</span>
+    $$y_i \leftarrow \alpha \, x_i + y_i, \qquad i = 1, \dots, n$$
+  </div>
+  <p><span class="i18n" data-en="The cuBLAS single-precision implementation of this operation issues memory accesses limited to 64-bit width. Having recovered Turing's instruction encoding through microbenchmarks, the authors substitute vectorized 128-bit-wide global-memory access instructions, which the compiler does not emit on its own for this kernel. The replacement is small, but it raises the achieved performance of the memory-bound saxpy substantially over the stock cuBLAS routine across the swept operand-array sizes." data-zh="此運算的 cuBLAS 單精度實作所發出的記憶體存取限於 64 位元寬度。在透過微基準還原 Turing 指令編碼後，作者改用向量化的 128 位元寬全域記憶體存取指令，而編譯器自身並不會為此核心發出這類指令。此替換雖小，卻在掃描的運算元陣列尺寸範圍內，使這個記憶體受限的 saxpy 的實測效能大幅超越原版 cuBLAS 常式。">The cuBLAS single-precision implementation of this operation issues memory accesses limited to 64-bit width. Having recovered Turing's instruction encoding through microbenchmarks, the authors substitute vectorized 128-bit-wide global-memory access instructions, which the compiler does not emit on its own for this kernel. The replacement is small, but it raises the achieved performance of the memory-bound saxpy substantially over the stock cuBLAS routine across the swept operand-array sizes.</span></p>
+  <p><span class="i18n" data-en="The wider lesson of the example is that the gap between the library's behavior and the silicon's capability is recoverable only once the encoding and the memory hierarchy are known, and that the same dissection apparatus that exposes this gap is what later exposes the involuntary clock droop. The two findings are products of one method applied to one device under controlled load." data-zh="此範例更廣的教訓是：函式庫行為與矽晶片能力之間的差距，唯有在已知編碼與記憶體階層後才能還原；而揭示此差距的同一套剖析工具，正是其後揭示非自願時脈下降的工具。這兩項發現是同一套方法施用於同一裝置、在受控負載下的產物。">The wider lesson of the example is that the gap between the library's behavior and the silicon's capability is recoverable only once the encoding and the memory hierarchy are known, and that the same dissection apparatus that exposes this gap is what later exposes the involuntary clock droop. The two findings are products of one method applied to one device under controlled load.</span></p>
+</section>
+
+<!-- ============================ MEMORY & CORES ============================ -->
+<section id="hierarchy">
+  <h2><span class="i18n" data-en="3. Memory Hierarchy and Cores" data-zh="3. 記憶體階層與運算核心">3. Memory Hierarchy and Cores</span></h2>
+
+  <p><span class="i18n" data-en="Before turning to throttling, the paper establishes the static substrate on which all kernels run: the depth and size of the cache hierarchy, and the per-SM resource counts that bound occupancy. These results matter to a serving predictor because they fix the points at which a working set spills from one cache level to the next, and because they explain why the TU104 sustains higher effective bandwidth than its Pascal predecessor." data-zh="在轉向節流之前，論文先確立所有核心運行其上的靜態基底：快取階層的深度與大小，以及限定 occupancy 的每 SM 資源計數。這些結果對 serving 預測器很重要，因為它們固定了工作集從一層快取溢出到下一層的點，也解釋了為何 TU104 能維持比其 Pascal 前作更高的有效頻寬。">Before turning to throttling, the paper establishes the static substrate on which all kernels run: the depth and size of the cache hierarchy, and the per-SM resource counts that bound occupancy. These results matter to a serving predictor because they fix the points at which a working set spills from one cache level to the next, and because they explain why the TU104 sustains higher effective bandwidth than its Pascal predecessor.</span></p>
+
+  <h3><span class="i18n" data-en="3.1 The measured hierarchy" data-zh="3.1 實測階層">3.1 The measured hierarchy</span></h3>
+  <p><span class="i18n" data-en="The pointer-chasing latency probe, swept across working-set sizes, exposes each cache level as a latency plateau bounded by jumps. The columns below give the level, its measured latency in clock cycles, and the comparison the paper draws against the Pascal GP104." data-zh="指標追逐延遲探針在工作集尺寸上掃描，將每一層快取顯示為被跳升所界定的延遲平台。下表各欄給出層級、其以時脈週期計的實測延遲，以及論文相對 Pascal GP104 所作的比較。">The pointer-chasing latency probe, swept across working-set sizes, exposes each cache level as a latency plateau bounded by jumps. The columns below give the level, its measured latency in clock cycles, and the comparison the paper draws against the Pascal GP104.</span></p>
+  <div class="tbl-wrap">
+  <div class="scroll-hint"><span class="i18n" data-en="scroll table &rarr;" data-zh="左右滑動表格 &rarr;">scroll table &rarr;</span></div>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Level" data-zh="層級">Level</span></th>
+      <th><span class="i18n" data-en="Measured latency (T4)" data-zh="實測延遲（T4）">Measured latency (T4)</span></th>
+      <th><span class="i18n" data-en="Note vs prior gen" data-zh="相對前代的說明">Note vs prior gen</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>L1 data cache</td><td>~32 <span class="i18n" data-en="cycles" data-zh="週期">cycles</span></td><td><span class="i18n" data-en="Lower latency and higher bandwidth than the Pascal P4; new replacement policy lowers miss rate without shared memory." data-zh="延遲較低、頻寬高於 Pascal P4；新的替換策略在不使用 shared memory 時降低未命中率。">Lower latency and higher bandwidth than the Pascal P4; new replacement policy lowers miss rate without shared memory.</span></td></tr>
+      <tr><td>Shared memory</td><td>~19 <span class="i18n" data-en="cycles" data-zh="週期">cycles</span></td><td><span class="i18n" data-en="Two dual-ported register banks replace Pascal's four single-ported banks, easing bank-conflict avoidance." data-zh="兩個雙埠暫存器庫取代 Pascal 的四個單埠庫，較易避免庫衝突。">Two dual-ported register banks replace Pascal's four single-ported banks, easing bank-conflict avoidance.</span></td></tr>
+      <tr><td>L2 cache</td><td>~188 <span class="i18n" data-en="cycles" data-zh="週期">cycles</span></td><td><span class="i18n" data-en="Several cache levels on the TU104 are twice the size of the GP104; same hierarchy depth as the GV100." data-zh="TU104 上的多個快取層是 GP104 的兩倍大小；階層深度與 GV100 相同。">Several cache levels on the TU104 are twice the size of the GP104; same hierarchy depth as the GV100.</span></td></tr>
+      <tr><td>Global memory (GDDR6)</td><td><span class="i18n" data-en="hundreds of cycles" data-zh="數百週期">hundreds of cycles</span></td><td><span class="i18n" data-en="~320 GB/s at a 5,001 MHz memory clock; higher global-memory bandwidth than the P4." data-zh="在 5,001 MHz 記憶體時脈下約 320 GB/s；全域記憶體頻寬高於 P4。">~320 GB/s at a 5,001 MHz memory clock; higher global-memory bandwidth than the P4.</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><span class="i18n" data-en="The takeaway is that Turing inherits the Volta hierarchy depth while enlarging individual levels, so a kernel that was cache-resident on a V100 generally remains cache-resident on a T4 at the same problem size, but a kernel tuned to the smaller Pascal caches leaves capacity unused." data-zh="重點是：Turing 繼承了 Volta 的階層深度，同時放大了個別層級，因此在 V100 上可駐留快取的核心，在同一問題尺寸下於 T4 上通常仍可駐留，但針對較小的 Pascal 快取調校的核心則會留下未用的容量。">The takeaway is that Turing inherits the Volta hierarchy depth while enlarging individual levels, so a kernel that was cache-resident on a V100 generally remains cache-resident on a T4 at the same problem size, but a kernel tuned to the smaller Pascal caches leaves capacity unused.</span></p>
+
+  <h3><span class="i18n" data-en="3.2 Per-SM resources and the scheduler-to-core ratio" data-zh="3.2 每 SM 資源與排程器對核心比">3.2 Per-SM resources and the scheduler-to-core ratio</span></h3>
+  <p><span class="i18n" data-en="The paper situates the T4's 40 SMs and 1,590 MHz maximum clock within a generational table, and observes a long-running trend: the ratio of schedulers to cores grew from 1:48 in Kepler to 1:16 in Turing, which the authors correlate with rising instruction throughput. The following abbreviated comparison frames the columns as device, SM count, maximum graphics clock, and the FP64 cores per SM that bound double-precision rate." data-zh="論文將 T4 的 40 個 SM 與 1,590 MHz 最高時脈置於一張跨世代表格中，並觀察到一個長期趨勢：排程器對核心的比例從 Kepler 的 1:48 成長到 Turing 的 1:16，作者將此與指令吞吐量的上升相關聯。以下精簡比較將各欄設定為裝置、SM 數、最高圖形時脈，以及限定雙精度速率的每 SM FP64 核心數。">The paper situates the T4's 40 SMs and 1,590 MHz maximum clock within a generational table, and observes a long-running trend: the ratio of schedulers to cores grew from 1:48 in Kepler to 1:16 in Turing, which the authors correlate with rising instruction throughput. The following abbreviated comparison frames the columns as device, SM count, maximum graphics clock, and the FP64 cores per SM that bound double-precision rate.</span></p>
+  <div class="tbl-wrap">
+  <div class="scroll-hint"><span class="i18n" data-en="scroll table &rarr;" data-zh="左右滑動表格 &rarr;">scroll table &rarr;</span></div>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Device" data-zh="裝置">Device</span></th>
+      <th><span class="i18n" data-en="Arch" data-zh="架構">Arch</span></th>
+      <th>SMs</th>
+      <th><span class="i18n" data-en="Max clock (MHz)" data-zh="最高時脈 (MHz)">Max clock (MHz)</span></th>
+      <th><span class="i18n" data-en="FP64 cores / SM" data-zh="每 SM FP64 核心">FP64 cores / SM</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>T4 (TU104)</td><td>Turing</td><td>40</td><td>1,590</td><td>2</td></tr>
+      <tr><td>V100 (GV100)</td><td>Volta</td><td>80</td><td>1,380</td><td>32</td></tr>
+      <tr><td>P100 (GP100)</td><td>Pascal</td><td>56</td><td>1,328</td><td>32</td></tr>
+      <tr><td>P4 (GP104)</td><td>Pascal</td><td>40</td><td>1,531</td><td>4</td></tr>
+      <tr><td>K80 (GK210)</td><td>Kepler</td><td>13</td><td>875</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><span class="i18n" data-en="The handful of FP64 cores per SM make plain that the T4 is an inference part: double precision is deliberately under-provisioned, and the design budget is spent instead on the reduced-precision Tensor-Core paths examined next. The T4 and P4 share an SM count of 40 and similar clocks, which is why their single-precision throughputs are close; their double-precision rates differ in proportion to the FP64-core ratio shown above, and their reduced-precision throughputs diverge most sharply of all because of the refreshed Turing Tensor Cores." data-zh="每 SM 僅有少數 FP64 核心清楚表明 T4 是一款推理晶片：雙精度被刻意配置不足，設計預算改投入於接下來檢視的低精度 Tensor-Core 路徑。T4 與 P4 同樣有 40 個 SM 與相近的時脈，這就是為何它們的單精度吞吐量接近；它們的雙精度速率則依上表所示的 FP64 核心比例而有所不同，而低精度吞吐量因更新後的 Turing Tensor Cores 而分歧最為明顯。">The handful of FP64 cores per SM make plain that the T4 is an inference part: double precision is deliberately under-provisioned, and the design budget is spent instead on the reduced-precision Tensor-Core paths examined next. The T4 and P4 share an SM count of 40 and similar clocks, which is why their single-precision throughputs are close; their double-precision rates differ in proportion to the FP64-core ratio shown above, and their reduced-precision throughputs diverge most sharply of all because of the refreshed Turing Tensor Cores.</span></p>
+</section>
+
+<!-- ============================ TENSOR CORES ============================ -->
+<section id="tensor">
+  <h2><span class="i18n" data-en="4. Tensor Cores and Achieved GEMM Throughput" data-zh="4. Tensor Cores 與實測 GEMM 吞吐量">4. Tensor Cores and Achieved GEMM Throughput</span></h2>
+
+  <p><span class="i18n" data-en="The Tensor Cores are the part of the T4 that justifies its existence as an inference accelerator, and the paper measures what they actually deliver rather than what the whitepaper promises. The central finding of this section is that achieved throughput depends jointly on the precision, the library, and — critically — the clock the device is willing to sustain, which connects this section directly to the throttling analysis that follows." data-zh="Tensor Cores 是 T4 作為推理加速器之所以存在的部分，論文量測的是它們實際交付的，而非白皮書承諾的。本節的核心發現是：實測吞吐量同時取決於精度、函式庫，以及——關鍵地——裝置願意維持的時脈，這使本節直接連接到隨後的節流分析。">The Tensor Cores are the part of the T4 that justifies its existence as an inference accelerator, and the paper measures what they actually deliver rather than what the whitepaper promises. The central finding of this section is that achieved throughput depends jointly on the precision, the library, and — critically — the clock the device is willing to sustain, which connects this section directly to the throttling analysis that follows.</span></p>
+
+  <h3><span class="i18n" data-en="4.1 New Turing Tensor-Core instructions" data-zh="4.1 Turing 全新的 Tensor-Core 指令">4.1 New Turing Tensor-Core instructions</span></h3>
+  <p><span class="i18n" data-en="Where Volta's Tensor Cores accepted only half-precision matrix operands, Turing widens the supported operand set, and the SASS-level mapping shows the device gaining dedicated instructions that express a matrix-multiply-accumulate step in fewer issued operations. The practical consequence is that the nvcc compiler renders a given matrix-math fragment more compactly on Turing than on Volta, reducing instruction-fetch pressure for the same arithmetic." data-zh="Volta 的 Tensor Cores 只接受半精度矩陣運算元，而 Turing 擴大了支援的運算元集合；SASS 層級的映射顯示裝置獲得了專用指令，以更少的發射運算表達一個矩陣乘加步驟。實務上的後果是：對於同一段矩陣運算，nvcc 編譯器在 Turing 上的渲染比在 Volta 上更精簡，對相同算術降低了指令擷取壓力。">Where Volta's Tensor Cores accepted only half-precision matrix operands, Turing widens the supported operand set, and the SASS-level mapping shows the device gaining dedicated instructions that express a matrix-multiply-accumulate step in fewer issued operations. The practical consequence is that the <code>nvcc</code> compiler renders a given matrix-math fragment more compactly on Turing than on Volta, reducing instruction-fetch pressure for the same arithmetic.</span></p>
+  <p><span class="i18n" data-en="The encoding survey itself is a foundational result that the throttling and throughput findings rest on, because it lets the authors read the actual machine instructions a kernel issues rather than guessing from the source. The study confirms that Turing reuses Volta's instruction-encoding scheme, adds a new uniform-register class for values shared across a warp, and introduces the matrix instructions that the schematic SASS fragment below illustrates in condensed form." data-zh="編碼調查本身是一項基礎結果，節流與吞吐量發現都建立其上，因為它讓作者得以讀取核心實際發出的機器指令，而非從源碼猜測。研究確認 Turing 重用 Volta 的指令編碼方案，新增一個供 warp 內共享值使用的 uniform-register 類別，並引入下方示意 SASS 片段以精簡形式說明的矩陣指令。">The encoding survey itself is a foundational result that the throttling and throughput findings rest on, because it lets the authors read the actual machine instructions a kernel issues rather than guessing from the source. The study confirms that Turing reuses Volta's instruction-encoding scheme, adds a new uniform-register class for values shared across a warp, and introduces the matrix instructions that the schematic SASS fragment below illustrates in condensed form.</span></p>
+  <pre><code><span class="cm">; Schematic SASS: a half-precision matrix-multiply-accumulate step.</span>
+<span class="cm">; Uniform registers (URx) hold warp-shared operands on Turing.</span>
+S2UR     UR4, SR_CLOCKLO        <span class="cm">; read warp-uniform clock-low into a uniform reg</span>
+HMMA.884.F16 R12, R8, R10, R12  <span class="cm">; Turing matrix-multiply-accumulate (condensed)</span>
+<span class="cm">; ... remaining accumulate fragments omitted ...</span></code></pre>
+  <p><span class="i18n" data-en="The fragment is schematic rather than a verbatim disassembly, but it captures the two structural changes that matter for a performance model: the uniform-register operand, which removes redundant per-thread copies of a shared value, and the matrix-multiply-accumulate instruction, which folds a tile of the GEMM into a single issued operation. Both reduce the number of instructions standing between the source and the silicon, which is precisely the quantity the saxpy example of Section 2.3 showed to be optimizable once the encoding is known." data-zh="此片段為示意而非逐字反組譯，但它捕捉了對效能模型重要的兩項結構變化：uniform-register 運算元，它移除了共享值在每執行緒的冗餘副本；以及矩陣乘加指令，它將 GEMM 的一個圖塊摺疊成單一發射運算。兩者都減少了介於源碼與矽晶片之間的指令數，而這正是第 2.3 節 saxpy 範例所顯示、一旦已知編碼即可優化的量。">The fragment is schematic rather than a verbatim disassembly, but it captures the two structural changes that matter for a performance model: the uniform-register operand, which removes redundant per-thread copies of a shared value, and the matrix-multiply-accumulate instruction, which folds a tile of the GEMM into a single issued operation. Both reduce the number of instructions standing between the source and the silicon, which is precisely the quantity the saxpy example of Section 2.3 showed to be optimizable once the encoding is known.</span></p>
+
+  <h3><span class="i18n" data-en="4.2 Achieved throughput across precisions" data-zh="4.2 跨精度的實測吞吐量">4.2 Achieved throughput across precisions</span></h3>
+  <p><span class="i18n" data-en="The figure below (Figure 4.3 in the paper) plots the achieved cuBLAS half-precision throughput together with the SM clock the device actually grants, both as a function of array size, with the application clock pinned to 1,590 MHz. It is the paper's clearest single picture of how achieved performance and the granted clock decline together once operands grow large, and therefore of how the gap between advertised and achieved performance depends on operand size." data-zh="下圖（論文中的圖 4.3）繪製了實測 cuBLAS 半精度吞吐量與裝置實際給予的 SM 時脈，兩者皆作為陣列尺寸的函數，應用時脈固定在 1,590 MHz。它是論文中最清晰的單張圖，呈現一旦運算元增大，實測效能與所給予的時脈如何一同下降，從而說明宣稱效能與實測效能之間的差距如何取決於運算元尺寸。">The figure below (Figure 4.3 in the paper) plots the achieved cuBLAS half-precision throughput together with the SM clock the device actually grants, both as a function of array size, with the application clock pinned to 1,590 MHz. It is the paper's clearest single picture of how achieved performance and the granted clock decline together once operands grow large, and therefore of how the gap between advertised and achieved performance depends on operand size.</span></p>
+
+  <div class="paper-fig">
+    <img src="figures/fig43_clock_vs_size.png" alt="Figure 4.3: cuBLAS performance (TFLOPS) and observed SM clock frequency (MHz) versus array/matrix size on a T4 with the application clock pinned to 1,590 MHz; the clock falls from ~1,590 to ~1,330 MHz as array size grows.">
+    <div class="fig-cap"><strong>Figure 4.3 (from paper):</strong>
+      <span class="i18n" data-en="Clock frequency (right axis, MHz) and cuBLAS throughput (left axis, TFLOPS) measured while continuously computing cuBLAS half-precision matrix multiplication, with the application clock pinned to 1,590 MHz. As array size grows along the x-axis, the granted SM clock declines from about 1,590 MHz to about 1,330 MHz, and the achieved cuBLAS throughput is pulled down with it — the clearest direct evidence that the clock is a function of operand size under the power cap." data-zh="在持續計算 cuBLAS 半精度矩陣乘法時量測到的時脈頻率（右軸，MHz）與 cuBLAS 吞吐量（左軸，TFLOPS），應用時脈固定在 1,590 MHz。隨著陣列尺寸沿 x 軸增大，實際給予的 SM 時脈從約 1,590 MHz 降到約 1,330 MHz，實測 cuBLAS 吞吐量也隨之被拉低——這是時脈在功耗上限下為運算元尺寸函數的最清晰直接證據。">Clock frequency (right axis, MHz) and cuBLAS throughput (left axis, TFLOPS) measured while continuously computing cuBLAS half-precision matrix multiplication, with the application clock pinned to 1,590 MHz. As array size grows along the x-axis, the granted SM clock declines from about 1,590 MHz to about 1,330 MHz, and the achieved cuBLAS throughput is pulled down with it — the clearest direct evidence that the clock is a function of operand size under the power cap.</span>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="The paper also reports a separate per-precision peak-throughput table (reproduced below), distinct from the array-size sweep plotted above. Its single FP16 entry of 41,616 GFLOPS is the representative cuBLAS rate the authors quote for half precision; the plotted curve, taken on a different array-size sweep, peaks somewhat higher (around 47 TFLOPS) at a mid-size operand before the clock droop pulls it back down. Across the table the achieved matrix-multiply rates rise steeply as precision narrows, and the reduced-precision rows are exactly where the T4 separates from its Pascal predecessor." data-zh="論文另外報告了一張獨立的逐精度峰值吞吐量表（重製於下），它與上方的陣列尺寸掃描不同。其唯一的 FP16 數值 41,616 GFLOPS，是作者為半精度引用的代表性 cuBLAS 速率；而上方繪製的曲線取自另一組陣列尺寸掃描，在中等尺寸運算元上的峰值略高（約 47 TFLOPS），隨後因時脈下降而被拉回。整張表中，隨著精度收窄，實測矩陣乘法速率急遽上升，而低精度各列正是 T4 與其 Pascal 前作分道揚鑣之處。">The paper also reports a separate per-precision peak-throughput table (reproduced below), distinct from the array-size sweep plotted above. Its single FP16 entry of 41,616 GFLOPS is the representative cuBLAS rate the authors quote for half precision; the plotted curve, taken on a different array-size sweep, peaks somewhat higher (around 47 TFLOPS) at a mid-size operand before the clock droop pulls it back down. Across the table the achieved matrix-multiply rates rise steeply as precision narrows, and the reduced-precision rows are exactly where the T4 separates from its Pascal predecessor.</span></p>
+  <div class="tbl-wrap">
+  <div class="scroll-hint"><span class="i18n" data-en="scroll table &rarr;" data-zh="左右滑動表格 &rarr;">scroll table &rarr;</span></div>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Precision" data-zh="精度">Precision</span></th>
+      <th><span class="i18n" data-en="T4 throughput" data-zh="T4 吞吐量">T4 throughput</span></th>
+      <th><span class="i18n" data-en="P4 throughput" data-zh="P4 吞吐量">P4 throughput</span></th>
+      <th><span class="i18n" data-en="Unit" data-zh="單位">Unit</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Double (FP64)" data-zh="雙精度 (FP64)">Double (FP64)</span></td><td>253</td><td>231</td><td>GFLOPS</td></tr>
+      <tr><td><span class="i18n" data-en="Single (FP32)" data-zh="單精度 (FP32)">Single (FP32)</span></td><td>7,174</td><td>6,944</td><td>GFLOPS</td></tr>
+      <tr><td><span class="i18n" data-en="Half (FP16)" data-zh="半精度 (FP16)">Half (FP16)</span></td><td>41,616</td><td>6,571</td><td>GFLOPS</td></tr>
+      <tr><td>INT8</td><td>74,934</td><td>24,172</td><td>GOPS</td></tr>
+      <tr><td>INT4</td><td>114,384</td><td>—</td><td>GOPS</td></tr>
+      <tr><td>INT1</td><td>552,230</td><td>—</td><td>GOPS</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><span class="i18n" data-en="Two observations from the table govern inference deployment. The half-precision rate of 41,616 GFLOPS is more than six times the P4's 6,571 GFLOPS, which is the Tensor-Core dividend; the FP64 and FP32 rows are nearly equal across the two boards because they share core counts and clocks. The reduced-precision rows climb steeply — INT8 at 74,934 GOPS, INT4 at 114,384 GOPS, INT1 at 552,230 GOPS — so the device's headroom is concentrated entirely in the low-precision Tensor-Core paths, which is exactly where quantized inference lives. These are achieved cuBLAS/CUTLASS rates at the pinned 1,590 MHz clock; once the operand grows large enough to trigger throttling, even these figures are an envelope the sustained workload does not hold." data-zh="表中有兩項觀察主導推理部署。41,616 GFLOPS 的半精度速率超過 P4 的 6,571 GFLOPS 六倍，這是 Tensor-Core 的紅利；FP64 與 FP32 兩列在兩張卡上幾乎相等，因為它們共用核心數與時脈。低精度各列急遽攀升——INT8 為 74,934 GOPS、INT4 為 114,384 GOPS、INT1 為 552,230 GOPS——因此裝置的餘裕完全集中在低精度 Tensor-Core 路徑上，而這正是量化推理所在之處。這些是固定 1,590 MHz 時脈下實測的 cuBLAS/CUTLASS 速率；一旦運算元增大到足以觸發節流，即使這些數字也只是持續工作負載無法維持的包絡。">Two observations from the table govern inference deployment. The half-precision rate of 41,616 GFLOPS is more than six times the P4's 6,571 GFLOPS, which is the Tensor-Core dividend; the FP64 and FP32 rows are nearly equal across the two boards because they share core counts and clocks. The reduced-precision rows climb steeply — INT8 at 74,934 GOPS, INT4 at 114,384 GOPS, INT1 at 552,230 GOPS — so the device's headroom is concentrated entirely in the low-precision Tensor-Core paths, which is exactly where quantized inference lives. These are achieved cuBLAS/CUTLASS rates at the pinned 1,590 MHz clock; once the operand grows large enough to trigger throttling, even these figures are an envelope the sustained workload does not hold.</span></p>
+</section>
+
+<!-- ============================ THROTTLING ============================ -->
+<section id="throttle">
+  <h2><span class="i18n" data-en="5. Clock Throttling: Power-Limit and Thermal" data-zh="5. 時脈節流：功耗上限與熱">5. Clock Throttling: Power-Limit and Thermal</span></h2>
+
+  <p><span class="i18n" data-en="This section contains the result most directly relevant to a serving-latency predictor: a direct measurement that the small-form-factor T4 lowers its own clock under a sustained compute load, and that it does so for two distinct reasons with different signatures. The authors show that the T4 and P4 are far more prone to this behavior than full-size boards, because their 70 W cap and their limited passive heat-sinks leave little margin between actual draw and the protection thresholds." data-zh="本節包含與 serving 延遲預測器最直接相關的結果：一項直接量測，顯示小尺寸 T4 在持續計算負載下會降低自身時脈，且它出於兩個不同原因、具有不同特徵地這麼做。作者指出，T4 與 P4 比全尺寸卡遠更容易出現此行為，因為其 70 W 上限與有限的被動散熱片，在實際功耗與保護閾值之間僅留下很小的餘裕。">This section contains the result most directly relevant to a serving-latency predictor: a direct measurement that the small-form-factor T4 lowers its own clock under a sustained compute load, and that it does so for two distinct reasons with different signatures. The authors show that the T4 and P4 are far more prone to this behavior than full-size boards, because their 70 W cap and their limited passive heat-sinks leave little margin between actual draw and the protection thresholds.</span></p>
+
+  <h3><span class="i18n" data-en="5.1 Power-limit throttling: clock falls as operand size grows" data-zh="5.1 功耗上限節流：時脈隨運算元尺寸增大而下降">5.1 Power-limit throttling: clock falls as operand size grows</span></h3>
+  <p><span class="i18n" data-en="Power-limit throttling triggers when instantaneous power exceeds the 70 W manufacturer limit. The authors confirmed the mechanism with the operand-size sweep of Section 2.2: as the cuBLAS input matrices grew, the T4 exceeded its power limit more and more frequently and lowered its clock more and more, and the reduced clock eventually depressed overall arithmetic throughput. On the full-size V100, P100, M60, and K80 the same kernel barely throttled at all, because the margin between draw and limit is far larger. The behavior is therefore not a property of cuBLAS or of the matrix kernel, but of the power envelope of the small-form-factor board." data-zh="功耗上限節流在瞬時功耗超過 70 W 製造商上限時觸發。作者以第 2.2 節的運算元尺寸掃描確認了此機制：隨著 cuBLAS 輸入矩陣增大，T4 越來越頻繁地超過其功耗上限，並越來越降低其時脈，而降低的時脈最終壓低了整體算術吞吐量。在全尺寸的 V100、P100、M60 與 K80 上，同一核心幾乎完全不節流，因為功耗與上限之間的餘裕大得多。因此此行為並非 cuBLAS 或矩陣核心的性質，而是小尺寸卡功耗範圍的性質。">Power-limit throttling triggers when instantaneous power exceeds the 70 W manufacturer limit. The authors confirmed the mechanism with the operand-size sweep of Section 2.2: as the cuBLAS input matrices grew, the T4 exceeded its power limit more and more frequently and lowered its clock more and more, and the reduced clock eventually depressed overall arithmetic throughput. On the full-size V100, P100, M60, and K80 the same kernel barely throttled at all, because the margin between draw and limit is far larger. The behavior is therefore not a property of cuBLAS or of the matrix kernel, but of the power envelope of the small-form-factor board.</span></p>
+
+  <h3><span class="i18n" data-en="5.2 Thermal throttling: a sharper step at 85 °C" data-zh="5.2 熱節流：85 °C 處更陡的階梯">5.2 Thermal throttling: a sharper step at 85 °C</span></h3>
+  <p><span class="i18n" data-en="The second mechanism is characterized by a benchmark that repeatedly launches a GEMM on a single large matrix while temperature climbs. Below the 85 °C maximum operating temperature, power-limit throttling alone reduces the clock as the die warms; once the temperature reaches 85 °C, thermal throttling engages in addition to power-limit throttling and produces a markedly sharper step-down. The figure below plots both temperature and clock over time and labels the two regimes; the authors note that thermal throttling causes a more severe clock reduction than power-limit throttling alone." data-zh="第二種機制以一個基準刻畫：當溫度攀升時，反覆在單一大矩陣上發起 GEMM。在 85 °C 最高運作溫度以下，僅功耗上限節流隨晶片升溫降低時脈；一旦溫度達到 85 °C，熱節流在功耗上限節流之外一併介入，產生明顯更陡的階梯式下降。下圖將溫度與時脈隨時間作圖並標示這兩個區間；作者指出熱節流造成的時脈下降比單純功耗上限節流更為嚴重。">The second mechanism is characterized by a benchmark that repeatedly launches a GEMM on a single large matrix while temperature climbs. Below the 85 °C maximum operating temperature, power-limit throttling alone reduces the clock as the die warms; once the temperature reaches 85 °C, thermal throttling engages in addition to power-limit throttling and produces a markedly sharper step-down. The figure below plots both temperature and clock over time and labels the two regimes; the authors note that thermal throttling causes a more severe clock reduction than power-limit throttling alone.</span></p>
+
+  <div class="paper-fig">
+    <img src="figures/fig44_throttle_time.png" alt="Figure 4.4: GPU temperature (left axis) rising to 85 C and clock frequency (right axis) falling over time during repeated cublasSgemm; the plot is divided into a power-limit-throttling region and a power-limit-plus-thermal-throttling region with deeper clock dips below 800 MHz.">
+    <div class="fig-cap"><strong>Figure 4.4 (from paper):</strong>
+      <span class="i18n" data-en="GPU temperature (left axis, °C) and clock frequency (right axis, MHz) over time while repeatedly computing cublasSgemm, application clock pinned to 1,590 MHz. In the first regime, power-limit throttling alone lowers the clock as the die warms toward 85 °C; once 85 °C is reached, thermal throttling adds a sharper step-down and the clock dips intermittently below 800 MHz. The two labeled regions show that the involuntary clock reduction has two distinct contributors with different magnitudes." data-zh="反覆計算 cublasSgemm 時的 GPU 溫度（左軸，°C）與時脈頻率（右軸，MHz）隨時間變化，應用時脈固定在 1,590 MHz。在第一個區間，當晶片升溫趨近 85 °C 時，僅功耗上限節流即降低時脈；一旦達到 85 °C，熱節流增加一個更陡的階梯式下降，時脈間歇性地跌破 800 MHz。兩個標示區域顯示這項非自願時脈下降有兩個不同貢獻者，且幅度不同。">GPU temperature (left axis, °C) and clock frequency (right axis, MHz) over time while repeatedly computing cublasSgemm, application clock pinned to 1,590 MHz. In the first regime, power-limit throttling alone lowers the clock as the die warms toward 85 °C; once 85 °C is reached, thermal throttling adds a sharper step-down and the clock dips intermittently below 800 MHz. The two labeled regions show that the involuntary clock reduction has two distinct contributors with different magnitudes.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.3 Throttling across device classes" data-zh="5.3 跨裝置類別的節流">5.3 Throttling across device classes</span></h3>
+  <p><span class="i18n" data-en="To separate the device-class effect from the kernel, the authors ran an identical 1024×1024 cublasSgemm in an endless loop on every board and recorded the graphics clock over time, normalizing by each card's TDP. The comparison isolates a clean dichotomy between the inference-class and the full-size parts." data-zh="為了將裝置類別效應與核心分離，作者在每張卡上以無窮迴圈執行完全相同的 1024×1024 cublasSgemm，並記錄隨時間的圖形時脈，再以每張卡的 TDP 正規化。此比較分離出推理級與全尺寸晶片之間清楚的二分法。">To separate the device-class effect from the kernel, the authors ran an identical 1024×1024 <code>cublasSgemm</code> in an endless loop on every board and recorded the graphics clock over time, normalizing by each card's TDP. The comparison isolates a clean dichotomy between the inference-class and the full-size parts.</span></p>
+  <div class="vflow">
+    <div class="branch">
+      <div class="box red"><h4><span class="i18n" data-en="Inference-class: T4 (70 W), P4 (75 W)" data-zh="推理級：T4 (70 W)、P4 (75 W)">Inference-class: T4 (70 W), P4 (75 W)</span></h4><span class="i18n" data-en="Hold the maximum clock for only a few seconds at the start; as temperature rises, throttling intervenes and the clock declines. Throttling is observed on these two boards alone." data-zh="僅在開始時維持最高時脈數秒；隨著溫度上升，節流介入，時脈下降。僅在這兩張卡上觀察到節流。">Hold the maximum clock for only a few seconds at the start; as temperature rises, throttling intervenes and the clock declines. Throttling is observed on these two boards alone.</span></div>
+      <div class="box blue"><h4><span class="i18n" data-en="Full-size: V100, P100, M60, K80 (250–300 W)" data-zh="全尺寸：V100、P100、M60、K80 (250–300 W)">Full-size: V100, P100, M60, K80 (250–300 W)</span></h4><span class="i18n" data-en="Power draw could not be raised close enough to the limit to trigger throttling; the clock holds steady throughout the same kernel." data-zh="功耗無法被提高到足夠接近上限以觸發節流；在相同核心下時脈全程保持穩定。">Power draw could not be raised close enough to the limit to trigger throttling; the clock holds steady throughout the same kernel.</span></div>
+    </div>
+  </div>
+  <p><span class="i18n" data-en="The consequence for a performance model is decisive: clock-versus-load is not a universal GPU property but a regime that the small-form-factor inference boards enter and the full-size boards do not. A predictor that targets inference-class hardware must therefore treat the clock as an endogenous, load-dependent quantity, whereas one calibrated on a V100 would never observe the effect at all." data-zh="對效能模型而言，其後果是決定性的：時脈對負載並非通用的 GPU 性質，而是小尺寸推理卡會進入、全尺寸卡不會進入的一個區間。因此針對推理級硬體的預測器必須將時脈視為一個內生的、與負載相依的量，而在 V100 上校準的預測器則根本不會觀察到此效應。">The consequence for a performance model is decisive: clock-versus-load is not a universal GPU property but a regime that the small-form-factor inference boards enter and the full-size boards do not. A predictor that targets inference-class hardware must therefore treat the clock as an endogenous, load-dependent quantity, whereas one calibrated on a V100 would never observe the effect at all.</span></p>
+</section>
+
+<!-- ============================ RELEVANCE TO OUR PREDICTOR ============================ -->
+<section id="relevance">
+  <h2><span class="i18n" data-en="6. Relevance to Our Per-Step Serving Predictor" data-zh="6. 與我們的逐步 serving 預測器之關聯">6. Relevance to Our Per-Step Serving Predictor</span></h2>
+
+  <p><span class="i18n" data-en="Our own work builds a per-step latency predictor for vLLM serving that folds the GPU SM clock in as a hidden, involuntary, input-token-driven term. The connection to this paper is direct: where we observe the clock falling from boost toward throttle as the input-token count M of a serving step rises, this paper supplies the microbenchmark-level empirical anchor for the same mechanism, expressed in its classical form as clock-versus-operand-size on a power-capped GEMM (Figure 4.3). We cite it as the closest classical analogue to the effect our predictor models." data-zh="我們自己的工作為 vLLM serving 建立一個逐步延遲預測器，將 GPU SM 時脈作為一個隱藏的、非自願的、由輸入 token 驅動的項納入。與本論文的關聯是直接的：我們觀察到隨著一個 serving 步驟的輸入 token 數 M 上升，時脈從 boost 向節流下降，而本論文以其古典形式——功耗受限 GEMM 上的時脈對運算元尺寸——提供了同一機制在微基準層級的經驗錨點（圖 4.3）。我們將其引用為我們預測器所建模效應的最接近古典類比。">Our own work builds a per-step latency predictor for vLLM serving that folds the GPU SM clock in as a hidden, involuntary, input-token-driven term. The connection to this paper is direct: where we observe the clock falling from boost toward throttle as the input-token count M of a serving step rises, this paper supplies the microbenchmark-level empirical anchor for the same mechanism, expressed in its classical form as clock-versus-operand-size on a power-capped GEMM (Figure 4.3). We cite it as the closest classical analogue to the effect our predictor models.</span></p>
+
+  <h3><span class="i18n" data-en="6.1 The shared mechanism, two vocabularies" data-zh="6.1 共同的機制，兩種語彙">6.1 The shared mechanism, two vocabularies</span></h3>
+  <p><span class="i18n" data-en="The mapping between the two settings is almost one-to-one. In the paper, the independent variable is the cuBLAS operand size; in our serving predictor, it is the input-token count M of a step, which sets the size of the prefill or compute-bound attention GEMM. In both cases a larger operand raises sustained power, the power-cap protection loop responds by lowering the clock, and the lowered clock degrades the achieved rate. The variable our predictor calls M and the variable the paper calls matrix size are two names for the same driver of sustained power." data-zh="兩個情境之間的映射幾乎是一對一的。在論文中，自變數是 cuBLAS 運算元尺寸；在我們的 serving 預測器中，它是一個步驟的輸入 token 數 M，後者設定 prefill 或計算受限注意力 GEMM 的大小。兩種情況下，較大的運算元都提高持續功耗，功耗上限保護迴路以降低時脈作為回應，而降低的時脈使實測速率退化。我們預測器稱為 M 的變數，與論文稱為矩陣尺寸的變數，是同一個持續功耗驅動因子的兩個名稱。">The mapping between the two settings is almost one-to-one. In the paper, the independent variable is the cuBLAS operand size; in our serving predictor, it is the input-token count $M$ of a step, which sets the size of the prefill or compute-bound attention GEMM. In both cases a larger operand raises sustained power, the power-cap protection loop responds by lowering the clock, and the lowered clock degrades the achieved rate. The variable our predictor calls $M$ and the variable the paper calls matrix size are two names for the same driver of sustained power.</span></p>
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$f_{\text{clock}} = g\!\left(P_{\text{sustained}}(M),\; T_{\text{die}}\right), \qquad \text{latency}_{\text{step}} \;\propto\; \frac{1}{f_{\text{clock}}}$$
+  </div>
+  <p><span class="i18n" data-en="Equation (1) is the structural form both works share: the granted clock is a function of the sustained power induced by the operand and of the die temperature, and the step latency varies inversely with that clock. The paper measures the function for cuBLAS GEMM at the microbenchmark level; our predictor instantiates the same function with M as the operand driver inside a general serving-latency model, so the per-step latency a scheduler reasons about already absorbs the droop rather than treating the clock as a constant." data-zh="式 (1) 是兩項工作共有的結構形式：實際給予的時脈是運算元誘發的持續功耗與晶片溫度的函數，而步驟延遲與該時脈成反比。論文在微基準層級為 cuBLAS GEMM 量測此函數；我們的預測器在一個通用 serving 延遲模型內，以 M 作為運算元驅動因子實例化同一函數，使排程器所推理的逐步延遲已吸收這個下降，而非將時脈視為常數。">Equation (1) is the structural form both works share: the granted clock is a function of the sustained power induced by the operand and of the die temperature, and the step latency varies inversely with that clock. The paper measures the function for cuBLAS GEMM at the microbenchmark level; our predictor instantiates the same function with $M$ as the operand driver inside a general serving-latency model, so the per-step latency a scheduler reasons about already absorbs the droop rather than treating the clock as a constant.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 What the paper establishes, and where our gap remains" data-zh="6.2 論文確立了什麼，以及我們的缺口何在">6.2 What the paper establishes, and where our gap remains</span></h3>
+  <p><span class="i18n" data-en="The honest division of credit is the following. The droop mechanism itself, and the learnability of latency from clock, are both established prior knowledge, and this paper is among the cleanest classical demonstrations that the clock drops as a function of operand size on a power-capped board. What this paper does not do — and what our contribution is — is model that involuntary droop as a function of the serving-step variable M inside a general per-step serving predictor, so that the term feeds directly into scheduling and capacity decisions for a modern decode-and-prefill workload on current SXM-class hardware." data-zh="誠實的功勞劃分如下。下降機制本身，以及由時脈推斷延遲的可學習性，二者皆為既有的先前知識，而本論文是「在功耗受限卡上時脈隨運算元尺寸下降」這一點最乾淨的古典示範之一。本論文未做的——也正是我們的貢獻——是在一個通用的逐步 serving 預測器內，將該非自願下降建模為 serving 步驟變數 M 的函數，使該項直接饋入現代 decode-與-prefill 工作負載、在當前 SXM 級硬體上的排程與容量決策。">The honest division of credit is the following. The droop mechanism itself, and the learnability of latency from clock, are both established prior knowledge, and this paper is among the cleanest classical demonstrations that the clock drops as a function of operand size on a power-capped board. What this paper does not do — and what our contribution is — is model that involuntary droop as a function of the serving-step variable $M$ inside a general per-step serving predictor, so that the term feeds directly into scheduling and capacity decisions for a modern decode-and-prefill workload on current SXM-class hardware.</span></p>
+
+  <h3><span class="i18n" data-en="6.3 What carries over to SXM hardware and what does not" data-zh="6.3 哪些可延伸到 SXM 硬體、哪些不能">6.3 What carries over to SXM hardware and what does not</span></h3>
+  <p><span class="i18n" data-en="The mechanism transfers, but its operating regime must be re-measured for each board, exactly as Section 5.3 warns. On the 70 W T4 the throttling is severe and triggers early; on the SXM-class H100, H200, and A100-80 cards our measurements target, the much larger power and thermal margins shift the throttling onset, so the droop is expected to stay dormant under light decode-only serving and to become material only in the compute-bound, high-M, prefill-heavy regime where sustained power approaches the cap — the serving analogue of the large-matrix region of Figure 4.3. Quantifying exactly where each board crosses that onset is itself part of what our measurements recover, rather than something we assume. The lesson we take from this paper is therefore not a constant to copy but a methodology: pin the clock, sweep the operand driver, and read back the granted clock to recover the device-specific droop curve before trusting any constant-clock latency model." data-zh="機制可轉移，但其運作區間必須為每張卡重新量測，正如第 5.3 節所警示。在 70 W 的 T4 上，節流嚴重且觸發得早；在我們量測所針對的 SXM 級 H100、H200 與 A100-80 卡上，功耗與熱餘裕大得多，會推遲節流觸發點，因此預期該下降在輕量、僅 decode 的 serving 下處於休眠，僅在計算受限、高 M、prefill 為主、持續功耗趨近上限的區間才變得重要——也就是圖 4.3 大矩陣區域的 serving 類比。每張卡究竟在何處越過該觸發點，本身正是我們的量測所要還原的，而非我們所假設的。因此我們從本論文取得的教訓並非一個可照抄的常數，而是一套方法論：固定時脈、掃描運算元驅動因子、讀回實際給予的時脈，以在信任任何固定時脈延遲模型之前還原裝置特定的下降曲線。">The mechanism transfers, but its operating regime must be re-measured for each board, exactly as Section 5.3 warns. On the 70 W T4 the throttling is severe and triggers early; on the SXM-class H100, H200, and A100-80 cards our measurements target, the much larger power and thermal margins shift the throttling onset, so the droop is expected to stay dormant under light decode-only serving and to become material only in the compute-bound, high-$M$, prefill-heavy regime where sustained power approaches the cap — the serving analogue of the large-matrix region of Figure 4.3. Quantifying exactly where each board crosses that onset is itself part of what our measurements recover, rather than something we assume. The lesson we take from this paper is therefore not a constant to copy but a methodology: pin the clock, sweep the operand driver, and read back the granted clock to recover the device-specific droop curve before trusting any constant-clock latency model.</span></p>
+  <div class="note">
+    <strong><span class="i18n" data-en="Why we selected this paper" data-zh="我們選擇本論文的原因">Why we selected this paper</span></strong>
+    <span class="i18n" data-en=" — Among the prior art, this is the microbenchmark study that most cleanly isolates involuntary, operand-size-driven clock reduction under a power cap, with a direct measurement (Figure 4.3) and a mechanism decomposition (Figure 4.4). It is the closest classical analogue to the clock-versus-M term at the centre of our predictor, and the right citation when we argue that the droop mechanism is established while its incorporation into a serving predictor is the open gap." data-zh="——在先前研究中，這是最乾淨地隔離了功耗上限下、由運算元尺寸驅動的非自願時脈下降的微基準研究，附有直接量測（圖 4.3）與機制分解（圖 4.4）。它是我們預測器核心的時脈對 M 項的最接近古典類比，也是當我們論證「下降機制已確立，而將其納入 serving 預測器才是尚未解決的缺口」時最恰當的引用。">&nbsp;— Among the prior art, this is the microbenchmark study that most cleanly isolates involuntary, operand-size-driven clock reduction under a power cap, with a direct measurement (Figure 4.3) and a mechanism decomposition (Figure 4.4). It is the closest classical analogue to the clock-versus-$M$ term at the centre of our predictor, and the right citation when we argue that the droop mechanism is established while its incorporation into a serving predictor is the open gap.</span>
+  </div>
+</section>
+
+<!-- ============================ LIMITATIONS ============================ -->
+<section id="limits">
+  <h2><span class="i18n" data-en="7. Strengths, Limitations, and Takeaways" data-zh="7. 優點、限制與啟示">7. Strengths, Limitations, and Takeaways</span></h2>
+
+  <p><span class="i18n" data-en="The paper's value to a 2025 serving researcher lies in its method and its throttling measurement rather than in the absolute numbers, which are tied to a 2019 device. The following assessment separates what remains durable from what is specific to the T4 and its measurement setup." data-zh="本論文對 2025 年 serving 研究者的價值，在於其方法與其節流量測，而非綁定於 2019 年裝置的絕對數字。以下評估區分了哪些仍然耐久、哪些是 T4 及其量測設置所特有。">The paper's value to a 2025 serving researcher lies in its method and its throttling measurement rather than in the absolute numbers, which are tied to a 2019 device. The following assessment separates what remains durable from what is specific to the T4 and its measurement setup.</span></p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="Strengths" data-zh="優點">Strengths</span></h4>
+      <ul>
+        <li><span class="check">+</span> <span class="i18n" data-en="Direct, reproducible evidence that the SM clock is a function of operand size under a power cap, isolated with a pinned application clock so the reduction is provably involuntary." data-zh="直接且可重現的證據，顯示在功耗上限下 SM 時脈是運算元尺寸的函數，並以固定的應用時脈加以隔離，使該下降可被證明為非自願。">Direct, reproducible evidence that the SM clock is a function of operand size under a power cap, isolated with a pinned application clock so the reduction is provably involuntary.</span></li>
+        <li><span class="check">+</span> <span class="i18n" data-en="Decomposes the involuntary reduction into power-limit and thermal contributors with distinct signatures, which a later model can treat as separate terms." data-zh="將非自願下降分解為具有不同特徵的功耗上限與熱兩個貢獻者，後續模型可將其視為獨立的項。">Decomposes the involuntary reduction into power-limit and thermal contributors with distinct signatures, which a later model can treat as separate terms.</span></li>
+        <li><span class="check">+</span> <span class="i18n" data-en="Cross-device comparison establishes that the effect is a property of the inference-class power envelope, not of the kernel, which scopes where a clock term is needed." data-zh="跨裝置比較確立此效應是推理級功耗範圍的性質，而非核心的性質，從而界定了何處需要時脈項。">Cross-device comparison establishes that the effect is a property of the inference-class power envelope, not of the kernel, which scopes where a clock term is needed.</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></h4>
+      <ul>
+        <li><span class="cross">&minus;</span> <span class="i18n" data-en="The absolute clock and throughput figures are specific to the Turing T4; current SXM-class accelerators have far larger margins and a different operating regime." data-zh="絕對時脈與吞吐量數字是 Turing T4 所特有；當前 SXM 級加速器的餘裕大得多，運作區間也不同。">The absolute clock and throughput figures are specific to the Turing T4; current SXM-class accelerators have far larger margins and a different operating regime.</span></li>
+        <li><span class="partial">~</span> <span class="i18n" data-en="The throttling experiments ran on a server outside NVIDIA's Tesla-qualified catalog, so the exact thresholds may shift on a qualified host, as the authors themselves caution." data-zh="節流實驗在 NVIDIA Tesla 認證目錄外的伺服器上執行，因此確切閾值在認證主機上可能改變，作者自己也提出此警告。">The throttling experiments ran on a server outside NVIDIA's Tesla-qualified catalog, so the exact thresholds may shift on a qualified host, as the authors themselves caution.</span></li>
+        <li><span class="cross">&minus;</span> <span class="i18n" data-en="The study characterizes GEMM in isolation, not a full serving step with attention, KV-cache traffic, and a mix of prefill and decode that determines real sustained power." data-zh="本研究單獨刻畫 GEMM，而非包含注意力、KV-cache 流量，以及決定真實持續功耗的 prefill 與 decode 混合的完整 serving 步驟。">The study characterizes GEMM in isolation, not a full serving step with attention, KV-cache traffic, and a mix of prefill and decode that determines real sustained power.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <p><span class="i18n" data-en="The durable takeaway is methodological. A latency model for power-capped accelerators cannot assume a constant clock; it must recover a device-specific droop curve by pinning the application clock, sweeping the operand driver, and reading back the clock the hardware grants. This paper is the canonical demonstration of that procedure on an inference GPU, and it is the foundation on which a per-step serving predictor with an explicit clock term is built." data-zh="耐久的啟示是方法論上的。功耗受限加速器的延遲模型不能假設固定時脈；它必須透過固定應用時脈、掃描運算元驅動因子、讀回硬體所給予的時脈，來還原裝置特定的下降曲線。本論文是該程序在推理 GPU 上的典範示範，也是建立帶有明確時脈項的逐步 serving 預測器的基礎。">The durable takeaway is methodological. A latency model for power-capped accelerators cannot assume a constant clock; it must recover a device-specific droop curve by pinning the application clock, sweeping the operand driver, and reading back the clock the hardware grants. This paper is the canonical demonstration of that procedure on an inference GPU, and it is the foundation on which a per-step serving predictor with an explicit clock term is built.</span></p>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Dissecting the NVIDIA Turing T4 GPU via Microbenchmarking — Jia, Maggioni, Smith, Scarpazza (arXiv:1903.07486, GTC 2019)" data-zh="Dissecting the NVIDIA Turing T4 GPU via Microbenchmarking — Jia、Maggioni、Smith、Scarpazza（arXiv:1903.07486，GTC 2019）">Dissecting the NVIDIA Turing T4 GPU via Microbenchmarking — Jia, Maggioni, Smith, Scarpazza (arXiv:1903.07486, GTC 2019)</span></p>
+  <p><span class="i18n" data-en="Figures reproduced from the paper PDF for analysis. Page generated 2026-06-20." data-zh="圖表自論文 PDF 重製以供分析。頁面產生於 2026-06-20。">Figures reproduced from the paper PDF for analysis. Page generated 2026-06-20.</span></p>
+  <p><a href="https://arxiv.org/abs/1903.07486">arXiv:1903.07486</a></p>
+</footer>
+
+<script>
+  function setLang(l){
+    document.querySelectorAll('.i18n').forEach(function(e){
+      if(e.dataset[l]) e.innerHTML = e.dataset[l];
+    });
+    document.getElementById('lang-en').classList.toggle('active', l === 'en');
+    document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+    localStorage.setItem('lang', l);
+    if (window.renderMathInElement) {
+      window.renderMathInElement(document.body, {
+        delimiters: [
+          {left: '$$', right: '$$', display: true},
+          {left: '$',  right: '$',  display: false}
+        ]
+      });
+    }
+  }
+  (function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>

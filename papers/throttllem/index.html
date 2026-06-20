@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>throttLL'eM: Predictive GPU Throttling for Energy-Efficient LLM Inference Serving</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+/* ===== ACCENT (Lime — prediction / DVFS control) ===== */
+:root{--accent:#8bc34a;--accent-rgb:139,195,74;--nav-bg:rgba(28,40,16,0.95);--link:#6ec6ff;--accent2:#ff9f43;--accent2-rgb:255,159,67;
+/* categorical diagram-box palette */
+--c-blue:15,52,96;--c-blue-line:110,198,255;--c-red:233,69,96;--c-green:139,195,74;--c-orange:245,166,35;--c-gray:45,45,68}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+html,body{overflow-x:clip}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+p,li,h1,h2,h3,h4,th,td,span,figcaption{overflow-wrap:anywhere}
+p code,li code,td code{overflow-wrap:anywhere;word-break:break-word}
+a{color:var(--link);text-decoration:none;transition:color .2s}
+a:hover{color:var(--accent2)}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#a9c08a;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#16200d 0%,#141a20 50%,#101a14 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.07) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(var(--accent2-rgb),.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.8rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.15rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none;letter-spacing:normal}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,var(--link),var(--accent2))}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;max-width:100%;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+.table-wrap{overflow-x:auto;max-width:100%;margin:1rem 0}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:rgb(var(--c-blue))}
+.flow .step:nth-child(2) .c{background:var(--accent);color:#15200a}
+.flow .step:nth-child(3) .c{background:rgb(var(--c-orange));color:#1a1030}
+.flow .step:nth-child(4) .c{background:rgb(var(--c-green))}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(var(--c-blue),.6);border:1px solid rgba(var(--c-blue-line),.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(var(--c-red),.12);border:1px solid rgba(var(--c-red),.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(var(--c-green),.12);border:1px solid rgba(var(--c-green),.4);color:#d0d5e0}
+.vflow .box.orange{background:rgba(var(--c-orange),.1);border:1px solid rgba(var(--c-orange),.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(var(--c-gray),.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(var(--accent2-rgb),.06);border-left:4px solid var(--accent2);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== GRID-2 ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== PAPER FIGURES ===== */
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{display:block;margin:0 auto;max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:620px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:800px;display:inline-block;text-align:left;line-height:1.5}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+
+/* ===== LATEX ===== */
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:var(--link)}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav{padding:0}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  nav ul li:first-child a{padding-left:1rem}
+  .vflow .branch{flex-direction:column}
+  .paper-fig.fig-sm img{max-width:100%;width:100%;height:auto}
+}
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#motivation">Motivation</a></li>
+    <li><a href="#contributions">Contributions</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#projection">KV/Batch Projection</a></li>
+    <li><a href="#model">Performance Model</a></li>
+    <li><a href="#controller">Frequency Control</a></li>
+    <li><a href="#results">Results</a></li>
+    <li><a href="#relevance">Relevance to Our Predictor</a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>throttLL'eM</h1>
+  <p class="sub"><span class="i18n" data-en="Predictive GPU Throttling for Energy-Efficient LLM Inference Serving — projecting future KV-cache usage and batch size to set the lowest GPU clock that still meets the SLO." data-zh="面向能效的 LLM 推論服務之預測式 GPU 降頻——透過預測未來的 KV 快取占用與批次大小，選定仍能滿足 SLO 的最低 GPU 時脈。">Predictive GPU Throttling for Energy-Efficient LLM Inference Serving — projecting future KV-cache usage and batch size to set the lowest GPU clock that still meets the SLO.</span></p>
+  <div class="badges">
+    <span class="badge">arXiv 2024 &middot; 2408.05235</span>
+    <span class="badge">DVFS / Energy</span>
+    <span class="badge">Iteration-level Predictor</span>
+    <span class="badge">A100 &times; 8</span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Andreas Kosmas Kakolyris, Dimosthenis Masouros, Petros Vavaroutsos, Sotirios Xydis, Dimitrios Soudris</p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">National Technical University of Athens</p>
+</div>
+
+<div class="container">
+
+<!-- ===================== MOTIVATION ===================== -->
+<section id="motivation">
+  <h2><span class="i18n" data-en="1. Why Energy, and Why Now" data-zh="1. 為何聚焦能耗，以及為何在此刻">1. Why Energy, and Why Now</span></h2>
+
+  <p><span class="i18n" data-en="The economics of large-language-model serving are dominated by inference rather than training. Training a frontier model is a one-time capital event; serving it is a perpetual operating cost that scales with every user request, and the paper notes that inference accounts for over 90% of a deployed model's compute cycles — so it dominates the lifetime energy footprint. Data-center electricity demand is on a steep curve: the paper cites a projection of roughly 1050 TWh of consumption by 2026, driven substantially by AI workloads. As providers field interactive chat, batch summarization, and agentic pipelines against the same GPU fleet, the marginal cost of one more token is increasingly an electricity-bill question rather than a hardware-availability question." data-zh="大型語言模型服務的經濟結構由推論而非訓練主導。訓練前沿模型是一次性的資本支出，但服務它卻是隨每個使用者請求而擴張的持續性營運成本；論文指出推論占了已部署模型逾 90% 的計算週期——因此主導了全生命週期能耗。資料中心的用電需求正陡升：論文引用一項預測，至 2026 年用電量約達 1050 TWh，其中 AI 工作負載貢獻可觀。當服務商以同一 GPU 機隊承載互動式對話、批次摘要與代理式流程時，多生成一個 token 的邊際成本，愈來愈是一道電費問題，而非硬體可用性問題。">The economics of large-language-model serving are dominated by inference rather than training. Training a frontier model is a one-time capital event; serving it is a perpetual operating cost that scales with every user request, and the paper notes that inference accounts for over 90% of a deployed model's compute cycles — so it dominates the lifetime energy footprint. Data-center electricity demand is on a steep curve: the paper cites a projection of roughly 1050 TWh of consumption by 2026, driven substantially by AI workloads. As providers field interactive chat, batch summarization, and agentic pipelines against the same GPU fleet, the marginal cost of one more token is increasingly an electricity-bill question rather than a hardware-availability question.</span></p>
+
+  <p><span class="i18n" data-en="The central observation that makes savings possible is that the boost clock is frequently overkill. A GPU pinned at its maximum frequency completes each decode iteration faster than the service-level objective requires, and the surplus speed is converted directly into wasted joules. The figure below, reproduced from the paper, sweeps batch size against GPU frequency and reports throughput in tokens per second. Throughput saturates well before the top of the frequency range at the lower batch sizes that characterize latency-sensitive serving, which means a substantial band of the highest frequencies buys almost no additional useful work." data-zh="使成本得以下降的核心觀察是：boost 時脈往往是過度配置。被固定在最高頻率的 GPU，會以快於 SLO 所需的速度完成每一次解碼迭代，而這多餘的速度會直接轉化為浪費掉的焦耳。下圖取自原論文，橫掃批次大小與 GPU 頻率，並以每秒 token 數呈現吞吐量。在刻畫延遲敏感服務的較低批次大小下，吞吐量遠在頻率上限之前就已飽和，這意味著最高頻率的一整段區間幾乎換不到任何額外的有效工作。">The central observation that makes savings possible is that the boost clock is frequently overkill. A GPU pinned at its maximum frequency completes each decode iteration faster than the service-level objective requires, and the surplus speed is converted directly into wasted joules. The figure below, reproduced from the paper, sweeps batch size against GPU frequency and reports throughput in tokens per second. Throughput saturates well before the top of the frequency range at the lower batch sizes that characterize latency-sensitive serving, which means a substantial band of the highest frequencies buys almost no additional useful work.</span></p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2408.05235v1/x3.png" alt="Figure 2a: throughput heatmap over batch size and GPU frequency">
+      <div class="fig-cap"><strong>Figure 2a (from paper):</strong> <span class="i18n" data-en="System throughput as a joint function of batch size and GPU frequency. At small batch sizes (latency-sensitive serving) throughput saturates far below the 1410 MHz boost clock — the high-frequency band yields little extra work." data-zh="系統吞吐量作為批次大小與 GPU 頻率的聯合函數。在小批次（延遲敏感服務）下，吞吐量遠在 1410 MHz boost 時脈之前即飽和——高頻區段幾乎產生不了額外工作。">System throughput as a joint function of batch size and GPU frequency. At small batch sizes (latency-sensitive serving) throughput saturates far below the 1410 MHz boost clock — the high-frequency band yields little extra work.</span></div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2408.05235v1/x7.png" alt="Figure 2e: energy-efficiency heatmap over batch size and GPU frequency">
+      <div class="fig-cap"><strong>Figure 2e (from paper):</strong> <span class="i18n" data-en="Energy efficiency in tokens per joule across the same sweep. The most efficient operating points lie in an interior frequency band, not at the boost clock; running at maximum frequency forfeits efficiency the SLO never asked for." data-zh="同一橫掃下以每焦耳 token 數衡量的能效。最具效率的操作點落在中段頻率區間，而非 boost 時脈；以最高頻率運行會放棄 SLO 從未要求的能效。">Energy efficiency in tokens per joule across the same sweep. The most efficient operating points lie in an interior frequency band, not at the boost clock; running at maximum frequency forfeits efficiency the SLO never asked for.</span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="1.1 A concrete waste scenario" data-zh="1.1 一個具體的浪費情境">1.1 A concrete waste scenario</span></h3>
+  <p><span class="i18n" data-en="Consider, as an illustrative scenario distinct from the Azure trace used later in the evaluation, a chat assistant serving Llama2-13B at tensor-parallel degree two, driven by a conversational workload whose median request carries roughly 161 input tokens and emits about 213 output tokens, while a long tail above the 95th percentile pushes past 1,000 generated tokens. The evaluated end-to-end SLO is a 30.2-second p99 deadline with a per-token deadline of roughly 30 ms between tokens. A typical 213-token reply therefore needs only about 6.4 seconds of decode at 30 ms per token, leaving more than 23 seconds of slack against the 30.2-second budget — and even a 1,000-token tail request at the 95th percentile finishes around 30 seconds, still inside the deadline. Pinned at the 1410 MHz boost clock the configuration completes these requests well inside that budget — the latency distributions in the evaluation sit comfortably below the deadline line — which means the boost clock is buying latency margin the contract never asked for. That margin is paid for in watts: each decode iteration runs at peak power even though a much lower clock would still finish on time, so the surplus speed converts directly into wasted joules. Across a busy hour of such requests the cluster expends a large fraction of its energy purchasing deadline slack the service contract did not require." data-zh="設想一個示例情境（與後續評估所用的 Azure trace 不同）：一個以張量並行度二服務 Llama2-13B 的對話助理，由一條對話式工作負載驅動，其中位數請求約帶 161 個輸入 token、生成約 213 個輸出 token，而 95 百分位以上的長尾則超過 1,000 個生成 token。受測的端到端 SLO 為 30.2 秒的 p99 期限，token 間期限約 30 ms。因此一則典型的 213-token 回覆只需約 6.4 秒解碼（每 token 30 ms），相對 30.2 秒的預算留下超過 23 秒的餘裕——即使是 95 百分位、長達 1,000 token 的長尾請求，也約在 30 秒完成，仍落在期限之內。固定在 1410 MHz boost 時脈時，該配置在預算內從容完成這些請求——評估中的延遲分布舒適地落在期限線之下——這意味著 boost 時脈買來了契約從未要求的延遲餘裕。這份餘裕是用瓦數換來的：即使低得多的時脈也仍能準時完成，每一次解碼迭代仍以尖峰功率運行，於是多餘的速度直接轉化為浪費掉的焦耳。在繁忙時段內如此累積，叢集會把可觀比例的能源耗用在購買服務契約並未要求的期限餘裕上。">Consider, as an illustrative scenario distinct from the Azure trace used later in the evaluation, a chat assistant serving Llama2-13B at tensor-parallel degree two, driven by a conversational workload whose median request carries roughly 161 input tokens and emits about 213 output tokens, while a long tail above the 95th percentile pushes past 1,000 generated tokens. The evaluated end-to-end SLO is a 30.2-second p99 deadline with a per-token deadline of roughly 30 ms between tokens. A typical 213-token reply therefore needs only about 6.4 seconds of decode at 30 ms per token, leaving more than 23 seconds of slack against the 30.2-second budget — and even a 1,000-token tail request at the 95th percentile finishes around 30 seconds, still inside the deadline. Pinned at the 1410 MHz boost clock the configuration completes these requests well inside that budget — the latency distributions in the evaluation sit comfortably below the deadline line — which means the boost clock is buying latency margin the contract never asked for. That margin is paid for in watts: each decode iteration runs at peak power even though a much lower clock would still finish on time, so the surplus speed converts directly into wasted joules. Across a busy hour of such requests the cluster expends a large fraction of its energy purchasing deadline slack the service contract did not require.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 The baseline pain number" data-zh="1.2 基線的痛點數字">1.2 The baseline pain number</span></h3>
+  <p><span class="i18n" data-en="The status quo against which the paper measures is NVIDIA's Triton inference server with the TensorRT-LLM backend, run at its default fixed boost frequency. Under that configuration the system reaches an energy efficiency of about 0.69 tokens per joule on the evaluated trace. The paper's measurements indicate that the same SLOs can be honored at far lower clocks, and the gap between 0.69 tokens per joule and what is physically achievable is the waste the framework targets. Stated as energy rather than efficiency, throttLL'eM later recovers up to 43.8% of total energy consumption relative to this baseline while still satisfying the deadlines, which sets the size of the prize: nearly half the serving energy was margin." data-zh="論文用以衡量的現狀基線，是搭配 TensorRT-LLM 後端、以預設固定 boost 頻率運行的 NVIDIA Triton 推論伺服器。在該設定下，系統在受測 trace 上達到約 0.69 tokens/joule 的能效。論文的量測顯示同樣的 SLO 可在低得多的時脈下被滿足，而 0.69 tokens/joule 與物理可達值之間的落差，正是該框架鎖定的浪費。若以能源而非能效表述，throttLL'eM 後續在滿足期限的同時，相對此基線回收了高達 43.8% 的總能耗，這界定了獎賞規模：近半的服務能源原本是餘裕。">The status quo against which the paper measures is NVIDIA's Triton inference server with the TensorRT-LLM backend, run at its default fixed boost frequency. Under that configuration the system reaches an energy efficiency of about 0.69 tokens per joule on the evaluated trace. The paper's measurements indicate that the same SLOs can be honored at far lower clocks, and the gap between 0.69 tokens per joule and what is physically achievable is the waste the framework targets. Stated as energy rather than efficiency, throttLL'eM later recovers up to 43.8% of total energy consumption relative to this baseline while still satisfying the deadlines, which sets the size of the prize: nearly half the serving energy was margin.</span></p>
+
+  <h3><span class="i18n" data-en="1.3 Strawman: a reactive hardware governor" data-zh="1.3 稻草人方案：被動式硬體調速器">1.3 Strawman: a reactive hardware governor</span></h3>
+  <p><span class="i18n" data-en="An obvious response is to delegate the decision to the GPU's own reactive frequency governor: let the hardware lower the clock when utilization drops and raise it when load returns. This fails for inference because the governor responds to the present, while a service-level objective is a statement about the future. A reactive governor cannot know that the batch about to be admitted will require a higher clock to meet a deadline several hundred iterations away; by the time utilization has risen enough for it to react, the request may already be mathematically late. The decode loop is also too fine-grained for a coarse hardware control loop — a single iteration lasts tens of milliseconds, and the composition of the batch changes at that cadence as requests arrive and complete. A correct setting must be chosen per iteration, with foreknowledge of how the batch will evolve, which is precisely what a reactive governor lacks." data-zh="一個顯而易見的回應，是把決策交給 GPU 自身的被動式頻率調速器：讓硬體在使用率下降時降頻、在負載回升時升頻。對推論而言這會失效，因為調速器回應的是當下，而 SLO 是關於未來的陳述。被動式調速器無從得知：即將被排入的批次，需要更高的時脈才能滿足數百次迭代之後的期限；待使用率升高到足以觸發其反應時，該請求可能已在數學上遲到。解碼迴圈對粗粒度的硬體控制迴圈而言也過於細緻——單次迭代僅持續數十毫秒，而批次組成會隨請求到達與完成以該節奏變動。正確的設定必須逐迭代選定，並預知批次將如何演進，這正是被動式調速器所缺乏的。">An obvious response is to delegate the decision to the GPU's own reactive frequency governor: let the hardware lower the clock when utilization drops and raise it when load returns. This fails for inference because the governor responds to the present, while a service-level objective is a statement about the future. A reactive governor cannot know that the batch about to be admitted will require a higher clock to meet a deadline several hundred iterations away; by the time utilization has risen enough for it to react, the request may already be mathematically late. The decode loop is also too fine-grained for a coarse hardware control loop — a single iteration lasts tens of milliseconds, and the composition of the batch changes at that cadence as requests arrive and complete. A correct setting must be chosen per iteration, with foreknowledge of how the batch will evolve, which is precisely what a reactive governor lacks.</span></p>
+
+  <h3><span class="i18n" data-en="1.4 The fundamental obstacle" data-zh="1.4 根本障礙">1.4 The fundamental obstacle</span></h3>
+  <p><span class="i18n" data-en="The deeper difficulty is that the right clock for the current iteration depends on quantities that will only be known in the future. Decode throughput at a fixed frequency is governed chiefly by the batch size and by the total KV-cache occupancy, and both of these are moving targets: requests join and leave the batch continuously, and each surviving request's KV footprint grows by one block every few iterations as its sequence lengthens. To choose a frequency that will satisfy an end-to-end deadline, the controller must know how the batch and the cache will look across the entire remaining horizon of the request, not just at the current instant. That horizon in turn depends on how many tokens each request will ultimately generate — a quantity that is unknown at admission and, as prior work has shown, is difficult to predict precisely. The framework must therefore reason about future load under genuine uncertainty rather than assume it away." data-zh="更深層的困難在於：當前迭代的正確時脈，取決於只有未來才會知曉的量。固定頻率下的解碼吞吐量主要由批次大小與 KV 快取總占用所決定，而兩者皆為移動標的：請求持續加入與離開批次，且每個存續請求的 KV 足跡會隨序列增長，每數次迭代成長一個區塊。要選定一個能滿足端到端期限的頻率，控制器必須知道批次與快取在請求整段剩餘範圍內的樣貌，而不僅是當下一刻。該範圍又取決於每個請求最終會生成多少 token——這在進入服務時是未知的，且如先前工作所示，難以精確預測。因此該框架必須在真實的不確定性下推理未來負載，而非把它假設掉。">The deeper difficulty is that the right clock for the current iteration depends on quantities that will only be known in the future. Decode throughput at a fixed frequency is governed chiefly by the batch size and by the total KV-cache occupancy, and both of these are moving targets: requests join and leave the batch continuously, and each surviving request's KV footprint grows by one block every few iterations as its sequence lengthens. To choose a frequency that will satisfy an end-to-end deadline, the controller must know how the batch and the cache will look across the entire remaining horizon of the request, not just at the current instant. That horizon in turn depends on how many tokens each request will ultimately generate — a quantity that is unknown at admission and, as prior work has shown, is difficult to predict precisely. The framework must therefore reason about future load under genuine uncertainty rather than assume it away.</span></p>
+
+  <h3><span class="i18n" data-en="1.5 Position relative to prior work" data-zh="1.5 相對於先前工作的定位">1.5 Position relative to prior work</span></h3>
+  <p><span class="i18n" data-en="Energy-aware GPU scheduling and DVFS are mature topics in general HPC, but LLM serving introduces structure that earlier systems did not exploit, and the few LLM-specific energy systems each left something on the table for an iteration-level, SLO-aware design. The table below positions these prior efforts along three columns: the first names the prior approach, the second states the mechanism it uses, and the third identifies the specific gap it leaves for throttLL'eM to close." data-zh="能耗感知的 GPU 排程與 DVFS 在一般 HPC 中已是成熟主題，但 LLM 服務引入了先前系統未曾利用的結構，而少數針對 LLM 的能耗系統，各自為「迭代級、SLO 感知」的設計留下了未盡之處。下表以三欄定位這些先前工作：第一欄列出先前方法，第二欄說明其採用的機制，第三欄指出它為 throttLL'eM 所留下的具體缺口。">Energy-aware GPU scheduling and DVFS are mature topics in general HPC, but LLM serving introduces structure that earlier systems did not exploit, and the few LLM-specific energy systems each left something on the table for an iteration-level, SLO-aware design. The table below positions these prior efforts along three columns: the first names the prior approach, the second states the mechanism it uses, and the third identifies the specific gap it leaves for throttLL'eM to close.</span></p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Prior approach" data-zh="先前方法">Prior approach</span></th>
+      <th><span class="i18n" data-en="What it does" data-zh="其作法">What it does</span></th>
+      <th><span class="i18n" data-en="What it left on the table" data-zh="未盡之處">What it left on the table</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="i18n" data-en="Reactive HW governor (nvidia-smi / driver)" data-zh="被動式硬體調速器（nvidia-smi / 驅動）">Reactive HW governor (nvidia-smi / driver)</span></td>
+        <td><span class="i18n" data-en="Adjusts clock from instantaneous utilization." data-zh="依瞬時使用率調整時脈。">Adjusts clock from instantaneous utilization.</span></td>
+        <td><span class="i18n" data-en="No model of the future batch or deadline; cannot guarantee an SLO set hundreds of iterations ahead." data-zh="沒有對未來批次或期限的模型；無法保證設定於數百次迭代後的 SLO。">No model of the future batch or deadline; cannot guarantee an SLO set hundreds of iterations ahead.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Zeus / batch-size energy tuning" data-zh="Zeus／批次大小能耗調校">Zeus / batch-size energy tuning</span></td>
+        <td><span class="i18n" data-en="Tunes a single power-limit / batch knob for training-style jobs." data-zh="為訓練式工作調校單一功率上限／批次旋鈕。">Tunes a single power-limit / batch knob for training-style jobs.</span></td>
+        <td><span class="i18n" data-en="Job-granular and SLO-free; does not track the per-iteration KV growth of autoregressive decode." data-zh="以整個工作為粒度且無 SLO；未追蹤自回歸解碼中逐迭代的 KV 成長。">Job-granular and SLO-free; does not track the per-iteration KV growth of autoregressive decode.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Orca / continuous (in-flight) batching" data-zh="Orca／連續（飛行中）批次">Orca / continuous (in-flight) batching</span></td>
+        <td><span class="i18n" data-en="Schedules at iteration granularity for throughput." data-zh="以迭代粒度排程以提升吞吐。">Schedules at iteration granularity for throughput.</span></td>
+        <td><span class="i18n" data-en="Treats the clock as fixed; energy is never a decision variable." data-zh="將時脈視為固定；能耗從不是決策變數。">Treats the clock as fixed; energy is never a decision variable.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Output-length predictors (e.g., S3, length-aware schedulers)" data-zh="輸出長度預測器（如 S3、長度感知排程器）">Output-length predictors (e.g., S3, length-aware schedulers)</span></td>
+        <td><span class="i18n" data-en="Predict generation length to pack the batch." data-zh="預測生成長度以裝填批次。">Predict generation length to pack the batch.</span></td>
+        <td><span class="i18n" data-en="Use length only for memory/admission; never close the loop onto a frequency setting." data-zh="僅將長度用於記憶體／准入；從未把迴圈收斂到頻率設定上。">Use length only for memory/admission; never close the loop onto a frequency setting.</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p><span class="i18n" data-en="throttLL'eM occupies the intersection these works leave empty: it predicts the future load of the decode loop at iteration granularity and uses that prediction to drive a frequency knob under an explicit SLO. The clock is treated as a controlled variable that the system deliberately sets to the lowest deadline-satisfying value." data-zh="throttLL'eM 佔據了這些工作所留下的交集空白：它以迭代粒度預測解碼迴圈的未來負載，並以該預測在明確的 SLO 下驅動頻率旋鈕。時脈被視為受控變數，由系統刻意設定為能滿足期限的最低值。">throttLL'eM occupies the intersection these works leave empty: it predicts the future load of the decode loop at iteration granularity and uses that prediction to drive a frequency knob under an explicit SLO. The clock is treated as a controlled variable that the system deliberately sets to the lowest deadline-satisfying value.</span></p>
+</section>
+
+<!-- ===================== CONTRIBUTIONS ===================== -->
+<section id="contributions">
+  <h2><span class="i18n" data-en="2. What throttLL'eM Contributes" data-zh="2. throttLL'eM 的貢獻">2. What throttLL'eM Contributes</span></h2>
+  <p><span class="i18n" data-en="Having established that boost-clock serving wastes nearly half its energy and that no reactive mechanism can recover it safely, the paper proposes a predictive control framework. Its contributions cluster into a characterization study, a pair of projection mechanisms, a learned performance model, and the closed-loop controller that ties them together. The cards below summarize each; the sections that follow develop them in turn." data-zh="在確立 boost 時脈服務浪費了近半能源、且任何被動機制都無法安全回收之後，論文提出了一套預測式控制框架。其貢獻可歸納為一項特性分析研究、一對投影機制、一個學習式效能模型，以及將它們串接起來的閉迴路控制器。下方卡片各自摘要，後續章節依序展開。">Having established that boost-clock serving wastes nearly half its energy and that no reactive mechanism can recover it safely, the paper proposes a predictive control framework. Its contributions cluster into a characterization study, a pair of projection mechanisms, a learned performance model, and the closed-loop controller that ties them together. The cards below summarize each; the sections that follow develop them in turn.</span></p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Characterization of the energy landscape" data-zh="能耗地景的特性分析">Characterization of the energy landscape</span></h4>
+      <p><span class="i18n" data-en="A systematic sweep of GPU frequency, batch size, KV-cache utilization, and tensor-parallel degree, quantifying how each shapes throughput, latency, power, and tokens-per-joule across three models spanning five engine configurations." data-zh="對 GPU 頻率、批次大小、KV 快取占用與張量並行度的系統性橫掃，量化各因素在涵蓋五種引擎配置的三個模型上如何形塑吞吐、延遲、功率與每焦耳 token 數。">A systematic sweep of GPU frequency, batch size, KV-cache utilization, and tensor-parallel degree, quantifying how each shapes throughput, latency, power, and tokens-per-joule across three models spanning five engine configurations.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Analytical KV & batch projection" data-zh="分析式 KV 與批次投影">Analytical KV & batch projection</span></h4>
+      <p><span class="i18n" data-en="A scoreboard-based mechanism that projects, for every future iteration, the total KV blocks and the batch size, with mean prediction errors of 2.26% and 0.19% respectively." data-zh="一種以記分板為基礎的機制，對每一次未來迭代投影出 KV 總區塊數與批次大小，平均預測誤差分別為 2.26% 與 0.19%。">A scoreboard-based mechanism that projects, for every future iteration, the total KV blocks and the batch size, with mean prediction errors of 2.26% and 0.19% respectively.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Learned iteration-level performance model" data-zh="學習式迭代級效能模型">Learned iteration-level performance model</span></h4>
+      <p><span class="i18n" data-en="A gradient-boosted decision tree mapping engine size, batch size, KV occupancy, and GPU frequency to iterations per second, with R&sup2; > 0.97 and a mean error under one iteration per second." data-zh="一個梯度提升決策樹，將引擎規模、批次大小、KV 占用與 GPU 頻率映射為每秒迭代數，R&sup2; > 0.97 且平均誤差低於每秒一次迭代。">A gradient-boosted decision tree mapping engine size, batch size, KV occupancy, and GPU frequency to iterations per second, with R&sup2; &gt; 0.97 and a mean error under one iteration per second.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="SLO-aware frequency + instance control" data-zh="SLO 感知的頻率＋實例控制">SLO-aware frequency + instance control</span></h4>
+      <p><span class="i18n" data-en="A controller that binary-searches the frequency range for the lowest SLO-satisfying clock per iteration, combined with autoscaling of tensor-parallel instances, delivering up to 43.8% energy reduction." data-zh="一個控制器，逐迭代以二分搜尋在頻率範圍內尋找能滿足 SLO 的最低時脈，並結合張量並行實例的自動擴縮，帶來高達 43.8% 的能耗下降。">A controller that binary-searches the frequency range for the lowest SLO-satisfying clock per iteration, combined with autoscaling of tensor-parallel instances, delivering up to 43.8% energy reduction.</span></p>
+    </div>
+  </div>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">43.8%</div><div class="label"><span class="i18n" data-en="max energy reduction vs Triton (with autoscaling)" data-zh="相對 Triton 最大能耗下降（含自動擴縮）">max energy reduction vs Triton (with autoscaling)</span></div></div>
+    <div class="metric-box"><div class="value">1.71&times;</div><div class="label"><span class="i18n" data-en="energy-efficiency gain (tokens/joule), minimum" data-zh="能效提升（tokens/joule），下限">energy-efficiency gain (tokens/joule), minimum</span></div></div>
+    <div class="metric-box"><div class="value">&gt;0.97</div><div class="label"><span class="i18n" data-en="R² of the performance model" data-zh="效能模型的 R²">R² of the performance model</span></div></div>
+    <div class="metric-box"><div class="value">2.26% / 0.19%</div><div class="label"><span class="i18n" data-en="KV / batch projection error" data-zh="KV／批次投影誤差">KV / batch projection error</span></div></div>
+  </div>
+
+  <div class="note"><span class="i18n" data-en="The key insight that organizes the design is that an SLO is a budget, and a fixed boost clock spends that budget all at once. If the system can predict how fast it needs to go to finish exactly on time, it can convert every unused millisecond of slack into saved energy by lowering the clock — but only if it can see the future shape of the workload, which is what the projection mechanisms supply." data-zh="貫穿整個設計的關鍵洞見是：SLO 是一份預算，而固定 boost 時脈會一次性花光這份預算。若系統能預測自己需要多快才能恰好準時完成，它便能透過降頻把每一毫秒未用的餘裕轉化為節省的能源——但前提是它能看見工作負載未來的形貌，而這正是投影機制所提供的。">The key insight that organizes the design is that an SLO is a budget, and a fixed boost clock spends that budget all at once. If the system can predict how fast it needs to go to finish exactly on time, it can convert every unused millisecond of slack into saved energy by lowering the clock — but only if it can see the future shape of the workload, which is what the projection mechanisms supply.</span></div>
+</section>
+
+<!-- ===================== ARCHITECTURE ===================== -->
+<section id="architecture">
+  <h2><span class="i18n" data-en="3. System Architecture" data-zh="3. 系統架構">3. System Architecture</span></h2>
+  <p><span class="i18n" data-en="throttLL'eM sits between the request stream and the inference backend as a predictive control layer. Each incoming query passes through a generation-length predictor, after which a scoreboard maintains the metadata needed to project future load. On every decode iteration the projected load is fed to a learned performance model, the model's throughput prediction is checked against the SLO inside the scheduler, and the controller then selects the lowest GPU frequency that still satisfies the deadline. The same projections drive an autoscaler that chooses how many tensor-parallel instances to run. The paper's overview figure, reproduced below, lays out these components and the data flowing between them." data-zh="throttLL'eM 作為一層預測式控制，位於請求串流與推論後端之間。每個進入的查詢先經過一個生成長度預測器，之後由一個記分板維護投影未來負載所需的中介資料。在每次解碼迭代上，投影出的負載被送入學習式效能模型，模型的吞吐預測在排程器內對照 SLO 檢查，控制器隨後選定仍能滿足期限的最低 GPU 頻率。同一組投影也驅動一個自動擴縮器，決定運行多少張量並行實例。下方重製的論文總覽圖呈現了這些元件及其間流動的資料。">throttLL'eM sits between the request stream and the inference backend as a predictive control layer. Each incoming query passes through a generation-length predictor, after which a scoreboard maintains the metadata needed to project future load. On every decode iteration the projected load is fed to a learned performance model, the model's throughput prediction is checked against the SLO inside the scheduler, and the controller then selects the lowest GPU frequency that still satisfies the deadline. The same projections drive an autoscaler that chooses how many tensor-parallel instances to run. The paper's overview figure, reproduced below, lays out these components and the data flowing between them.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2408.05235v1/x16.png" alt="Figure 6: throttLL'eM system overview">
+    <div class="fig-cap"><strong>Figure 6 (from paper):</strong> <span class="i18n" data-en="throttLL'eM overview. A query is tokenized and length-predicted; the scoreboard projects KV usage and batch size; the performance model M(E,KV,B,F) predicts throughput T; the scheduler checks SLO and KV violations; per-GPU throttling controllers pick the minimum frequency satisfying the SLOs, while autoscaling adjusts instance count from RPS." data-zh="throttLL'eM 總覽。查詢被切詞並預測長度；記分板投影 KV 占用與批次大小；效能模型 M(E,KV,B,F) 預測吞吐 T；排程器檢查 SLO 與 KV 違規；逐 GPU 的降頻控制器選取能滿足 SLO 的最低頻率，自動擴縮則依 RPS 調整實例數。">throttLL'eM overview. A query is tokenized and length-predicted; the scoreboard projects KV usage and batch size; the performance model M(E,KV,B,F) predicts throughput T; the scheduler checks SLO and KV violations; per-GPU throttling controllers pick the minimum frequency satisfying the SLOs, while autoscaling adjusts instance count from RPS.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="3.1 The control loop, end to end" data-zh="3.1 端到端控制迴圈">3.1 The control loop, end to end</span></h3>
+  <p><span class="i18n" data-en="The framework's logic is easiest to follow as a single pass through the loop, from a query arriving to a frequency being applied. The vertical flow below traces that path; each stage corresponds to one of the boxes in the overview figure and is developed in its own section later." data-zh="把該框架的邏輯視為穿過迴圈的一趟流程最易理解——從查詢到達到頻率被套用。下方的垂直流程描繪這條路徑；每個階段對應總覽圖中的一個方塊，並在後續各節展開。">The framework's logic is easiest to follow as a single pass through the loop, from a query arriving to a frequency being applied. The vertical flow below traces that path; each stage corresponds to one of the boxes in the overview figure and is developed in its own section later.</span></p>
+
+  <div class="vflow">
+    <div class="box blue"><h4><span class="i18n" data-en="① Generation-length prediction" data-zh="① 生成長度預測">① Generation-length prediction</span></h4><span class="i18n" data-en="On arrival, a query of input length |qᵢ| is assigned a predicted output length |rᵢ|̂. This sets the horizon over which the request will occupy the batch and grow the cache." data-zh="到達時，輸入長度為 |qᵢ| 的查詢被指派一個預測輸出長度 |rᵢ|̂。此值設定了該請求佔用批次、增長快取的時間範圍。">On arrival, a query of input length |qᵢ| is assigned a predicted output length |rᵢ|̂. This sets the horizon over which the request will occupy the batch and grow the cache.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="② Scoreboard & projection" data-zh="② 記分板與投影">② Scoreboard & projection</span></h4><span class="i18n" data-en="The scoreboard stores (scheduled iteration, input length, predicted length) per active request. From it the system computes, analytically, the KV-block vector and batch-size vector for every future iteration in roughly 2 ms." data-zh="記分板為每個活躍請求儲存（排定迭代、輸入長度、預測長度）。系統由此在約 2 ms 內，分析式地算出每一次未來迭代的 KV 區塊向量與批次大小向量。">The scoreboard stores (scheduled iteration, input length, predicted length) per active request. From it the system computes, analytically, the KV-block vector and batch-size vector for every future iteration in roughly 2 ms.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box orange"><h4><span class="i18n" data-en="③ Performance model M(E,KV,B,F)" data-zh="③ 效能模型 M(E,KV,B,F)">③ Performance model M(E,KV,B,F)</span></h4><span class="i18n" data-en="The projected KV and batch values, the engine size E, and a candidate frequency F are passed to a gradient-boosted tree that returns the predicted iterations per second, in roughly 3 ms on CPU." data-zh="投影出的 KV 與批次值、引擎規模 E 以及候選頻率 F 被送入一個梯度提升樹，其在 CPU 上約 3 ms 內回傳預測的每秒迭代數。">The projected KV and batch values, the engine size E, and a candidate frequency F are passed to a gradient-boosted tree that returns the predicted iterations per second, in roughly 3 ms on CPU.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box gray"><h4><span class="i18n" data-en="④ Scheduler admission check" data-zh="④ 排程器准入檢查">④ Scheduler admission check</span></h4><span class="i18n" data-en="Using a virtual scoreboard, the scheduler tests whether admitting the query keeps every active request within its KV capacity, its per-token deadline, and its end-to-end deadline. Failing checks send the query to a queue." data-zh="排程器以一個虛擬記分板，測試准入該查詢是否能讓每個活躍請求都維持在其 KV 容量、token 間期限與端到端期限之內。任一檢查失敗，查詢即被送入佇列。">Using a virtual scoreboard, the scheduler tests whether admitting the query keeps every active request within its KV capacity, its per-token deadline, and its end-to-end deadline. Failing checks send the query to a queue.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="⑤ Frequency throttling controller" data-zh="⑤ 降頻控制器">⑤ Frequency throttling controller</span></h4><span class="i18n" data-en="A binary search over [210, 1410] MHz finds the lowest frequency at which the model still predicts SLO compliance, and that clock is applied to the GPU for the next iteration." data-zh="在 [210, 1410] MHz 上的二分搜尋找出模型仍預測能滿足 SLO 的最低頻率，該時脈即套用到 GPU 以供下一次迭代使用。">A binary search over [210, 1410] MHz finds the lowest frequency at which the model still predicts SLO compliance, and that clock is applied to the GPU for the next iteration.</span></div>
+  </div>
+
+  <div class="note"><span class="i18n" data-en="The architectural consequence of this layout is that every component above operates on the CPU and out of the critical inference path: projection costs about 2 ms and model inference about 3 ms, against decode iterations of tens of milliseconds. The control layer therefore runs concurrently with the GPU, so the prediction-and-decide overhead is hidden rather than added to user-visible latency." data-zh="這種佈局的架構性後果是：上述每個元件皆在 CPU 上、且位於推論關鍵路徑之外運作：投影約 2 ms、模型推論約 3 ms，相對於數十毫秒的解碼迭代。因此這層控制與 GPU 並行運行，使「預測與決策」的開銷被遮蔽，而非疊加到使用者可見的延遲上。">The architectural consequence of this layout is that every component above operates on the CPU and out of the critical inference path: projection costs about 2 ms and model inference about 3 ms, against decode iterations of tens of milliseconds. The control layer therefore runs concurrently with the GPU, so the prediction-and-decide overhead is hidden rather than added to user-visible latency.</span></div>
+</section>
+
+<!-- ===================== PROJECTION ===================== -->
+<section id="projection">
+  <h2><span class="i18n" data-en="4. Projecting Future KV Usage and Batch Size" data-zh="4. 投影未來的 KV 占用與批次大小">4. Projecting Future KV Usage and Batch Size</span></h2>
+  <p><span class="i18n" data-en="The performance model can only be useful if it is fed the load the GPU will actually experience, not the load it experiences now. Because autoregressive decode follows a rigid arithmetic — each surviving request emits one token per iteration and its KV cache grows by one block every N tokens — the future load is not random but analytically computable from a small amount of per-request bookkeeping. This section explains how the scoreboard turns that bookkeeping into per-iteration vectors of KV occupancy and batch size." data-zh="效能模型唯有在被餵以 GPU 將真正經歷的負載（而非當下經歷的負載）時才有用。由於自回歸解碼遵循一套嚴格的算術——每個存續請求每次迭代生成一個 token，其 KV 快取每 N 個 token 增長一個區塊——未來負載並非隨機，而是可由少量的逐請求帳務分析式地算出。本節說明記分板如何把這些帳務轉化為逐迭代的 KV 占用與批次大小向量。">The performance model can only be useful if it is fed the load the GPU will actually experience, not the load it experiences now. Because autoregressive decode follows a rigid arithmetic — each surviving request emits one token per iteration and its KV cache grows by one block every N tokens — the future load is not random but analytically computable from a small amount of per-request bookkeeping. This section explains how the scoreboard turns that bookkeeping into per-iteration vectors of KV occupancy and batch size.</span></p>
+
+  <h3><span class="i18n" data-en="4.1 The scoreboard" data-zh="4.1 記分板">4.1 The scoreboard</span></h3>
+  <p><span class="i18n" data-en="The scoreboard is a small table holding one row per active request. Each row records the iteration at which the request was scheduled, its input length, and its predicted generation length. These three numbers are sufficient to reconstruct, for any future iteration, whether the request is still running and how many KV blocks it occupies — which is the entire basis of the projection." data-zh="記分板是一張小表，每個活躍請求一列。每列記錄該請求被排定的迭代、其輸入長度與其預測生成長度。這三個數字足以為任何未來迭代重建出：該請求是否仍在運行，以及它占用多少 KV 區塊——這便是整個投影的基礎。">The scoreboard is a small table holding one row per active request. Each row records the iteration at which the request was scheduled, its input length, and its predicted generation length. These three numbers are sufficient to reconstruct, for any future iteration, whether the request is still running and how many KV blocks it occupies — which is the entire basis of the projection.</span></p>
+
+  <h3><span class="i18n" data-en="4.2 Per-request KV projection" data-zh="4.2 逐請求 KV 投影">4.2 Per-request KV projection</span></h3>
+  <p><span class="i18n" data-en="For a request scheduled at iteration $s_i$ with input length $|q_i|$ and predicted generation length $\hat{|r_i|}$, the number of KV blocks it occupies at a future iteration $j$ is the total number of tokens it holds so far, divided by the block size $N$ and rounded up. The request holds blocks only while it is active — that is, from its scheduled iteration until it has emitted its predicted number of tokens — and contributes zero otherwise. The paper expresses this as a single closed form." data-zh="對於在迭代 $s_i$ 被排定、輸入長度為 $|q_i|$、預測生成長度為 $\hat{|r_i|}$ 的請求，其在未來迭代 $j$ 所占用的 KV 區塊數，等於它至此持有的 token 總數除以區塊大小 $N$ 後向上取整。該請求僅在活躍期間持有區塊——即自其排定迭代起，至生成完預測的 token 數為止——否則貢獻為零。論文將此表為單一封閉式。">For a request scheduled at iteration $s_i$ with input length $|q_i|$ and predicted generation length $\hat{|r_i|}$, the number of KV blocks it occupies at a future iteration $j$ is the total number of tokens it holds so far, divided by the block size $N$ and rounded up. The request holds blocks only while it is active — that is, from its scheduled iteration until it has emitted its predicted number of tokens — and contributes zero otherwise. The paper expresses this as a single closed form.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$KV^{q_i}[j] = \begin{cases} \left\lceil \dfrac{j - s_i + |q_i|}{N} \right\rceil & \text{if } s_i \leq j < s_i + \hat{|r_i|} \\[6pt] 0 & \text{otherwise} \end{cases}$$
+  </div>
+
+  <p><span class="i18n" data-en="The numerator $j - s_i + |q_i|$ is the running token count: the input tokens present from the start, plus one decoded token for every iteration elapsed since scheduling. Dividing by $N$ and taking the ceiling converts that token count into the integer number of paged-attention blocks the request currently pins. Because the expression is exact arithmetic rather than a learned estimate, its only source of error is the predicted length $\hat{|r_i|}$, which controls the upper edge of the active window; a length misprediction shifts the moment the request stops contributing blocks, but does not perturb the per-iteration growth rate." data-zh="分子 $j - s_i + |q_i|$ 是累計 token 數：自始即在的輸入 token，加上自排定以來每經過一次迭代所解出的一個 token。除以 $N$ 並取上整，便把該 token 數轉為該請求當前釘住的分頁注意力區塊整數。由於此式是精確算術而非學習式估計，其唯一誤差來源是預測長度 $\hat{|r_i|}$，它控制活躍視窗的上緣；長度誤判會挪移該請求停止貢獻區塊的時刻，但不會擾動逐迭代的成長率。">The numerator $j - s_i + |q_i|$ is the running token count: the input tokens present from the start, plus one decoded token for every iteration elapsed since scheduling. Dividing by $N$ and taking the ceiling converts that token count into the integer number of paged-attention blocks the request currently pins. Because the expression is exact arithmetic rather than a learned estimate, its only source of error is the predicted length $\hat{|r_i|}$, which controls the upper edge of the active window; a length misprediction shifts the moment the request stops contributing blocks, but does not perturb the per-iteration growth rate.</span></p>
+
+  <h3><span class="i18n" data-en="4.3 Aggregating into system-wide vectors" data-zh="4.3 彙總為全系統向量">4.3 Aggregating into system-wide vectors</span></h3>
+  <p><span class="i18n" data-en="The total KV occupancy at iteration $j$ is simply the sum of the per-request occupancies over all active requests, and the batch size at iteration $j$ is the count of requests whose active window contains $j$. Summing Equation 1 over the scoreboard therefore yields the two vectors the performance model needs." data-zh="迭代 $j$ 的 KV 總占用，就是對所有活躍請求逐請求占用的加總；而迭代 $j$ 的批次大小，是其活躍視窗包含 $j$ 的請求計數。因此在記分板上對式 (1) 求和，即得到效能模型所需的兩個向量。">The total KV occupancy at iteration $j$ is simply the sum of the per-request occupancies over all active requests, and the batch size at iteration $j$ is the count of requests whose active window contains $j$. Summing Equation 1 over the scoreboard therefore yields the two vectors the performance model needs.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(2)</span>
+    $$KV[j] = \sum_{\forall q_i} KV^{q_i}[j], \qquad B[j] = \bigl|\{\, q_i : s_i \leq j < s_i + \hat{|r_i|} \,\}\bigr|$$
+  </div>
+
+  <p><span class="i18n" data-en="These vectors are the workload as the GPU will see it across the remaining horizon. The paper reports that this analytical projection achieves a mean absolute error of 2.26% on KV occupancy and 0.19% on batch size — accurate enough that the dominant remaining uncertainty is the generation-length prediction feeding it, not the projection arithmetic itself." data-zh="這些向量就是 GPU 在其剩餘範圍內所將見到的工作負載。論文報告此分析式投影在 KV 占用上達到 2.26%、在批次大小上達到 0.19% 的平均絕對誤差——已準確到剩餘的主導不確定性是送入它的生成長度預測，而非投影算術本身。">These vectors are the workload as the GPU will see it across the remaining horizon. The paper reports that this analytical projection achieves a mean absolute error of 2.26% on KV occupancy and 0.19% on batch size — accurate enough that the dominant remaining uncertainty is the generation-length prediction feeding it, not the projection arithmetic itself.</span></p>
+</section>
+
+<!-- ===================== PERFORMANCE MODEL ===================== -->
+<section id="model">
+  <h2><span class="i18n" data-en="5. The Iteration-Level Performance Model" data-zh="5. 迭代級效能模型">5. The Iteration-Level Performance Model</span></h2>
+  <p><span class="i18n" data-en="The projections describe the load; the performance model translates load and a candidate frequency into the speed the GPU will actually deliver. This learned function is the heart of the framework, because it is what allows the controller to ask the counterfactual question — how fast would this iteration run at frequency F? — without running the iteration. The figure below illustrates the empirical relationship the model must capture." data-zh="投影描述了負載；效能模型則把負載與候選頻率轉譯為 GPU 實際能交付的速度。這個學習式函數是整個框架的核心，因為它讓控制器能在不真正執行迭代的情況下提出反事實問題——這次迭代在頻率 F 下會跑多快？下圖描繪了模型必須捕捉的經驗關係。">The projections describe the load; the performance model translates load and a candidate frequency into the speed the GPU will actually deliver. This learned function is the heart of the framework, because it is what allows the controller to ask the counterfactual question — how fast would this iteration run at frequency F? — without running the iteration. The figure below illustrates the empirical relationship the model must capture.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2408.05235v1/x8.png" alt="Figure 3a: throughput in iterations per second versus KV blocks, by batch size">
+    <div class="fig-cap"><strong>Figure 3a (from paper):</strong> <span class="i18n" data-en="Iteration throughput (IPS) falls monotonically as KV-cache occupancy grows, for each batch size. The decline is smooth and regular — exactly the kind of structure a regression model can learn from a modest number of samples." data-zh="對每個批次大小而言，迭代吞吐（IPS）隨 KV 快取占用增長而單調下降。此下降平滑而規律——正是回歸模型可從不多的樣本中學得的那種結構。">Iteration throughput (IPS) falls monotonically as KV-cache occupancy grows, for each batch size. The decline is smooth and regular — exactly the kind of structure a regression model can learn from a modest number of samples.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.1 Inputs, output, and model class" data-zh="5.1 輸入、輸出與模型類別">5.1 Inputs, output, and model class</span></h3>
+  <p><span class="i18n" data-en="The model $\mathcal{M}$ is a gradient-boosted decision tree — an ensemble of shallow trees in which each successive tree corrects the residual error of the ensemble so far. This class is chosen because the target surface is smooth and low-dimensional but nonlinear, with saturation effects (throughput flattens at high frequency) and interaction effects (the frequency at which throughput saturates depends on batch size) that a single linear model cannot represent. It takes four inputs and returns one number." data-zh="模型 $\mathcal{M}$ 是一個梯度提升決策樹——由淺樹構成的集成，其中每棵後續樹修正目前集成的殘差。選此類別是因為目標曲面平滑、低維但非線性，帶有飽和效應（吞吐在高頻飽和）與交互效應（吞吐飽和所在的頻率取決於批次大小），單一線性模型無法表達。它接收四項輸入、回傳一個數字。">The model $\mathcal{M}$ is a gradient-boosted decision tree — an ensemble of shallow trees in which each successive tree corrects the residual error of the ensemble so far. This class is chosen because the target surface is smooth and low-dimensional but nonlinear, with saturation effects (throughput flattens at high frequency) and interaction effects (the frequency at which throughput saturates depends on batch size) that a single linear model cannot represent. It takes four inputs and returns one number.</span></p>
+
+  <div class="math-block">
+    $$T = \mathcal{M}(E, KV, B, F)$$
+  </div>
+
+  <p><span class="i18n" data-en="Here $E$ is the engine size (the tensor-parallel degree of the served instance), $KV$ is the projected KV occupancy from Equation 2, $B$ is the projected batch size, $F$ is the candidate GPU frequency, and $T$ is the predicted throughput in iterations per second. The presence of $F$ as an explicit input is what makes the model a control tool rather than a monitor: the controller evaluates $\mathcal{M}$ repeatedly at different values of $F$ to discover the throughput-versus-frequency curve for the current load." data-zh="此處 $E$ 是引擎規模（所服務實例的張量並行度），$KV$ 是式 (2) 投影出的 KV 占用，$B$ 是投影批次大小，$F$ 是候選 GPU 頻率，$T$ 是預測吞吐（每秒迭代數）。以 $F$ 作為顯式輸入，正是使該模型成為控制工具而非監測器的關鍵：控制器在不同 $F$ 值上反覆評估 $\mathcal{M}$，以探知當前負載下的吞吐對頻率曲線。">Here $E$ is the engine size (the tensor-parallel degree of the served instance), $KV$ is the projected KV occupancy from Equation 2, $B$ is the projected batch size, $F$ is the candidate GPU frequency, and $T$ is the predicted throughput in iterations per second. The presence of $F$ as an explicit input is what makes the model a control tool rather than a monitor: the controller evaluates $\mathcal{M}$ repeatedly at different values of $F$ to discover the throughput-versus-frequency curve for the current load.</span></p>
+
+  <h3><span class="i18n" data-en="5.2 Why a gradient-boosted tree" data-zh="5.2 為何選用梯度提升樹">5.2 Why a gradient-boosted tree</span></h3>
+  <p><span class="i18n" data-en="Gradient boosting builds its predictor additively: it starts from a constant prediction and then fits each new shallow tree to the residual — the gap between the current ensemble's output and the measured throughput — so that every tree specializes in the error the previous trees could not capture. The plain idea is that a sum of many weak, depth-limited trees approximates a smooth nonlinear surface far better than any single tree, while each tree stays cheap to evaluate. It is chosen here over a neural network because the input is only four-dimensional and the training set is a modest characterization sweep, a regime where boosted trees fit accurately without the data volume a network would demand; it is chosen over linear regression because the throughput surface saturates and its features interact, which a linear model cannot represent. Its weakness is that a tree ensemble extrapolates poorly outside the sampled envelope, so the model is only trusted inside the frequency and load range covered by the sweep, and the controller's binary search is confined to that same [210, 1410] MHz interval." data-zh="梯度提升以加法方式建構其預測器：先從一個常數預測出發，再讓每棵新的淺樹去擬合殘差——當前集成輸出與實測吞吐之間的差距——使每棵樹專注於前面各樹未能捕捉的誤差。其樸素想法是：許多弱的、深度受限的樹之和，能比任何單一樹更好地逼近平滑的非線性曲面，而每棵樹的評估仍很便宜。此處選它而非神經網路，是因為輸入僅四維、訓練集只是不大的特性分析橫掃——在此情境下提升樹能準確擬合，而無需網路所要求的資料量；選它而非線性回歸，則因吞吐曲面會飽和且特徵彼此交互，線性模型無法表達。其弱點是樹集成在取樣範圍之外外推不佳，因此模型僅在橫掃所涵蓋的頻率與負載範圍內被信任，控制器的二分搜尋亦被限制在同一個 [210, 1410] MHz 區間。">Gradient boosting builds its predictor additively: it starts from a constant prediction and then fits each new shallow tree to the residual — the gap between the current ensemble's output and the measured throughput — so that every tree specializes in the error the previous trees could not capture. The plain idea is that a sum of many weak, depth-limited trees approximates a smooth nonlinear surface far better than any single tree, while each tree stays cheap to evaluate. It is chosen here over a neural network because the input is only four-dimensional and the training set is a modest characterization sweep, a regime where boosted trees fit accurately without the data volume a network would demand; it is chosen over linear regression because the throughput surface saturates and its features interact, which a linear model cannot represent. Its weakness is that a tree ensemble extrapolates poorly outside the sampled envelope, so the model is only trusted inside the frequency and load range covered by the sweep, and the controller's binary search is confined to that same [210, 1410] MHz interval.</span></p>
+  <p><span class="i18n" data-en="The condensed sketch below shows the training loop and the per-iteration inference call as the controller uses them. Training fits the ensemble on the characterization sweep; inference is the single millisecond-scale evaluation the controller invokes for each candidate frequency during admission and throttling." data-zh="下方的精簡草圖展示訓練迴圈，以及控制器所使用的逐迭代推論呼叫。訓練在特性分析橫掃上擬合集成；推論則是控制器在准入與降頻時，對每個候選頻率所發起的單次毫秒級評估。">The condensed sketch below shows the training loop and the per-iteration inference call as the controller uses them. Training fits the ensemble on the characterization sweep; inference is the single millisecond-scale evaluation the controller invokes for each candidate frequency during admission and throttling.</span></p>
+  <pre><code><span class="cm"># Training: fit M on the characterization sweep</span>
+X = features(<span class="st">E</span>, <span class="st">KV</span>, <span class="st">B</span>, <span class="st">F</span>)   <span class="cm"># 4-D inputs from the sweep</span>
+y = measured_ips                 <span class="cm"># target: iterations/sec</span>
+M = <span class="fn">GradientBoostingRegressor</span>(n_estimators=..., max_depth=3)
+M.<span class="fn">fit</span>(X, y)                     <span class="cm"># each tree fits the running residual</span>
+
+<span class="cm"># Inference: called once per candidate frequency, ~3 ms on CPU</span>
+<span class="kw">def</span> <span class="fn">predict_ips</span>(E, KV, B, F):
+    <span class="kw">return</span> M.<span class="fn">predict</span>([[E, KV, B, F]])[<span class="nu">0</span>]   <span class="cm"># off the GPU critical path</span></code></pre>
+  <p><span class="i18n" data-en="Because each inference is a handful of shallow-tree traversals on the CPU, the controller can afford to evaluate the model at every step of a binary search over frequency without perturbing the decode loop running on the GPU. This cheapness is what makes the counterfactual query practical inside a live serving system." data-zh="由於每次推論不過是 CPU 上少量淺樹的走訪，控制器得以在對頻率的二分搜尋的每一步都評估模型，而不擾動在 GPU 上運行的解碼迴圈。正是這份廉價，使得在線上服務系統中進行反事實查詢成為可行。">Because each inference is a handful of shallow-tree traversals on the CPU, the controller can afford to evaluate the model at every step of a binary search over frequency without perturbing the decode loop running on the GPU. This cheapness is what makes the counterfactual query practical inside a live serving system.</span></p>
+
+  <h3><span class="i18n" data-en="5.3 Accuracy" data-zh="5.3 準確度">5.3 Accuracy</span></h3>
+  <p><span class="i18n" data-en="The model is trained on the characterization sweep and evaluated per configuration. The table summarizes the reported fit quality under the 90/10 train/test split; the columns give the standard regression diagnostics, where R² near one indicates the model explains nearly all variance in throughput, and the absolute errors are stated in iterations per second so they can be compared directly to a decode rate of tens of iterations per second. The paper also reports a sparse 10/90 split — training on only a tenth of the sweep — under which the fit degrades only modestly to R²=0.96, MAPE=6.5%, and MAE=1.01 IPS, evidence that the surface is learnable from few samples." data-zh="模型在特性分析橫掃上訓練、逐配置評估。下表彙整在 90/10 訓練／測試切分下所報告的擬合品質；各欄為標準回歸診斷，R² 趨近於一表示模型解釋了吞吐中幾乎全部的變異，而絕對誤差以每秒迭代數表述，便於直接與每秒數十次迭代的解碼速率比較。論文亦報告了稀疏的 10/90 切分——僅以橫掃的十分之一訓練——其擬合僅小幅退化至 R²=0.96、MAPE=6.5%、MAE=1.01 IPS，佐證該曲面可從少量樣本學得。">The model is trained on the characterization sweep and evaluated per configuration. The table summarizes the reported fit quality under the 90/10 train/test split; the columns give the standard regression diagnostics, where R² near one indicates the model explains nearly all variance in throughput, and the absolute errors are stated in iterations per second so they can be compared directly to a decode rate of tens of iterations per second. The paper also reports a sparse 10/90 split — training on only a tenth of the sweep — under which the fit degrades only modestly to R²=0.96, MAPE=6.5%, and MAE=1.01 IPS, evidence that the surface is learnable from few samples.</span></p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Metric" data-zh="指標">Metric</span></th>
+      <th><span class="i18n" data-en="Reported value (90/10 split)" data-zh="報告值（90/10 切分）">Reported value (90/10 split)</span></th>
+      <th><span class="i18n" data-en="Reading" data-zh="解讀">Reading</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>R²</td><td>&gt; 0.97 (often &gt; 0.98)</td><td><span class="i18n" data-en="Near-perfect explanation of throughput variance across the operating range." data-zh="在整個操作範圍內，對吞吐變異近乎完美的解釋。">Near-perfect explanation of throughput variance across the operating range.</span></td></tr>
+      <tr><td>MAPE</td><td>&le; 5.8%</td><td><span class="i18n" data-en="Worst-case mean percentage error stays within a single-digit band." data-zh="最差情況的平均百分比誤差維持在個位數區間內。">Worst-case mean percentage error stays within a single-digit band.</span></td></tr>
+      <tr><td>MAE</td><td>&lt; 1 IPS</td><td><span class="i18n" data-en="On average the model misses true throughput by less than one iteration per second." data-zh="平均而言，模型對真實吞吐的偏離小於每秒一次迭代。">On average the model misses true throughput by less than one iteration per second.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Timing drift" data-zh="時序漂移">Timing drift</span></td><td>0.43 ms / iter</td><td><span class="i18n" data-en="Accumulated per-iteration timing error is small enough that horizon estimates stay reliable." data-zh="累計的逐迭代時序誤差小到足以使範圍估計保持可靠。">Accumulated per-iteration timing error is small enough that horizon estimates stay reliable.</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3><span class="i18n" data-en="5.3 From throughput to a deadline test" data-zh="5.3 從吞吐到期限檢驗">5.3 From throughput to a deadline test</span></h3>
+  <p><span class="i18n" data-en="The performance model returns throughput, but the SLO is stated as a deadline, so the controller converts one into the other by integrating predicted speed over the request's remaining iterations. The time between tokens at iteration $j$ is the reciprocal of the predicted throughput there, and the remaining time until a request finishes is the cumulative sum of those per-iteration times from the current iteration $k$ to the iteration $j$ at which the request will complete." data-zh="效能模型回傳的是吞吐，但 SLO 是以期限陳述，因此控制器透過對請求剩餘迭代上的預測速度積分，把一者轉換為另一者。迭代 $j$ 處的 token 間時間，是該處預測吞吐的倒數；而距某請求完成的剩餘時間，是從當前迭代 $k$ 到該請求完成所在迭代 $j$ 之間，這些逐迭代時間的累計和。">The performance model returns throughput, but the SLO is stated as a deadline, so the controller converts one into the other by integrating predicted speed over the request's remaining iterations. The time between tokens at iteration $j$ is the reciprocal of the predicted throughput there, and the remaining time until a request finishes is the cumulative sum of those per-iteration times from the current iteration $k$ to the iteration $j$ at which the request will complete.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(3)</span>
+    $$\hat{TR}_j = \sum_{i=k}^{j} T'_i = \sum_{i=k}^{j} \frac{1}{T_i}, \qquad \forall q_i : \hat{TR}_l + t_{cur} < t_{dead}(q_i)$$
+  </div>
+
+  <p><span class="i18n" data-en="The right-hand condition is the end-to-end SLO test: for every request, the estimated remaining time to its completion iteration $l$, added to the current wall-clock time $t_{cur}$, must fall before its deadline $t_{dead}$. Because $T_i$ depends on the candidate frequency through the performance model, lowering the frequency raises every $T'_i$ and pushes the projected finish time later; the controller's task is to find the lowest frequency at which this inequality still holds for all active requests. This makes the deadline test directly differentiable with respect to the knob the controller actually turns." data-zh="右側的條件即端到端 SLO 檢驗：對每個請求，至其完成迭代 $l$ 的估計剩餘時間，加上當前牆鐘時間 $t_{cur}$，必須落在其期限 $t_{dead}$ 之前。由於 $T_i$ 透過效能模型依賴候選頻率，降頻會抬高每個 $T'_i$ 並把預測完成時間往後推；控制器的任務是找出此不等式對所有活躍請求仍成立的最低頻率。這使期限檢驗對控制器實際旋轉的旋鈕直接可控。">The right-hand condition is the end-to-end SLO test: for every request, the estimated remaining time to its completion iteration $l$, added to the current wall-clock time $t_{cur}$, must fall before its deadline $t_{dead}$. Because $T_i$ depends on the candidate frequency through the performance model, lowering the frequency raises every $T'_i$ and pushes the projected finish time later; the controller's task is to find the lowest frequency at which this inequality still holds for all active requests. This makes the deadline test directly differentiable with respect to the knob the controller actually turns.</span></p>
+</section>
+
+<!-- ===================== CONTROLLER ===================== -->
+<section id="controller">
+  <h2><span class="i18n" data-en="6. Frequency Control, Admission, and Autoscaling" data-zh="6. 頻率控制、准入與自動擴縮">6. Frequency Control, Admission, and Autoscaling</span></h2>
+  <p><span class="i18n" data-en="With a model that predicts throughput at any candidate frequency and a deadline test built on it, the remaining problem is a search: find the cheapest clock that keeps every promise. throttLL'eM solves this with a per-iteration binary search, guards it with an admission controller that prevents over-commitment, and stretches the energy savings further with an instance-level autoscaler. This section covers all three." data-zh="有了能在任意候選頻率上預測吞吐的模型、以及建於其上的期限檢驗，剩下的問題便是一次搜尋：找出能信守所有承諾的最省時脈。throttLL'eM 以逐迭代的二分搜尋求解此問題，以一個防止過度承諾的准入控制器加以守護，並以一個實例級的自動擴縮器把節能再向前推進。本節涵蓋這三者。">With a model that predicts throughput at any candidate frequency and a deadline test built on it, the remaining problem is a search: find the cheapest clock that keeps every promise. throttLL'eM solves this with a per-iteration binary search, guards it with an admission controller that prevents over-commitment, and stretches the energy savings further with an instance-level autoscaler. This section covers all three.</span></p>
+
+  <h3><span class="i18n" data-en="6.1 Binary search for the minimum frequency" data-zh="6.1 二分搜尋最低頻率">6.1 Binary search for the minimum frequency</span></h3>
+  <p><span class="i18n" data-en="Throughput rises monotonically with frequency, so the set of frequencies that satisfy the deadline test forms a contiguous upper interval; the cheapest acceptable clock is its lower boundary. A monotone interval is the textbook setting for binary search, which finds that boundary in a logarithmic number of model evaluations rather than scanning all 80 discrete frequency steps. The controller searches the supported range from the GPU's idle floor to its boost ceiling in 15 MHz increments." data-zh="吞吐隨頻率單調上升，因此滿足期限檢驗的頻率集合構成一段連續的上區間；最省的可接受時脈即其下界。單調區間正是二分搜尋的教科書場景，它以對數次的模型評估找到該下界，而非掃過全部 80 個離散頻率步階。控制器在 GPU 由閒置下限到 boost 上限的支援範圍內、以 15 MHz 為增量進行搜尋。">Throughput rises monotonically with frequency, so the set of frequencies that satisfy the deadline test forms a contiguous upper interval; the cheapest acceptable clock is its lower boundary. A monotone interval is the textbook setting for binary search, which finds that boundary in a logarithmic number of model evaluations rather than scanning all 80 discrete frequency steps. The controller searches the supported range from the GPU's idle floor to its boost ceiling in 15 MHz increments.</span></p>
+
+  <p><span class="i18n" data-en="The procedure below is a condensed sketch of the per-iteration decision. It expresses the search in terms of the deadline test of Equation 3, evaluated through the performance model at each trial frequency." data-zh="以下程序是逐迭代決策的精簡示意。它以式 (3) 的期限檢驗來表達搜尋，並在每個試探頻率上透過效能模型評估。">The procedure below is a condensed sketch of the per-iteration decision. It expresses the search in terms of the deadline test of Equation 3, evaluated through the performance model at each trial frequency.</span></p>
+
+  <pre><code><span class="cm"># Condensed: per-iteration frequency selection (body simplified)</span>
+<span class="kw">def</span> <span class="fn">select_frequency</span>(scoreboard, E, F_min=<span class="nu">210</span>, F_max=<span class="nu">1410</span>):
+    KV, B = <span class="fn">project</span>(scoreboard)        <span class="cm"># Eq. 1-2, future load vectors</span>
+    lo, hi = F_min, F_max
+    <span class="kw">while</span> hi - lo &gt; STEP:               <span class="cm"># STEP = 15 MHz</span>
+        F = (lo + hi) // <span class="nu">2</span>
+        T = M(E, KV, B, F)            <span class="cm"># predicted IPS at trial clock</span>
+        <span class="kw">if</span> <span class="fn">slo_satisfied</span>(T, scoreboard):  <span class="cm"># Eq. 3 holds for all q_i</span>
+            hi = F                    <span class="cm"># this clock works -&gt; try lower</span>
+        <span class="kw">else</span>:
+            lo = F                    <span class="cm"># too slow -&gt; need higher clock</span>
+    <span class="kw">return</span> hi                          <span class="cm"># lowest SLO-satisfying frequency</span></code></pre>
+
+  <p><span class="i18n" data-en="The condensed routine omits the boundary handling and the bypass path, but the deep behavior worth noting is the fallback: if any request has already fallen behind its deadline — what the paper terms a lost request — the search is skipped entirely and the GPU is driven to its boost frequency, since at that point the only useful action is to recover as fast as the hardware permits. Energy minimization is suspended precisely when correctness is at risk, which keeps the optimizer from ever trading an SLO violation for joules." data-zh="此精簡程序略去了邊界處理與旁路路徑，但值得注意的深層行為是其後備機制：若任何請求已落後於其期限——論文稱之為「失落請求」——搜尋將被完全跳過，GPU 被驅動至其 boost 頻率，因為此時唯一有用的動作，是以硬體所允許的最快速度恢復。能耗最小化恰在正確性受威脅時被暫停，這使優化器絕不會以 SLO 違規換取焦耳。">The condensed routine omits the boundary handling and the bypass path, but the deep behavior worth noting is the fallback: if any request has already fallen behind its deadline — what the paper terms a lost request — the search is skipped entirely and the GPU is driven to its boost frequency, since at that point the only useful action is to recover as fast as the hardware permits. Energy minimization is suspended precisely when correctness is at risk, which keeps the optimizer from ever trading an SLO violation for joules.</span></p>
+
+  <h3><span class="i18n" data-en="6.2 Admission control via a virtual scoreboard" data-zh="6.2 經由虛擬記分板的准入控制">6.2 Admission control via a virtual scoreboard</span></h3>
+  <p><span class="i18n" data-en="Before a queued request is admitted, the scheduler must confirm that adding it will not push any existing request past its deadline or exceed the KV-cache capacity. It does this by speculatively appending the candidate to a copy of the scoreboard — the virtual scoreboard — and re-running the projection and deadline test on that hypothetical state. If every active request, including the candidate, still clears its KV-capacity check, its per-token deadline, and its end-to-end deadline, the request is admitted; otherwise it remains queued. This what-if evaluation lets the system reason about the consequences of a decision before committing to it." data-zh="在一個排隊的請求被准入前，排程器必須確認加入它不會把任何既有請求推過其期限、亦不會超出 KV 快取容量。其作法是把候選者推測性地附加到記分板的一份副本上——即虛擬記分板——並在該假想狀態上重跑投影與期限檢驗。若每個活躍請求（含候選者）仍通過其 KV 容量檢查、token 間期限與端到端期限，該請求即被准入；否則仍留在佇列中。這種 what-if 評估讓系統能在承諾一項決策之前，先推理其後果。">Before a queued request is admitted, the scheduler must confirm that adding it will not push any existing request past its deadline or exceed the KV-cache capacity. It does this by speculatively appending the candidate to a copy of the scoreboard — the virtual scoreboard — and re-running the projection and deadline test on that hypothetical state. If every active request, including the candidate, still clears its KV-capacity check, its per-token deadline, and its end-to-end deadline, the request is admitted; otherwise it remains queued. This what-if evaluation lets the system reason about the consequences of a decision before committing to it.</span></p>
+
+  <h3><span class="i18n" data-en="6.3 Instance autoscaling" data-zh="6.3 實例自動擴縮">6.3 Instance autoscaling</span></h3>
+  <p><span class="i18n" data-en="Frequency throttling lowers the energy of a fixed instance, but a second lever is how many instances of what size to run at all. Every ten seconds the autoscaler estimates the minimum tensor-parallel degree — chosen from 1, 2, 4, or 8 — that can absorb the current request rate, and provisions accordingly. Because spinning up a new instance takes more than twenty seconds, the system uses shadow instancing to prepare a replacement ahead of demand and a grace period before downscaling, so that brief lulls do not trigger a teardown that would have to be reversed moments later. The autoscaler and the throttling controller compound: scaling sets the coarse capacity, and throttling trims the residual slack within whatever instances are running." data-zh="降頻降低了固定實例的能耗，但第二個調節維度是究竟要運行多少個、何種規模的實例。自動擴縮器每十秒估計能吸收當前請求率的最低張量並行度——自 1、2、4、8 中選取——並據以配置。由於啟動一個新實例需逾二十秒，系統以影子實例在需求之前預備替補、並在降規前設置寬限期，使短暫的低谷不致觸發稍後又須反轉的拆除。自動擴縮與降頻控制相互加乘：擴縮設定粗粒度容量，降頻則在運行中的實例內修剪殘餘餘裕。">Frequency throttling lowers the energy of a fixed instance, but a second lever is how many instances of what size to run at all. Every ten seconds the autoscaler estimates the minimum tensor-parallel degree — chosen from 1, 2, 4, or 8 — that can absorb the current request rate, and provisions accordingly. Because spinning up a new instance takes more than twenty seconds, the system uses shadow instancing to prepare a replacement ahead of demand and a grace period before downscaling, so that brief lulls do not trigger a teardown that would have to be reversed moments later. The autoscaler and the throttling controller compound: scaling sets the coarse capacity, and throttling trims the residual slack within whatever instances are running.</span></p>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section id="results">
+  <h2><span class="i18n" data-en="7. Evaluation" data-zh="7. 評估">7. Evaluation</span></h2>
+  <p><span class="i18n" data-en="The framework is evaluated on a p4d.24xlarge AWS instance with eight NVIDIA A100 40 GB GPUs, serving Llama3-8B, Llama2-13B at three tensor-parallel degrees, and Llama3-70B, replaying an Azure LLM inference trace against the NVIDIA Triton server as the baseline. The two questions the evaluation must answer are whether the energy savings are real and whether they come at the cost of the SLOs they were supposed to respect. The figures below address both." data-zh="該框架在一台搭載八張 NVIDIA A100 40 GB GPU 的 p4d.24xlarge AWS 實例上評估，服務 Llama3-8B、三種張量並行度的 Llama2-13B 與 Llama3-70B，以 NVIDIA Triton 伺服器為基線重放一條 Azure LLM 推論 trace。評估須回答的兩個問題是：節能是否真實，以及它是否以本應遵守的 SLO 為代價。下方各圖回答了兩者。">The framework is evaluated on a p4d.24xlarge AWS instance with eight NVIDIA A100 40 GB GPUs, serving Llama3-8B, Llama2-13B at three tensor-parallel degrees, and Llama3-70B, replaying an Azure LLM inference trace against the NVIDIA Triton server as the baseline. The two questions the evaluation must answer are whether the energy savings are real and whether they come at the cost of the SLOs they were supposed to respect. The figures below address both.</span></p>
+
+  <h3><span class="i18n" data-en="7.1 Latency stays inside the SLO" data-zh="7.1 延遲維持在 SLO 之內">7.1 Latency stays inside the SLO</span></h3>
+  <p><span class="i18n" data-en="The first concern with any energy-saving scheme is that it might quietly degrade service. The figure reports end-to-end latency distributions for Triton and for throttLL'eM across the five engine configurations, with the per-configuration deadline marked. Across every configuration that possessed slack the latency distributions remain below their deadlines, confirming that the lowered clocks did not push requests past the contract — the slack the controller spent was genuinely surplus. The lone exception is the most resource-constrained configuration, Llama2-13B at TP1, which lacks the headroom to both serve the trace and lower the clock and is discussed in the caveat below." data-zh="任何節能方案的首要顧慮，是它可能默默地降低服務品質。下圖呈現 Triton 與 throttLL'eM 在五種引擎配置下的端到端延遲分布，並標出各配置的期限。在每個擁有餘裕的配置中，延遲分布皆維持在其期限之下，確認降下的時脈並未把請求推過契約——控制器所花掉的餘裕確實是多餘的。唯一的例外是資源最受限的配置，即 Llama2-13B TP1，其缺乏同時服務該 trace 並降頻的餘裕，詳見下方的附帶說明。">The first concern with any energy-saving scheme is that it might quietly degrade service. The figure reports end-to-end latency distributions for Triton and for throttLL'eM across the five engine configurations, with the per-configuration deadline marked. Across every configuration that possessed slack the latency distributions remain below their deadlines, confirming that the lowered clocks did not push requests past the contract — the slack the controller spent was genuinely surplus. The lone exception is the most resource-constrained configuration, Llama2-13B at TP1, which lacks the headroom to both serve the trace and lower the clock and is discussed in the caveat below.</span></p>
+
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2408.05235v1/x20.png" alt="Figure 8a: end-to-end latency comparison, Triton versus throttLL'eM">
+    <div class="fig-cap"><strong>Figure 8a (from paper):</strong> <span class="i18n" data-en="End-to-end latency distributions for Triton versus throttLL'eM across 8B-TP1, 13B-TP1/TP2/TP4, and 70B-TP8. The dashed line marks each configuration's E2E deadline; throttLL'eM's distributions sit below the deadline despite running at substantially lower clocks, with the exception of the resource-constrained 13B-TP1 case noted in the caveat." data-zh="Triton 與 throttLL'eM 在 8B-TP1、13B-TP1/TP2/TP4 與 70B-TP8 上的端到端延遲分布。虛線標示各配置的端到端期限；throttLL'eM 的分布在時脈大幅降低下仍位於期限之下，唯資源受限的 13B-TP1 例外（見附帶說明）。">End-to-end latency distributions for Triton versus throttLL'eM across 8B-TP1, 13B-TP1/TP2/TP4, and 70B-TP8. The dashed line marks each configuration's E2E deadline; throttLL'eM's distributions sit below the deadline despite running at substantially lower clocks, with the exception of the resource-constrained 13B-TP1 case noted in the caveat.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="7.2 Energy and efficiency against the baseline" data-zh="7.2 對基線的能耗與能效">7.2 Energy and efficiency against the baseline</span></h3>
+  <p><span class="i18n" data-en="The headline comparison sets several implementations side by side at the p99 end-to-end percentile: Triton at full clock, throttLL'eM with throttling alone, and throttLL'eM with both throttling and autoscaling, each shown at length-prediction error margins of 0%, 15%, and 30%. The comparison establishes both the size of the savings and their robustness to imperfect length prediction." data-zh="主要比較在 p99 端到端百分位上並列數種實作：全時脈的 Triton、僅降頻的 throttLL'eM，以及同時降頻與自動擴縮的 throttLL'eM，各以 0%、15%、30% 的長度預測誤差邊界呈現。此比較同時確立了節省的規模及其對不完美長度預測的穩健性。">The headline comparison sets several implementations side by side at the p99 end-to-end percentile: Triton at full clock, throttLL'eM with throttling alone, and throttLL'eM with both throttling and autoscaling, each shown at length-prediction error margins of 0%, 15%, and 30%. The comparison establishes both the size of the savings and their robustness to imperfect length prediction.</span></p>
+
+  <div class="paper-fig">
+    <img src="https://arxiv.org/html/2408.05235v1/x26.png" alt="Figure 10a: p99 end-to-end comparison across implementations">
+    <div class="fig-cap"><strong>Figure 10a (from paper):</strong> <span class="i18n" data-en="p99 end-to-end latency across implementations: Triton TP4, autoscaling-only, throttling-only, and full throttLL'eM at 0/15/30% length-prediction error. Energy falls sharply relative to Triton while p99 stays within budget, and the result is stable as the length-prediction margin loosens." data-zh="各實作的 p99 端到端延遲：Triton TP4、僅自動擴縮、僅降頻，以及在 0/15/30% 長度預測誤差下的完整 throttLL'eM。能耗相對 Triton 大幅下降，而 p99 仍在預算內，且結果在長度預測邊界放寬時保持穩定。">p99 end-to-end latency across implementations: Triton TP4, autoscaling-only, throttling-only, and full throttLL'eM at 0/15/30% length-prediction error. Energy falls sharply relative to Triton while p99 stays within budget, and the result is stable as the length-prediction margin loosens.</span></div>
+  </div>
+
+  <p><span class="i18n" data-en="Quantitatively, throttling alone lowers energy consumption by 24.7% on average and 30.7% at best, and adding autoscaling lowers energy by up to 43.8% at 0% length-prediction error, holding at 41.7% even when the length predictor is allowed a 30% error margin. Energy efficiency improves from the baseline's 0.69 tokens per joule to roughly 1.19–1.23 tokens per joule, an improvement of 1.71–1.78×. The chosen GPU frequencies land in the 950–1260 MHz band against the 1410 MHz boost clock the baseline holds, which is the physical mechanism behind the savings — the controller simply declines to pay for the top of the frequency range when the deadline does not demand it." data-zh="量化而言，僅降頻平均降低 24.7%、最佳降低 30.7% 的能耗；加入自動擴縮後，在 0% 長度預測誤差下能耗最多降低 43.8%，即使容許長度預測器有 30% 的誤差邊界，仍維持 41.7%。能效從基線的 0.69 tokens/joule 提升至約 1.19–1.23 tokens/joule，提升 1.71–1.78×。所選 GPU 頻率落在 950–1260 MHz 區間，相對基線維持的 1410 MHz boost 時脈——這正是節省背後的物理機制：當期限並未要求時，控制器只是拒絕為頻率範圍的頂端付費。">Quantitatively, throttling alone lowers energy consumption by 24.7% on average and 30.7% at best, and adding autoscaling lowers energy by up to 43.8% at 0% length-prediction error, holding at 41.7% even when the length predictor is allowed a 30% error margin. Energy efficiency improves from the baseline's 0.69 tokens per joule to roughly 1.19–1.23 tokens per joule, an improvement of 1.71–1.78×. The chosen GPU frequencies land in the 950–1260 MHz band against the 1410 MHz boost clock the baseline holds, which is the physical mechanism behind the savings — the controller simply declines to pay for the top of the frequency range when the deadline does not demand it.</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">24.7%</div><div class="label"><span class="i18n" data-en="avg energy cut, throttling only" data-zh="僅降頻的平均能耗下降">avg energy cut, throttling only</span></div></div>
+    <div class="metric-box"><div class="value">0.69 &rarr; 1.2</div><div class="label"><span class="i18n" data-en="tokens/joule, baseline to throttLL'eM" data-zh="tokens/joule，基線至 throttLL'eM">tokens/joule, baseline to throttLL'eM</span></div></div>
+    <div class="metric-box"><div class="value">950–1260</div><div class="label"><span class="i18n" data-en="MHz selected vs 1410 MHz boost" data-zh="所選 MHz 對 1410 MHz boost">MHz selected vs 1410 MHz boost</span></div></div>
+    <div class="metric-box"><div class="value">~5 ms</div><div class="label"><span class="i18n" data-en="CPU control overhead, hidden off the decode path" data-zh="CPU 控制開銷，遮蔽於解碼路徑之外">CPU control overhead, hidden off the decode path</span></div></div>
+  </div>
+
+  <div class="note"><span class="i18n" data-en="One caveat qualifies these evaluation results. The end-to-end deadline was satisfied in all configurations except the most resource-constrained one, Llama2-13B at TP1, where there is simply not enough headroom to both serve the trace and lower the clock. The per-token deadlines were met everywhere. The savings are therefore contingent on the configuration actually possessing slack — on a system already saturated at the boost clock, there is no margin to reclaim." data-zh="有一點附帶說明限定了這些評估結果。端到端期限在所有配置下皆被滿足，唯一例外是資源最受限的 Llama2-13B TP1，其餘裕不足以同時服務該 trace 並降頻。token 間期限則在各處皆達標。因此節省取決於該配置確實擁有餘裕——在一個已於 boost 時脈飽和的系統上，並無餘裕可回收。">One caveat qualifies these evaluation results. The end-to-end deadline was satisfied in all configurations except the most resource-constrained one, Llama2-13B at TP1, where there is simply not enough headroom to both serve the trace and lower the clock. The per-token deadlines were met everywhere. The savings are therefore contingent on the configuration actually possessing slack — on a system already saturated at the boost clock, there is no margin to reclaim.</span></div>
+</section>
+
+<!-- ===================== RELEVANCE ===================== -->
+<section id="relevance">
+  <h2><span class="i18n" data-en="8. Relevance to Our Predictor" data-zh="8. 與我們預測器的關聯">8. Relevance to Our Predictor</span></h2>
+  <p><span class="i18n" data-en="We selected throttLL'eM because it is the cleanest published delimiter of our own contribution. Our work is a per-step vLLM serving-latency predictor that folds the GPU streaming-multiprocessor clock into the latency model as a hidden, involuntary, input-token-driven term. throttLL'eM and our predictor both place the GPU clock at the center of an iteration-level model, and both rely on the same physical fact — that decode speed depends jointly on batch size, KV occupancy, and frequency. The difference is the direction of causation between the controller and the clock, and that difference is precisely the boundary of our novelty." data-zh="我們選擇 throttLL'eM，是因為它是我們自身貢獻最清晰的已發表界定。我們的工作是一個逐步的 vLLM 服務延遲預測器，把 GPU 串流多處理器時脈作為一個隱藏的、非自願的、由輸入 token 驅動的項，折入延遲模型。throttLL'eM 與我們的預測器都把 GPU 時脈置於迭代級模型的核心，且都仰賴同一個物理事實——解碼速度聯合取決於批次大小、KV 占用與頻率。差別在於控制器與時脈之間因果的方向，而這個差別正是我們新穎性的邊界。">We selected throttLL'eM because it is the cleanest published delimiter of our own contribution. Our work is a per-step vLLM serving-latency predictor that folds the GPU streaming-multiprocessor clock into the latency model as a hidden, involuntary, input-token-driven term. throttLL'eM and our predictor both place the GPU clock at the center of an iteration-level model, and both rely on the same physical fact — that decode speed depends jointly on batch size, KV occupancy, and frequency. The difference is the direction of causation between the controller and the clock, and that difference is precisely the boundary of our novelty.</span></p>
+
+  <h3><span class="i18n" data-en="8.1 The clock as a set knob versus a taken-away quantity" data-zh="8.1 時脈作為被設定的旋鈕，相對於被取走的量">8.1 The clock as a set knob versus a taken-away quantity</span></h3>
+  <p><span class="i18n" data-en="In throttLL'eM the GPU frequency $F$ is a decision variable that the system writes. It enters the performance model $\mathcal{M}(E, KV, B, F)$ as a known input under the controller's command: the binary search proposes a value of $F$, the model predicts the throughput that would result, and the chosen $F$ is then applied to the hardware. The clock is something the framework knows because it is the thing the framework sets. Our predictor inverts this. We do not set the clock; we predict the clock the hardware will involuntarily impose as a function of the input load. In our measurements the SM clock falls by 19–31% — from boost down toward a throttled steady state — as the input-token count M rises and the die heats, with a clock-versus-temperature correlation of $r = -0.93$ to $-0.98$ across H100, H200, A100-80, and Blackwell parts. The clock is therefore not an input we command but a latent output we must estimate, and it must be modeled as a function $f(M)$ of the offered load before latency can be predicted at all." data-zh="在 throttLL'eM 中，GPU 頻率 $F$ 是系統寫入的決策變數。它作為一個受控制器指揮的已知輸入進入效能模型 $\mathcal{M}(E, KV, B, F)$：二分搜尋提出一個 $F$ 值，模型預測由此產生的吞吐，所選的 $F$ 隨後被套用至硬體。時脈是該框架知道的東西，因為它正是該框架所設定的東西。我們的預測器把這反轉過來。我們不設定時脈；我們預測硬體將作為輸入負載的函數而非自願施加的時脈。在我們的量測中，隨輸入 token 數 M 上升且晶片升溫，SM 時脈下降 19–31%——自 boost 朝一個受限的穩態下行——在 H100、H200、A100-80 與 Blackwell 各部件上，時脈對溫度的相關係數為 $r = -0.93$ 至 $-0.98$。因此時脈不是我們命令的輸入，而是我們必須估計的潛在輸出，且必須先把它建模為供給負載的函數 $f(M)$，方能預測延遲。">In throttLL'eM the GPU frequency $F$ is a decision variable that the system writes. It enters the performance model $\mathcal{M}(E, KV, B, F)$ as a known input under the controller's command: the binary search proposes a value of $F$, the model predicts the throughput that would result, and the chosen $F$ is then applied to the hardware. The clock is something the framework knows because it is the thing the framework sets. Our predictor inverts this. We do not set the clock; we predict the clock the hardware will involuntarily impose as a function of the input load. In our measurements the SM clock falls by 19–31% — from boost down toward a throttled steady state — as the input-token count M rises and the die heats, with a clock-versus-temperature correlation of $r = -0.93$ to $-0.98$ across H100, H200, A100-80, and Blackwell parts. The clock is therefore not an input we command but a latent output we must estimate, and it must be modeled as a function $f(M)$ of the offered load before latency can be predicted at all.</span></p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="throttLL'eM — clock is an output of control" data-zh="throttLL'eM——時脈是控制的輸出">throttLL'eM — clock is an output of control</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Frequency F is a written decision variable." data-zh="頻率 F 是被寫入的決策變數。">Frequency F is a written decision variable.</span></li>
+        <li><span class="i18n" data-en="Goal: choose the lowest F that still meets the SLO, to save energy." data-zh="目標：選出仍能滿足 SLO 的最低 F，以節省能源。">Goal: choose the lowest F that still meets the SLO, to save energy.</span></li>
+        <li><span class="i18n" data-en="F enters the model as a known input the controller commands." data-zh="F 作為控制器命令的已知輸入進入模型。">F enters the model as a known input the controller commands.</span></li>
+        <li><span class="i18n" data-en="Voluntary, software-initiated DVFS." data-zh="自願的、由軟體發起的 DVFS。">Voluntary, software-initiated DVFS.</span></li>
+      </ul>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Our predictor — clock is a hidden term to estimate" data-zh="我們的預測器——時脈是須估計的隱藏項">Our predictor — clock is a hidden term to estimate</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="Clock is a latent quantity the hardware imposes, not set by us." data-zh="時脈是硬體施加的潛在量，並非由我們設定。">Clock is a latent quantity the hardware imposes, not set by us.</span></li>
+        <li><span class="i18n" data-en="Goal: predict the involuntary droop f(M) to predict latency accurately." data-zh="目標：預測非自願的下垂 f(M)，以準確預測延遲。">Goal: predict the involuntary droop f(M) to predict latency accurately.</span></li>
+        <li><span class="i18n" data-en="Clock must be inferred from input-token count M and thermal state." data-zh="時脈必須由輸入 token 數 M 與熱狀態推得。">Clock must be inferred from input-token count M and thermal state.</span></li>
+        <li><span class="i18n" data-en="Involuntary, thermally-driven throttling under compute-bound load." data-zh="在計算受限負載下，非自願的、由熱驅動的降頻。">Involuntary, thermally-driven throttling under compute-bound load.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="8.2 Where the two views meet, and where ours extends" data-zh="8.2 兩種觀點的交會處，以及我們延伸之處">8.2 Where the two views meet, and where ours extends</span></h3>
+  <p><span class="i18n" data-en="throttLL'eM operates in a regime where the SXM-class cards under light decode serving stay pinned at their boost clock, so for it the clock is whatever the controller writes and the thermal droop never appears. Our regime is the complement: under compute-bound, high-M, prefill-heavy load the same cards leave boost involuntarily, and a latency predictor that assumes a fixed clock — as throttLL'eM's model implicitly does on the input side, since it treats F as commanded — will misestimate the iteration time. We acknowledge that the droop mechanism itself and the learnability of latency-from-clock are not new; throttLL'eM demonstrates the latter convincingly with its R² above 0.97. Our contribution is narrower and specific: modeling the involuntary droop as a function of the input-token count $M$, $f(M)$, and embedding that term inside a general serving-latency predictor so that the clock the hardware takes away is anticipated rather than discovered after the fact." data-zh="throttLL'eM 運作於一個區間：SXM 等級的卡在輕量解碼服務下維持釘在其 boost 時脈，因此對它而言時脈就是控制器所寫入者，熱下垂從不出現。我們的區間是其補集：在計算受限、高 M、以 prefill 為主的負載下，同樣的卡會非自願地離開 boost，而一個假設固定時脈的延遲預測器——如 throttLL'eM 的模型在輸入端隱含所為，因其視 F 為被命令者——將會誤估迭代時間。我們承認下垂機制本身與「由時脈學得延遲」的可學性並非新穎；throttLL'eM 以其逾 0.97 的 R² 令人信服地展示了後者。我們的貢獻較窄且具體：把非自願的下垂建模為輸入 token 數 $M$ 的函數 $f(M)$，並把該項嵌入一個通用的服務延遲預測器，使硬體取走的時脈得以被預期，而非事後才發現。">throttLL'eM operates in a regime where the SXM-class cards under light decode serving stay pinned at their boost clock, so for it the clock is whatever the controller writes and the thermal droop never appears. Our regime is the complement: under compute-bound, high-M, prefill-heavy load the same cards leave boost involuntarily, and a latency predictor that assumes a fixed clock — as throttLL'eM's model implicitly does on the input side, since it treats F as commanded — will misestimate the iteration time. We acknowledge that the droop mechanism itself and the learnability of latency-from-clock are not new; throttLL'eM demonstrates the latter convincingly with its R² above 0.97. Our contribution is narrower and specific: modeling the involuntary droop as a function of the input-token count $M$, $f(M)$, and embedding that term inside a general serving-latency predictor so that the clock the hardware takes away is anticipated rather than discovered after the fact.</span></p>
+
+  <div class="warn"><span class="i18n" data-en="The distinction can be stated in a single sentence: throttLL'eM predicts performance in order to choose a clock the system sets, whereas we predict the clock the system never chose, because the thermal controller took it away as the input load rose." data-zh="這項區別可以一句話陳述：throttLL'eM 預測效能以選定系統所設定的時脈，而我們則預測系統從未選擇的時脈，因為熱控制器隨輸入負載上升而把它取走了。">The distinction can be stated in a single sentence: throttLL'eM predicts performance in order to choose a clock the system sets, whereas we predict the clock the system never chose, because the thermal controller took it away as the input load rose.</span></div>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="throttLL'eM: Predictive GPU Throttling for Energy-Efficient LLM Inference Serving (arXiv:2408.05235). Kakolyris, Masouros, Vavaroutsos, Xydis, Soudris — National Technical University of Athens." data-zh="throttLL'eM：面向能效的 LLM 推論服務之預測式 GPU 降頻（arXiv:2408.05235）。Kakolyris、Masouros、Vavaroutsos、Xydis、Soudris——雅典國立科技大學。">throttLL'eM: Predictive GPU Throttling for Energy-Efficient LLM Inference Serving (arXiv:2408.05235). Kakolyris, Masouros, Vavaroutsos, Xydis, Soudris — National Technical University of Athens.</span></p>
+  <p><span class="i18n" data-en="Analysis page generated 2026-06-20 for the agentic-AI inference survey." data-zh="分析頁面於 2026-06-20 為代理式 AI 推論調查產生。">Analysis page generated 2026-06-20 for the agentic-AI inference survey.</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$',  right: '$',  display: false}
+      ]
+    });
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>
