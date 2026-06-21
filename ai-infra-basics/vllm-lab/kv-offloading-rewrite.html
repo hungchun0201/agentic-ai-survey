@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM KV Offloading — The v0.19→v0.23 Rewrite</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+:root{--accent:#29b6f6;--accent-rgb:41,182,246;--nav-bg:rgba(8,28,40,0.95)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1100px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#9fb4cc;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+.hero{background:linear-gradient(135deg,#0a1820 0%,#0d1a26 50%,#0a1422 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.07) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative}
+.hero .sub{font-size:1.12rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:160px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent)}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step:nth-child(5) .c{background:#ab47bc}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.78rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.cyan{background:rgba(41,182,246,.1);border:1px solid rgba(41,182,246,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:210px}
+.tbar{display:flex;align-items:stretch;gap:4px;margin:1.2rem 0 2rem;flex-wrap:nowrap;overflow-x:auto}
+.tbar .seg{min-width:150px;flex:1;border-radius:8px;padding:.7rem .8rem;font-size:.8rem;position:relative;border:1px solid rgba(255,255,255,.08)}
+.tbar .seg .v{font-weight:700;color:#fff;font-size:.92rem}
+.tbar .seg .d{color:#8fa4c0;font-size:.72rem;margin-top:2px}
+.tbar .seg.s1{background:rgba(110,198,255,.12)}
+.tbar .seg.s2{background:rgba(126,87,194,.14)}
+.tbar .seg.s3{background:rgba(41,182,246,.16)}
+.tbar .seg.s4{background:rgba(46,204,113,.14)}
+.tbar .seg.s5{background:rgba(245,166,35,.14)}
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+.check{color:#2ecc71;font-weight:bold}.cross{color:#e94560;font-weight:bold}.partial{color:#ffb74d;font-weight:bold}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.7rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  pre{font-size:.74rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+}
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="../index.html">&larr; <span class="i18n" data-en="AI-Infra Basics" data-zh="AI 推理基礎">AI-Infra Basics</span></a></li>
+    <li><a href="index.html">vLLM Lab</a></li>
+    <li><a href="#motivation"><span class="i18n" data-en="Motivation" data-zh="動機">Motivation</span></a></li>
+    <li><a href="#rewrite"><span class="i18n" data-en="The Rewrite" data-zh="改寫總覽">The Rewrite</span></a></li>
+    <li><a href="#core-api"><span class="i18n" data-en="Core API" data-zh="核心 API">Core API</span></a></li>
+    <li><a href="#cpu-tier"><span class="i18n" data-en="CPU Tier" data-zh="CPU 層">CPU Tier</span></a></li>
+    <li><a href="#tiering"><span class="i18n" data-en="Tiering" data-zh="多層級">Tiering</span></a></li>
+    <li><a href="#timeline"><span class="i18n" data-en="Timeline" data-zh="時間線">Timeline</span></a></li>
+    <li><a href="#issues"><span class="i18n" data-en="Open Issues" data-zh="未解問題">Open Issues</span></a></li>
+    <li><a href="#contributing"><span class="i18n" data-en="Contributing" data-zh="貢獻">Contributing</span></a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>vLLM KV Offloading &mdash; <span class="i18n" data-en="The v0.19&rarr;v0.23 Rewrite" data-zh="v0.19&rarr;v0.23 改寫">The v0.19&rarr;v0.23 Rewrite</span></h1>
+  <p class="sub"><span class="i18n" data-en="How the native OffloadingConnector was rebuilt into a hybrid-aware, multi-tier KV cache subsystem &mdash; OffloadKey, CanonicalKVCaches, pluggable eviction policies, and a secondary-tier framework spanning CPU DRAM, local NVMe, and S3." data-zh="原生 OffloadingConnector 如何被重建為一個 hybrid-aware、多層級的 KV 快取子系統 &mdash; OffloadKey、CanonicalKVCaches、可插拔淘汰策略，以及橫跨 CPU DRAM、本地 NVMe 與 S3 的 secondary-tier 框架。">How the native OffloadingConnector was rebuilt into a hybrid-aware, multi-tier KV cache subsystem.</span></p>
+  <div class="badges">
+    <span class="badge">vLLM v0.19 &rarr; v0.23</span>
+    <span class="badge">vllm/v1/kv_offload</span>
+    <span class="badge">main @183a430</span>
+    <span class="badge"><span class="i18n" data-en="Source analysis &middot; 2026-06-21" data-zh="原始碼分析 &middot; 2026-06-21">Source analysis &middot; 2026-06-21</span></span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none"><span class="i18n" data-en="Feature authors: Or Ozeri, Danny Harnik, Ronen Schaffer (IBM Research) &middot; co-maintained with the vLLM KV-connector group" data-zh="功能作者：Or Ozeri、Danny Harnik、Ronen Schaffer（IBM Research）&middot; 與 vLLM KV-connector 小組共同維護">Feature authors: Or Ozeri, Danny Harnik, Ronen Schaffer (IBM Research) &middot; co-maintained with the vLLM KV-connector group</span></p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none"><span class="i18n" data-en="A vLLM Lab source-code analysis based on reading the latest main, not release notes." data-zh="一篇基於閱讀最新 main 原始碼（而非發行說明）的 vLLM Lab 分析。">A vLLM Lab source-code analysis based on reading the latest main, not release notes.</span></p>
+</div>
+
+<div class="container">
+
+<!-- ===================== MOTIVATION ===================== -->
+<section id="motivation">
+  <h2><span class="i18n" data-en="1. Why a KV-cache offloading subsystem, and why rebuild it in 2026" data-zh="1. 為什麼需要 KV 快取卸載子系統，又為何在 2026 年重建它">1. Why a KV-cache offloading subsystem, and why rebuild it in 2026</span></h2>
+
+  <p><span class="i18n" data-en="A serving engine keeps, for every running request, a key&ndash;value tensor for each transformer layer &mdash; the KV cache. It is the single largest consumer of GPU high-bandwidth memory (HBM) during decoding, and it is also the asset that makes prefix reuse possible: if two requests share a prompt prefix, the second can skip recomputing that prefix's attention entirely. The difficulty is that HBM is scarce and expensive, so the cache that would accelerate the next request is routinely evicted to make room for the current one." data-zh="服務引擎為每個執行中的請求、每一個 transformer 層保存一份 key&ndash;value 張量 &mdash; 即 KV 快取。它是解碼期間 GPU 高頻寬記憶體（HBM）的最大消耗者，同時也是讓前綴重用成為可能的資產：若兩個請求共享提示前綴，第二個請求便可完全跳過該前綴的注意力重算。困難之處在於 HBM 稀缺且昂貴，因此原本能加速下一個請求的快取，經常為了騰出空間給當前請求而被逐出。">A serving engine keeps, for every running request, a key&ndash;value tensor for each transformer layer &mdash; the KV cache.</span></p>
+
+  <h4><span class="i18n" data-en="Why now" data-zh="為什麼是現在">Why now</span></h4>
+  <p><span class="i18n" data-en="Two workload shifts since 2024 made GPU-only KV caching insufficient. First, context lengths grew from a few thousand tokens to 128K and beyond, so a single request's cache can occupy gigabytes of HBM. Second, agentic and multi-turn workloads now dominate production traffic: the same long system prompt, tool schema, or conversation history is replayed across many turns and many parallel agents. Under GPU-only caching, the prefix that a multi-agent program will reuse seconds later has usually already been evicted, so the engine recomputes it from scratch on every turn. CPU DRAM, by contrast, is an order of magnitude larger than HBM and sits one PCIe hop away &mdash; close enough that loading a cached prefix back is far cheaper than recomputing it." data-zh="自 2024 年以來，兩個工作負載轉變使得僅靠 GPU 的 KV 快取不再足夠。其一，上下文長度從數千 token 成長到 128K 以上，因此單一請求的快取就可能佔用數 GB 的 HBM。其二，agentic 與多輪工作負載如今主導生產流量：相同的長系統提示、工具結構描述或對話歷史，會在多個回合與多個並行 agent 之間反覆出現。在僅靠 GPU 的快取下，多 agent 程式數秒後將重用的前綴通常早已被逐出，引擎便在每一回合從頭重算。相對地，CPU DRAM 比 HBM 大一個數量級，且僅隔一個 PCIe 躍程 &mdash; 近到足以讓重新載入已快取前綴遠比重算便宜。">Two workload shifts since 2024 made GPU-only KV caching insufficient.</span></p>
+
+  <h4><span class="i18n" data-en="A concrete failure of GPU-only caching" data-zh="僅靠 GPU 快取的一個具體失效情境">A concrete failure of GPU-only caching</span></h4>
+  <p><span class="i18n" data-en="Consider a research agent that issues twelve LLM calls over five minutes, each call sharing the same 8,000-token system prompt and growing conversation history. With GPU-only prefix caching, the first call computes and caches the 8K prefix; but while the agent is thinking, dozens of other requests arrive and evict those blocks to reclaim HBM. When the agent's second call arrives, the prefix is gone, and the engine re-runs an 8,000-token prefill &mdash; hundreds of milliseconds of compute &mdash; to reproduce a result it held moments earlier. Across twelve calls the program pays this recompute eleven times. The work is not wrong; it is redundant, and it consumes exactly the GPU cycles that other users are waiting for." data-zh="設想一個研究 agent 在五分鐘內發出十二次 LLM 呼叫，每次呼叫都共享相同的 8,000-token 系統提示與不斷增長的對話歷史。在僅靠 GPU 的前綴快取下，第一次呼叫計算並快取了該 8K 前綴；但當 agent 在思考時，數十個其他請求湧入並逐出這些區塊以回收 HBM。當 agent 的第二次呼叫抵達時，前綴已不存在，引擎便重新執行一次 8,000-token 的 prefill &mdash; 數百毫秒的計算 &mdash; 只為重現它片刻之前已持有的結果。在十二次呼叫中，該程式付出此重算代價達十一次。這份工作並非錯誤，而是冗餘，且它消耗的正是其他使用者正在等待的 GPU 週期。">Consider a research agent that issues twelve LLM calls over five minutes, each sharing the same 8,000-token system prompt.</span></p>
+
+  <h4><span class="i18n" data-en="The baseline cost being paid" data-zh="正在付出的基線代價">The baseline cost being paid</span></h4>
+  <p><span class="i18n" data-en="The cost of a cache miss is a full prefill of the missed prefix. vLLM's own measurements of the offloading connector report that loading a cached prefix from CPU memory instead of recomputing it reduces time-to-first-token by between 2&times; and 22&times; depending on prompt length, and lifts end-to-end throughput by up to 9&times; at high cache-hit rates. Those gains are the mirror image of the baseline pain: when the cache lives only on the GPU and is evicted, every one of those factors is lost on every miss. The design target of the offloading subsystem is to convert that recompute into a background data transfer that overlaps with ongoing GPU work." data-zh="一次快取未命中的代價，是對未命中前綴做一次完整 prefill。vLLM 官方對卸載連接器的量測指出，從 CPU 記憶體載入已快取前綴（而非重算）可將首 token 時間（TTFT）依提示長度縮短 2 至 22 倍，並在高快取命中率下將端到端吞吐提升至多 9 倍。這些增益正是基線痛點的鏡像：當快取僅存於 GPU 並被逐出時，每一次未命中都會損失上述每一項因子。卸載子系統的設計目標，是把該重算轉化為一次與進行中 GPU 工作重疊的背景資料傳輸。">The cost of a cache miss is a full prefill of the missed prefix.</span></span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">2&ndash;22&times;</div><div class="label"><span class="i18n" data-en="TTFT reduction from CPU cache hit" data-zh="CPU 快取命中的 TTFT 縮短">TTFT reduction from CPU cache hit</span></div></div>
+    <div class="metric-box"><div class="value">up to 9&times;</div><div class="label"><span class="i18n" data-en="throughput at high hit rate" data-zh="高命中率下的吞吐">throughput at high hit rate</span></div></div>
+    <div class="metric-box"><div class="value">~4&times; / ~5&times;</div><div class="label"><span class="i18n" data-en="TTFT / throughput from the v0.12 layout change alone" data-zh="僅 v0.12 佈局改動的 TTFT / 吞吐">TTFT / throughput from the v0.12 layout change</span></div></div>
+    <div class="metric-box"><div class="value">10&times;+</div><div class="label"><span class="i18n" data-en="CPU DRAM vs GPU HBM capacity" data-zh="CPU DRAM 相對 GPU HBM 容量">CPU DRAM vs GPU HBM capacity</span></div></div>
+  </div>
+
+  <h4><span class="i18n" data-en="The obvious fix, and why it is not enough" data-zh="顯而易見的修法，及其為何不足">The obvious fix, and why it is not enough</span></h4>
+  <p><span class="i18n" data-en="The naive remedy is to copy evicted KV blocks to CPU memory and copy them back on a hit. The reason this does not trivially work is that the copy competes with the model for two scarce resources at once: PCIe bandwidth and the GPU's own attention computation. A synchronous copy stalls decoding; a copy issued on the wrong stream can read a KV block before the attention kernel has finished writing it, silently corrupting the cache. The transfer must therefore be asynchronous, correctly ordered against compute, and shaped so that DMA runs efficiently &mdash; which in turn forces a specific physical memory layout. Beyond a single CPU tier, a further obstacle appears: production deployments want to spill further down to NVMe or object storage, but a storage tier cannot touch GPU memory at all, so every transfer has to be staged through CPU DRAM. None of these constraints is satisfied by a naive memcpy." data-zh="天真的補救方式，是把被逐出的 KV 區塊複製到 CPU 記憶體，命中時再複製回來。它之所以無法直接奏效，是因為該複製同時與模型爭奪兩項稀缺資源：PCIe 頻寬與 GPU 本身的注意力計算。同步複製會使解碼停滯；在錯誤的 stream 上發出的複製，可能在注意力核心尚未寫完之前就讀取某 KV 區塊，默默地破壞快取。因此傳輸必須非同步、與計算正確定序，並塑形成讓 DMA 高效運行的形狀 &mdash; 這又強制了一種特定的實體記憶體佈局。在單一 CPU 層之外，還有進一步的障礙：生產部署希望再向下溢出到 NVMe 或物件儲存，但儲存層完全無法觸及 GPU 記憶體，因此每次傳輸都必須經由 CPU DRAM 中轉。這些約束沒有一項能被天真的 memcpy 滿足。">The naive remedy is to copy evicted KV blocks to CPU memory and copy them back on a hit.</span></p>
+
+  <h4><span class="i18n" data-en="Position relative to neighbouring systems" data-zh="相對於鄰近系統的定位">Position relative to neighbouring systems</span></h4>
+  <p><span class="i18n" data-en="vLLM already had a connector framework for external KV stores. LMCache provides distributed, persistent, cross-instance KV reuse with its own multi-tier storage; Mooncake pools KV across a disaggregated cluster; NIXL supplies the RDMA and object-store transport that prefill&ndash;decode disaggregation relies on. What none of these is, is a low-overhead, in-tree extension of vLLM's own GPU prefix cache to local CPU memory and beyond, owned by the engine and requiring no external service. The native OffloadingConnector fills exactly that gap: it debuted in v0.11.0 as a single CPU tier, and the rewrite documented here is what turned it into a general, hybrid-aware, multi-tier subsystem." data-zh="vLLM 原本已有一個用於外部 KV 儲存的連接器框架。LMCache 以其自有的多層級儲存提供分散式、持久化、跨實例的 KV 重用；Mooncake 在分散式叢集間池化 KV；NIXL 提供 prefill&ndash;decode 分離所仰賴的 RDMA 與物件儲存傳輸。然而它們都不是 &mdash; 一個低開銷、in-tree、由引擎自身擁有且無需外部服務、將 vLLM 自有 GPU 前綴快取延伸到本地 CPU 記憶體乃至更遠的擴展。原生 OffloadingConnector 正好填補此空缺：它於 v0.11.0 以單一 CPU 層登場，而本文所記錄的改寫，正是將它轉變為一個通用、hybrid-aware、多層級子系統的過程。">vLLM already had a connector framework for external KV stores; the native OffloadingConnector fills a different gap.</span></p>
+
+  <div class="note"><strong><span class="i18n" data-en="Scope of this page." data-zh="本頁範圍。">Scope of this page.</span></strong> <span class="i18n" data-en="This is not about the separate SimpleCPUOffloadConnector (a minimal alternative connector). It is about the native OffloadingConnector and the vllm/v1/kv_offload package &mdash; specifically the structural rewrite that landed incrementally between v0.19.0 and v0.23.0." data-zh="本頁討論的並非另一個獨立的 SimpleCPUOffloadConnector（一個極簡的替代連接器），而是原生 OffloadingConnector 與 vllm/v1/kv_offload 套件 &mdash; 特別是在 v0.19.0 至 v0.23.0 之間分批落地的結構性改寫。">This page covers the native OffloadingConnector and the vllm/v1/kv_offload package, not the separate SimpleCPUOffloadConnector.</span></div>
+</section>
+
+<!-- ===================== THE REWRITE ===================== -->
+<section id="rewrite">
+  <h2><span class="i18n" data-en="2. The rewrite at a glance" data-zh="2. 改寫總覽">2. The rewrite at a glance</span></h2>
+
+  <p><span class="i18n" data-en="The offloading code of early 2026 (vLLM v0.16, February) was a flat directory of single-purpose modules: abstract.py, backend.py, cpu.py, mediums.py, lru_manager.py, arc_manager.py, and a worker/cpu_gpu.py. Over five releases this was reorganised into a layered package whose shape encodes the new capabilities. The point of the reorganisation was not tidiness; each move enabled a feature that the flat layout could not express cleanly &mdash; hybrid-model keys, a pluggable eviction interface, per-request policy, metadata-driven metrics, and an entire secondary-tier framework." data-zh="2026 年初（vLLM v0.16，二月）的卸載程式碼，是一個由單一用途模組構成的扁平目錄：abstract.py、backend.py、cpu.py、mediums.py、lru_manager.py、arc_manager.py，以及一個 worker/cpu_gpu.py。歷經五個版本，它被重組為一個分層套件，其形狀本身就編碼了新的能力。重組的目的不在整潔；每一次移動都使得扁平佈局無法乾淨表達的某項功能成為可能 &mdash; hybrid-model 鍵、可插拔的淘汰介面、per-request 策略、metadata 驅動的指標，以及一整個 secondary-tier 框架。">The flat v0.16 offloading directory was reorganised over five releases into a layered package whose shape encodes the new capabilities.</span></p>
+
+  <h4><span class="i18n" data-en="Old layout (v0.16, flat) &rarr; new layout (current package)" data-zh="舊佈局（v0.16，扁平）&rarr; 新佈局（當前套件）">Old layout (v0.16, flat) &rarr; new layout (current package)</span></h4>
+  <table>
+    <thead><tr><th><span class="i18n" data-en="Concern" data-zh="關注點">Concern</span></th><th><span class="i18n" data-en="Old (v0.16)" data-zh="舊（v0.16）">Old (v0.16)</span></th><th><span class="i18n" data-en="New (current)" data-zh="新（當前）">New (current)</span></th></tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Core abstractions" data-zh="核心抽象">Core abstractions</span></td><td><code>abstract.py</code></td><td><code>base.py</code></td></tr>
+      <tr><td><span class="i18n" data-en="CPU tier" data-zh="CPU 層">CPU tier</span></td><td><code>cpu.py</code> + <code>backends/cpu.py</code> + <code>mediums.py</code></td><td><code>cpu/{spec,manager,common,gpu_worker,shared_offload_region,swap_blocks_triton}.py</code></td></tr>
+      <tr><td><span class="i18n" data-en="Eviction" data-zh="淘汰">Eviction</span></td><td><code>lru_manager.py</code>, <code>arc_manager.py</code></td><td><code>cpu/policies/{base,lru,arc}.py</code> <span class="i18n" data-en="(pluggable)" data-zh="（可插拔）">(pluggable)</span></td></tr>
+      <tr><td><span class="i18n" data-en="Storage tiers" data-zh="儲存層">Storage tiers</span></td><td><span class="cross">&mdash;</span></td><td><code>tiering/{base,manager,spec,factory,async_lookup}.py</code> + <code>tiering/{fs,obj,example}/</code></td></tr>
+      <tr><td><span class="i18n" data-en="Worker transfer" data-zh="Worker 傳輸">Worker transfer</span></td><td><code>worker/cpu_gpu.py</code></td><td><code>cpu/gpu_worker.py</code> + <code>worker/worker.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4 id="timeline-mini"><span class="i18n" data-en="It was incremental, not a single drop" data-zh="它是分批進行，而非單次發布">It was incremental, not a single drop</span></h4>
+  <p><span class="i18n" data-en="A common recollection is that the rewrite &quot;landed in v0.19.0.&quot; That is half right: v0.19.0 contained the first visible restructure &mdash; the cpu/ package split and the pluggable eviction policy &mdash; but it carried neither the new key type, nor the tiering framework, nor the per-request policy. The full rewrite is a five-release campaign, summarised below and detailed in section 7." data-zh="一個常見的記憶是改寫「在 v0.19.0 落地」。這只對了一半：v0.19.0 包含了第一次可見的重構 &mdash; cpu/ 套件拆分與可插拔的淘汰策略 &mdash; 但它既未帶來新的鍵型別，也沒有 tiering 框架，更沒有 per-request 策略。完整的改寫是一場跨越五個版本的工程，概述如下，詳見第 7 節。">A common recollection is that the rewrite landed in v0.19.0. That is half right.</span></p>
+  <div class="tbar">
+    <div class="seg s1"><div class="v">v0.19.0</div><div class="d"><span class="i18n" data-en="cpu/ package split; pluggable LRU/ARC policy (PR #37874)" data-zh="cpu/ 套件拆分；可插拔 LRU/ARC 策略（PR #37874）">cpu/ split; pluggable LRU/ARC (#37874)</span></div></div>
+    <div class="seg s2"><div class="v">v0.20&ndash;0.21</div><div class="d"><span class="i18n" data-en="OffloadKey, single-block lookup, ReqContext; abstract.py&rarr;base.py; CanonicalKVCaches; HMA" data-zh="OffloadKey、單塊 lookup、ReqContext；abstract.py&rarr;base.py；CanonicalKVCaches；HMA">OffloadKey, base.py, CanonicalKVCaches, HMA</span></div></div>
+    <div class="seg s3"><div class="v">v0.22.0</div><div class="d"><span class="i18n" data-en="Multi-tier framework + filesystem tier (PR #40020, #41735)" data-zh="多層級框架 + 檔案系統層（PR #40020、#41735）">Multi-tier framework + fs tier (#40020)</span></div></div>
+    <div class="seg s4"><div class="v">v0.23.0</div><div class="d"><span class="i18n" data-en="Object-store (S3) tier; HMA-by-default; per-request OffloadPolicy (#41968, #43205)" data-zh="物件儲存（S3）層；HMA 預設開；per-request OffloadPolicy（#41968、#43205）">S3 tier; HMA default; per-request policy (#43205)</span></div></div>
+    <div class="seg s5"><div class="v">post-0.23</div><div class="d"><span class="i18n" data-en="Metadata-driven metrics finishing (RFC #44008)" data-zh="metadata 驅動指標收尾（RFC #44008）">metadata metrics (RFC #44008)</span></div></div>
+  </div>
+</section>
+
+<!-- ===================== CORE API ===================== -->
+<section id="core-api">
+  <h2><span class="i18n" data-en="3. The core API rewrite" data-zh="3. 核心 API 改寫">3. The core API rewrite</span></h2>
+  <p><span class="i18n" data-en="Everything in the package is built on a handful of abstract classes in vllm/v1/kv_offload/base.py. Five changes to those abstractions distinguish the new design from the old one. Each is small in code and large in consequence, because the manager interface is the contract that every backend, eviction policy, and storage tier must satisfy." data-zh="套件中的一切都建立在 vllm/v1/kv_offload/base.py 裡的少數幾個抽象類別之上。這些抽象的五項變動，將新設計與舊設計區分開來。每一項在程式碼上都很小、在後果上卻很大，因為 manager 介面正是每個 backend、淘汰策略與儲存層都必須滿足的契約。">The package is built on a few abstract classes in base.py; five changes distinguish the new design.</span></p>
+
+  <h3><span class="i18n" data-en="3.1 OffloadKey &mdash; making the cache hybrid-aware" data-zh="3.1 OffloadKey &mdash; 讓快取具備 hybrid 意識">3.1 OffloadKey &mdash; making the cache hybrid-aware</span></h3>
+  <p><span class="i18n" data-en="A key identifies one offloaded block. The old key was simply a block hash. The problem is that modern models are no longer uniform stacks of attention layers: a hybrid model interleaves full-attention layers with Mamba/SSM or sliding-window layers, and these belong to different KV cache groups with different block shapes. A bare content hash cannot tell two physically different blocks apart when they happen to share token content across groups. The new OffloadKey fixes this by packing the group index into the key itself." data-zh="一個鍵識別一個被卸載的區塊。舊鍵就只是一個 block hash。問題在於現代模型不再是注意力層的均勻堆疊：hybrid 模型把 full-attention 層與 Mamba/SSM 或 sliding-window 層交錯，而這些屬於不同的 KV cache group、具有不同的區塊形狀。當兩個實體上不同的區塊恰好跨 group 共享 token 內容時，單純的內容雜湊無法區分它們。新的 OffloadKey 透過把 group 索引打包進鍵本身來修正此問題。">A key identifies one offloaded block; the new OffloadKey packs the KV-cache group index into the key.</span></p>
+  <pre><code><span class="cm"># vllm/v1/kv_offload/base.py:31-48 &mdash; key = block_hash + 4-byte big-endian group index</span>
+OffloadKey = NewType(<span class="st">"OffloadKey"</span>, bytes)
+
+<span class="kw">def</span> <span class="fn">make_offload_key</span>(block_hash: bytes, group_idx: int) -> OffloadKey:
+    <span class="kw">return</span> OffloadKey(block_hash + group_idx.to_bytes(<span class="nu">4</span>, <span class="st">"big"</span>, signed=<span class="kw">False</span>))
+
+<span class="kw">def</span> <span class="fn">get_offload_block_hash</span>(key: OffloadKey) -> bytes: <span class="kw">return</span> key[:-<span class="nu">4</span>]
+<span class="kw">def</span> <span class="fn">get_offload_group_idx</span>(key: OffloadKey) -> int: <span class="kw">return</span> int.from_bytes(key[-<span class="nu">4</span>:], <span class="st">"big"</span>)</code></pre>
+  <p><span class="i18n" data-en="Encoding the group index as raw bytes appended to the hash, rather than as a Python tuple, is deliberate: keys are created and compared on the scheduler's hot path, and a bytes object avoids the per-key tuple allocation and garbage-collection overhead. The group index is what later lets the scheduler route a block to the correct KV cache group when a hybrid model has several." data-zh="把 group 索引編碼為附加在雜湊後的原始位元組、而非 Python tuple，是刻意為之：鍵在排程器的熱路徑上被建立與比較，而 bytes 物件可避免每個鍵的 tuple 配置與垃圾回收開銷。group 索引正是稍後讓排程器在 hybrid 模型擁有多個 group 時，將區塊路由到正確 KV cache group 的依據。">Encoding the group index as appended bytes avoids per-key tuple allocation on the scheduler hot path.</span></p>
+
+  <h3><span class="i18n" data-en="3.2 Single-block lookup returning a tri-state" data-zh="3.2 回傳三態的單塊 lookup">3.2 Single-block lookup returning a tri-state</span></h3>
+  <p><span class="i18n" data-en="The manager's lookup method answers the scheduler's question &quot;is this block available?&quot;. The old method took a list of hashes and returned the length of the longest already-offloaded prefix &mdash; an answer shaped for a single CPU tier where a block is either present or absent. The rewrite changes lookup to take one key and return one of three states: True (present and ready), False (absent), or None (a transfer is in flight, retry on a later step). The third state is the load-bearing change. With secondary tiers, a block may be on its way up from disk to CPU when the scheduler asks; None lets the scheduler park the request and revisit it once the promotion completes, rather than treating an in-flight block as a miss." data-zh="manager 的 lookup 方法回答排程器「這個區塊可用嗎？」的提問。舊方法接收一份雜湊清單，回傳已卸載前綴的最長長度 &mdash; 這是為單一 CPU 層塑形的答案，那裡區塊非有即無。改寫把 lookup 改為接收單一鍵、回傳三態之一：True（存在且就緒）、False（不存在），或 None（傳輸進行中，於稍後步驟重試）。第三個狀態是承重的改動。有了 secondary tier，當排程器詢問時，某個區塊可能正從磁碟向上搬往 CPU；None 讓排程器把請求暫置，待 promotion 完成後再回訪，而非把進行中的區塊當成未命中。">Lookup now takes one key and returns True / False / None, where None means a transfer is in flight.</span></p>
+  <pre><code><span class="cm"># vllm/v1/kv_offload/base.py:151 (abstract) &middot; cpu/manager.py:115 (CPU impl)</span>
+<span class="kw">def</span> <span class="fn">lookup</span>(self, key: OffloadKey, req_context: ReqContext) -> bool | <span class="kw">None</span>:
+    block = self._policy.get(key)
+    <span class="kw">if</span> block <span class="kw">is</span> <span class="kw">None</span>:        <span class="kw">return</span> <span class="kw">False</span>     <span class="cm"># absent</span>
+    <span class="kw">if</span> <span class="kw">not</span> block.is_ready: <span class="kw">return</span> <span class="kw">None</span>      <span class="cm"># write in-flight; caller should retry</span>
+    <span class="kw">return</span> <span class="kw">True</span></code></pre>
+
+  <h3><span class="i18n" data-en="3.3 ReqContext and the per-request OffloadPolicy" data-zh="3.3 ReqContext 與 per-request OffloadPolicy">3.3 ReqContext and the per-request OffloadPolicy</span></h3>
+  <p><span class="i18n" data-en="Every manager method now receives a ReqContext &mdash; the request id and its kv_transfer_params. This threads request identity through the whole subsystem, which earlier had no notion of which request a block belonged to. Built on top of it, the on_new_request lifecycle hook lets a manager declare, per request, how that request's blocks should be offloaded: BLOCK_LEVEL offloads only newly-computed blocks, while REQUEST_LEVEL offloads the request's complete context &mdash; used by tiers that need the whole sequence, not just the new tail." data-zh="每個 manager 方法如今都接收一個 ReqContext &mdash; 請求 id 及其 kv_transfer_params。這把請求身份貫穿整個子系統，而它先前並無「某區塊屬於哪個請求」的概念。在其之上，on_new_request 生命週期鉤子讓 manager 能以請求為單位宣告該請求的區塊應如何被卸載：BLOCK_LEVEL 僅卸載新計算的區塊，而 REQUEST_LEVEL 卸載請求的完整上下文 &mdash; 供需要整段序列（而非僅新尾端）的層使用。">Every manager method now receives a ReqContext, and on_new_request declares a per-request OffloadPolicy.</span></p>
+  <pre><code><span class="cm"># vllm/v1/kv_offload/base.py:51-68</span>
+@dataclass
+<span class="kw">class</span> <span class="fn">ReqContext</span>:
+    req_id: str
+    kv_transfer_params: dict | <span class="kw">None</span> = <span class="kw">None</span>
+
+<span class="kw">class</span> <span class="fn">OffloadPolicy</span>(Enum):
+    BLOCK_LEVEL   = <span class="st">"block_level"</span>    <span class="cm"># offload only newly-computed blocks</span>
+    REQUEST_LEVEL = <span class="st">"request_level"</span>  <span class="cm"># offload the request's complete context</span></code></pre>
+  <div class="note"><strong><span class="i18n" data-en="Naming collision worth knowing." data-zh="值得知道的命名衝突。">Naming collision worth knowing.</span></strong> <span class="i18n" data-en="This runtime OffloadPolicy (per-request granularity, shipped in v0.23.0) is different from the still-unbuilt &quot;OffloadPolicy abstraction&quot; on the roadmap backlog, which concerns which blocks to store (preemption-only vs spillover modes). The two share a name but not a meaning." data-zh="這個執行期的 OffloadPolicy（per-request 粒度，於 v0.23.0 發布）不同於 roadmap backlog 上仍未建造的「OffloadPolicy 抽象」，後者關乎要儲存哪些區塊（preemption-only 對 spillover 模式）。兩者同名而不同義。">The runtime per-request OffloadPolicy is different from the still-unbuilt store-selection OffloadPolicy abstraction on the roadmap backlog.</span></div>
+
+  <h3><span class="i18n" data-en="3.4 CanonicalKVCaches &mdash; one layout abstraction instead of backend probing" data-zh="3.4 CanonicalKVCaches &mdash; 以單一佈局抽象取代 backend 探測">3.4 CanonicalKVCaches &mdash; one layout abstraction instead of backend probing</span></h3>
+  <p><span class="i18n" data-en="Different attention backends store their KV tensors in different physical shapes &mdash; FlashAttention's layout differs from MLA's, and hybrid models mix several within one model. The old worker probed each attention backend to discover its shape. The rewrite replaces that probing with a single canonical representation: every KV cache is presented to the transfer layer as a list of int8 tensors of shape (num_blocks, page_size_bytes), with per-group references describing how each layer maps onto them. The worker then copies opaque, byte-addressed blocks, indifferent to the model architecture that produced them." data-zh="不同的注意力後端以不同的實體形狀儲存其 KV 張量 &mdash; FlashAttention 的佈局與 MLA 不同，而 hybrid 模型在單一模型內混用多種。舊 worker 透過探測每個注意力後端來發現其形狀。改寫以單一規範化表示取代該探測：每個 KV 快取都以一份形狀為 (num_blocks, page_size_bytes) 的 int8 張量清單呈現給傳輸層，並附帶 per-group 參考以描述每一層如何映射到它們之上。worker 於是複製不透明、以位元組定址的區塊，對產生它們的模型架構無動於衷。">CanonicalKVCaches presents every KV cache as int8 (num_blocks, page_size_bytes) tensors, so the worker is architecture-agnostic.</span></p>
+
+  <h3><span class="i18n" data-en="3.5 Metadata-driven metrics" data-zh="3.5 metadata 驅動的指標">3.5 Metadata-driven metrics</span></h3>
+  <p><span class="i18n" data-en="The last piece of the core rewrite replaces hard-coded Prometheus counters with declarative metric definitions. A spec class declares the metrics it emits via a build_metric_definitions classmethod, and managers report values through get_stats. This makes new metrics &mdash; a per-tier hit counter, a CPU-usage gauge &mdash; additive rather than a special case threaded through the connector. The API hooks are in tree; the full Prometheus migration (RFC #44008) is the one part of the rewrite still finishing as of mid-2026." data-zh="核心改寫的最後一塊，以宣告式的指標定義取代寫死的 Prometheus 計數器。spec 類別透過 build_metric_definitions classmethod 宣告它發出的指標，而 manager 透過 get_stats 回報數值。這使得新指標 &mdash; 每層命中計數、CPU 使用率量規 &mdash; 成為加法式的，而非穿過連接器的特例。API 鉤子已在樹中；完整的 Prometheus 遷移（RFC #44008）是改寫中截至 2026 年中仍在收尾的一塊。">A spec declares its metrics via build_metric_definitions; full Prometheus migration (RFC #44008) is the one part still finishing.</span></p>
+</section>
+
+<!-- ===================== CPU TIER ===================== -->
+<section id="cpu-tier">
+  <h2><span class="i18n" data-en="4. The CPU primary tier and pluggable eviction" data-zh="4. CPU 主層與可插拔淘汰">4. The CPU primary tier and pluggable eviction</span></h2>
+  <p><span class="i18n" data-en="The CPU tier (vllm/v1/kv_offload/cpu/) is where KV blocks actually live in DRAM. Its manager owns the shared logic &mdash; reference counting, block-pool allocation, the store/load skeletons &mdash; and delegates the one decision that varies between strategies, namely which block to evict, to a pluggable CachePolicy. This separation is what made it cheap to ship a second eviction algorithm and what makes it cheap to add a third." data-zh="CPU 層（vllm/v1/kv_offload/cpu/）是 KV 區塊真正存在於 DRAM 之處。其 manager 擁有共用邏輯 &mdash; 參考計數、block-pool 配置、store/load 骨架 &mdash; 並把策略之間唯一不同的決定（即淘汰哪個區塊）委派給可插拔的 CachePolicy。正是這個分離，讓發布第二種淘汰演算法變得廉價，也讓新增第三種變得廉價。">The CPU tier's manager owns shared logic and delegates the eviction decision to a pluggable CachePolicy.</span></p>
+
+  <h4><span class="i18n" data-en="The reference-count lifecycle" data-zh="參考計數生命週期">The reference-count lifecycle</span></h4>
+  <p><span class="i18n" data-en="Each block's entire readiness-and-pinning protocol is one integer. A freshly allocated block is born at ref_cnt = -1, meaning &quot;allocated but its data has not arrived yet&quot;; a completed store flips it to 0, meaning &quot;present and evictable&quot;; and each in-flight load that reads it raises the count above zero, pinning it against eviction until the load finishes. The is_ready check is simply ref_cnt >= 0. This compact protocol is why lookup can return None: a block at -1 exists but is not yet readable." data-zh="每個區塊完整的「就緒與釘選」協定就是一個整數。剛配置的區塊誕生於 ref_cnt = -1，意指「已配置但其資料尚未抵達」；完成的 store 將它翻為 0，意指「存在且可淘汰」；而每一個讀取它的進行中 load 會把計數提高到零以上，將它釘住以防淘汰，直到 load 完成。is_ready 檢查就只是 ref_cnt >= 0。這個精簡協定正是 lookup 能回傳 None 的原因：處於 -1 的區塊存在，但尚不可讀。">A block's whole readiness/pinning protocol is one integer: -1 not-ready, 0 evictable, &gt;0 pinned.</span></p>
+
+  <h3><span class="i18n" data-en="4.1 LRU &mdash; the baseline policy" data-zh="4.1 LRU &mdash; 基線策略">4.1 LRU &mdash; the baseline policy</span></h3>
+  <p><span class="i18n" data-en="Least-Recently-Used eviction keeps blocks in a single ordered dictionary and, when space is needed, discards the blocks that have gone longest without a hit. It is the right default because prefix reuse is strongly recency-correlated: a prompt prefix that was useful a moment ago is likely useful again soon. Its weakness is that a burst of one-off requests can flush a still-valuable prefix simply by being more recent. The implementation is deliberately small &mdash; the eviction scan walks the dictionary in order and collects the first n blocks whose ref_cnt is 0 and which are not protected, returning None (changing nothing) if it cannot find enough, so the operation is atomic." data-zh="最近最少使用（LRU）淘汰將區塊保存在單一有序字典中，當需要空間時，丟棄最久未命中的區塊。它是恰當的預設，因為前綴重用與近期性強烈相關：片刻前有用的提示前綴，很可能很快再次有用。它的弱點是，一陣一次性請求可能僅因更為近期，就把仍有價值的前綴沖刷掉。其實作刻意精簡 &mdash; 淘汰掃描依序走過字典，收集前 n 個 ref_cnt 為 0 且未受保護的區塊，若找不到足夠數量則回傳 None（不改變任何狀態），因此該操作是原子的。">LRU keeps blocks in one ordered dict and evicts the least-recently-used; its eviction is atomic.</span></p>
+  <pre><code><span class="cm"># vllm/v1/kv_offload/cpu/policies/lru.py:42-57 (condensed)</span>
+<span class="kw">def</span> <span class="fn">evict</span>(self, n: int, protected: set) -> list | <span class="kw">None</span>:
+    candidates = []
+    <span class="kw">for</span> key, block <span class="kw">in</span> self.blocks.items():           <span class="cm"># oldest first</span>
+        <span class="kw">if</span> block.ref_cnt == <span class="nu">0</span> <span class="kw">and</span> key <span class="kw">not</span> <span class="kw">in</span> protected:
+            candidates.append((key, block))
+            <span class="kw">if</span> len(candidates) == n: <span class="kw">break</span>
+    <span class="kw">if</span> len(candidates) &lt; n: <span class="kw">return</span> <span class="kw">None</span>           <span class="cm"># atomic: nothing mutated</span>
+    <span class="kw">for</span> key, _ <span class="kw">in</span> candidates: <span class="kw">del</span> self.blocks[key]
+    <span class="kw">return</span> candidates</code></pre>
+
+  <h3><span class="i18n" data-en="4.2 ARC &mdash; adapting between recency and frequency" data-zh="4.2 ARC &mdash; 在近期性與頻率間自我調適">4.2 ARC &mdash; adapting between recency and frequency</span></h3>
+  <p><span class="i18n" data-en="Adaptive Replacement Cache addresses LRU's blind spot by tracking frequency as well as recency. It maintains two real lists &mdash; T1 for blocks seen once and T2 for blocks seen at least twice &mdash; plus two ghost lists B1 and B2 that remember the keys recently evicted from each. A hit in a ghost list is the signal that the policy guessed wrong: a hit in B1 means recency was under-weighted, a hit in B2 means frequency was, and the policy nudges a target size accordingly. The result is a cache that behaves like LRU on recency-dominated traffic and like LFU on frequency-dominated traffic, without being told which it is facing." data-zh="自適應替換快取（ARC）透過同時追蹤頻率與近期性，解決 LRU 的盲點。它維護兩個真實清單 &mdash; T1 存放只見過一次的區塊、T2 存放至少見過兩次的區塊 &mdash; 外加兩個 ghost 清單 B1 與 B2，記住各自最近被逐出的鍵。在 ghost 清單中的命中，是策略猜錯的訊號：B1 命中意味近期性被低估、B2 命中意味頻率被低估，策略據此微調一個目標尺寸。其結果是一個快取：在近期性主導的流量上表現得像 LRU，在頻率主導的流量上表現得像 LFU，而無需被告知它面對的是哪一種。">ARC tracks frequency as well as recency via T1/T2 lists and B1/B2 ghost lists, self-tuning a target split.</span></p>
+  <p><span class="i18n" data-en="Concretely, the policy maintains a target size for T1 and adjusts it on every ghost-list hit:" data-zh="具體而言，策略為 T1 維護一個目標尺寸，並在每次 ghost 清單命中時調整它：">Concretely, the policy maintains a target size for T1 and adjusts it on every ghost-list hit:</span></p>
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$ p \leftarrow \min\!\big(p + \max(1, \tfrac{|B_2|}{|B_1|}),\; c\big) \quad\text{on a } B_1 \text{ hit}, \qquad p \leftarrow \max\!\big(p - \max(1, \tfrac{|B_1|}{|B_2|}),\; 0\big) \quad\text{on a } B_2 \text{ hit} $$
+  </div>
+  <p><span class="i18n" data-en="Here $p$ is the target size of $T_1$ and $c$ is the cache capacity; a hit in $B_1$ grows $p$ toward recency, a hit in $B_2$ shrinks it toward frequency, and the step size is itself adaptive to the relative ghost-list lengths. ARC was contributed by Alberto Perdomo (Red Hat) and is selected, like LRU, through a single eviction_policy string in the connector config." data-zh="此處 $p$ 是 $T_1$ 的目標尺寸、$c$ 是快取容量；$B_1$ 命中使 $p$ 朝近期性增長、$B_2$ 命中使其朝頻率收縮，而步長本身會依 ghost 清單的相對長度自我調適。ARC 由 Alberto Perdomo（Red Hat）貢獻，並與 LRU 一樣，透過連接器設定中的單一 eviction_policy 字串來選用。">Here $p$ is the target size of $T_1$ and $c$ the capacity; the step adapts to the relative ghost-list lengths.</span></p>
+
+  <h4><span class="i18n" data-en="The transfer engine" data-zh="傳輸引擎">The transfer engine</span></h4>
+  <p><span class="i18n" data-en="The actual GPU&harr;CPU copy lives in cpu/gpu_worker.py and uses ops.swap_blocks_batch, which on CUDA 12.8+ maps to cuMemcpyBatchAsync, with an optional Triton fast path for small transfers. Two ordering rules keep it correct. For a GPU&rarr;CPU store, the transfer stream first waits on the compute stream, so a block is never copied out before the attention kernel has finished writing it &mdash; this is the fix for a class of silent-corruption bugs. For a CPU&rarr;GPU load, no such wait is needed because the pinned host source is never written by a concurrent GPU stream, so the copy may use a relaxed source-access ordering. Completion is polled non-blockingly via a CUDA event query each engine step." data-zh="實際的 GPU&harr;CPU 複製位於 cpu/gpu_worker.py，使用 ops.swap_blocks_batch，在 CUDA 12.8+ 上映射到 cuMemcpyBatchAsync，並對小型傳輸提供可選的 Triton 快路徑。兩條定序規則維持其正確性。對於 GPU&rarr;CPU 的 store，傳輸 stream 會先等候計算 stream，使得區塊絕不會在注意力核心寫完之前就被複製出去 &mdash; 這正是一類靜默損壞 bug 的修法。對於 CPU&rarr;GPU 的 load，則不需此等候，因為被釘選的 host 來源絕不會被併發的 GPU stream 寫入，所以複製可採用較寬鬆的來源存取定序。完成狀態於每個引擎步驟透過 CUDA event query 以非阻塞方式輪詢。">Transfers use swap_blocks_batch (cuMemcpyBatchAsync); GPU&rarr;CPU stores wait on the compute stream to avoid reading unfinished KV.</span></p>
+</section>
+
+<!-- ===================== TIERING ===================== -->
+<section id="tiering">
+  <h2><span class="i18n" data-en="5. The tiering subsystem &mdash; offloading beyond CPU" data-zh="5. 多層級子系統 &mdash; 卸載到 CPU 之外">5. The tiering subsystem &mdash; offloading beyond CPU</span></h2>
+  <p><span class="i18n" data-en="The headline feature of the rewrite is multi-tier offloading: spilling the CPU cache further down to local NVMe, S3-compatible object storage, or a remote node. The design, proposed by Danny Harnik in RFC #38260 and implemented chiefly by Ronen Schaffer in PR #40020, rests on a single architectural rule &mdash; a secondary tier may never touch GPU memory. CPU DRAM is the one primary tier with GPU access; every other tier is secondary and exchanges data only with CPU." data-zh="改寫的頭號功能是多層級卸載：把 CPU 快取再向下溢出到本地 NVMe、S3 相容物件儲存，或遠端節點。此設計由 Danny Harnik 於 RFC #38260 提出、主要由 Ronen Schaffer 於 PR #40020 實作，奠基於單一架構規則 &mdash; secondary tier 絕不可觸及 GPU 記憶體。CPU DRAM 是唯一具備 GPU 存取的 primary tier；其餘每一層皆為 secondary，且只與 CPU 交換資料。">Multi-tier offloading rests on one rule: a secondary tier may never touch GPU memory; all transfers stage through CPU.</span></p>
+
+  <p><span class="i18n" data-en="That rule turns every store into a cascade and every load into a promotion, both staged through the CPU primary tier:" data-zh="該規則把每個 store 變成一次 cascade、每個 load 變成一次 promotion，兩者皆經由 CPU primary tier 中轉：">That rule turns every store into a cascade and every load into a promotion, both staged through CPU:</span></p>
+  <div class="vflow">
+    <div class="box cyan"><h4><span class="i18n" data-en="STORE cascade (GPU &rarr; CPU &rarr; secondary)" data-zh="STORE 串接（GPU &rarr; CPU &rarr; secondary）">STORE cascade (GPU &rarr; CPU &rarr; secondary)</span></h4>
+      <span class="i18n" data-en="GPU block is swapped into a CPU primary slot; once stored, the tiering manager pins that slot and submits an async job so each secondary tier reads it from CPU into its own backing store." data-zh="GPU 區塊被換入一個 CPU primary 槽位；存妥後，tiering manager 釘住該槽位並提交一個非同步工作，讓每個 secondary tier 從 CPU 將其讀入自身的後備儲存。">GPU&rarr;CPU swap, then each secondary tier reads from the CPU slot.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="LOAD promotion (secondary &rarr; CPU &rarr; GPU)" data-zh="LOAD 拔升（secondary &rarr; CPU &rarr; GPU）">LOAD promotion (secondary &rarr; CPU &rarr; GPU)</span></h4>
+      <span class="i18n" data-en="On a secondary hit, the manager reserves a CPU slot at ref_cnt = -1 and returns None from lookup so the scheduler retries; at the step's end it batches one submit_load per tier-and-request; once the data lands in CPU, a normal CPU&rarr;GPU load completes the promotion." data-zh="在 secondary 命中時，manager 以 ref_cnt = -1 保留一個 CPU 槽位、並讓 lookup 回傳 None 使排程器重試；在該步驟結尾，它為每個 tier-and-request 批次發出一次 submit_load；一旦資料落入 CPU，一次正常的 CPU&rarr;GPU load 便完成此 promotion。">Secondary hit reserves a CPU slot (ref_cnt=-1), batches submit_load at step end, then CPU&rarr;GPU.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.1 The SecondaryTierManager contract" data-zh="5.1 SecondaryTierManager 契約">5.1 The SecondaryTierManager contract</span></h3>
+  <p><span class="i18n" data-en="A secondary tier is any class implementing the SecondaryTierManager interface in tiering/base.py. Its methods all run inside the scheduler process and must be non-blocking: submit_store and submit_load enqueue asynchronous jobs and return immediately, while get_finished_jobs polls for completion. The tier reads and writes the primary tier's CPU memory through a zero-copy memoryview handed to it at construction &mdash; it never sees a GPU pointer. The methods a new tier must implement are exactly lookup, submit_store, submit_load, get_finished_jobs, on_new_request, and drain_jobs." data-zh="secondary tier 是任何實作 tiering/base.py 中 SecondaryTierManager 介面的類別。它的方法全都在排程器行程內執行，且必須非阻塞：submit_store 與 submit_load 將非同步工作入列後立即回傳，而 get_finished_jobs 輪詢完成狀態。該層透過建構時交給它的 zero-copy memoryview 讀寫 primary tier 的 CPU 記憶體 &mdash; 它從不見到 GPU 指標。一個新層必須實作的方法恰為 lookup、submit_store、submit_load、get_finished_jobs、on_new_request 與 drain_jobs。">A secondary tier implements lookup / submit_store / submit_load / get_finished_jobs / on_new_request / drain_jobs, all non-blocking, all scheduler-side.</span></p>
+
+  <h3><span class="i18n" data-en="5.2 The three shipped tiers" data-zh="5.2 已發布的三種層">5.2 The three shipped tiers</span></h3>
+  <p><span class="i18n" data-en="Three concrete tiers are registered in tiering/factory.py, in ascending order of realism." data-zh="tiering/factory.py 中註冊了三個具體層，按真實度遞增排列。">Three concrete tiers are registered in tiering/factory.py.</span></p>
+  <div class="cards">
+    <div class="card hl"><h4>example</h4><p><span class="i18n" data-en="A synchronous in-memory dictionary tier whose only purpose is to be the reference a contributor copies. It implements the six required methods in their simplest form and documents the JobMetadata / JobResult contract." data-zh="一個同步的記憶體字典層，其唯一目的就是作為貢獻者照抄的範本。它以最簡形式實作六個必要方法，並記錄 JobMetadata / JobResult 契約。">The reference tier a contributor copies; a synchronous in-memory dict.</span></p></div>
+    <div class="card"><h4>fs</h4><p><span class="i18n" data-en="A filesystem tier: one block per file, written and read with O_DIRECT straight into the CPU memoryview, serviced by a dual-priority thread pool, with existence checks via os.path.exists run on a background lookup thread." data-zh="一個檔案系統層：一塊一檔，以 O_DIRECT 直接寫入與讀出 CPU memoryview，由雙優先級執行緒池服務，並在背景查找執行緒上透過 os.path.exists 做存在性檢查。">One block per file via O_DIRECT into the CPU memoryview, dual-priority thread pool.</span></p></div>
+    <div class="card"><h4>obj</h4><p><span class="i18n" data-en="An S3-compatible object-store tier &mdash; implemented over NVIDIA NIXL's OBJ backend rather than a raw boto3 client &mdash; that registers the CPU primary buffer with NIXL once and moves blocks between it and the bucket." data-zh="一個 S3 相容的物件儲存層 &mdash; 以 NVIDIA NIXL 的 OBJ backend（而非原始 boto3 客戶端）實作 &mdash; 它把 CPU primary 緩衝區向 NIXL 註冊一次，並在其與儲存桶之間搬移區塊。">S3-compatible, over NVIDIA NIXL's OBJ backend (not boto3).</span></p></div>
+  </div>
+
+  <h4><span class="i18n" data-en="Non-blocking lookups via a background thread" data-zh="透過背景執行緒的非阻塞查找">Non-blocking lookups via a background thread</span></h4>
+  <p><span class="i18n" data-en="A storage lookup &mdash; stat a file, probe a bucket &mdash; is far too slow to run on the scheduler's hot path. Real tiers therefore compose an AsyncLookupManager: the tier delegates lookup to a per-request cache, accumulates the step's queries, and flushes them at on_schedule_end to a background daemon thread that runs the actual batch_lookup. Results are applied on the next step. A tier author implements only batch_lookup; the non-blocking machinery is inherited." data-zh="一次儲存查找 &mdash; stat 一個檔案、探測一個儲存桶 &mdash; 慢到不可能跑在排程器的熱路徑上。因此真實的層會組合一個 AsyncLookupManager：該層把 lookup 委派給一個 per-request 快取，累積該步驟的查詢，並在 on_schedule_end 把它們刷給一個執行實際 batch_lookup 的背景常駐執行緒。結果在下一步驟套用。層作者只需實作 batch_lookup；非阻塞機制是繼承而來的。">Real tiers compose an AsyncLookupManager and implement only batch_lookup; the non-blocking machinery is inherited.</span></p>
+
+  <div class="note"><strong><span class="i18n" data-en="A subtle but important invariant." data-zh="一個微妙但重要的不變式。">A subtle but important invariant.</span></strong> <span class="i18n" data-en="reset_cache drains every tier's in-flight jobs before resetting the primary, but it deliberately does not erase secondary data &mdash; a filesystem or object-store tier is persistent and keeps its blocks across a reset. The cascade also reserves the CPU promotion slot at ref_cnt = -1 precisely so that a same-step duplicate lookup returns None instead of issuing a second, racing promotion." data-zh="reset_cache 會在重置 primary 之前排空每一層的進行中工作，但它刻意不抹除 secondary 資料 &mdash; 檔案系統或物件儲存層是持久的，會在重置後保留其區塊。cascade 也正是以 ref_cnt = -1 保留 CPU promotion 槽位，使得同一步驟內的重複 lookup 回傳 None，而非發出第二次相互競賽的 promotion。">reset_cache drains tiers but does not erase persistent secondary data; the ref_cnt=-1 promotion slot prevents duplicate races.</span></div>
+</section>
+
+<!-- ===================== TIMELINE ===================== -->
+<section id="timeline">
+  <h2><span class="i18n" data-en="6. PR and version archaeology" data-zh="6. PR 與版本考古">6. PR and version archaeology</span></h2>
+  <p><span class="i18n" data-en="The table below pins each headline change to a pull request, an author, and the release it first shipped in. The original connector predates the rewrite by seven months; the rewrite itself runs from v0.19.0 to v0.23.0, peaking with the v0.22.0 multi-tier framework. Version mappings were cross-checked against the v0.22.0 and v0.23.0 GitHub release notes and the repository at commit 183a430." data-zh="下表把每項頭條改動釘到一個 pull request、一位作者，以及它首次發布的版本。原始連接器比改寫早了七個月；改寫本身從 v0.19.0 延續至 v0.23.0，於 v0.22.0 的多層級框架達到高峰。版本對應已對照 v0.22.0 與 v0.23.0 的 GitHub 發行說明，以及 commit 183a430 處的程式碼庫核對。">The table pins each headline change to a PR, author, and release; the rewrite runs v0.19.0&rarr;v0.23.0.</span></p>
+  <table>
+    <thead><tr><th><span class="i18n" data-en="Change" data-zh="改動">Change</span></th><th>PR</th><th><span class="i18n" data-en="Author" data-zh="作者">Author</span></th><th><span class="i18n" data-en="Release" data-zh="版本">Release</span></th></tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Original OffloadingConnector framework" data-zh="原始 OffloadingConnector 框架">Original OffloadingConnector framework</span></td><td>#22595</td><td>orozery</td><td>v0.11.0</td></tr>
+      <tr><td><span class="i18n" data-en="cpu/ package split + pluggable LRU/ARC" data-zh="cpu/ 套件拆分 + 可插拔 LRU/ARC">cpu/ package split + pluggable LRU/ARC</span></td><td>#37874</td><td>ronensc</td><td><strong>v0.19.0</strong></td></tr>
+      <tr><td><span class="i18n" data-en="OffloadKey / single-block lookup / ReqContext" data-zh="OffloadKey / 單塊 lookup / ReqContext">OffloadKey / single-block lookup / ReqContext</span></td><td>#39185 +</td><td>orozery</td><td>v0.20.0</td></tr>
+      <tr><td><span class="i18n" data-en="abstract.py&rarr;base.py + CanonicalKVCaches (HMA)" data-zh="abstract.py&rarr;base.py + CanonicalKVCaches（HMA）">abstract.py&rarr;base.py + CanonicalKVCaches (HMA)</span></td><td>#38453 +</td><td>orozery</td><td>v0.21.0</td></tr>
+      <tr><td><span class="i18n" data-en="Multi-tier framework (SecondaryTierManager)" data-zh="多層級框架（SecondaryTierManager）">Multi-tier framework (SecondaryTierManager)</span></td><td><strong>#40020</strong></td><td>ronensc</td><td>v0.22.0</td></tr>
+      <tr><td><span class="i18n" data-en="Filesystem secondary tier" data-zh="檔案系統 secondary tier">Filesystem secondary tier</span></td><td>#41735</td><td>rshavitt</td><td>v0.22.0</td></tr>
+      <tr><td><span class="i18n" data-en="Object-store (S3 / NIXL) secondary tier" data-zh="物件儲存（S3 / NIXL）secondary tier">Object-store (S3 / NIXL) secondary tier</span></td><td>#41968</td><td>effi-ofer</td><td>v0.23.0</td></tr>
+      <tr><td><span class="i18n" data-en="Per-request offloading policy (on_new_request)" data-zh="per-request 卸載策略（on_new_request）">Per-request offloading policy (on_new_request)</span></td><td>#43205</td><td>ronensc</td><td>v0.23.0</td></tr>
+      <tr><td><span class="i18n" data-en="HMA on by default for capable connectors" data-zh="HMA 對支援的連接器預設開啟">HMA on by default for capable connectors</span></td><td>#41847</td><td>chfeng-cs</td><td>v0.23.0</td></tr>
+      <tr><td><span class="i18n" data-en="Metadata-driven metrics (cleanup)" data-zh="metadata 驅動指標（收尾）">Metadata-driven metrics (cleanup)</span></td><td>#45905</td><td>Alex-ai-future</td><td><span class="i18n" data-en="post-v0.23" data-zh="v0.23 之後">post-v0.23</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><span class="i18n" data-en="Design ownership: RFC #38260 (multi-tier) is authored solely by Danny Harnik; RFC #33689 is the living roadmap maintained by Or Ozeri. The connector itself debuted in v0.11.0 and was made fast in v0.12.0 by the contiguous all-layer block layout &mdash; the change CanonicalKVCaches later generalised." data-zh="設計歸屬：RFC #38260（多層級）由 Danny Harnik 獨自撰寫；RFC #33689 是由 Or Ozeri 維護的活躍 roadmap。連接器本身於 v0.11.0 登場，並在 v0.12.0 由連續的全層區塊佈局加速 &mdash; 此改動稍後被 CanonicalKVCaches 一般化。">RFC #38260 (multi-tier) is by Danny Harnik alone; RFC #33689 is Or Ozeri's living roadmap.</span></div>
+</section>
+
+<!-- ===================== OPEN ISSUES ===================== -->
+<section id="issues">
+  <h2><span class="i18n" data-en="7. Open issues and limitations (June 2026)" data-zh="7. 未解問題與限制（2026 年 6 月）">7. Open issues and limitations (June 2026)</span></h2>
+  <p><span class="i18n" data-en="The rewrite closed an earlier generation of data-safety bugs &mdash; an index-out-of-range during batch store, a decode-block offload failure, a stale-block corruption under concurrency &mdash; by introducing the reference-count discipline and the compute-before-offload stream wait. What it opened in their place are higher-level problems: state-machine races at the boundary between preemption and asynchronous scheduling, contract mismatches between the manager and secondary-tier lifecycle hooks, and feature interactions with newer subsystems. The most relevant open items as of June 2026 are below." data-zh="改寫透過引入參考計數紀律與「先計算後卸載」的 stream 等候，關閉了上一代的資料安全 bug &mdash; 批次 store 期間的索引越界、decode 區塊卸載失敗、併發下的舊區塊損壞。取而代之開啟的是更高層的問題：搶占與非同步排程交界處的狀態機競賽、manager 與 secondary-tier 生命週期鉤子之間的契約不一致，以及與較新子系統的功能互動。截至 2026 年 6 月最相關的未解項目如下。">The rewrite closed older data-safety bugs but opened higher-level state-machine and contract problems.</span></p>
+  <table>
+    <thead><tr><th>#</th><th><span class="i18n" data-en="Problem" data-zh="問題">Problem</span></th><th><span class="i18n" data-en="Status / suitability" data-zh="狀態 / 適合度">Status / suitability</span></th></tr></thead>
+    <tbody>
+      <tr><td>#45405</td><td><span class="i18n" data-en="RFC: forward ReqContext to the CachePolicy. The block-level LRU/ARC policies recover essentially no prefixes in multi-turn workloads because they cannot see session identity; a session-aware prototype cut second-turn latency from ~0.85s to 0.07&ndash;0.14s." data-zh="RFC：把 ReqContext 轉發給 CachePolicy。block-level 的 LRU/ARC 策略在多輪工作負載中幾乎回收不到任何前綴，因為它們看不到 session 身份；一個 session-aware 原型把第二輪延遲從 ~0.85s 降到 0.07&ndash;0.14s。">RFC: forward ReqContext to CachePolicy; LRU/ARC recover ~no prefixes in multi-turn.</span></td><td><span class="check">&#9679;</span> <span class="i18n" data-en="Open RFC, additive, no CUDA; high research fit (see section 8.2)." data-zh="開放 RFC，加法式、無 CUDA；研究契合度高（見 8.2 節）。">Open RFC, additive; high research fit.</span></td></tr>
+      <tr><td>#44888</td><td><span class="i18n" data-en="TieringOffloadingSpec startup fails with an mmap madvise(MADV_POPULATE_WRITE) OSError on kernels older than 5.14." data-zh="TieringOffloadingSpec 在啟動時，於早於 5.14 的核心上因 mmap madvise(MADV_POPULATE_WRITE) 拋出 OSError 而失敗。">Tiering startup fails with mmap madvise OSError on kernels &lt; 5.14.</span></td><td><span class="partial">&#9679;</span> <span class="i18n" data-en="Self-contained; fix PR #44913 already open." data-zh="自包含；修正 PR #44913 已開啟。">Self-contained; fix PR #44913 open.</span></td></tr>
+      <tr><td>#46027</td><td><span class="i18n" data-en="on_request_finished gives inconsistent guarantees: the manager fires it after stores complete, a secondary tier after stores are merely submitted." data-zh="on_request_finished 給出不一致的保證：manager 在 store 完成後觸發它，secondary tier 則在 store 僅被提交後就觸發。">on_request_finished has inconsistent completion-vs-submission semantics across layers.</span></td><td><span class="check">&#9679;</span> <span class="i18n" data-en="Well-specified docstring + bookkeeping fix; good entry point." data-zh="明確的 docstring + 記帳修正；良好的切入點。">Well-specified; good entry point.</span></td></tr>
+      <tr><td>#41515</td><td><span class="i18n" data-en="kv_offload + HMA crashes on the second chat turn (Mamba+Attention hybrid, TP=2, on RTX 5090)." data-zh="kv_offload + HMA 在第二輪對話崩潰（Mamba+Attention hybrid，TP=2，RTX 5090 上）。">kv_offload + HMA crashes on the second chat turn (hybrid model, TP=2).</span></td><td><span class="cross">&#9679;</span> <span class="i18n" data-en="In the scheduler/connector handshake; reproducible but delicate." data-zh="位於排程器/連接器握手；可重現但精細。">Scheduler-side; delicate.</span></td></tr>
+      <tr><td>#45268</td><td><span class="i18n" data-en="Sleep mode and native offload are mutually exclusive: an EngineDeadError after the first sleep/wake, because the CPU offload buffer is bound to the CUDA context that sleep tears down." data-zh="睡眠模式與原生卸載互斥：首次 sleep/wake 後出現 EngineDeadError，因為 CPU 卸載緩衝區綁定於 sleep 拆除的 CUDA context。">Sleep mode + native offload mutually exclusive (CUDA-context teardown).</span></td><td><span class="cross">&#9679;</span> <span class="i18n" data-en="Lifecycle/CUDA-context work; no fix yet." data-zh="生命週期/CUDA-context 工作；尚無修正。">Lifecycle work; no fix yet.</span></td></tr>
+    </tbody>
+  </table>
+  <p><span class="i18n" data-en="No open KV-offloading issue currently carries a good-first-issue or help-wanted label, but #46027, #44888, and #45405 are explicitly framed as contributor-ready. The headline architectural limitation remains hybrid-model cross-layer offload, which the roadmap (RFC #33689) still lists as unbuilt." data-zh="目前沒有任何未解的 KV 卸載問題帶有 good-first-issue 或 help-wanted 標籤，但 #46027、#44888 與 #45405 被明確定位為適合貢獻者。頭號架構限制仍是 hybrid-model 的跨層卸載，roadmap（RFC #33689）仍將其列為未建造。">No issue carries a good-first-issue label, but #46027/#44888/#45405 are contributor-ready.</span></p>
+</section>
+
+<!-- ===================== CONTRIBUTING ===================== -->
+<section id="contributing">
+  <h2><span class="i18n" data-en="8. Contributing: extension points and two worked scaffolds" data-zh="8. 貢獻：擴展點與兩個實作骨架">8. Contributing: extension points and two worked scaffolds</span></h2>
+  <p><span class="i18n" data-en="The rewrite left an unusually clean extension surface. A new storage medium, a new eviction policy, and a new spec each plug in at a single, well-defined seam, summarised below. This lab includes two scaffolds built against the current main &mdash; one for a storage tier, one for an eviction policy &mdash; that exercise these seams end to end." data-zh="改寫留下了一個異常乾淨的擴展面。一個新的儲存媒介、一個新的淘汰策略、一個新的 spec，各自接入單一、定義良好的接縫，概述如下。本 lab 包含兩個針對當前 main 建構的骨架 &mdash; 一個用於儲存層、一個用於淘汰策略 &mdash; 端到端地操練這些接縫。">The rewrite left a clean extension surface; this lab includes two scaffolds built against current main.</span></p>
+  <table>
+    <thead><tr><th><span class="i18n" data-en="To add a&hellip;" data-zh="若要新增&hellip;">To add a&hellip;</span></th><th><span class="i18n" data-en="Implement" data-zh="實作">Implement</span></th><th><span class="i18n" data-en="Register at" data-zh="註冊於">Register at</span></th></tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Storage tier" data-zh="儲存層">Storage tier</span></td><td><code>SecondaryTierManager</code> <span class="i18n" data-en="(6 methods)" data-zh="（6 個方法）">(6 methods)</span></td><td><code>SecondaryTierFactory.register_tier</code></td></tr>
+      <tr><td><span class="i18n" data-en="Eviction policy" data-zh="淘汰策略">Eviction policy</span></td><td><code>CachePolicy</code> <span class="i18n" data-en="(get/insert/remove/touch/evict/clear)" data-zh="（get/insert/remove/touch/evict/clear）">(get/insert/remove/touch/evict/clear)</span></td><td><code>_CACHE_POLICIES</code> <span class="i18n" data-en="dict in cpu/manager.py" data-zh="cpu/manager.py 中的 dict">dict in cpu/manager.py</span></td></tr>
+      <tr><td><span class="i18n" data-en="Offloading spec" data-zh="卸載 spec">Offloading spec</span></td><td><code>OffloadingSpec</code> <span class="i18n" data-en="(get_manager, get_handlers)" data-zh="（get_manager、get_handlers）">(get_manager, get_handlers)</span></td><td><code>OffloadingSpecFactory.register_spec</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="8.1 A GPUDirect-Storage (cuFile) NVMe tier" data-zh="8.1 一個 GPUDirect-Storage（cuFile）NVMe 層">8.1 A GPUDirect-Storage (cuFile) NVMe tier</span></h3>
+  <p><span class="i18n" data-en="The filesystem tier reads NVMe into CPU memory with O_DIRECT and then a separate handler copies CPU to GPU &mdash; two hops. On hardware with fast NVMe (H100/H200-class nodes), NVIDIA GPUDirect Storage via cuFile can read NVMe with asynchronous, page-cache-bypassing DMA. The scaffold in this lab adds a gds tier that mirrors the filesystem tier's structure but routes block I/O through cuFile when enabled, falling back to the proven O_DIRECT path otherwise, so the tier works out of the box and the cuFile path is an opt-in optimisation." data-zh="檔案系統層以 O_DIRECT 把 NVMe 讀入 CPU 記憶體，再由一個獨立 handler 把 CPU 複製到 GPU &mdash; 兩個躍程。在具備快速 NVMe 的硬體上（H100/H200 等級節點），透過 cuFile 的 NVIDIA GPUDirect Storage 能以非同步、繞過 page-cache 的 DMA 讀取 NVMe。本 lab 的骨架新增了一個 gds 層，鏡像檔案系統層的結構，但在啟用時把區塊 I/O 路由經由 cuFile，否則退回到經驗證的 O_DIRECT 路徑，因此該層開箱即用，而 cuFile 路徑是一項可選的最佳化。">The scaffold adds a gds tier mirroring the fs tier, routing block I/O through cuFile when enabled, with an O_DIRECT fallback.</span></p>
+  <div class="warn"><strong><span class="i18n" data-en="An honest limit." data-zh="一個誠實的限制。">An honest limit.</span></strong> <span class="i18n" data-en="Because a secondary tier may not touch GPU memory, a contract-compliant cuFile tier still moves NVMe&harr;CPU, so its advantage over the existing filesystem tier is modest. The genuinely differentiated design &mdash; GPUDirect straight from NVMe into GPU HBM, skipping the CPU bounce &mdash; breaks the no-GPU-access rule and would require a design proposal to extend the tiering contract. That is the larger, RFC-gated contribution; the in-tree scaffold is the compliant first step." data-zh="由於 secondary tier 不可觸及 GPU 記憶體，一個符合契約的 cuFile 層仍是在搬移 NVMe&harr;CPU，因此它相對於現有檔案系統層的優勢有限。真正具差異化的設計 &mdash; GPUDirect 直接從 NVMe 進入 GPU HBM、跳過 CPU 中轉 &mdash; 會打破「不可存取 GPU」規則，並需要一份設計提案來擴展 tiering 契約。那是更大、需經 RFC 的貢獻；in-tree 的骨架是符合契約的第一步。">A compliant cuFile tier still moves NVMe&harr;CPU; the GPU-direct variant breaks the no-GPU rule and needs an RFC.</span></div>
+
+  <h3><span class="i18n" data-en="8.2 A session-aware eviction policy" data-zh="8.2 一個 session-aware 淘汰策略">8.2 A session-aware eviction policy</span></h3>
+  <p><span class="i18n" data-en="Issue #45405 reports that block-level LRU and ARC recover almost no prefixes in multi-turn and multi-agent workloads, because the eviction decision cannot see which session a block belongs to. The scaffold in this lab is a SessionAwareLRUCachePolicy that protects blocks of recently-active sessions: it records a session identity at store time, marks a session active on each touch, and evicts blocks from idle sessions before those of hot ones, falling back to LRU order within each set. A session is keyed by kv_transfer_params['session_id'] when present &mdash; the natural identifier for a multi-agent program that shares a conversation across turns &mdash; or by req_id otherwise." data-zh="Issue #45405 指出，block-level 的 LRU 與 ARC 在多輪與多 agent 工作負載中幾乎回收不到任何前綴，因為淘汰決策看不到某區塊屬於哪個 session。本 lab 的骨架是一個 SessionAwareLRUCachePolicy，它保護近期活躍 session 的區塊：在 store 時記錄一個 session 身份、每次 touch 時把該 session 標記為活躍，並在淘汰熱門 session 的區塊之前先淘汰閒置 session 的區塊，在各集合內退回到 LRU 順序。session 在 kv_transfer_params['session_id'] 存在時以其為鍵 &mdash; 這是跨回合共享對話的多 agent 程式的自然識別符 &mdash; 否則以 req_id 為鍵。">The scaffold is a SessionAwareLRUCachePolicy that protects blocks of recently-active sessions, keyed by session_id.</span></p>
+  <div class="note"><strong><span class="i18n" data-en="Coordinate, do not duplicate." data-zh="協調，而非重複。">Coordinate, do not duplicate.</span></strong> <span class="i18n" data-en="The plumbing this policy depends on &mdash; forwarding ReqContext to the policy via touch_with_context and on_store_batch &mdash; is exactly what RFC #45405 already proposes, and its author has a working patch awaiting maintainer feedback. A separate PR (#46216) reworks the same policy registry for performance. The uncontested contribution is therefore the policy and a benchmark that demonstrates its multi-turn recovery, brought to RFC #45405 &mdash; not a competing plumbing PR. The repository's AGENTS.md mandates a duplicate-work check before any PR." data-zh="此策略所依賴的管線 &mdash; 透過 touch_with_context 與 on_store_batch 把 ReqContext 轉發給策略 &mdash; 正是 RFC #45405 已提出的內容，且其作者已有一個可運作的 patch 等待 maintainer 回饋。另一個獨立 PR（#46216）為效能重做了同一個策略註冊表。因此未被佔據的貢獻，是該策略以及一份展示其多輪回收效果的 benchmark，並帶到 RFC #45405 &mdash; 而非一個競爭性的管線 PR。該程式碼庫的 AGENTS.md 強制要求在任何 PR 之前進行重複工作檢查。">The plumbing it depends on is already proposed in RFC #45405 (with a working patch); bring the policy + a benchmark there, not a competing plumbing PR.</span></div>
+
+  <h3><span class="i18n" data-en="8.3 Contribution mechanics" data-zh="8.3 貢獻機制">8.3 Contribution mechanics</span></h3>
+  <p><span class="i18n" data-en="The repository's AGENTS.md sets strict rules for AI-assisted contributions: a mandatory duplicate-work check with the gh CLI before opening a PR, no low-value busywork PRs, a human who understands and can defend every changed line, and an explicit disclosure of AI assistance in the PR description. The development environment is uv plus a virtual environment &mdash; never a bare pip &mdash; with pre-commit (ruff, mypy, an SPDX-header check), an 88-character line limit, and Google-style docstrings. A change over roughly 500 lines that is not test, config, or kernel code requires an RFC issue first. By this rule, an eviction policy or a single tier can go straight to a PR; the GPU-direct tier variant and any change to the shared policy interface must start with an RFC." data-zh="該程式碼庫的 AGENTS.md 為 AI 輔助的貢獻設下嚴格規則：在開 PR 之前以 gh CLI 進行強制的重複工作檢查、不開低價值的雜務 PR、由一位理解且能捍衛每一行改動的人類負責，並在 PR 描述中明確揭露 AI 協助。開發環境是 uv 加上虛擬環境 &mdash; 絕不使用裸 pip &mdash; 搭配 pre-commit（ruff、mypy、SPDX 標頭檢查）、88 字元行寬限制，以及 Google 風格的 docstring。一項超過約 500 行、且非測試、設定或核心程式碼的改動，需先有一個 RFC issue。依此規則，一個淘汰策略或單一層可直接送 PR；GPU-direct 層變體與任何對共用策略介面的改動，都必須從一個 RFC 開始。">AGENTS.md mandates gh duplicate-checks, human accountability, AI disclosure, uv+venv, pre-commit, 88-char lines; &gt;500 LOC needs an RFC.</span></p>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="vLLM Lab &middot; Native KV Offloading rewrite (vllm/v1/kv_offload, main @183a430)" data-zh="vLLM Lab &middot; 原生 KV 卸載改寫（vllm/v1/kv_offload，main @183a430）">vLLM Lab &middot; Native KV Offloading rewrite (vllm/v1/kv_offload, main @183a430)</span></p>
+  <p><span class="i18n" data-en="Sources: RFC #33689 (roadmap), #38260 (multi-tier), #44008 (metrics); PRs #37874, #40020, #41968, #43205; the vLLM blog (2026-01-08)." data-zh="來源：RFC #33689（roadmap）、#38260（多層級）、#44008（指標）；PR #37874、#40020、#41968、#43205；vLLM 部落格（2026-01-08）。">Sources: RFC #33689, #38260, #44008; PRs #37874, #40020, #41968, #43205; vLLM blog (2026-01-08).</span></p>
+  <p><span class="i18n" data-en="Generated 2026-06-21" data-zh="產生日期：2026-06-21">Generated 2026-06-21</span></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>
