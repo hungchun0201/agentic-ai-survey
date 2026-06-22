@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Core Review — What Our Inference-Time Predictor Actually Is</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],macros:{'\\fclk':'f_{\\mathrm{clk}}','\\etabar':'\\bar{\\eta}','\\etac':'\\eta_{c}','\\Tstep':'T_{\\mathrm{step}}','\\Tblocks':'T_{\\mathrm{blocks}}','\\Tsamp':'T_{\\mathrm{samp}}','\\Sn':'S(N)'}});"></script>
+<style>
+/* ===== ACCENT (Sky — infrastructure / modeling) ===== */
+:root{--accent:#4fc3f7;--accent-rgb:79,195,247;--nav-bg:rgba(8,26,40,0.95)}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+html,body{overflow-x:clip}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none;contain:paint}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#9fbcd0;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+.hero{background:linear-gradient(135deg,#101a26 0%,#13182a 50%,#0d1622 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.07) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.4rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative;max-width:980px;margin-left:auto;margin-right:auto}
+.hero .sub{font-size:1.1rem;color:#8fa4c0;max-width:780px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none}
+
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.75rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.22rem;color:#e0e7f0;margin:1.8rem 0 .7rem;font-weight:600}
+h4{font-size:1.02rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:920px}
+.container p{margin:.7rem 0}
+
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.09);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:1rem 0;border-radius:8px;contain:paint;max-width:100%}
+.table-wrap table{margin:0;min-width:560px}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.55rem .75rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.5rem .75rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.4rem 1.6rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0}
+
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.note strong{color:#fff}
+.warn{background:rgba(46,204,113,.07);border-left:4px solid #2ecc71;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.warn strong{color:#fff}
+.bad{background:rgba(233,69,96,.07);border-left:4px solid #e94560;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.9rem}
+.bad strong{color:#fff}
+
+/* question box: quotes the user's bracketed item */
+.qbox{background:rgba(30,34,52,.6);border:1px solid rgba(var(--accent-rgb),.15);border-radius:10px;padding:.8rem 1.1rem;margin:.9rem 0;font-size:.9rem;color:#b8c4d8}
+.qbox .qq{color:#e6edf6;font-style:italic}
+.qcat{display:inline-block;font-size:.66rem;font-weight:700;padding:.12rem .5rem;border-radius:11px;margin-right:.5rem;vertical-align:middle;text-transform:uppercase;letter-spacing:.04em}
+.qcat.lit{background:rgba(126,87,194,.2);color:#b39ddb;border:1px solid rgba(126,87,194,.45)}
+.qcat.challenge{background:rgba(233,69,96,.16);color:#ff6b81;border:1px solid rgba(233,69,96,.45)}
+.qcat.issue{background:rgba(245,166,35,.16);color:#ffb74d;border:1px solid rgba(245,166,35,.45)}
+.qcat.question{background:rgba(79,195,247,.16);color:#4fc3f7;border:1px solid rgba(79,195,247,.45)}
+.pill{display:inline-block;font-size:.66rem;font-weight:700;padding:.12rem .5rem;border-radius:11px;margin-left:.4rem;vertical-align:middle}
+.pill.ok{background:rgba(46,204,113,.16);color:#2ecc71;border:1px solid rgba(46,204,113,.45)}
+.pill.gap{background:rgba(233,69,96,.16);color:#ff6b81;border:1px solid rgba(233,69,96,.45)}
+.pill.partial{background:rgba(245,166,35,.16);color:#ffb74d;border:1px solid rgba(245,166,35,.45)}
+
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.1rem 1.4rem;margin:1rem 0;overflow-x:auto;text-align:center;contain:paint;max-width:100%}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+.legend{display:flex;flex-wrap:wrap;gap:.6rem;margin:1rem 0 0}
+.check{color:#2ecc71;font-weight:bold}.cross{color:#e94560;font-weight:bold}.partial{color:#ffb74d;font-weight:bold}
+
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.6rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  table{font-size:.8rem}
+  th,td{padding:.4rem .45rem}
+}
+</style>
+</head>
+<body>
+<nav>
+  <ul>
+    <li><a href="../index.html">&larr; <span class="i18n" data-en="Deep Dives" data-zh="深潛">Deep Dives</span></a></li>
+    <li><a href="#framing"><span class="i18n" data-en="0. Framing" data-zh="0. 定位">0. Framing</span></a></li>
+    <li><a href="#part1"><span class="i18n" data-en="1. The predictor" data-zh="1. 預測器">1. The predictor</span></a></li>
+    <li><a href="#part2"><span class="i18n" data-en="2. The utility story" data-zh="2. 效用論述">2. The utility story</span></a></li>
+    <li><a href="#lit"><span class="i18n" data-en="3. Literature" data-zh="3. 文獻">3. Literature</span></a></li>
+    <li><a href="#experiments"><span class="i18n" data-en="4. Missing experiments" data-zh="4. 待補實驗">4. Missing experiments</span></a></li>
+    <li><a href="#scorecard"><span class="i18n" data-en="5. Scorecard" data-zh="5. 對照記分卡">5. Scorecard</span></a></li>
+    <li class="lang-switch">
+      <a onclick="setLang('en')" id="lang-en" class="active">EN</a>
+      <a onclick="setLang('zh')" id="lang-zh">ZH</a>
+    </li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1><span class="i18n" data-en="Project Core Review" data-zh="專案核心審視">Project Core Review</span></h1>
+  <p class="sub"><span class="i18n" data-en="What our LLM inference-time predictor actually is, what the data lets us honestly claim, and where new experiments are still required — every claim traced to a raw result file." data-zh="我們的 LLM 推論時間預測器究竟是什麼、資料允許我們誠實主張到哪裡、以及哪些地方仍需新實驗——每一項主張都對應到原始結果檔。">What our LLM inference-time predictor actually is, what the data lets us honestly claim, and where new experiments are still required.</span></p>
+  <div class="badges">
+    <span class="badge"><span class="i18n" data-en="Internal self-audit" data-zh="內部自我審查">Internal self-audit</span></span>
+    <span class="badge"><span class="i18n" data-en="Every number traced to results/" data-zh="每個數字皆溯源 results/">Every number traced to results/</span></span>
+    <span class="badge"><span class="i18n" data-en="Honest scope, including negative results" data-zh="誠實界定範圍，含負面結果">Honest scope, including negative results</span></span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none"><span class="i18n" data-en="Bracket legend: each answered question is tagged with its category and a status pill (resolved / data-insufficient)." data-zh="中括號圖例：每個被回答的問題都標記其類別與狀態徽章（已釐清／資料不足）。">Bracket legend: each answered question is tagged with its category and a status pill.</span></p>
+</div>
+
+<div class="container">
+
+<!-- ============================ 0. FRAMING ============================ -->
+<section id="framing">
+  <h2><span class="i18n" data-en="0. The honest framing — two halves, not a speedup paper" data-zh="0. 誠實的定位——兩個半部，而非一篇加速論文">0. The honest framing — two halves, not a speedup paper</span></h2>
+
+  <p><span class="i18n"
+    data-en="The reframing is correct that the project has two halves. The first half builds a per-step GPU inference-time predictor; the second half asks what that predictor buys downstream. But there is one mismatch the data forces us to confront before anything else, because it shapes every claim that follows: the second half, as currently measured, does NOT demonstrate a reduction in inference time. It is a signal-fidelity and integration study, and it reports negative results alongside the positive ones. Calling it 'Part 2 improves inference time' would overstate what we have."
+    data-zh="此重構正確地指出本專案有兩個半部。前半建立一個逐步的 GPU 推論時間預測器；後半則探問這個預測器在下游能帶來什麼價值。但在進入任何細節之前，資料逼我們先面對一個落差，因為它牽動後續每一項主張：後半部就目前所量測的內容而言，並未證明推論時間被縮短。它是一項訊號保真度與整合研究，並且在正面結果之外同時報告了負面結果。把它說成「第二部分改善了推論時間」會誇大我們實際擁有的成果。">The two-half reframing is correct, but with one mismatch the data forces us to confront: the second half, as measured, does NOT demonstrate reduced inference time — it is a signal-fidelity and integration study with disclosed negative results.</span></p>
+
+  <div class="qbox"><span class="qcat question">Question</span><span class="i18n"
+    data-en="<span class='qq'>Does the paper present the 2-part structure (Part 1 = predict step time from minimal/pure-input measurement; Part 2 = use the predictor to improve inference time via existing mechanism papers)?</span>"
+    data-zh="<span class='qq'>論文是否呈現了這個兩部分結構（第一部分＝以最小／純輸入量測預測 step time；第二部分＝透過既有機制論文用預測器改善推論時間）？</span>"><span class='qq'>Does the paper present the 2-part structure?</span></span></div>
+
+  <p><span class="i18n"
+    data-en="Partial match. The paper's own words are 'a focused per-step predictor plus a utility study of what it buys downstream' (1_introduction.tex:15) — it is never labelled Part 1 / Part 2. Two corrections to the mental model: (1) 'minimal / pure-input measurement' overstates Half 1. The model is mechanism-structured but microbenchmark- and engine-sweep-calibrated: it needs standalone matmul/attention microbenchmarks plus Nsight-Compute counters per architecture, and in its deployment-calibrated mode one host-floor scalar per trace. Only the GPU-efficiency constants are trace-free. (2) Half 2 is a utility study, and two of its four pre-registered claims fail their gates: prediction-driven routing recovers 94–100% of a reference router's SLO attainment, but simple queue-aware heuristics beat that reference at the workload knee — so it measures signal-fidelity to a weak reference, not fleet-optimality, and at saturation it explicitly does not win. The one positive real-hardware result is keep-warm routing, which trims time-to-first-token by a pooled 30 ms per turn. A separate integration tier swaps the predictor into four published serving tools; that tier claims accuracy-comparability at far lower calibration cost, not a latency improvement."
+    data-zh="部分相符。論文自己的措辭是「一個聚焦的逐步預測器，加上一項關於它在下游能帶來何種價值的效用研究」（1_introduction.tex:15）——它從未被標為第一／第二部分。對心智模型有兩處修正：（1）「最小／純輸入量測」誇大了前半。此模型雖以機制為骨架，卻是以微基準與引擎掃描校準的：每個架構都需要獨立的 matmul／attention 微基準加上 Nsight-Compute 計數器，並且在其部署校準模式下，每條 trace 需要一個 host-floor 純量。只有 GPU 效率常數是不需 trace 的。（2）後半是效用研究，而其四項預先登記的主張中有兩項未通過其閘門：預測驅動的路由能回復參考路由器 94–100% 的 SLO 達成率，但簡單的佇列感知啟發式在工作負載拐點處勝過該參考——所以它量測的是對一個弱參考的訊號保真度，而非全機隊最優，而在飽和時它明確地不勝出。唯一的正面真實硬體結果是 keep-warm 路由，它把首字時間（TTFT）每輪平均縮短 30 ms。另有一個獨立的整合層把預測器換入四個已發表的服務工具；該層主張的是在遠低校準成本下的準確度可比性，而非延遲改善。">Partial match. The paper calls it 'a per-step predictor plus a utility study'. 'Pure-input' overstates Half 1 (it needs microbenchmarks + ncu counters per architecture, plus one host-floor scalar per trace in calibrated mode). Half 2 is a utility study where two of four pre-registered claims FAIL; the one real win is keep-warm routing (−30 ms TTFT). A separate tier swaps the predictor into four tools, claiming accuracy-at-lower-cost, not speedup.</span></p>
+
+  <div class="note"><span class="i18n"
+    data-en="<strong>Why this matters for the whole document.</strong> If we want the headline to be 'our predictor improves inference time', the data does not yet support it and we must run the speedup experiments listed in Section 4. If instead the headline is 'our predictor is a cheap, explainable, transferable decision signal that drops into existing systems', the data largely supports that. This review is written to make that choice deliberate rather than accidental."
+    data-zh="<strong>這對整份文件為何重要。</strong>若我們要把標題定為「我們的預測器改善了推論時間」，目前資料尚不支持，必須執行第 4 節列出的加速實驗。若把標題改為「我們的預測器是一個廉價、可解釋、可轉移、能直接放進既有系統的決策訊號」，資料大致支持。本審視的目的，是讓這個選擇是審慎的，而非偶然的。"><strong>Why this matters.</strong> If the headline is 'we improve inference time', the data does not yet support it (run Section 4's experiments). If the headline is 'a cheap, explainable, transferable decision signal that drops into existing systems', the data largely supports it.</span></div>
+</section>
+
+<!-- ============================ 1. THE PREDICTOR ============================ -->
+<section id="part1">
+  <h2><span class="i18n" data-en="1. Part one — what the predictor actually computes" data-zh="1. 第一部分——預測器實際計算了什麼">1. Part one — what the predictor actually computes</span></h2>
+
+  <p><span class="i18n"
+    data-en="Half one predicts the wall-clock time of one served engine step. The classic approach decides the bottleneck per kernel from compute (FLOPs) versus memory traffic (bytes) and divides each by a peak rate. That needs two numbers a GPU rarely actually sustains — peak TFLOP/s and peak bandwidth — and the literature patches the gap by multiplying each peak by a fitted efficiency factor whose value is reported but not explained. Our contribution is to replace that opaque factor with a small product of factors, each of which corresponds to a concrete thing the GPU does once a kernel launches. This section answers, with real numbers, every question raised in the reframing about that model."
+    data-zh="前半預測一個被服務的引擎 step 的實際時間。經典做法是逐 kernel 從計算量（FLOPs）與記憶體流量（bytes）判定 bottleneck，再各除以一個峰值速率。這需要兩個 GPU 很少真正維持的數字——峰值 TFLOP/s 與峰值頻寬——文獻於是用一個被報告卻未被解釋的擬合效率因子去乘各峰值來補洞。我們的貢獻是把那個不透明因子換成一個小小的因子乘積，其中每個因子都對應到 kernel 啟動後 GPU 實際做的一件具體事情。本節以真實數字回答重構中關於該模型提出的每個問題。">Half one predicts one served engine step. The classic approach decides the bottleneck per kernel from FLOPs vs bytes and divides by peak rates — needing two numbers a GPU rarely sustains, patched with an unexplained efficiency factor. We replace that factor with a small product of factors, each a concrete thing the GPU does after launch.</span></p>
+
+  <h3><span class="i18n" data-en="1.1 The step-time equation — and why it is not three corrections" data-zh="1.1 step-time 方程式——以及它為何不是三項修正">1.1 The step-time equation — and why it is not three corrections</span></h3>
+  <div class="qbox"><span class="qcat question">Question</span><span class="i18n"
+    data-en="<span class='qq'>Do we only have these three changes (compute α / five-factor, memory / L2, CPU–GPU overlap)?</span>"
+    data-zh="<span class='qq'>我們只有這三個變化嗎（計算 α／五因子、記憶體／L2、CPU–GPU 重疊）？</span>"><span class='qq'>Do we only have these three changes?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="No — three is an undercount; the honest structure is about seven additive terms and nine-plus factors. The step time is the boxed equation below (3_method.tex eq:tstep):"
+    data-zh="不——三項是低估；誠實的結構約有七個加法項與九個以上的因子。step time 是下方方框中的方程式（3_method.tex eq:tstep）：">No — three is an undercount; the honest structure is ~7 additive terms and 9+ factors. The step time is:</span></p>
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$T_{\mathrm{step}} \;=\; \max\!\big(T_{\mathrm{blocks}},\; N_{\mathrm{kern}} T_{\mathrm{launch}}\big) \;+\; \alpha(N,T_{\mathrm{new}})\,S(N) \;+\; T_{\mathrm{samp}}$$
+  </div>
+  <p><span class="i18n"
+    data-en="Here $T_{\mathrm{blocks}}$ itself sums five operator classes (qkv, o, gate_up, down, attention) over 32 layers, plus light-kernel and LM-head terms. Enumerated, the correction terms/factors are: (1) the GEMM compute efficiency $\eta_c = \eta_{\mathrm{wave}}\cdot \mathrm{TCutil}\cdot \bar\eta$ — three factors, not one; (2) a GEMM memory branch with its own streaming efficiency $\eta_{\mathrm{mem}}$ that the roofline max selects at small problem sizes; (3) the attention term, itself four factors (SM-fill, a softmax-amortisation saturation, and a causal-shape diagonal-tile penalty); (4) the kernel-launch / dispatch floor $N_{\mathrm{kern}}\,T_{\mathrm{launch}}$, an explicit max against compute; (5) the host overlap leak $\alpha(N,T_{\mathrm{new}})\,S(N)$; (6) the sampling term $T_{\mathrm{samp}}$; (7) the clock / five-factor split of $\bar\eta$ into $f_{\mathrm{clk}}$ times an iso-clock residual — a validation-level decomposition, not a separate runtime term. The three listed in the reframing map to (1)+(7) lumped as 'compute', (2) loosely as 'memory', and (5) as 'overlap'; omitted are the attention term, the launch floor, sampling, and the light / LM-head kernels."
+    data-zh="此處 $T_{\mathrm{blocks}}$ 本身在 32 層上加總五個運算子類別（qkv、o、gate_up、down、attention），再加上 light-kernel 與 LM-head 項。逐一列出，修正項／因子為：（1）GEMM 計算效率 $\eta_c = \eta_{\mathrm{wave}}\cdot \mathrm{TCutil}\cdot \bar\eta$——是三個因子而非一個；（2）GEMM 記憶體分支，具有其自身的串流效率 $\eta_{\mathrm{mem}}$，roofline 的 max 在小問題尺寸時會選到它；（3）attention 項，本身就有四個因子（SM 填充、一個 softmax 攤銷飽和、以及一個因果形狀的對角分塊懲罰）；（4）kernel 啟動／派發地板 $N_{\mathrm{kern}}\,T_{\mathrm{launch}}$，與計算做明確的 max；（5）host 重疊洩漏 $\alpha(N,T_{\mathrm{new}})\,S(N)$；（6）取樣項 $T_{\mathrm{samp}}$；（7）把 $\bar\eta$ 拆成 $f_{\mathrm{clk}}$ 乘上等時脈殘差的時脈／五因子拆解——這是驗證層級的拆解，而非獨立的執行期項。重構所列的三項對應到（1）+（7）合稱「計算」、（2）寬鬆地當作「記憶體」、（5）當作「重疊」；被遺漏的是 attention 項、啟動地板、取樣、以及 light／LM-head kernels。">$T_{\mathrm{blocks}}$ sums five operator classes over 32 layers plus light/LM-head terms. The full list: GEMM compute efficiency $\eta_c=\eta_{\mathrm{wave}}\cdot\mathrm{TCutil}\cdot\bar\eta$ (three factors), a memory branch $\eta_{\mathrm{mem}}$, the attention term (four factors), the launch floor, the overlap leak, sampling, and the clock split of $\bar\eta$. The reframing omitted attention, the launch floor, sampling, and light/LM-head.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 The frequency claim — valid, but sharper than the slogan" data-zh="1.2 頻率主張——成立，但比口號更精確">1.2 The frequency claim — valid, but sharper than the slogan</span></h3>
+  <div class="qbox"><span class="qcat challenge">Challenge</span><span class="i18n"
+    data-en="<span class='qq'>Is the claim valid — that GPU frequency drops after hitting the power wall, so the kernel cannot reach 989 TFLOP/s and GEMM is slower than expected? If not, explain it with the five-factor model.</span>"
+    data-zh="<span class='qq'>這個主張成立嗎——GPU 頻率在撞到功率牆後下降，所以達不到 989 TFLOP/s、GEMM 比預期慢？若不成立，用五因子模型解釋。</span>"><span class='qq'>Is the frequency claim valid?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="Partially valid, and the precise version is more interesting than the slogan. The clock-droop part is real and large. The sustained SM clock divided by the spec reference clock — the factor $f_{\mathrm{clk}}$ — measures 0.76 on H100, 0.71 on H200, 0.75 on A100-80, and 0.43 on the 350 W L40S (gemm_mechanism_4sku.json). The kernel genuinely never reaches the 989 TFLOP/s figure: the H100 qkv cell at $M{=}2048$ measures 575.7 TFLOP/s, which is 0.58 of the 989 spec, and the clock factor alone accounts for about 0.76 of that shortfall, the remainder being the geometric factors (eta_decomposition_qkv_m2048.json)."
+    data-zh="部分成立，而精確版本比口號更有意思。時脈下垂的部分是真實且巨大的。持續 SM 時脈除以規格參考時脈——亦即因子 $f_{\mathrm{clk}}$——在 H100 上量得 0.76、H200 0.71、A100-80 0.75、350 W 的 L40S 0.43（gemm_mechanism_4sku.json）。確實永遠達不到 989 TFLOP/s 那個數字：H100 qkv 在 $M{=}2048$ 量得 575.7 TFLOP/s，是 989 規格的 0.58，而光是時脈因子就佔了這個缺口的約 0.76，其餘是幾何因子（eta_decomposition_qkv_m2048.json）。">Partially valid. The clock droop is real and large: $f_{\mathrm{clk}}$ = 0.76 (H100), 0.71 (H200), 0.75 (A100-80), 0.43 (L40S). The kernel never reaches 989 TFLOP/s — H100 qkv at $M{=}2048$ measures 575.7 (0.58 of spec), and the clock alone explains ~0.76 of that shortfall.</span></p>
+  <p><span class="i18n"
+    data-en="But the slogan that 'lower clock makes GEMM slower' — meaning a throughput decline — is FALSE on the well-provisioned parts. Achieved TFLOP/s does not fall with problem size on H100 (0.0%) or A100-80 (0.0%), and only -0.6% on H200. The clock sits at a constant power-cap step, and the rising geometric efficiency (the iso-clock $\eta_{\mathrm{noclk}}$ climbs from 0.18 to 0.95 as the tensor pipe fills) cancels the clock drop, so throughput rises and then plateaus. Throughput only actually declines on the tight-cap parts where the clock keeps drooping past the knee and there is no geometric headroom left: L40S loses 15.4% (and -14.9% ± 0.8 across three randomized-order repeats), the Max-Q Blackwell about 3% (projected, treat cautiously). A locked-clock control confirms the mechanism: pin the clock and the L40S decline collapses to 0.0%. So 'the kernel misses 989' is true and quantified; 'so GEMM gets slower with size' is true only for tight-cap parts and false for H100 / A100 / H200, where the droop is masked. This distinction is exactly the subject of the companion clock-power deep dive."
+    data-zh="但「較低時脈使 GEMM 變慢」——意指吞吐下降——這個口號在配置充裕的型號上是錯的。實測 TFLOP/s 在 H100（0.0%）或 A100-80（0.0%）上不隨問題尺寸下降，H200 也僅 -0.6%。時脈停在一個固定的功率上限階梯，而上升的幾何效率（等時脈的 $\eta_{\mathrm{noclk}}$ 隨張量管線填滿從 0.18 升到 0.95）抵消了時脈下降，所以吞吐先升後達平台。吞吐唯一真正下降的，是時脈在拐點之後仍持續下垂、且已無幾何餘裕的吃緊上限型號：L40S 損失 15.4%（三次隨機順序重複為 -14.9% ± 0.8），Max-Q Blackwell 約 3%（為推估值，需謹慎看待）。一個鎖定時脈的對照確認了機制：把時脈釘住，L40S 的下降就塌縮到 0.0%。所以「達不到 989」為真且已量化；「所以 GEMM 隨尺寸變慢」只對吃緊上限型號為真，對 H100／A100／H200 為假，那裡的下垂被遮蔽了。這個區別正是姊妹篇 clock-power 深潛的主題。">But 'lower clock makes GEMM slower' (a throughput decline) is FALSE on well-provisioned parts: H100/A100 decline 0.0%, H200 −0.6%, because rising geometric efficiency ($\eta_{\mathrm{noclk}}$ 0.18→0.95) masks the clock. Throughput only declines on tight-cap parts (L40S −15.4%, ±0.8 over 3 repeats; Blackwell ~3%, projected). A locked-clock control collapses the L40S decline to 0.0%.</span></p>
+  <p><span class="i18n" data-en="See the companion deep dive for the full treatment of this mechanism." data-zh="此機制的完整處理見姊妹深潛。">See the companion deep dive for the full treatment.</span> <a href="../clock-power/index.html"><span class="i18n" data-en="→ The Clock Is Not a Constant" data-zh="→ 時脈並非常數">→ The Clock Is Not a Constant</span></a></p>
+
+  <h3><span class="i18n" data-en="1.3 Why the SMs are not all filled — cluster rounding, not a sync stall" data-zh="1.3 為何 SM 沒有全開——是 cluster 取整，不是同步停滯">1.3 Why the SMs are not all filled — cluster rounding, not a sync stall</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>Is it true that SMs are not packed full because GPC clusters sync, so the effective SM count is below 132 (plus a smaller last wave)? Why can't all 132 be on — aren't idle SMs wasteful?</span>"
+    data-zh="<span class='qq'>SM 因為 GPC cluster 同步而填不滿、有效 SM 數低於 132（再加上較小的 last wave），這是真的嗎？為什麼不能 132 全開——閒置的 SM 不是很浪費嗎？</span>"><span class='qq'>Why aren't all 132 SMs filled?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="The phenomenon is real, but the stated mechanism conflates two distinct effects, and the dominant one on Hopper is not a synchronisation stall. The SM-fill factor is $\eta_{\mathrm{smused}} = \min(\text{grid}, N_{\mathrm{SM}})/N_{\mathrm{SM}}$. At the compute-bound $M{=}2048$ cell on both H100 and H200 the launched grid is 112 and the SMs number 132, so $\eta_{\mathrm{smused}} = 112/132 = 0.848$. The reason is thread-block-CLUSTER rounding: cuBLAS launches a persistent grid sized to a multiple of the Hopper cluster dimension (we observe cluster sizes of 2, 8, and 9 CTAs in the raw Nsight-Compute logs). 132 is not divisible by the cluster size in a way that uses every SM, so the grid rounds down to the largest cluster-aligned count at or below 132 — 112 — and 20 SMs sit dark by construction. The idle SMs are indeed wasted, about 15% of the array, but the waste is forced by the launch heuristic; it is launch-time geometry, not a runtime barrier between GPCs. The phrase 'clusters sync' is therefore misleading — it is cluster-DIMENSION rounding of the launch grid."
+    data-zh="這個現象是真的，但所述機制混淆了兩個不同效應，而 Hopper 上的主因並不是同步停滯。SM 填充因子是 $\eta_{\mathrm{smused}} = \min(\text{grid}, N_{\mathrm{SM}})/N_{\mathrm{SM}}$。在 H100 與 H200 的 compute-bound $M{=}2048$ 格點上，啟動的 grid 是 112、SM 數是 132，所以 $\eta_{\mathrm{smused}} = 112/132 = 0.848$。原因是 thread-block-CLUSTER 取整：cuBLAS 啟動一個持久 grid，其大小被取為 Hopper cluster 維度的倍數（我們在原始 Nsight-Compute 記錄中觀察到 2、8、9 個 CTA 的 cluster 大小）。132 無法以一種用滿每個 SM 的方式被 cluster 大小整除，所以 grid 向下取整到不超過 132、且 cluster 對齊的最大值——112——而有 20 個 SM 依設計而暗著。這些閒置 SM 確實被浪費，約佔陣列的 15%，但這浪費是被啟動啟發式強制的；它是啟動期的幾何，而非 GPC 之間的執行期屏障。所以「clusters 同步」一詞具誤導性——它是啟動 grid 的 cluster 維度取整。">Real, but the mechanism conflates two effects, and the Hopper-dominant one is not a sync stall. $\eta_{\mathrm{smused}}=\min(\text{grid},N_{\mathrm{SM}})/N_{\mathrm{SM}}$; at $M{=}2048$ the grid is 112 of 132 (0.848). cuBLAS launches a persistent grid rounded to a multiple of the Hopper cluster size (2/8/9 CTAs seen in raw ncu); 132 is not cluster-divisible, so it rounds down to 112 and 20 SMs are dark by construction — launch-time geometry, not a runtime barrier.</span></p>
+  <p><span class="i18n"
+    data-en="On Ampere and Ada there are no clusters, so the grid greatly exceeds the SM count (for example 384 CTAs on 108–142 SMs); there $\eta_{\mathrm{smused}} = 1.0$ and the residual lands instead as a WAVE tail — the last of three or four waves only partially fills the array (A100 wave-tail idle 11.1%, L40S 9.9%). So the two effects are genuinely different and the data separates them: cluster-quantisation (Hopper, grid pinned to 112) versus wave-quantisation (Ampere / Ada, full fill but a partial last wave). At tiny problem sizes there is a true last-wave tail even on Hopper — the o-projection at $M{=}64$ launches only 72 CTAs, $\eta_{\mathrm{wave}} = 0.545$ — because the problem is too small to fill even one wave. The model captures both."
+    data-zh="在 Ampere 與 Ada 上沒有 cluster，所以 grid 遠超 SM 數（例如 108–142 個 SM 上有 384 個 CTA）；那裡 $\eta_{\mathrm{smused}} = 1.0$，殘差改以 WAVE 尾端的形式出現——三或四個 wave 的最後一個只部分填滿陣列（A100 wave 尾端閒置 11.1%、L40S 9.9%）。所以這兩個效應確實不同，資料也將其分開：cluster 量化（Hopper，grid 釘在 112）對比 wave 量化（Ampere／Ada，填滿但有部分的 last wave）。在極小問題尺寸下，即使在 Hopper 上也有真正的 last-wave 尾端——o 投影在 $M{=}64$ 只啟動 72 個 CTA，$\eta_{\mathrm{wave}} = 0.545$——因為問題小到連一個 wave 都填不滿。模型兩者都涵蓋。">On Ampere/Ada there are no clusters; the grid far exceeds SM count, $\eta_{\mathrm{smused}}=1.0$, and the residual is a wave tail (A100 11.1%, L40S 9.9% last-wave idle). At tiny sizes even Hopper has a true last-wave tail (o at $M{=}64$: 72 CTAs, $\eta_{\mathrm{wave}}=0.545$). The model captures both.</span></p>
+
+  <h3><span class="i18n" data-en="1.4 Why two factors, not one — occupancy time vs pipe duty" data-zh="1.4 為何是兩個因子而非一個——佔用時間 vs 管線工作率">1.4 Why two factors, not one — occupancy time vs pipe duty</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>Why two correction parameters (the fraction of time the tensor core is actually working, and the cluster-finishing requirement) instead of just 'how much of the time the tensor core computes'?</span>"
+    data-zh="<span class='qq'>為什麼需要兩個修正參數（張量核心實際工作的時間比例、以及 cluster 要一起算完的要求），而不是只看「張量核心實際上有多少時間在算」？</span>"><span class='qq'>Why two parameters, not one?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="First, a correction to the premise: the two factors in the code are not 'tensor-core busy time' and 'clusters must finish'. The cluster-finishing effect lives in the SM-fill factor of Section 1.3, not here. The two factors here, defined in equation (3) below, are orthogonal and should not be merged. The first, $\eta_{\mathrm{active}}$, is the fraction of wall-clock time during which an SM has work resident, averaged over the SMs that got work — a TIME-domain occupancy that degrades from load imbalance and an uneven last wave. The second, $\eta_{\mathrm{duty}}$, is the fraction of those active cycles in which the tensor pipe is actually issuing matrix instructions — a PIPE-domain duty that degrades from intra-kernel stalls (accumulator and barrier dependencies)."
+    data-zh="首先修正前提：程式中的兩個因子並非「張量核心忙碌時間」與「cluster 要算完」。cluster 算完的效應位於第 1.3 節的 SM 填充因子，不在此處。這裡的兩個因子（定義見下方式 (3)）是正交的，不應合併。第一個 $\eta_{\mathrm{active}}$ 是在多少比例的實際時間裡 SM 上有常駐工作，並對拿到工作的那些 SM 取平均——這是一個會因負載不均與不齊的 last wave 而退化的時間域佔用。第二個 $\eta_{\mathrm{duty}}$ 是在這些活躍週期中，張量管線實際發出矩陣指令的比例——這是一個會因 kernel 內停滯（累加器與屏障相依）而退化的管線域工作率。">First, the premise mislabels them: the cluster-finishing effect is in the SM-fill factor (1.3), not here. The two factors here, defined in equation (3), are orthogonal: $\eta_{\mathrm{active}}$ is a TIME-domain occupancy (load-imbalance / last-wave idle time); $\eta_{\mathrm{duty}}$ is a PIPE-domain duty (the fraction of active cycles the tensor pipe is issuing).</span></p>
+  <div class="math-block">
+    <span class="eq-label">(3)</span>
+    $$\eta_{\mathrm{active}} = \frac{(\text{SM-active cycles})/(\text{SMs used})}{\text{elapsed cycles}},\qquad \eta_{\mathrm{duty}} = \frac{\text{tensor-pipe issuing cycles}}{\text{SM-active cycles}}$$
+  </div>
+  <p><span class="i18n"
+    data-en="They multiply to give exactly the single quantity one might propose — (tensor-pipe issuing) / (elapsed) — but keeping them split is correct because they have different physics and different shape-dependence. Measured at $M{=}2048$: H100 $\eta_{\mathrm{active}} = 0.946$, $\eta_{\mathrm{duty}} = 0.955$; A100-80 0.883 / 0.918; L40S 0.898 / 0.962. Within a single GPU they differ (A100 0.883 versus 0.918) and track different confounds: $\eta_{\mathrm{active}}$ falls when there are many waves with an uneven tail (A100 runs four waves), while $\eta_{\mathrm{duty}}$ falls from pipe stalls independent of wave count. Collapsing them would hide which mechanism is responsible and would break the cross-SKU transfer, where the model folds $\eta_{\mathrm{active}}$ into the iso-clock residual but keeps $\eta_{\mathrm{duty}}$ as a separately predicted geometric factor. So the answer to 'isn't one enough?' is: arithmetically yes, diagnostically and for transfer, no."
+    data-zh="它們相乘恰好得到可能會提出的那個單一量——（張量管線發出）／（elapsed）——但保持拆分是正確的，因為它們有不同的物理與不同的形狀相依性。在 $M{=}2048$ 量得：H100 $\eta_{\mathrm{active}} = 0.946$、$\eta_{\mathrm{duty}} = 0.955$；A100-80 0.883／0.918；L40S 0.898／0.962。在單一 GPU 內它們不同（A100 的 0.883 對 0.918），並追蹤不同的混淆因子：$\eta_{\mathrm{active}}$ 在有許多 wave 且尾端不齊時下降（A100 跑四個 wave），而 $\eta_{\mathrm{duty}}$ 因與 wave 數無關的管線停滯而下降。把它們塌縮會掩蓋是哪個機制在負責，也會破壞跨型號轉移——模型在轉移時把 $\eta_{\mathrm{active}}$ 折進等時脈殘差，卻把 $\eta_{\mathrm{duty}}$ 保留為一個獨立預測的幾何因子。所以對「一個不夠嗎？」的答案是：算術上夠，但診斷上與為了轉移則不夠。">They multiply to the single proposed quantity, but staying split is correct — different physics and shape-dependence. At $M{=}2048$: H100 0.946/0.955, A100 0.883/0.918, L40S 0.898/0.962. $\eta_{\mathrm{active}}$ falls from many-wave tails (A100 runs 4 waves); $\eta_{\mathrm{duty}}$ falls from pipe stalls. For transfer the model folds $\eta_{\mathrm{active}}$ into the residual but keeps $\eta_{\mathrm{duty}}$ separate. Arithmetically one suffices; diagnostically and for transfer, two are needed.</span></p>
+
+  <h3><span class="i18n" data-en="1.5 The memory side and L2 reuse — a bytes correction, not a bandwidth α" data-zh="1.5 記憶體側與 L2 重用——是 bytes 修正，不是頻寬 α">1.5 The memory side and L2 reuse — a bytes correction, not a bandwidth α</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>Does L2 reuse mean peak bandwidth should also be multiplied by a factor below 1? And can the L2 effect be quantified from pure parameters?</span>"
+    data-zh="<span class='qq'>L2 重用是否意味著峰值頻寬也要乘上一個小於 1 的因子？而 L2 效應能不能用純參數量化？</span>"><span class='qq'>Is L2 reuse a bandwidth α, and can it be quantified from pure parameters?</span></span><span class="pill partial">partly — needs an experiment</span></div>
+  <p><span class="i18n"
+    data-en="It is a bytes-moved correction, not a bandwidth multiplier — it is the dual of the compute α. The compute α derates the achievable peak rate; L2 reuse derates the effective bytes the model should charge. Concretely, cold per-kernel profiling charges DRAM traffic that warm execution (with L2 reuse active) never actually moves: the measured cold-to-warm DRAM-read ratio for attention at 512 prompt tokens is 73.5x on H100, 147x on H200, and 246x on A100-80 — that is, 98–99.6% of the cold-charged bytes are not really moved. At 2048 prompt tokens the activation no longer fits in L2 and the inflation collapses to about 1–2x. The model prices this as a numerator effect (effective bytes versus ideal bytes), never as a sub-1 bandwidth factor."
+    data-zh="它是 bytes-moved 修正，而非頻寬乘子——它是計算 α 的對偶。計算 α 把可達峰值速率打折；L2 重用則把模型應計入的有效 bytes 打折。具體而言，冷快取的逐 kernel 剖析會計入暖執行（L2 重用開啟）實際上從不搬運的 DRAM 流量：在 512 prompt token 時，attention 的冷對暖 DRAM 讀取比在 H100 為 73.5x、H200 為 147x、A100-80 為 246x——也就是說，98–99.6% 被冷計入的 bytes 其實沒被搬。在 2048 prompt token 時，activation 不再容於 L2，膨脹塌縮到約 1–2x。模型把這當作分子效應計價（有效 bytes 對理想 bytes），絕非當作一個小於 1 的頻寬因子。">It is a bytes-moved correction, the dual of the compute α: compute α derates the peak rate; L2 reuse derates the effective bytes charged. Cold profiling charges DRAM traffic warm execution never moves — cold/warm DRAM-read ratio for attention at 512 tokens is 73.5x (H100), 147x (H200), 246x (A100-80); collapses to ~1–2x at 2048 tokens. Modeled as a numerator (effective vs ideal bytes), never a sub-1 bandwidth factor.</span></p>
+  <p><span class="i18n"
+    data-en="Two honest caveats. First, the byte saving is large but converts to almost no wall-clock: the composed recoverable ceiling at $M{=}2048$ is 0.31 ms (H100) / 0.12 ms (H200) / 0.20 ms (A100-80), under 0.65% of the roughly 50 ms forward pass, and under 0.1% once realistic cache pollution intervenes. This L2 work is written up as its own standalone paper ('Worth the Bytes?'), whose thesis is exactly 'resource real, value bounded, misattribution easy', and whose live causal gate failed — so it reports a descriptive bound, not a causal speedup."
+    data-zh="兩個誠實的附註。其一，bytes 的節省雖大，卻幾乎轉不成實際時間：在 $M{=}2048$，可回收的合成上限為 0.31 ms（H100）／0.12 ms（H200）／0.20 ms（A100-80），不到約 50 ms forward pass 的 0.65%，在實際快取污染介入後更不到 0.1%。這項 L2 工作被寫成一篇獨立論文（《Worth the Bytes?》），其主旨正是「資源真實、價值有界、誤歸因容易」，且其即時因果閘門未通過——所以它報告的是一個描述性上界，而非因果加速。">The byte saving converts to almost no time: recoverable ceiling at $M{=}2048$ is 0.31/0.12/0.20 ms (under 0.65% of the ~50 ms pass; under 0.1% with pollution). This is a standalone paper ('Worth the Bytes?') — resource real, value bounded — whose causal gate failed, so it reports a descriptive bound.</span></p>
+  <div class="warn"><span class="i18n"
+    data-en="<strong>Pure-parameter status — needs an experiment.</strong> The current L2 correction is a MEASURED lookup table (cold/warm Nsight-Compute counter ratios keyed by SKU, prompt size, kernel class), not a closed form. It cannot yet be computed from $M,K,N$, dtype, and L2 size alone, because the dominant unknown — how much of a producer's footprint survives to its consumer — depends on the runtime intervening traffic (a sharp cliff at roughly 0.25–1x L2), not just the static GEMM shape. Making it pure-parameter requires fitting that survival cliff once per architecture: sweep blob size against intervening pollution on the existing producer–polluter–consumer microbenchmark, fit survival = f(blob / free-L2, pollution / L2), and combine it with the shape-derived ideal bytes. The ingredients (ideal-bytes from shape, amplification = measured / ideal) already exist; the missing piece is the cliff model."
+    data-zh="<strong>純參數狀態——需要一個實驗。</strong>目前的 L2 修正是一個量測得到的查表（依型號、prompt 大小、kernel 類別索引的冷／暖 Nsight-Compute 計數器比值），並非封閉式。它目前還無法只由 $M,K,N$、dtype 與 L2 大小算出，因為主要未知量——生產者的足跡有多少能存活到其消費者——取決於執行期介入流量（在約 0.25–1x L2 處有一道陡崖），而非僅取決於靜態 GEMM 形狀。要使其成為純參數，需要每個架構擬合一次該存活崖：在既有的生產者–污染者–消費者微基準上掃描 blob 大小對介入污染，擬合 survival = f(blob／free-L2，pollution／L2)，再與由形狀推得的理想 bytes 結合。材料（由形狀得到的理想 bytes、放大率＝量測／理想）已存在；缺的是那個崖模型。"><strong>Pure-parameter status — needs an experiment.</strong> The L2 correction is currently a MEASURED lookup table, not closed-form. It depends on runtime intervening traffic (a cliff at ~0.25–1x L2), not just shape. To make it pure-parameter: fit a survival cliff per architecture (sweep blob size vs pollution on the existing microbenchmark; survival = f(blob/free-L2, pollution/L2)) and combine with shape-derived ideal bytes.</span></div>
+
+  <h3><span class="i18n" data-en="1.6 The host overlap term — a bounded exposure, eager-mode α ≈ 1" data-zh="1.6 host 重疊項——一個有界的暴露比例，eager 模式 α ≈ 1">1.6 The host overlap term — a bounded exposure, eager-mode α ≈ 1</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>How did we derive the CPU–GPU overlap correction α, given that neither summing nor taking the max of the two times is right?</span>"
+    data-zh="<span class='qq'>既然 CPU–GPU 兩者時間相加或取 max 都不對，我們是怎麼推導出重疊修正 α 的？</span>"><span class='qq'>How did we derive the overlap α?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="It is a bounded overlap fraction, derived from a two-resource argument, and in eager mode it resolves to a measured host floor that is exposed on the critical path. Per step the host runs a CPU span while the device runs a GPU span; the realised time lies between the pure-overlap lower bound (the max) and the full-serialisation upper bound (the sum). The host span splits into a shadowable part — per-kernel dispatch, pipelined one step ahead — and an irreducible serial residual $S(N)$ (the scheduler body: admission, KV-block allocation, input-tensor build). The leftover GPU shadow after dispatch is $T_{\mathrm{shadow}} = \max(0, T_{\mathrm{gpu}} - N_{\mathrm{kern}} T_{\mathrm{launch}})$, and the EXPOSED fraction of the residual is"
+    data-zh="它是一個有界的重疊比例，由雙資源論證導出，而在 eager 模式下，它歸結為一個暴露在關鍵路徑上的、量測得到的 host 地板。每個 step，host 跑一段 CPU 時間、裝置跑一段 GPU 時間；實現的時間介於純重疊下界（max）與完全序列化上界（sum）之間。host 時間分成一個可被遮蔽的部分——逐 kernel 的派發，提前一個 step 管線化——以及一個不可化約的序列殘差 $S(N)$（排程器本體：admission、KV-block 配置、輸入張量建構）。派發後剩下的 GPU 遮蔽是 $T_{\mathrm{shadow}} = \max(0, T_{\mathrm{gpu}} - N_{\mathrm{kern}} T_{\mathrm{launch}})$，而殘差中被暴露的比例為">A bounded overlap fraction from a two-resource argument; in eager mode it resolves to a measured, exposed host floor. The realised time lies between max (pure overlap) and sum (full serialisation). The host span splits into a shadowable dispatch part and an irreducible serial residual $S(N)$. With $T_{\mathrm{shadow}}=\max(0,T_{\mathrm{gpu}}-N_{\mathrm{kern}}T_{\mathrm{launch}})$, the exposed fraction is</span></p>
+  <div class="math-block">
+    <span class="eq-label">(2)</span>
+    $$\alpha(N,T_{\mathrm{new}}) \;=\; \max\!\Big(0,\; 1 - \frac{T_{\mathrm{shadow}}}{S(N)}\Big),\qquad S(N) = a + b\,(N-1)$$
+  </div>
+  <p><span class="i18n"
+    data-en="So it is neither a single fitted scalar nor a naive max-plus-residual: it is a curve that is fully exposed ($\alpha = 1$) for short GPU steps and fully hidden ($\alpha = 0$) when the GPU supplies enough shadow. The floor $S(N)$ is calibrated once per SKU on a synthetic decode grid disjoint from every evaluation trace — a 2.4–4.4 ms floor (L40S 2.35, A100-80 3.08, H100 3.12, H200 4.37) with a slope at or below 0.02 ms per request. In eager mode the realised exposure is $\alpha \approx 1$: Hopper $N{=}1$ decode steps measure 15.6–16.6 ms while the GPU work is only 5.0–6.7 ms, leaving a 9.5–11.2 ms host residual on the critical path that the GPU shadow could in principle hide but does not."
+    data-zh="所以它既不是單一擬合純量，也不是天真的 max 加殘差：它是一條曲線，在 GPU step 短時完全暴露（$\alpha = 1$），在 GPU 提供足夠遮蔽時完全隱藏（$\alpha = 0$）。地板 $S(N)$ 在一個與所有評估 trace 不相交的合成 decode 網格上，每型號校準一次——2.4–4.4 ms 的地板（L40S 2.35、A100-80 3.08、H100 3.12、H200 4.37），斜率在每請求 0.02 ms 以下。在 eager 模式下，實現的暴露為 $\alpha \approx 1$：Hopper $N{=}1$ 的 decode step 量得 15.6–16.6 ms，而 GPU 工作只有 5.0–6.7 ms，留下 9.5–11.2 ms 的 host 殘差在關鍵路徑上——GPU 遮蔽原則上能藏住它，實際卻沒有。">Neither a fitted scalar nor max-plus-residual: a curve, fully exposed for short GPU steps, fully hidden when the GPU supplies shadow. $S(N)$ is calibrated once per SKU on a disjoint synthetic grid (floor 2.4–4.4 ms, slope ≤0.02 ms/req). Eager-mode exposure is $\alpha\approx1$: Hopper $N{=}1$ decode measures 15.6–16.6 ms while GPU work is 5.0–6.7 ms, leaving a 9.5–11.2 ms exposed host residual.</span></p>
+  <p><span class="i18n"
+    data-en="It is a SEPARATE host term, added outside the max in equation (1), not on the GEMM path. The bounded form is load-bearing: a prior FITTED scalar α implied per-cell exposure fractions from -12.7 to +9.9 (52 of 108 cells outside the feasible [0,1] range), proving a scalar was absorbing signed GPU-model error. The bounded form cannot do that, forcing those errors back into the GPU terms where the compute model must account for them."
+    data-zh="它是一個獨立的 host 項，加在方程式（1）的 max 之外，不在 GEMM 路徑上。這個有界形式是承重的：先前一個擬合純量 α 推得的逐格點暴露比例從 -12.7 到 +9.9（108 個格點中有 52 個落在可行的 [0,1] 之外），證明一個純量正在吸收帶號的 GPU 模型誤差。有界形式做不到這件事，於是把那些誤差逼回 GPU 項，由計算模型去交代。">A SEPARATE host term, outside the max in (1), not on the GEMM path. The bounded form is load-bearing: a fitted scalar α implied per-cell exposures from −12.7 to +9.9 (52/108 cells outside [0,1]), proving a scalar was absorbing GPU-model error; the bounded form forces those errors back into the GPU terms.</span></p>
+
+  <h3><span class="i18n" data-en="1.7 Is it online learning? No." data-zh="1.7 這是 online learning 嗎？不是。">1.7 Is it online learning? No.</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>Are we really doing online learning, and roughly how long does it take to converge?</span>"
+    data-zh="<span class='qq'>我們真的是 online learning 嗎？大約多久收斂？</span>"><span class='qq'>Are we really doing online learning?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="Calling it online learning would be an overstatement — there is no online, incremental, or gradient-based learning anywhere in the predictor. Almost everything is computed or measured once, offline: datasheet peaks and model geometry are given; the wave and tensor-utilisation factors are computed from launch geometry; the per-architecture ceilings ($\bar\eta$, $\eta_{\mathrm{mem}}$, the attention constants) are measured from standalone matmul and attention microbenchmarks, not from the evaluation traces; the launch and sampling costs come from empty-kernel and sampler traces. The only learned quantity is the host floor $S(N) = a + b(N-1)$, fit once per SKU by a closed-form least-squares over a synthetic decode grid — there is no iteration and therefore no convergence-in-steps; the grid, not a step count, is the sample budget. There is also an optional deployment-calibrated mode that recovers ONE scalar per trace (a per-deployment host-floor offset), which is a single offline recalibration, still not online learning. The only models in the repository that call `.fit()` are the baseline competitors (a Vidur-style random forest, a gradient-boosting baseline), not our mechanism predictor."
+    data-zh="把它稱為 online learning 會是誇大——預測器中沒有任何線上、增量或梯度式的學習。幾乎所有東西都是離線一次性計算或量測：規格峰值與模型幾何是給定的；wave 與張量利用率因子由啟動幾何計算；每架構的上限（$\bar\eta$、$\eta_{\mathrm{mem}}$、attention 常數）由獨立的 matmul 與 attention 微基準量得，而非由評估 trace；啟動與取樣成本來自空 kernel 與 sampler trace。唯一被學習的量是 host 地板 $S(N) = a + b(N-1)$，每型號用對合成 decode 網格的封閉式最小平方擬合一次——沒有迭代，因此沒有以步數計的收斂；樣本預算是網格本身，而非步數。另有一個選用的部署校準模式，每條 trace 回收一個純量（每部署的 host 地板偏移），那是單次離線再校準，仍非 online learning。整個 repo 裡唯一呼叫 `.fit()` 的模型是基線對手（Vidur 風格的隨機森林、一個梯度提升基線），而非我們的機制預測器。">An overstatement — no online/incremental/gradient learning anywhere. Everything is computed or measured once, offline; the per-architecture ceilings come from standalone microbenchmarks, not eval traces. The only learned quantity is the host floor $S(N)=a+b(N-1)$, a one-shot closed-form least-squares per SKU (no iteration, so no convergence-in-steps). An optional mode recovers one scalar per trace. The only `.fit()` models in the repo are baseline competitors.</span></p>
+  <p><span class="i18n" data-en="The honest phrasing is: a mechanism model whose constants are microbenchmark-calibrated per architecture, with one closed-form floor curve per SKU, and optionally one scalar per deployment. That is the property worth selling — it needs no per-workload training — but it is not online learning." data-zh="誠實的措辭是：一個機制模型，其常數依架構由微基準校準，每型號有一條封閉式地板曲線，並選用性地每部署有一個純量。這才是值得強調的性質——它不需要逐工作負載訓練——但它不是 online learning。">The honest phrasing: a mechanism model with microbenchmark-calibrated per-architecture constants, one closed-form floor curve per SKU, optionally one scalar per deployment. The sellable property is 'needs no per-workload training' — not 'online learning'.</span></p>
+
+  <h3><span class="i18n" data-en="1.8 How accurate are we, and where do we fail?" data-zh="1.8 我們有多準，又在哪裡失準？">1.8 How accurate are we, and where do we fail?</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>How accurate is the predictor right now, where is it least accurate, and why — compared to ground truth?</span>"
+    data-zh="<span class='qq'>預測器目前有多準、最不準的地方在哪、為什麼——和 ground truth 相比？</span>"><span class='qq'>How accurate are we vs ground truth, and where do we fail?</span></span><span class="pill ok">answered</span></div>
+  <p><span class="i18n"
+    data-en="Ground truth is the measured median step wall-clock of a real vLLM engine. Accuracy depends heavily on which of two modes one reads, and they differ by up to about ten times — this is the single most important caveat, and the paper is careful never to blend them. In the FROZEN mode (no per-trace fit), arrival-driven decode error is 2.6–7.1% and the cleanly staggered Poisson decode is 2.8–7.1%, but the worst case is the saturated all-at-once decode at 18.6–30.9%. In the DEPLOYMENT-CALIBRATED mode (one scalar per trace), decode error drops to 0.8–3.7% and mixed prefill-plus-decode steps run 5.2–9.3%. On the controlled grid, the overall mean absolute error is 4.34%, median 3.90%, p95 9.33%, max 15.87% (200 cells)."
+    data-zh="Ground truth 是真實 vLLM 引擎的 step 實測中位數。準確度高度取決於所讀的是兩種模式中的哪一種，兩者相差可達約十倍——這是最重要的單一附註，而論文謹慎地從不混用它們。在 FROZEN 模式（無逐 trace 擬合）下，到達驅動的 decode 誤差為 2.6–7.1%，乾淨錯開的 Poisson decode 為 2.8–7.1%，但最差情況是飽和的一次性全發 decode，達 18.6–30.9%。在 DEPLOYMENT-CALIBRATED 模式（每條 trace 一個純量）下，decode 誤差降到 0.8–3.7%，混合 prefill 加 decode 的 step 為 5.2–9.3%。在受控網格上，整體平均絕對誤差為 4.34%、中位數 3.90%、p95 9.33%、最大 15.87%（200 格點）。">Ground truth = measured median step wall of a real vLLM engine. Two modes differ ~10x. FROZEN (no per-trace fit): arrival-driven decode 2.6–7.1%, but saturated all-at-once decode 18.6–30.9%. CALIBRATED (one scalar/trace): decode 0.8–3.7%, mixed 5.2–9.3%. Controlled grid: mean 4.34%, p95 9.33%, max 15.87% (200 cells).</span></p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Where it fails" data-zh="失準之處">Where it fails</span></th>
+      <th><span class="i18n" data-en="Error" data-zh="誤差">Error</span></th>
+      <th><span class="i18n" data-en="Why" data-zh="原因">Why</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="First saturated-batch decode step" data-zh="首個飽和批次的 decode step">First saturated-batch decode step</span></td><td>83–97%</td><td><span class="i18n" data-en="A one-time host allocator growth event at N=64 that S(N) does not model." data-zh="N=64 時一次性的 host 配置器成長事件，S(N) 未建模。">A one-time host allocator growth event at N=64 that S(N) does not model.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Saturated all-at-once decode (frozen mode)" data-zh="飽和一次性全發 decode（frozen 模式）">Saturated all-at-once decode (frozen)</span></td><td>7.7–30.9%</td><td><span class="i18n" data-en="Real-text serving carries 0.03–0.08 ms/request output-processing host work the synthetic floor lacks." data-zh="真實文字服務帶有合成地板所缺的 0.03–0.08 ms/請求輸出處理 host 工作。">Per-request output-processing host work the synthetic floor lacks.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Mixed admission-burst steps (Hopper Poisson p95)" data-zh="混合 admission-burst step（Hopper Poisson p95）">Mixed admission-burst steps</span></td><td>~29% (p95)</td><td><span class="i18n" data-en="KV-allocation / input-build host work during admission bursts." data-zh="admission burst 期間的 KV 配置／輸入建構 host 工作。">KV-alloc / input-build host work during admission bursts.</span></td></tr>
+      <tr><td><span class="i18n" data-en="L40S prefill" data-zh="L40S prefill">L40S prefill</span></td><td>+8 to +14%</td><td><span class="i18n" data-en="Clock cap: the ceiling is calibrated at a clock the 350 W cap throttles to 43% of boost (f_clk = 0.43)." data-zh="時脈上限：上限校準在一個被 350 W 上限節流到 boost 43% 的時脈（f_clk = 0.43）。">Ceiling calibrated at a clock the 350 W cap throttles to 43% of boost.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Hopper N=1 pure decode" data-zh="Hopper N=1 純 decode">Hopper N=1 pure decode</span></td><td>−5.6 to −9.9%</td><td><span class="i18n" data-en="M-dependent decode-kernel selection a single eta_mem cannot span (A100 0.75 vs 0.51)." data-zh="隨 M 變動的 decode kernel 選擇，單一 eta_mem 無法涵蓋（A100 0.75 對 0.51）。">M-dependent decode-kernel selection one eta_mem cannot span.</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note"><span class="i18n"
+    data-en="<strong>Two caveats to carry.</strong> (1) Any single headline accuracy number is misleading unless it names the mode (frozen 2.6–7.1% vs calibrated 0.8–3.7% for decode). (2) The controlled-grid file labels its A100 as 'a100-40' while the ShareGPT validation labels it 'a100-80' — do not treat them as the same hardware row without checking."
+    data-zh="<strong>兩個需帶著走的附註。</strong>（1）任何單一的標題準確度數字，若不指明模式都會誤導（decode 的 frozen 2.6–7.1% 對 calibrated 0.8–3.7%）。（2）受控網格檔把其 A100 標為「a100-40」，而 ShareGPT 驗證標為「a100-80」——未經查證前，勿將兩者視為同一硬體列。"><strong>Two caveats.</strong> (1) Any headline accuracy number must name the mode (frozen 2.6–7.1% vs calibrated 0.8–3.7% decode). (2) The controlled grid labels A100 as 'a100-40' while ShareGPT labels it 'a100-80' — verify before treating as one row.</span></div>
+</section>
+
+<!-- ============================ 2. THE UTILITY STORY ============================ -->
+<section id="part2">
+  <h2><span class="i18n" data-en="2. Part two — the utility story, told honestly" data-zh="2. 第二部分——誠實述說效用論述">2. Part two — the utility story, told honestly</span></h2>
+  <p><span class="i18n"
+    data-en="The reframing flags Part 2 as the unclear half and asks, for each paper, the predictor it uses and the formula where ours plugs in — ideally in the abstract as 'tested on N systems, improved the metric by X%'. Here is the per-system reality from the raw ledger. It is weaker than 'we improve everything', and the honest abstract claim is a coverage-and-cost story, not an across-the-board improvement."
+    data-zh="重構指出第二部分是不清楚的那一半，並要求針對每篇論文，給出它使用的預測器、以及我們插入的公式所在——最好在 abstract 裡寫成「在 N 個系統上測試，把指標改善 X%」。以下是來自原始 ledger 的逐系統真相。它比「我們改善了一切」更弱，而誠實的 abstract 主張是一個涵蓋率與成本的論述，不是全面性的改善。">The reframing wants, per paper, the predictor it uses and where ours plugs in, ideally as an abstract 'tested on N systems, improved metric by X%'. Here is the per-system reality from the raw ledger — weaker than 'we improve everything'; the honest claim is a coverage-and-cost story.</span></p>
+
+  <h3><span class="i18n" data-en="2.1 The per-system integration table" data-zh="2.1 逐系統整合表">2.1 The per-system integration table</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>For each integrated paper: what predictor does it use, where exactly do we plug in, what metric did we move and by how much, and is it real-system or simulated?</span>"
+    data-zh="<span class='qq'>對每篇整合的論文：它用什麼預測器、我們確切插在哪、我們移動了什麼指標、移動了多少、以及是真實系統還是模擬？</span>"><span class='qq'>The per-paper predictor / insertion-point / result table.</span></span><span class="pill partial">3 of 5 have numbers</span></div>
+  <p><span class="i18n"
+    data-en="Each row of the table names the published system, the predictor it ships with natively, the exact code hook where our predictor is swapped in, and the measured result against that native predictor. A check mark means we beat the native predictor on its own metric, an approximate sign means a statistical tie, a cross means we are worse, and a plus means a capability the native predictor cannot produce at all. Only three of the five systems admit a numeric head-to-head; the other two are integration or capability additions, which the result column states plainly."
+    data-zh="表中每一列列出已發表的系統、它原生附帶的預測器、我們的預測器被換入的確切程式掛鉤、以及對該原生預測器量得的結果。打勾代表我們在其自身指標上勝過原生預測器，約等號代表統計上平手，打叉代表我們較差，加號代表一項原生預測器根本無法產生的能力。五個系統中只有三個容許數值對比；另外兩個是整合或能力擴充，結果欄已明白標示。">Each row names the published system, its native predictor, the exact code hook where ours is swapped in, and the measured result against that native predictor (✓ = we beat it, ≈ = tie, ✗ = worse, + = a capability it cannot produce). Only three of five admit a numeric head-to-head.</span></p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="System" data-zh="系統">System</span></th>
+      <th><span class="i18n" data-en="Its native predictor" data-zh="其原生預測器">Its native predictor</span></th>
+      <th><span class="i18n" data-en="Where we plug in" data-zh="我們插入之處">Where we plug in</span></th>
+      <th><span class="i18n" data-en="Result vs native" data-zh="對原生的結果">Result vs native</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>Vidur</td>
+        <td><span class="i18n" data-en="Per-operator random forests" data-zh="逐運算子隨機森林">Per-operator random forests</span></td>
+        <td><code>RandomForestExecutionTimePredictor</code> <span class="i18n" data-en="registry swap" data-zh="登錄表替換">registry swap</span></td>
+        <td><span class="cross">✗</span> <span class="i18n" data-en="WORSE: decode 7.6% vs 5.6%, prefill 21% vs 0.9%, agg 8.4% vs 5.3% MAPE (simulated)" data-zh="較差：decode 7.6% 對 5.6%、prefill 21% 對 0.9%、整體 8.4% 對 5.3% MAPE（模擬）">WORSE: agg 8.4% vs 5.3% MAPE (sim)</span></td>
+      </tr>
+      <tr>
+        <td>DistServe</td>
+        <td><span class="i18n" data-en="Prefill / decode polynomial" data-zh="prefill／decode 多項式">Prefill / decode polynomial</span></td>
+        <td><code>get_prefill_time</code> / <code>get_decode_time</code></td>
+        <td><span class="partial">≈</span> <span class="i18n" data-en="TIE: OPT-13B decode 1.78% vs 2.27% MAPE (real engine trace; 44,851-step crosscheck, 0 mismatch)" data-zh="平手：OPT-13B decode 1.78% 對 2.27% MAPE（真實引擎 trace；44,851 步交叉檢查、0 不符）">TIE: 1.78% vs 2.27% (real trace)</span></td>
+      </tr>
+      <tr>
+        <td>QLM</td>
+        <td><span class="i18n" data-en="Flat hardware-blind scalar (N×100/700)" data-zh="平坦、硬體無感純量（N×100/700）">Flat hardware-blind scalar</span></td>
+        <td><code>RWTEstimator.get_waiting_time</code></td>
+        <td><span class="check">✓</span> <span class="i18n" data-en="Estimator MAPE 0.9–4.4% vs 111–123% — but this is estimator accuracy, NOT QLM's SLO metric (live SLO unrun)" data-zh="估計器 MAPE 0.9–4.4% 對 111–123%——但這是估計器準確度，非 QLM 的 SLO 指標（即時 SLO 未跑）">Estimator 0.9–4.4% vs 111–123% (not SLO)</span></td>
+      </tr>
+      <tr>
+        <td>Splitwise-sim</td>
+        <td><span class="i18n" data-en="Interpolation over a profiled CSV" data-zh="對剖析 CSV 的內插">Interpolation over a profiled CSV</span></td>
+        <td><code>get_iteration_duration</code></td>
+        <td><span class="partial">+</span> <span class="i18n" data-en="Capability-add only: 0 of 1260 native rows in our model×GPU scope; no head-to-head possible" data-zh="僅能力擴充：原生 1260 列中有 0 列落在我們的 model×GPU 範圍；無法對比">Capability-add (0/1260 rows in scope)</span></td>
+      </tr>
+      <tr>
+        <td>AdaSpec</td>
+        <td><span class="i18n" data-en="Profiled table + linear regression" data-zh="剖析表＋線性迴歸">Profiled table + linear regression</span></td>
+        <td><code>MechanismDSD</code> <span class="i18n" data-en="subclass" data-zh="子類">subclass</span></td>
+        <td><span class="cross">–</span> <span class="i18n" data-en="Integration-only: no native ground-truth pickle ships; no numeric head-to-head exists" data-zh="僅整合：未附原生 ground-truth pickle；無數值對比">Integration-only, no numbers</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3><span class="i18n" data-en="2.2 Is Random Forest really worse? No — we are." data-zh="2.2 隨機森林真的比較爛嗎？不——是我們比較爛。">2.2 Is Random Forest really worse? No — we are.</span></h3>
+  <div class="qbox"><span class="qcat challenge">Challenge</span><span class="i18n"
+    data-en="<span class='qq'>Is Random Forest really worse? By how much do we beat it, how do both compare to ground truth, what is our advantage beyond observability, and how much do we beat RF on cross-GPU transfer?</span>"
+    data-zh="<span class='qq'>隨機森林真的比較爛嗎？我們贏它多少、兩者和 ground truth 差多少、我們除了可觀測性還有什麼優勢、跨 GPU 遷移我們贏 RF 多少？</span>"><span class='qq'>Is RF really worse, and how much do we beat it on cross-GPU transfer?</span></span><span class="pill gap">transfer = unmeasured</span></div>
+  <p><span class="i18n"
+    data-en="The Random Forest is not worse; our predictor is worse on Vidur's home turf. Against Vidur's own profiled ground truth on A100 with Llama-3-8B: decode MAPE is 7.6% for us versus 5.6% for the RF; prefill is 21% versus 0.9%; aggregate is 8.4% versus 5.3%. The RF was trained on exactly this profiled data and we read none of it, so 'we beat the RF' is simply false here, and the paper reports it as a negative result. Our only real advantage is calibration cost and coverage: ours costs about 0.001 s and zero profiling rows against the RF's 158 s and 44,000 profiled rows — roughly a hundred-thousand-fold cheaper onboarding — and we can drive a GPU cell Vidur ships no profile for, which the RF cannot produce at all."
+    data-zh="隨機森林並不比較爛；是我們的預測器在 Vidur 的主場比較差。對上 Vidur 自己在 A100、Llama-3-8B 上的剖析 ground truth：decode MAPE 我們 7.6% 對 RF 的 5.6%；prefill 21% 對 0.9%；整體 8.4% 對 5.3%。RF 正是用這份剖析資料訓練的，而我們一筆都沒讀，所以「我們贏 RF」在此根本是假的，論文也把它報告為負面結果。我們唯一真正的優勢是校準成本與涵蓋率：我們約 0.001 秒、零剖析列，對 RF 的 158 秒、44,000 剖析列——約十萬倍便宜的上線——而且我們能驅動一個 Vidur 未附剖析的 GPU 格點，那是 RF 根本無法產生的。">The RF is not worse — we are, on Vidur's home turf: decode 7.6% vs 5.6%, prefill 21% vs 0.9%, agg 8.4% vs 5.3% MAPE. The RF trained on exactly this data; we read none. Our only advantage is cost and coverage: ~0.001 s + 0 rows vs 158 s + 44k rows (~10⁵× cheaper), plus cells the RF cannot produce at all.</span></p>
+  <div class="warn"><span class="i18n"
+    data-en="<strong>Cross-GPU transfer — needs an experiment.</strong> The decisive question (how much better are we than the RF when moving to an unseen GPU?) has no measured answer in the repository. The 'unseen-GPU advantage' is asserted (the RF has no profile there) but never quantified, because there is no ground truth for the unseen cell. The experiment: collect Vidur's profiled ground truth on an unseen GPU (H100 and/or H200 with Llama-3-8B, about 1–2 GPU-hours per SKU using Vidur's own scripts); then score (a) the A100-trained RF transferred to that GPU and (b) our fit-free predictor, both against the new ground truth. The output is a two-by-two table — RF versus ours, on the A100 home cell versus the unseen cell — which is the only way to substantiate the transfer claim. Hypothesis: the RF degrades sharply off-profile while ours holds near 5–8% decode, but this is currently unmeasured."
+    data-zh="<strong>跨 GPU 遷移——需要一個實驗。</strong>決定性的問題（搬到沒見過的 GPU 時，我們比 RF 好多少？）在 repo 中沒有量測過的答案。「未見 GPU 優勢」是被斷言的（RF 在那裡沒有剖析），卻從未被量化，因為那個未見格點沒有 ground truth。實驗：在未見 GPU（H100 和／或 H200 搭 Llama-3-8B，用 Vidur 自己的腳本約每型號 1–2 GPU 小時）收集 Vidur 的剖析 ground truth；再評分（a）以 A100 訓練的 RF 遷移到該 GPU、（b）我們的免擬合預測器，兩者都對上新的 ground truth。產出是一張 2×2 表——RF 對我們、A100 主場格點對未見格點——這是證實遷移主張的唯一方法。假設：RF 離開剖析後急遽退化，而我們維持在約 5–8% decode，但這目前未量測。"><strong>Cross-GPU transfer — needs an experiment.</strong> The decisive question has NO measured answer. The advantage is asserted, never quantified. Experiment: collect Vidur ground truth on an unseen GPU (H100/H200, Llama-3-8B, ~1–2 GPU-hr/SKU), then score the A100-trained RF transferred there vs our fit-free predictor against the new ground truth — a 2×2 table (RF vs ours) × (home vs unseen). Hypothesis: RF degrades off-profile, ours holds ~5–8% decode.</span></div>
+
+  <h3><span class="i18n" data-en="2.3 What we changed in QLM" data-zh="2.3 我們在 QLM 改了什麼">2.3 What we changed in QLM</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>What exactly did we change in QLM, which equation consumes the prediction, and what did it do to QLM's SLO metric?</span>"
+    data-zh="<span class='qq'>我們在 QLM 確切改了什麼、哪個方程式消費這個預測、它對 QLM 的 SLO 指標做了什麼？</span>"><span class='qq'>What exactly did we change in QLM, and what did it do to its SLO metric?</span></span><span class="pill gap">SLO = unrun</span></div>
+  <p><span class="i18n"
+    data-en="We replaced QLM's `RWTEstimator.get_waiting_time` — the flat per-model scalar that estimates a request group's waiting time as (number of requests × workload tokens) / token throughput, with workload tokens hard-set to 100 and throughput hard-set to 700 tokens per second, so there is no sequence-length axis and no hardware axis at all. We swapped in our per-SKU, sequence-aware, fit-free `predict_step` summed over the group's decode steps. The effect on the ESTIMATE's accuracy is large: per-decode-step service-time MAPE drops from 111–123% to 0.9–4.4% across four GPUs, and the cross-SKU ranking goes from degenerate (the native estimator emits one identical value for all four GPUs, which actually differ by about 1.5x) to a perfect Spearman correlation of 1.0."
+    data-zh="我們替換了 QLM 的 `RWTEstimator.get_waiting_time`——那個平坦的每模型純量，把一個請求群的等待時間估為（請求數 × 工作負載 token）／token 吞吐，其中工作負載 token 硬設為 100、吞吐硬設為每秒 700 token，所以完全沒有序列長度軸、也沒有硬體軸。我們換入我們每型號、序列感知、免擬合的 `predict_step`，對該群的 decode steps 加總。對「估計值」準確度的效果很大：逐 decode step 的服務時間 MAPE 從 111–123% 降到四張 GPU 上的 0.9–4.4%，而跨型號排名從退化（原生估計器對四張 GPU 發出一個相同值，但它們實際相差約 1.5 倍）變成完美的 Spearman 相關 1.0。">We replaced `RWTEstimator.get_waiting_time` — a flat scalar (requests × 100 tokens / 700 tok/s, no sequence or hardware axis) — with our per-SKU, sequence-aware `predict_step`. The estimate's per-step MAPE drops from 111–123% to 0.9–4.4% across four GPUs, and cross-SKU ranking goes from degenerate to Spearman 1.0.</span></p>
+  <div class="warn"><span class="i18n"
+    data-en="<strong>QLM's SLO metric — needs an experiment.</strong> We have NO number for QLM's actual SLO attainment under our predictor. The scheduler-in-the-loop SLO run is gated on QLM's pinned vLLM 0.6.6 environment and was not executed (no evaluation outputs exist on disk). So every QLM 'SLO' claim must currently be downgraded to 'waiting-time estimate accuracy'. The experiment: build the version-pinned environment (or port the scheduler to a modern vLLM) on one H100, run the SLO loop with the native estimator and with ours on the same Poisson workload, and measure SLO attainment and violation rate for both — a paired delta that shows whether the 111%→1% estimator gain actually moves the SLO metric."
+    data-zh="<strong>QLM 的 SLO 指標——需要一個實驗。</strong>我們對 QLM 在我們預測器下實際的 SLO 達成率沒有任何數字。排程器在環的 SLO 執行被卡在 QLM 釘住的 vLLM 0.6.6 環境，未被執行（磁碟上沒有評估輸出）。所以目前每個 QLM「SLO」主張都必須降級為「等待時間估計準確度」。實驗：在一張 H100 上建好版本釘住的環境（或把排程器移植到現代 vLLM），用原生估計器與我們的估計器在相同 Poisson 工作負載上執行 SLO 迴圈，量測兩者的 SLO 達成率與違反率——一個配對差值，顯示 111%→1% 的估計增益是否真的移動了 SLO 指標。"><strong>QLM's SLO metric — needs an experiment.</strong> We have NO number for QLM's SLO attainment under our predictor; the live loop is gated on vLLM 0.6.6 and was not run. Downgrade all QLM 'SLO' claims to 'estimate accuracy'. Experiment: build the pinned env on one H100, run the SLO loop with native vs our estimator on the same Poisson workload, measure paired SLO attainment / violation rate.</span></div>
+
+  <h3><span class="i18n" data-en="2.4 The honest abstract claim" data-zh="2.4 誠實的 abstract 主張">2.4 The honest abstract claim</span></h3>
+  <div class="qbox"><span class="qcat issue">Issue</span><span class="i18n"
+    data-en="<span class='qq'>Draft the abstract sentence: tested on N systems, improved the metric by X–Y%, because of our predictor.</span>"
+    data-zh="<span class='qq'>草擬 abstract 那句話：在 N 個系統上測試、把指標改善 X–Y%、原因是我們的預測器。</span>"><span class='qq'>Draft the honest 'tested on N systems, improved by X–Y%' sentence.</span></span><span class="pill ok">drafted</span></div>
+  <p><span class="i18n"
+    data-en="The maximally honest claim the raw files support is a coverage-and-cost sentence, not an improvement sentence: 'We drop a fit-free mechanism predictor into the cost function of five published serving systems (Vidur, DistServe, QLM, Splitwise-sim, AdaSpec) on their own code; with zero target-workload profiling it matches the profiled fit on its decode home turf (DistServe OPT-13B 1.8% vs 2.3% MAPE), replaces a hardware-blind scalar with a hardware-aware estimate (QLM per-step service-time MAPE 0.9–4.4% vs 111–123%), and supplies model×GPU cells two of the tools cannot model at all — at roughly five orders of magnitude lower calibration cost than a profiled regressor.'"
+    data-zh="原始檔所支持的最誠實主張，是一個涵蓋率與成本的句子，而非改善句子：「我們把一個免擬合的機制預測器放進五個已發表服務系統（Vidur、DistServe、QLM、Splitwise-sim、AdaSpec）的成本函數、在它們自己的程式上；在零目標工作負載剖析下，它在其 decode 主場匹配了剖析擬合（DistServe OPT-13B 1.8% 對 2.3% MAPE），以硬體感知的估計取代了一個硬體無感的純量（QLM 逐步服務時間 MAPE 0.9–4.4% 對 111–123%），並提供其中兩個工具根本無法建模的 model×GPU 格點——其校準成本比剖析迴歸器約低五個數量級。」">The honest claim is coverage-and-cost, not improvement: 'We drop a fit-free predictor into the cost function of five published serving systems on their own code; with zero target-workload profiling it matches the profiled fit on its decode home turf (DistServe 1.8% vs 2.3%), replaces a hardware-blind scalar with a hardware-aware estimate (QLM 0.9–4.4% vs 111–123%), and supplies model×GPU cells two tools cannot model — at ~5 orders of magnitude lower calibration cost.'</span></p>
+  <div class="bad"><span class="i18n"
+    data-en="<strong>What we must NOT write.</strong> A claim of the form 'improved the metric by X–Y% on N systems' has N = 1, not 5: the only clean accuracy win is QLM, and even that is the estimator's accuracy, not QLM's SLO. On a measured metric we genuinely beat the native predictor on one system (QLM estimator), tie on one (DistServe), lose on one (Vidur), add capability with no head-to-head on one (Splitwise), and have no numbers on one (AdaSpec). Do not write 'improved by X%' for Vidur, Splitwise, or AdaSpec, and do not imply we beat Vidur's random forest."
+    data-zh="<strong>我們絕不能寫的東西。</strong>「在 N 個系統上把指標改善 X–Y%」這種形式的主張，N＝1 而非 5：唯一乾淨的準確度勝利是 QLM，而那還只是估計器的準確度，不是 QLM 的 SLO。在一個被量測的指標上，我們真正勝過原生預測器的是一個系統（QLM 估計器）、平手一個（DistServe）、落敗一個（Vidur）、能力擴充但無對比一個（Splitwise）、沒有數字一個（AdaSpec）。不要為 Vidur、Splitwise 或 AdaSpec 寫「改善 X%」，也不要暗示我們贏了 Vidur 的隨機森林。"><strong>Do NOT write.</strong> 'Improved metric by X–Y% on N systems' has N = 1, not 5: the only clean accuracy win is QLM (estimator, not SLO). Measured: beat native on 1 (QLM estimator), tie 1 (DistServe), lose 1 (Vidur), capability-add 1 (Splitwise), no numbers 1 (AdaSpec). Do not imply we beat Vidur's RF.</span></div>
+</section>
+
+<!-- ============================ 3. LITERATURE ============================ -->
+<section id="lit">
+  <h2><span class="i18n" data-en="3. Literature anchors for the framing" data-zh="3. 框架的文獻錨點">3. Literature anchors for the framing</span></h2>
+  <p><span class="i18n"
+    data-en="The framing rests on two literature claims flagged in the reframing for a proper survey: that prior work decides the bottleneck per kernel from FLOPs versus bytes, and that it then multiplies the peaks by an unexplained efficiency factor. A fresh survey is folded in below; two corrections to the candidate list came out of it."
+    data-zh="這個框架立基於重構中標記為需正式調查的兩個文獻主張：先前工作逐 kernel 從 FLOPs 對 bytes 判定 bottleneck，然後把峰值乘上一個未解釋的效率因子。一份新的調查整併於下；其中對候選清單得出兩處修正。">The framing rests on two literature claims flagged for survey: prior work decides the bottleneck per kernel from FLOPs vs bytes, then multiplies peaks by an unexplained efficiency factor. A fresh survey is folded in below.</span></p>
+
+  <h3><span class="i18n" data-en="3.1 Per-kernel roofline / op-by-op bottleneck" data-zh="3.1 逐 kernel roofline／逐運算子 bottleneck">3.1 Per-kernel roofline / op-by-op bottleneck</span></h3>
+  <div class="qbox"><span class="qcat lit">Literature</span><span class="i18n"
+    data-en="<span class='qq'>Which papers model the bottleneck using only per-kernel compute (FLOPs) versus memory movement (bytes)?</span>"
+    data-zh="<span class='qq'>哪些論文只用逐 kernel 的計算量（FLOPs）對記憶體搬移量（bytes）來判定 bottleneck？</span>"><span class='qq'>Which papers use only per-kernel FLOPs vs bytes?</span></span><span class="pill ok">surveyed</span></div>
+  <p><span class="i18n"
+    data-en="The foundational reference is the Roofline model (Williams, Waterman, Patterson, CACM 2009; DOI 10.1145/1498765.1498785): the attainable rate is $\min(\text{peak compute},\ \text{peak bandwidth}\times\text{arithmetic intensity})$, with no efficiency discount — it is precisely the ceiling everyone else later derates. The verified cleanest op-by-op instance for LLM inference is LLM-Viewer ('LLM Inference Unveiled: Survey and Roofline Model Insights', Yuan et al., arXiv:2402.16363, 2024), which computes operations-per-byte per operator against the ridge of the raw datasheet peak with NO efficiency factor. Pope et al. (MLSys 2023, arXiv:2211.05102) reason the same way from arithmetic intensity — prefill attention is compute-bound beyond roughly 480 tokens, generation is memory-bandwidth-bound. LIFE (Patwari et al., arXiv:2508.00904, 2025) is op-by-op but spreads efficiency across per-operator utilisation terms rather than one global factor. The class framing holds: these decide the bottleneck purely from per-kernel FLOPs versus bytes, and any efficiencies enter as constants, lookups, or learned residuals — never a closed form whose value is explained by the GPU architecture."
+    data-zh="基礎參考是 Roofline 模型（Williams、Waterman、Patterson，CACM 2009；DOI 10.1145/1498765.1498785）：可達速率為 $\min(\text{峰值計算},\ \text{峰值頻寬}\times\text{算術強度})$，不打任何效率折扣——它正是其他人之後拿去打折的那個天花板。對 LLM 推論而言，經查證最乾淨的逐運算子實例是 LLM-Viewer（《LLM Inference Unveiled: Survey and Roofline Model Insights》，Yuan 等，arXiv:2402.16363，2024），它逐運算子計算每位元組運算數，對著原始規格峰值的脊比較，且不含任何效率因子。Pope 等（MLSys 2023，arXiv:2211.05102）同樣從算術強度推理——prefill attention 在約 480 token 以上是 compute-bound、generation 是記憶體頻寬受限。LIFE（Patwari 等，arXiv:2508.00904，2025）是逐運算子，但把效率攤在逐運算子的利用率項上，而非單一全域因子。類別框定成立：這些工作純粹由逐 kernel 的 FLOPs 對 bytes 判定 bottleneck，而任何效率都以常數、查表或學習殘差進入——從來不是一個其值由 GPU 架構解釋的封閉式。">Foundational: the Roofline model (Williams, Waterman, Patterson, CACM 2009) — attainable rate $=\min(\text{peak compute}, \text{peak bandwidth}\times\text{intensity})$, no discount. The cleanest verified op-by-op LLM instance is LLM-Viewer (Yuan et al., arXiv:2402.16363, 2024), raw peak with no efficiency factor; Pope et al. (MLSys 2023, arXiv:2211.05102) reason the same way; LIFE (arXiv:2508.00904) spreads efficiency per-operator. Class framing: bottleneck from per-kernel FLOPs vs bytes; efficiencies are constants, lookups, or learned residuals.</span></p>
+
+  <h3><span class="i18n" data-en="3.2 The unexplained efficiency factor" data-zh="3.2 未解釋的效率因子">3.2 The unexplained efficiency factor</span></h3>
+  <div class="qbox"><span class="qcat lit">Literature</span><span class="i18n"
+    data-en="<span class='qq'>Which papers multiply peak TFLOP/s and peak bandwidth by an efficiency factor 0&lt;α≤1 without explaining its source?</span>"
+    data-zh="<span class='qq'>哪些論文把峰值 TFLOP/s 與峰值頻寬乘上一個效率因子 0&lt;α≤1，卻不解釋其來源？</span>"><span class='qq'>Which papers multiply peaks by an unexplained α?</span></span><span class="pill ok">surveyed</span></div>
+  <p><span class="i18n"
+    data-en="The clearest example of the fitted-but-unexplained factor is GenZ (Bambhaniya et al., arXiv:2406.01698, 2024): it writes per-operator time as $\max\!\big(\text{compute}/(\text{FLOPS}\cdot\text{Eff}_C),\ \text{memory}/(\text{BW}\cdot\text{Eff}_{\mathrm{mem}})\big)$ — a roofline WITH an efficiency scalar — and tabulates per-GPU values (about 0.40 on A100, 0.55–0.75 on H100, 0.25 on MI300X) that are empirically profiled, not derived; GenZ itself states that its efficiency methodology follows Vidur's profiling. The concept's origin is Model FLOPs Utilisation (MFU) from PaLM (Chowdhery et al., arXiv:2204.02311) — observed throughput over theoretical peak (PaLM-540B MFU 46.2%) with no closed form for the gap — and Megatron-LM (Narayanan et al., SC 2021) reporting an achieved fraction of peak (about 52%). FlashAttention (Dao et al., NeurIPS 2022) likewise headlines an achieved-TFLOP/s fraction. Our own measurements show why a single number is inadequate: FlashAttention-3's reported attention efficiency of 0.55 actually ranges from 0.066 to 0.610 on H200 — a constant standing in for a factor that varies nearly tenfold. The sharpest foil is NeuSight (Lee et al., ASPLOS 2025, arXiv:2407.13853), which concedes the same peak-FLOPs / peak-bandwidth laws but PREDICTS the utilisation with per-operator MLPs instead of explaining it — exactly the 'they black-box α, we give it a closed form' contrast our decomposition is built for."
+    data-zh="擬合卻未解釋之因子最清楚的例子是 GenZ（Bambhaniya 等，arXiv:2406.01698，2024）：它把逐運算子時間寫成 $\max\!\big(\text{計算}/(\text{FLOPS}\cdot\text{Eff}_C),\ \text{記憶體}/(\text{BW}\cdot\text{Eff}_{\mathrm{mem}})\big)$——一個帶效率純量的 roofline——並列出每 GPU 的數值（A100 約 0.40、H100 約 0.55–0.75、MI300X 約 0.25），這些是實證剖析得到、而非推導得到的；GenZ 自己也說其效率方法論沿用 Vidur 的剖析。此概念的起源是來自 PaLM 的 Model FLOPs Utilisation（MFU，Chowdhery 等，arXiv:2204.02311）——實測吞吐除以理論峰值（PaLM-540B MFU 46.2%），對該缺口並無封閉式——以及 Megatron-LM（Narayanan 等，SC 2021）報告達到的峰值比例（約 52%）。FlashAttention（Dao 等，NeurIPS 2022）同樣以達到的 TFLOP/s 比例為標題。我們自己的量測說明了單一數字為何不足：FlashAttention-3 報告的 attention 效率 0.55，在 H200 上實際從 0.066 變化到 0.610——一個常數代替了變化近十倍的因子。最銳利的對照是 NeuSight（Lee 等，ASPLOS 2025，arXiv:2407.13853），它承認同樣的峰值 FLOPs／峰值頻寬法則，卻以逐運算子 MLP 去「預測」利用率而非解釋它——這正是「他們把 α 黑箱化，我們給它封閉式」的對比，也是我們拆解所為之而生的。">The clearest fitted-but-unexplained factor is GenZ (Bambhaniya et al., arXiv:2406.01698): per-op time $=\max(\text{compute}/(\text{FLOPS}\cdot\text{Eff}_C), \text{memory}/(\text{BW}\cdot\text{Eff}_{\mathrm{mem}}))$ with profiled values (A100 0.40, H100 0.55–0.75, MI300X 0.25), empirically profiled not derived; GenZ follows Vidur's profiling. The concept's origin is MFU from PaLM (Chowdhery et al., arXiv:2204.02311; PaLM-540B 46.2%, no closed form) and Megatron-LM (~52% of peak). FlashAttention (Dao et al., 2022) headlines an achieved-fraction; FlashAttention-3's reported 0.55 actually ranges 0.066–0.610 on H200. The sharpest foil is NeuSight (ASPLOS 2025, arXiv:2407.13853), which predicts utilisation with per-op MLPs instead of explaining it.</span></p>
+  <div class="note"><span class="i18n" data-en="<strong>Bibliography to-do from the survey:</strong> add the foundational Roofline (Williams et al., CACM 2009) and an explicit MFU citation (PaLM, Chowdhery et al., 2204.02311), both currently missing; add NeuSight (2407.13853) as the ML-utilisation foil. Two corrections to the original candidate list: NeuSight is not yet in our bibliography, and LLMCompass derives utilisation from a tile-mapping search rather than a single fitted α, so it is not a clean α-multiplier." data-zh="<strong>調查得出的書目待辦：</strong>加入基礎 Roofline（Williams 等，CACM 2009）與一個明確的 MFU 引用（PaLM，Chowdhery 等，2204.02311），目前兩者皆缺；加入 NeuSight（2407.13853）作為 ML 利用率的對照。對原候選清單的兩處修正：NeuSight 尚未在我們的書目中，而 LLMCompass 是由 tile 對映搜尋導出利用率、而非單一擬合 α，因此並非乾淨的 α 乘子。"><strong>Bibliography to-do:</strong> add Roofline (Williams et al., CACM 2009) and an MFU citation (PaLM, 2204.02311), both missing; add NeuSight (2407.13853) as the ML-utilisation foil. LLMCompass derives utilisation from tile-mapping, not a single fitted α.</span></div>
+</section>
+
+<!-- ============================ 4. MISSING EXPERIMENTS ============================ -->
+<section id="experiments">
+  <h2><span class="i18n" data-en="4. What the data cannot yet support — the missing experiments" data-zh="4. 資料尚不能支持的——待補實驗">4. What the data cannot yet support — the missing experiments</span></h2>
+  <p><span class="i18n"
+    data-en="Three claims at issue are not yet backed by data, and one design choice (the speedup framing) needs an experiment that does not exist. Each is listed with a concrete design so it can be scheduled."
+    data-zh="所關注的三個主張目前尚無資料支撐，而一個設計選擇（加速框架）需要一個不存在的實驗。每一項都附上具體設計，以便排程。">Three claims at issue are not yet backed by data, plus one design choice (the speedup framing) that needs a non-existent experiment. Each has a concrete design.</span></p>
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="E1 · L2 reuse as a pure-parameter correction" data-zh="E1 · L2 重用作為純參數修正">E1 · L2 reuse as a pure-parameter correction</span></h4>
+      <p style="font-size:.9rem"><span class="i18n" data-en="Fit the survival cliff once per architecture: sweep producer blob size against intervening pollution on the existing producer–polluter–consumer microbenchmark; fit survival = f(blob / free-L2, pollution / L2). Combine with shape-derived ideal bytes to predict effective bytes with no live profiling. Validate against the held-out cold/warm ratios (target: predict the 73.5–245.7× attention inflation and its collapse at 2048 tokens)." data-zh="每架構擬合一次存活崖：在既有生產者–污染者–消費者微基準上掃描生產者 blob 大小對介入污染；擬合 survival = f(blob／free-L2，pollution／L2)。與由形狀推得的理想 bytes 結合，在無即時剖析下預測有效 bytes。對保留的冷／暖比值驗證（目標：預測 73.5–245.7× 的 attention 膨脹及其在 2048 token 的塌縮）。">Fit the survival cliff per architecture on the existing microbenchmark; combine with shape-derived ideal bytes; validate against held-out cold/warm ratios (73.5–245.7× attention inflation).</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="E2 · Vidur cross-GPU transfer vs RF" data-zh="E2 · Vidur 跨 GPU 遷移對 RF">E2 · Vidur cross-GPU transfer vs RF</span></h4>
+      <p style="font-size:.9rem"><span class="i18n" data-en="Collect Vidur ground truth on an unseen GPU (H100/H200, Llama-3-8B, ~1–2 GPU-hr/SKU via Vidur's scripts); score the A100-trained RF transferred there and our fit-free predictor against it. Output a 2×2 table (RF vs ours) × (home vs unseen). This is the only way to substantiate the transfer advantage." data-zh="在未見 GPU（H100／H200，Llama-3-8B，用 Vidur 腳本約每型號 1–2 GPU 小時）收集 Vidur ground truth；評分以 A100 訓練的 RF 遷移到該處與我們的免擬合預測器。產出 2×2 表（RF 對我們）×（主場對未見）。這是證實遷移優勢的唯一方法。">Collect Vidur ground truth on an unseen GPU; score A100-trained RF transferred vs our fit-free predictor; output a 2×2 (RF vs ours) × (home vs unseen) table.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="E3 · QLM live SLO loop" data-zh="E3 · QLM 即時 SLO 迴圈">E3 · QLM live SLO loop</span></h4>
+      <p style="font-size:.9rem"><span class="i18n" data-en="Build the version-pinned vLLM 0.6.6 environment (or port QLM's scheduler to a modern vLLM) on one H100; run the SLO loop with the native estimator and with ours on the same Poisson workload; measure paired SLO attainment and violation rate. This converts the 111%→1% estimator gain into a real SLO number." data-zh="在一張 H100 上建好版本釘住的 vLLM 0.6.6 環境（或把 QLM 排程器移植到現代 vLLM）；用原生與我們的估計器在相同 Poisson 工作負載上執行 SLO 迴圈；量測配對的 SLO 達成率與違反率。這把 111%→1% 的估計增益轉成真實的 SLO 數字。">Build the pinned vLLM 0.6.6 env on one H100; run the SLO loop with native vs our estimator on the same Poisson workload; measure paired SLO attainment and violation rate.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="E4 · A genuine speedup demonstration" data-zh="E4 · 一個真正的加速展示">E4 · A genuine speedup demonstration</span></h4>
+      <p style="font-size:.9rem"><span class="i18n" data-en="If the headline is to be 'we reduce inference time', it needs an end-to-end win against a strong, queue-aware baseline — not against a weak reference router. Either (a) find a mechanism whose decision is dominated by per-step time prediction and where current predictors are the bottleneck, or (b) report the keep-warm TTFT result (−30 ms/turn) as the scoped, honest speedup it is and frame the rest as decision-signal quality." data-zh="若標題要定為「我們縮短推論時間」，它需要一個對上強的、佇列感知基線的端到端勝利——而非對上一個弱的參考路由器。要麼（a）找到一個其決策由逐步時間預測主導、且現有預測器是瓶頸的機制，要麼（b）把 keep-warm TTFT 結果（每輪 −30 ms）報告為它本來就是的、有界且誠實的加速，並把其餘框定為決策訊號品質。">If the headline is 'we reduce inference time', it needs an end-to-end win vs a strong queue-aware baseline, not a weak reference. Either find a mechanism dominated by per-step time prediction, or report keep-warm TTFT (−30 ms/turn) as the scoped honest speedup and frame the rest as decision-signal quality.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 5. SCORECARD ============================ -->
+<section id="scorecard">
+  <h2><span class="i18n" data-en="5. Mental model versus the data — a scorecard" data-zh="5. 心智模型對資料——一張記分卡">5. Mental model versus the data — a scorecard</span></h2>
+  <p><span class="i18n"
+    data-en="This table is the one-screen summary: what the reframing assumed, and what the raw files actually show. Green is supported, amber is partially supported or needs rephrasing, red needs a new experiment before it can be claimed."
+    data-zh="這張表是一頁式摘要：重構假設了什麼，以及原始檔實際顯示了什麼。綠色是有支持，琥珀是部分支持或需重新措辭，紅色是在能主張前需要新實驗。">A one-screen summary: what the reframing assumed versus what the raw files show. Green = supported, amber = partly / needs rephrasing, red = needs a new experiment.</span></p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="The mental-model claim" data-zh="心智模型的主張">The mental-model claim</span></th>
+      <th><span class="i18n" data-en="The data verdict" data-zh="資料的裁決">The data verdict</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Part 1: predict step time from minimal / pure-input measurement" data-zh="第一部分：以最小／純輸入量測預測 step time">Part 1: predict from minimal / pure-input measurement</span></td><td><span class="partial">◐</span> <span class="i18n" data-en="Predicts step time well, but needs per-architecture microbenchmarks + ncu counters; only the GPU constants are trace-free." data-zh="能良好預測 step time，但需要每架構微基準＋ncu 計數器；只有 GPU 常數是免 trace 的。">Predicts well, but needs per-arch microbenchmarks; not pure-input.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Three corrections: compute α, memory/L2, CPU–GPU overlap" data-zh="三項修正：計算 α、記憶體/L2、CPU–GPU 重疊">Three corrections</span></td><td><span class="partial">◐</span> <span class="i18n" data-en="Undercount: ~7 additive terms / 9+ factors (adds attention, launch floor, sampling, light/LM-head)." data-zh="低估：約 7 個加法項／9+ 因子（多了 attention、啟動地板、取樣、light/LM-head）。">Undercount: ~7 terms / 9+ factors.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Frequency droop makes GEMM slower" data-zh="頻率下垂使 GEMM 變慢">Frequency droop makes GEMM slower</span></td><td><span class="partial">◐</span> <span class="i18n" data-en="True that the kernel misses 989 TFLOP/s; throughput only declines on tight-cap parts (L40S −15%), masked elsewhere." data-zh="達不到 989 TFLOP/s 為真；吞吐只在吃緊上限型號下降（L40S −15%），其餘被遮蔽。">Miss 989 = true; decline only on tight-cap parts.</span></td></tr>
+      <tr><td><span class="i18n" data-en="L2 reuse is a sub-1 bandwidth factor, quantifiable from pure params" data-zh="L2 重用是小於 1 的頻寬因子、可用純參數量化">L2 reuse = sub-1 bandwidth factor, pure-param</span></td><td><span class="cross">✗→experiment</span> <span class="i18n" data-en="It is a bytes-moved correction; currently a measured table, not yet pure-param (needs E1)." data-zh="它是 bytes-moved 修正；目前是量測表、尚非純參數（需 E1）。">Bytes correction, measured table — needs E1.</span></td></tr>
+      <tr><td><span class="i18n" data-en="We do online learning" data-zh="我們做 online learning">We do online learning</span></td><td><span class="cross">✗</span> <span class="i18n" data-en="No online learning; offline microbenchmark calibration + one closed-form floor per SKU + optional one scalar/deployment." data-zh="無 online learning；離線微基準校準＋每型號一條封閉式地板＋選用每部署一個純量。">No — offline calibration + one floor fit per SKU.</span></td></tr>
+      <tr><td><span class="i18n" data-en="Part 2: the predictor improves inference time on existing systems" data-zh="第二部分：預測器在既有系統上改善推論時間">Part 2: improves inference time on existing systems</span></td><td><span class="cross">✗→experiment</span> <span class="i18n" data-en="Not shown; utility study with negative results. Genuine accuracy win on 1 system (QLM estimator), tie 1, loss 1. Needs E2–E4." data-zh="未顯示；效用研究含負面結果。真正的準確度勝利在 1 個系統（QLM 估計器）、平手 1、落敗 1。需 E2–E4。">Not shown; win on 1 (QLM estimator), tie 1, loss 1. Needs E2–E4.</span></td></tr>
+      <tr><td><span class="i18n" data-en="We beat Vidur's Random Forest" data-zh="我們贏 Vidur 的隨機森林">We beat Vidur's Random Forest</span></td><td><span class="cross">✗</span> <span class="i18n" data-en="We are worse on accuracy (8.4% vs 5.3% agg); our edge is cost/coverage, transfer unmeasured." data-zh="準確度上我們較差（整體 8.4% 對 5.3%）；我們的優勢是成本/涵蓋率，遷移未量測。">Worse on accuracy; edge is cost/coverage.</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note"><span class="i18n"
+    data-en="<strong>The one-line conclusion.</strong> The predictor is real, cheap, explainable, and accurate where it is calibrated (decode 0.8–7.1% depending on mode); its honest selling point is decision-signal quality at near-zero calibration cost, not online learning and not a demonstrated end-to-end speedup. The fastest way to a defensible strong paper is to either (a) commit to the coverage-and-cost framing the data already supports, or (b) run E2–E4 to earn the speedup framing the mental model assumes."
+    data-zh="<strong>一句話結論。</strong>這個預測器是真實、廉價、可解釋、且在其校準之處準確（依模式 decode 0.8–7.1%）；它誠實的賣點是接近零校準成本下的決策訊號品質，而非 online learning、也非已展示的端到端加速。通往一篇可辯護的強論文最快的路，是要麼（a）採用資料已支持的涵蓋率與成本框架，要麼（b）執行 E2–E4 以掙得心智模型所假設的加速框架。"><strong>One-line conclusion.</strong> The predictor is real, cheap, explainable, and accurate where calibrated (decode 0.8–7.1% by mode); its honest selling point is decision-signal quality at near-zero calibration cost — not online learning and not a demonstrated speedup. Fastest path to a strong paper: either commit to the coverage-and-cost framing the data supports, or run E2–E4 to earn the speedup framing.</span></div>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="Project Core Review — an internal, data-grounded audit of the two-half inference-time-predictor project. Every number traced to a raw file under results/ or part2_integrations/." data-zh="專案核心審視——一份內部、以資料為據的雙半部推論時間預測器專案審查。每個數字皆溯源至 results/ 或 part2_integrations/ 下的原始檔。">Project Core Review — an internal, data-grounded audit. Every number traced to a raw file under results/ or part2_integrations/.</span></p>
+  <p><a href="../index.html"><span class="i18n" data-en="← Back to Deep Dives" data-zh="← 返回深潛">← Back to Deep Dives</span></a></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$',  right: '$',  display: false}
+      ],
+      macros: {'\\fclk':'f_{\\mathrm{clk}}','\\etabar':'\\bar{\\eta}','\\etac':'\\eta_{c}','\\Tstep':'T_{\\mathrm{step}}','\\Tblocks':'T_{\\mathrm{blocks}}','\\Tsamp':'T_{\\mathrm{samp}}','\\Sn':'S(N)'}
+    });
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>
