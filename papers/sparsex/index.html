@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SparseX: Segment-Level KV Cache Sharing for Interleaved LLM Serving</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+/* ===== ACCENT (Rose — KV cache management / sharing) ===== */
+:root{--accent:#e94560;--accent-rgb:233,69,96;--nav-bg:rgba(45,12,22,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#c0a0a8;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#1e1020 0%,#1a1428 50%,#1a1030 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.06) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative;line-height:1.2}
+.hero .sub{font-size:1.12rem;color:#8fa4c0;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.15);border:1px solid rgba(var(--accent-rgb),0.3);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none;letter-spacing:normal}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent)}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#2ecc71}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VERTICAL FLOW ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== SEGMENT STRIP (custom — interleaved reuse illustration) ===== */
+.segstrip{display:flex;gap:4px;margin:1rem 0 1.6rem;flex-wrap:wrap}
+.segstrip .seg{padding:.5rem .7rem;border-radius:6px;font-size:.78rem;font-weight:600;white-space:nowrap}
+.segstrip .seg.reuse{background:rgba(46,204,113,.16);color:#7fe0a5;border:1px solid rgba(46,204,113,.4)}
+.segstrip .seg.orig{background:rgba(var(--accent-rgb),.16);color:var(--accent);border:1px solid rgba(var(--accent-rgb),.4)}
+.segstrip .seg.pick{background:rgba(245,166,35,.18);color:#ffcf7a;border:1px solid rgba(245,166,35,.5)}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES & WARNINGS ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+.quote{background:rgba(110,198,255,.05);border-left:4px solid #6ec6ff;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1.2rem 0;font-size:.92rem;font-style:italic;color:#c8d4e6}
+.quote strong{color:#fff;font-style:normal}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:2rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.82rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== GRID-2 ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== PAPER FIGURES ===== */
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{display:block;margin:0 auto;max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:620px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:800px;display:inline-block;text-align:left;line-height:1.5}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+
+/* ===== LATEX ===== */
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.8rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.75rem;padding:.7rem}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+  table{display:block;overflow-x:auto}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#problem">Problem</a></li>
+    <li><a href="#coupling">Prefix Coupling</a></li>
+    <li><a href="#prior">Prior Work</a></li>
+    <li><a href="#contributions">Contributions</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#mechanism">Mechanism</a></li>
+    <li><a href="#system">System</a></li>
+    <li><a href="#results">Results</a></li>
+    <li><a href="#reproduce">Reproduce</a></li>
+    <li><a href="#decontamination">Our Thesis</a></li>
+    <li><a href="#assessment">Assessment</a></li>
+    <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>SparseX</h1>
+  <p class="sub"><span class="i18n" data-en="Efficient Segment-Level KV Cache Sharing for Interleaved LLM Serving &mdash; reusing repeated text that appears anywhere in the prompt, not only as a prefix" data-zh="面向交錯式 LLM 服務的高效片段級 KV Cache 共享 &mdash; 重用出現在提示任意位置、而非僅前綴的重複文字">Efficient Segment-Level KV Cache Sharing for Interleaved LLM Serving &mdash; reusing repeated text that appears anywhere in the prompt, not only as a prefix</span></p>
+  <div class="badges">
+    <span class="badge">arXiv:2606.01751</span>
+    <span class="badge">arXiv preprint (2026)</span>
+    <span class="badge">Segment-Level KV Reuse</span>
+    <span class="badge">SparseQ + Sparse-KV Recompute</span>
+    <span class="badge">vLLM v1 0.11.0</span>
+  </div>
+  <p style="color:#8fa4c0;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Quqing Zhang, Kai Chen, Ning Liao, Zehao Lin, Bo Tang, Feiyu Xiong, Zhiyu Li, Xiaoxing Wang</p>
+  <p style="color:#6a7a94;font-size:.85rem;position:relative;max-width:none">Code released at <a href="https://github.com/MemTensor/SparseX">github.com/MemTensor/SparseX</a> (MemTensor)</p>
+</div>
+
+<div class="container">
+
+<!-- ================= 1. PROBLEM ================= -->
+<section id="problem">
+  <h2><span class="i18n" data-en="1. The Interleaved-Reuse Problem" data-zh="1. 交錯重用問題">1. The Interleaved-Reuse Problem</span></h2>
+
+  <p><span class="i18n"
+    data-en="By 2026 the dominant long-context serving workloads &mdash; multi-round chat, retrieval-augmented generation (RAG), and multi-agent workflows &mdash; all reprocess large amounts of text that the serving stack has already seen. A chat assistant re-reads the entire dialogue history on every turn; a RAG service re-encodes the same knowledge snippets for thousands of different questions; a group of collaborating agents each re-reads another agent's intermediate reasoning, tool output, or draft. In every case the prefill stage, which must run multi-layer self-attention over the full context of length N and write the Key/Value (KV) tensors for every token, dominates end-to-end latency and compute cost. The natural remedy is to reuse the KV of text that has already been encoded rather than recomputing it."
+    data-zh="到了 2026 年，主流的長上下文服務工作負載 &mdash; 多輪對話、檢索增強生成（RAG）與多 agent 工作流 &mdash; 都在反覆處理服務系統早已見過的大量文字。聊天助理在每一輪都重讀整段對話歷史；RAG 服務為數千個不同問題重新編碼相同的知識片段；一組協作的 agent 各自重讀另一個 agent 的中間推理、工具輸出或草稿。在每一種情況下，需對長度為 N 的完整上下文執行多層自注意力、並為每個 token 寫入 Key/Value（KV）張量的 prefill 階段，都主導了端到端延遲與計算成本。自然的補救方式，是重用早已編碼過文字的 KV，而非重新計算。">By 2026 the dominant long-context serving workloads &mdash; multi-round chat, retrieval-augmented generation (RAG), and multi-agent workflows &mdash; all reprocess large amounts of text that the serving stack has already seen. A chat assistant re-reads the entire dialogue history on every turn; a RAG service re-encodes the same knowledge snippets for thousands of different questions; a group of collaborating agents each re-reads another agent's intermediate reasoning, tool output, or draft. In every case the prefill stage, which must run multi-layer self-attention over the full context of length N and write the Key/Value (KV) tensors for every token, dominates end-to-end latency and compute cost. The natural remedy is to reuse the KV of text that has already been encoded rather than recomputing it.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/fig_1_1.png" alt="Figure 1: Three common KV reuse scenarios — multi-round chat, RAG, and multi-agent systems">
+    <div class="fig-cap"><strong>Figure 1 (from paper):</strong>
+      <span class="i18n" data-en="Three common KV reuse scenarios supported by SparseX &mdash; multi-round chat, RAG, and multi-agent systems. Reusable content appears as segment-level repeated text distributed across different positions in the prompt, not as a clean shared prefix." data-zh="SparseX 支援的三種常見 KV 重用場景 &mdash; 多輪對話、RAG 與多 agent 系統。可重用內容以片段級重複文字的形式，分散在提示的不同位置，而非乾淨的共享前綴。">Three common KV reuse scenarios supported by SparseX &mdash; multi-round chat, RAG, and multi-agent systems. Reusable content appears as segment-level repeated text distributed across different positions in the prompt, not as a clean shared prefix.</span>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The catch is that today's production systems can only reuse KV when the repeated text is an exact prompt prefix. vLLM's Automatic Prefix Caching hashes blocks and reuses them when a new request shares an identical leading token sequence; SGLang's RadixAttention keeps prefixes in a radix tree. Both preserve output quality exactly, but both fire only on token-level prefix equality. The repeated content in real traffic does not obey this shape: it arrives as non-prefix, cross-request, cross-turn, and cross-agent segments scattered through the middle of the prompt."
+    data-zh="問題在於，如今的生產系統只能在重複文字恰為提示前綴時重用 KV。vLLM 的 Automatic Prefix Caching 以 block 為單位做雜湊，當新請求共享相同的開頭 token 序列時重用；SGLang 的 RadixAttention 則將前綴保存在基數樹中。兩者都能精確保留輸出品質，但都只在 token 層級前綴完全相等時才觸發。真實流量中的重複內容並不遵循這種形狀：它以非前綴、跨請求、跨輪次、跨 agent 的片段形式，散佈在提示中段。">The catch is that today's production systems can only reuse KV when the repeated text is an exact prompt prefix. vLLM's Automatic Prefix Caching hashes blocks and reuses them when a new request shares an identical leading token sequence; SGLang's RadixAttention keeps prefixes in a radix tree. Both preserve output quality exactly, but both fire only on token-level prefix equality. The repeated content in real traffic does not obey this shape: it arrives as non-prefix, cross-request, cross-turn, and cross-agent segments scattered through the middle of the prompt.</span></p>
+
+  <h3><span class="i18n" data-en="1.1 A concrete failure trace" data-zh="1.1 一個具體的失效軌跡">1.1 A concrete failure trace</span></h3>
+  <p><span class="i18n"
+    data-en="Consider a multi-agent debate over a hard reasoning problem. A first agent produces a 3,000-token analysis. A second agent's prompt is [system instruction] + [problem statement] + [Agent-1 analysis] + [new debate instruction]. The 3,000-token analysis is textually identical to what Agent-1 already encoded, but it now sits after a different system instruction and a different problem framing, and it is wrapped by fresh instructions on both sides. Because it is not a leading prefix, vLLM's Prefix Cache misses on it entirely, so the engine re-prefills all ~3,300 tokens from scratch. The reused analysis is byte-for-byte the same text the cluster computed seconds ago, yet the system pays the full quadratic attention cost again."
+    data-zh="設想一場關於難題的多 agent 辯論。第一個 agent 產生了 3,000 個 token 的分析。第二個 agent 的提示為 [系統指令] + [問題敘述] + [Agent-1 的分析] + [新的辯論指令]。這 3,000 token 的分析在文字上與 Agent-1 已編碼的完全相同，但它現在位於不同的系統指令與不同的問題框架之後，且兩側都被全新的指令包夾。由於它不是開頭前綴，vLLM 的 Prefix Cache 完全無法命中，引擎因而從頭重新 prefill 全部約 3,300 個 token。被重用的分析與叢集數秒前算出的文字逐位元組相同，系統卻再次付出完整的二次方注意力成本。">Consider a multi-agent debate over a hard reasoning problem. A first agent produces a 3,000-token analysis. A second agent's prompt is [system instruction] + [problem statement] + [Agent-1 analysis] + [new debate instruction]. The 3,000-token analysis is textually identical to what Agent-1 already encoded, but it now sits after a different system instruction and a different problem framing, and it is wrapped by fresh instructions on both sides. Because it is not a leading prefix, vLLM's Prefix Cache misses on it entirely, so the engine re-prefills all ~3,300 tokens from scratch. The reused analysis is byte-for-byte the same text the cluster computed seconds ago, yet the system pays the full quadratic attention cost again.</span></p>
+
+  <p><span class="i18n"
+    data-en="The general form of such a prompt is an interleaving of original and reused segments rather than a single reused block followed by original text. SparseX writes it as the pattern below, where each Reuse segment is cached text at an arbitrary position and each Original segment is fresh text specific to the current request:"
+    data-zh="這類提示的一般形式，是原始片段與重用片段的交錯，而非單一重用區塊後接原始文字。SparseX 將其寫成下面的模式，其中每個 Reuse 片段是位於任意位置的快取文字，每個 Original 片段是當前請求專屬的新文字：">The general form of such a prompt is an interleaving of original and reused segments rather than a single reused block followed by original text. SparseX writes it as the pattern below, where each Reuse segment is cached text at an arbitrary position and each Original segment is fresh text specific to the current request:</span></p>
+
+  <div class="segstrip">
+    <span class="seg orig">Original&#8321;</span>
+    <span class="seg reuse">Reuse&#8321;</span>
+    <span class="seg orig">Original&#8322;</span>
+    <span class="seg reuse">Reuse&#8322;</span>
+    <span class="seg orig">&hellip;</span>
+    <span class="seg reuse">Reuse&#8342;</span>
+    <span class="seg orig">Original&#8342;</span>
+  </div>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Prefix Cache can only reuse a leading run; every reused segment after the first Original block is invisible to it. The number of interleavings grows with dialogue depth, RAG concatenation policy, and agent-trajectory length." data-zh="Prefix Cache 只能重用開頭的一段；第一個 Original 區塊之後的每個重用片段對它都是不可見的。交錯的數量會隨對話深度、RAG 拼接策略與 agent 軌跡長度而增加。">Prefix Cache can only reuse a leading run; every reused segment after the first Original block is invisible to it. The number of interleavings grows with dialogue depth, RAG concatenation policy, and agent-trajectory length.</span></p>
+
+  <h3><span class="i18n" data-en="1.2 What the status quo costs" data-zh="1.2 現狀的代價">1.2 What the status quo costs</span></h3>
+  <p><span class="i18n"
+    data-en="The paper's own measurements quantify the pain at both ends of the trade-off. When Prefix Cache misses on interleaved reuse, the fallback is full recomputation, whose time-to-first-token (TTFT) is 9.23 s on LOCOMO with Qwen3-32B and 15.58 s on LongMemEval with Qwen3-30B-A3B. The opposite extreme, naively reusing cached KV without any correction, drops TTFT to well under a second but degrades quality sharply: the LOCOMO score falls from 0.68 to 0.54, and the RULER average on Qwen3-8B collapses from 0.96 to 0.69. Neither corner is acceptable: full recompute is too slow for interactive serving, and naive reuse fails on exactly the retrieval and tracking tasks these workloads depend on."
+    data-zh="論文自身的量測，刻畫了取捨兩端的代價。當 Prefix Cache 對交錯重用失手時，退路是完整重算，其首 token 延遲（TTFT）在 Qwen3-32B 的 LOCOMO 上為 9.23 秒、在 Qwen3-30B-A3B 的 LongMemEval 上為 15.58 秒。另一個極端 &mdash; 未經任何修正就直接重用快取 KV &mdash; 能將 TTFT 壓到遠低於一秒，卻使品質大幅退化：LOCOMO 分數從 0.68 掉到 0.54，Qwen3-8B 的 RULER 平均分則從 0.96 掉到 0.69。兩個角落都不可接受：完整重算對互動式服務而言太慢，而樸素重用恰恰在這些工作負載所倚賴的檢索與追蹤任務上失效。">The paper's own measurements quantify the pain at both ends of the trade-off. When Prefix Cache misses on interleaved reuse, the fallback is full recomputation, whose time-to-first-token (TTFT) is 9.23 s on LOCOMO with Qwen3-32B and 15.58 s on LongMemEval with Qwen3-30B-A3B. The opposite extreme, naively reusing cached KV without any correction, drops TTFT to well under a second but degrades quality sharply: the LOCOMO score falls from 0.68 to 0.54, and the RULER average on Qwen3-8B collapses from 0.96 to 0.69. Neither corner is acceptable: full recompute is too slow for interactive serving, and naive reuse fails on exactly the retrieval and tracking tasks these workloads depend on.</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">9.23 s</div><div class="label"><span class="i18n" data-en="Full-recompute TTFT, LOCOMO / Qwen3-32B (baseline pain)" data-zh="完整重算 TTFT，LOCOMO / Qwen3-32B（基線痛點）">Full-recompute TTFT, LOCOMO / Qwen3-32B (baseline pain)</span></div></div>
+    <div class="metric-box"><div class="value">0.68&rarr;0.54</div><div class="label"><span class="i18n" data-en="LOCOMO quality lost by naive reuse" data-zh="樸素重用損失的 LOCOMO 品質">LOCOMO quality lost by naive reuse</span></div></div>
+    <div class="metric-box"><div class="value">0.96&rarr;0.69</div><div class="label"><span class="i18n" data-en="RULER avg lost by naive reuse (Qwen3-8B)" data-zh="樸素重用損失的 RULER 平均分（Qwen3-8B）">RULER avg lost by naive reuse (Qwen3-8B)</span></div></div>
+  </div>
+</section>
+
+<!-- ================= 2. PREFIX COUPLING ================= -->
+<section id="coupling">
+  <h2><span class="i18n" data-en="2. Why Reuse Is Hard: Prefix Coupling" data-zh="2. 為何重用困難：前綴耦合">2. Why Reuse Is Hard: Prefix Coupling</span></h2>
+
+  <p><span class="i18n"
+    data-en="The reason naive reuse fails is not an implementation bug &mdash; it is a structural property of self-attention. The KV of a token is not a fixed function of that token alone; it is a function of the token together with everything that precedes it. SparseX states this obstacle almost verbatim as the premise our own line of work is built on, and this page treats the sentence below as the motivating citation to lock:"
+    data-zh="樸素重用失效的原因不是實作 bug &mdash; 而是自注意力的結構性性質。一個 token 的 KV 並非僅由該 token 決定的固定函數；它是該 token 連同其之前所有內容的函數。SparseX 幾乎逐字地把這個障礙陳述為我方研究線所立基的前提，本頁將下面這句話視為要鎖定的動機引用：">The reason naive reuse fails is not an implementation bug &mdash; it is a structural property of self-attention. The KV of a token is not a fixed function of that token alone; it is a function of the token together with everything that precedes it. SparseX states this obstacle almost verbatim as the premise our own line of work is built on, and this page treats the sentence below as the motivating citation to lock:</span></p>
+
+  <div class="quote">
+    <span class="i18n"
+      data-en="&ldquo;Because self-attention couples a segment representation with its prefix context, the hidden states and KV tensors of the same text segment often differ under different prefixes and different concatenation positions.&rdquo;"
+      data-zh="&ldquo;因為自注意力將片段表徵與其前綴上下文耦合，同一段文字在不同前綴與不同拼接位置下，其隱藏狀態與 KV 張量往往不同。&rdquo;">&ldquo;Because self-attention couples a segment representation with its prefix context, the hidden states and KV tensors of the same text segment often differ under different prefixes and different concatenation positions.&rdquo;</span>
+    <div style="margin-top:.5rem;font-size:.8rem;color:#8fa4c0;font-style:normal">&mdash; SparseX, Section 1.1 (Background)</div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="From this single fact the paper derives a clean problem statement. Because the same text produces different KV under different prefixes and positions, reuse cannot be a memory copy. SparseX therefore reframes it as an approximation problem to be solved per token:"
+    data-zh="從這個單一事實，論文導出一個乾淨的問題陳述。因為相同文字在不同前綴與位置下產生不同的 KV，重用不可能是一次記憶體複製。SparseX 因此將其重新框定為一個需逐 token 求解的近似問題：">From this single fact the paper derives a clean problem statement. Because the same text produces different KV under different prefixes and positions, reuse cannot be a memory copy. SparseX therefore reframes it as an approximation problem to be solved per token:</span></p>
+
+  <div class="quote">
+    <span class="i18n"
+      data-en="&ldquo;Reuse in realistic settings is a context-dependent and position-dependent approximate computation problem: under an output-quality constraint, the system must determine which tokens can directly reuse cached KV tensors, which tokens must be recomputed, and how this mechanism can be reliably integrated into a high-performance inference engine.&rdquo;"
+      data-zh="&ldquo;現實情境中的重用，是一個依賴上下文與位置的近似計算問題：在輸出品質的約束下，系統必須判定哪些 token 可以直接重用快取 KV 張量、哪些 token 必須重算，以及如何將此機制可靠地整合進高效能推理引擎。&rdquo;">&ldquo;Reuse in realistic settings is a context-dependent and position-dependent approximate computation problem: under an output-quality constraint, the system must determine which tokens can directly reuse cached KV tensors, which tokens must be recomputed, and how this mechanism can be reliably integrated into a high-performance inference engine.&rdquo;</span>
+    <div style="margin-top:.5rem;font-size:.8rem;color:#8fa4c0;font-style:normal">&mdash; SparseX, Section 1.1 (Background)</div>
+  </div>
+
+  <h3><span class="i18n" data-en="2.1 Two obvious fixes, and why they are not enough" data-zh="2.1 兩種顯而易見的修法，以及為何不足">2.1 Two obvious fixes, and why they are not enough</span></h3>
+  <p><span class="i18n"
+    data-en="A reader familiar with the KV-reuse literature will immediately propose two remedies; the paper pre-empts both. The first is to recompute a small, fixed subset of tokens to patch the missing cross-segment interaction &mdash; the CacheBlend/EPIC route. This works when reuse is a small number of contiguous chunks, but it assumes a regular structure. Under heavily interleaved inputs an original segment can alter the attention distribution of several downstream reused segments at once, so a local patch chosen from fixed boundaries becomes unstable and hit rates fall. The second is to pick recompute tokens from the deviation of the first attention layer, on the assumption that early layers already reveal token importance. The paper's layer-wise analysis (Section 6.4) shows that this assumption is false in general: where the important signal stabilizes depends strongly on prompt layout, so an early-layer selection can miss the tokens that actually matter."
+    data-zh="熟悉 KV 重用文獻的讀者，會立刻提出兩種補救；論文對兩者都預先回應。第一種是重算一小組固定的 token 以修補缺失的跨片段互動 &mdash; 即 CacheBlend/EPIC 路線。當重用是少數幾個連續 chunk 時這行得通，但它假設了規則的結構。在高度交錯的輸入下，一個原始片段可能同時改變下游數個重用片段的注意力分佈，因此從固定邊界選出的局部修補會變得不穩定、命中率下降。第二種是從第一層注意力的偏差挑選重算 token，假設早期層已能揭示 token 重要性。論文的逐層分析（第 6.4 節）顯示此假設一般並不成立：重要訊號在何處穩定下來，強烈取決於提示佈局，因此早期層的選擇可能錯過真正重要的 token。">A reader familiar with the KV-reuse literature will immediately propose two remedies; the paper pre-empts both. The first is to recompute a small, fixed subset of tokens to patch the missing cross-segment interaction &mdash; the CacheBlend/EPIC route. This works when reuse is a small number of contiguous chunks, but it assumes a regular structure. Under heavily interleaved inputs an original segment can alter the attention distribution of several downstream reused segments at once, so a local patch chosen from fixed boundaries becomes unstable and hit rates fall. The second is to pick recompute tokens from the deviation of the first attention layer, on the assumption that early layers already reveal token importance. The paper's layer-wise analysis (Section 6.4) shows that this assumption is false in general: where the important signal stabilizes depends strongly on prompt layout, so an early-layer selection can miss the tokens that actually matter.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="The fundamental obstacle." data-zh="根本障礙。">The fundamental obstacle.</span></strong>
+    <span class="i18n"
+      data-en="Reuse is neither free (prefix coupling makes cached KV wrong at the new position) nor cheap to fix by a fixed rule (interleaving makes the set of tokens that need correction request-specific and layout-dependent). Any workable method must (a) realign the cached KV to the new position and (b) decide, at runtime and per request, which reused tokens still need to interact with the fresh context. SparseX's design is a direct answer to exactly these two requirements."
+      data-zh="重用既非免費（前綴耦合使快取 KV 在新位置上是錯的），也無法用固定規則廉價修補（交錯使需要修正的 token 集合因請求而異、且依賴佈局）。任何可行的方法都必須（a）將快取 KV 重新對齊到新位置，並（b）在執行時、逐請求地判定哪些重用 token 仍需與新上下文互動。SparseX 的設計正是對這兩項要求的直接回應。">Reuse is neither free (prefix coupling makes cached KV wrong at the new position) nor cheap to fix by a fixed rule (interleaving makes the set of tokens that need correction request-specific and layout-dependent). Any workable method must (a) realign the cached KV to the new position and (b) decide, at runtime and per request, which reused tokens still need to interact with the fresh context. SparseX's design is a direct answer to exactly these two requirements.</span>
+  </div>
+</section>
+
+<!-- ================= 3. PRIOR WORK ================= -->
+<section id="prior">
+  <h2><span class="i18n" data-en="3. Position vs Prior Work" data-zh="3. 與既有工作的定位">3. Position vs Prior Work</span></h2>
+  <p><span class="i18n"
+    data-en="SparseX places itself in a crowded conversation on non-prefix KV reuse. The paper groups prior methods into three lines &mdash; direct segment alignment, auxiliary-model token selection, and sparse-recomputation &mdash; and argues that each leaves the general interleaved case on the table. The comparison below names the five works a knowledgeable reader expects to be addressed and states what each does not cover; SparseX's claim is that it is the first to support arbitrary interleaving of reused and non-reuse text inside a mainstream engine."
+    data-zh="SparseX 將自己置於關於非前綴 KV 重用的熱門討論中。論文將既有方法歸為三條線 &mdash; 直接片段對齊、輔助模型 token 選擇、以及稀疏重算 &mdash; 並主張每一條都未能涵蓋一般的交錯情況。下面的比較列出知識豐富的讀者預期會被處理的五項工作，並說明各自未涵蓋之處；SparseX 的主張是：它是首個在主流引擎內支援重用文字與非重用文字任意交錯的方法。">SparseX places itself in a crowded conversation on non-prefix KV reuse. The paper groups prior methods into three lines &mdash; direct segment alignment, auxiliary-model token selection, and sparse-recomputation &mdash; and argues that each leaves the general interleaved case on the table. The comparison below names the five works a knowledgeable reader expects to be addressed and states what each does not cover; SparseX's claim is that it is the first to support arbitrary interleaving of reused and non-reuse text inside a mainstream engine.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/fig_1_2.png" alt="Figure 2: Comparison of KV reuse methods on support for complex reuse patterns">
+    <div class="fig-cap"><strong>Figure 2 (from paper):</strong>
+      <span class="i18n" data-en="Comparison of different KV reuse methods in terms of support for complex reuse patterns. CacheBlend and EPIC suit contiguous reuse; KVCOMM constrains the length and semantics of non-reuse queries; SparseX allows arbitrary interleaving between reused segments and non-reuse query text." data-zh="不同 KV 重用方法對複雜重用模式支援程度的比較。CacheBlend 與 EPIC 適用於連續重用；KVCOMM 對非重用 query 的長度與語意加以約束；SparseX 允許重用片段與非重用 query 文字之間任意交錯。">Comparison of different KV reuse methods in terms of support for complex reuse patterns. CacheBlend and EPIC suit contiguous reuse; KVCOMM constrains the length and semantics of non-reuse queries; SparseX allows arbitrary interleaving between reused segments and non-reuse query text.</span>
+    </div>
+  </div>
+
+  <table>
+    <tr>
+      <th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th>
+      <th><span class="i18n" data-en="Reuse unit / idea" data-zh="重用單位／想法">Reuse unit / idea</span></th>
+      <th><span class="i18n" data-en="What it leaves on the table" data-zh="未涵蓋之處">What it leaves on the table</span></th>
+    </tr>
+    <tr>
+      <td><strong>Prefix Cache</strong><br><span style="font-size:.8rem;color:#8fa4c0">vLLM APC / RadixAttention</span></td>
+      <td><span class="i18n" data-en="Exact leading-prefix block reuse; quality preserved exactly" data-zh="精確的開頭前綴 block 重用；品質完全保留">Exact leading-prefix block reuse; quality preserved exactly</span></td>
+      <td><span class="i18n" data-en="Fires only on token-level prefix equality; misses all non-prefix segments" data-zh="僅在 token 層級前綴相等時觸發；漏掉所有非前綴片段">Fires only on token-level prefix equality; misses all non-prefix segments</span></td>
+    </tr>
+    <tr>
+      <td><strong>CacheBlend</strong> / <strong>EPIC</strong></td>
+      <td><span class="i18n" data-en="Concatenate cached chunks (RAG); recompute a small token subset / position-independent chunk caching" data-zh="拼接快取 chunk（RAG）；重算一小組 token／位置無關的 chunk 快取">Concatenate cached chunks (RAG); recompute a small token subset / position-independent chunk caching</span></td>
+      <td><span class="i18n" data-en="Assume contiguous chunk structure; degrade under heavy interleaving" data-zh="假設連續 chunk 結構；在高度交錯下退化">Assume contiguous chunk structure; degrade under heavy interleaving</span></td>
+    </tr>
+    <tr>
+      <td><strong>KVCOMM</strong></td>
+      <td><span class="i18n" data-en="Cross-agent reuse; an online anchor pool estimates and corrects the KV offset of shared content under different prefixes" data-zh="跨 agent 重用；線上 anchor pool 估計並修正共享內容在不同前綴下的 KV 偏移">Cross-agent reuse; an online anchor pool estimates and corrects the KV offset of shared content under different prefixes</span></td>
+      <td><span class="i18n" data-en="Constrains the length and semantics of non-reuse queries; additive offset correction, not full cross-attention restoration" data-zh="約束非重用 query 的長度與語意；加法式偏移修正，非完整的跨注意力還原">Constrains length/semantics of non-reuse queries; additive offset correction, not full cross-attention restoration</span></td>
+    </tr>
+    <tr>
+      <td><strong>CacheClip</strong></td>
+      <td><span class="i18n" data-en="A small proxy model's last-layer attention selects tokens critical for cross-chunk restoration" data-zh="小型代理模型的最後一層注意力，選出對跨 chunk 還原關鍵的 token">A small proxy model's last-layer attention selects tokens critical for cross-chunk restoration</span></td>
+      <td><span class="i18n" data-en="Adds a second model; extra scheduling and batching complexity under high concurrency" data-zh="引入第二個模型；高並發下增加排程與 batching 複雜度">Adds a second model; extra scheduling and batching complexity under high concurrency</span></td>
+    </tr>
+    <tr>
+      <td><strong>MInference</strong></td>
+      <td><span class="i18n" data-en="Long-context sparse-attention patterns (vertical / slash / block); last-Q probing to build sparse indices online" data-zh="長上下文稀疏注意力模式（vertical／slash／block）；以 last-Q 探測線上建構稀疏索引">Long-context sparse-attention patterns (vertical / slash / block); last-Q probing to build sparse indices online</span></td>
+      <td><span class="i18n" data-en="Optimizes a single long request; does not address cross-request reuse or restoring cross-segment interaction" data-zh="優化單一長請求；不處理跨請求重用或還原跨片段互動">Optimizes a single long request; not cross-request reuse or cross-segment restoration</span></td>
+    </tr>
+  </table>
+
+  <p><span class="i18n"
+    data-en="The paper organizes the non-prefix reuse literature into three lines, and its critique is that each buys efficiency by giving up generality. The cards below restate that taxonomy in the paper's own terms; SparseX positions itself as taking the third, sparse-recomputation route while removing its structural assumptions."
+    data-zh="論文將非前綴重用文獻歸為三條線，其批評是：每一條都以放棄通用性換取效率。下方卡片以論文自身的用語重述該分類；SparseX 將自己定位為採取第三條、稀疏重算的路線，同時移除其結構性假設。">The paper organizes the non-prefix reuse literature into three lines, and its critique is that each buys efficiency by giving up generality. The cards below restate that taxonomy in the paper's own terms; SparseX positions itself as taking the third, sparse-recomputation route while removing its structural assumptions.</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Line 1 &middot; Direct segment alignment" data-zh="路線 1 &middot; 直接片段對齊">Line 1 &middot; Direct segment alignment</span></h4>
+      <p><span class="i18n" data-en="Reuse or align KV at segment/chunk granularity without sparse attention. EPIC does position-independent chunk caching for RAG; KVCOMM keeps an online anchor pool to correct KV offset across prefixes. Low recompute cost, but they depend on stable structure and cannot fully restore cross-attention among segments." data-zh="以片段／chunk 粒度重用或對齊 KV，不用稀疏注意力。EPIC 為 RAG 做位置無關的 chunk 快取；KVCOMM 維護線上 anchor pool 以修正跨前綴的 KV 偏移。重算成本低，但依賴穩定結構，且無法完整還原片段間的跨注意力。">Reuse or align KV at segment/chunk granularity without sparse attention. EPIC does position-independent chunk caching for RAG; KVCOMM keeps an online anchor pool to correct KV offset across prefixes. Low recompute cost, but they depend on stable structure and cannot fully restore cross-attention among segments.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Line 2 &middot; Auxiliary-model selection" data-zh="路線 2 &middot; 輔助模型選擇">Line 2 &middot; Auxiliary-model selection</span></h4>
+      <p><span class="i18n" data-en="Use a small proxy model to predict which tokens to recompute. CacheClip uses a small model's last-layer attention to select tokens critical for cross-chunk restoration. This raises the selection ceiling but adds a second model, which increases scheduling complexity and creates pipeline bubbles under mixed high-concurrency traffic." data-zh="用一個小型代理模型預測要重算哪些 token。CacheClip 以小模型最後一層的注意力，選出對跨 chunk 還原關鍵的 token。這提升了選擇的上限，卻引入第二個模型，增加排程複雜度，並在混合的高並發流量下造成管線氣泡。">Use a small proxy model to predict which tokens to recompute. CacheClip uses a small model's last-layer attention to select tokens critical for cross-chunk restoration. This raises the selection ceiling but adds a second model, which increases scheduling complexity and creates pipeline bubbles under mixed high-concurrency traffic.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Line 3 &middot; Sparse recomputation (SparseX's route)" data-zh="路線 3 &middot; 稀疏重算（SparseX 的路線）">Line 3 &middot; Sparse recomputation (SparseX's route)</span></h4>
+      <p><span class="i18n" data-en="Recompute a small token subset to compensate missing cross-attention. CacheBlend patches multi-chunk RAG; DroidSpeak recomputes a few layers for cross-model sharing; KVShare and KVLink add deviation-based selection or trainable tokens. The paper argues this is the most promising route for balancing quality and prefill cost &mdash; and builds SparseX on it without the contiguous-chunk assumption." data-zh="重算一小組 token 以補償缺失的跨注意力。CacheBlend 修補多 chunk RAG；DroidSpeak 為跨模型共享重算少數幾層；KVShare 與 KVLink 加入基於偏差的選擇或可訓練 token。論文主張這是在品質與 prefill 成本間取捨最有希望的路線 &mdash; 並在其上建構 SparseX，且不帶連續 chunk 假設。">Recompute a small token subset to compensate missing cross-attention. CacheBlend patches multi-chunk RAG; DroidSpeak recomputes a few layers for cross-model sharing; KVShare and KVLink add deviation-based selection or trainable tokens. The paper argues this is the most promising route for balancing quality and prefill cost &mdash; and builds SparseX on it without the contiguous-chunk assumption.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="Two of these are load-bearing for the rest of this page. MInference supplies the mechanism SparseX generalizes: SparseX keeps MInference's idea of probing a subset of queries to build sparse indices, but replaces the fixed last-Q tail with the non-reuse query positions that arise naturally in reuse workloads. KVCOMM is the closest prior method to our own thesis, and Section 9 returns to how SparseX positions itself against it &mdash; and against us."
+    data-zh="其中兩項對本頁其餘部分至關重要。MInference 提供了 SparseX 所推廣的機制：SparseX 保留 MInference「探測一組 query 以建構稀疏索引」的想法，但把固定的 last-Q 尾端，換成在重用工作負載中自然出現的非重用 query 位置。KVCOMM 則是與我方論點最接近的既有方法，第 9 節將回到 SparseX 如何相對於它 &mdash; 以及相對於我們 &mdash; 定位自身。">Two of these are load-bearing for the rest of this page. MInference supplies the mechanism SparseX generalizes: SparseX keeps MInference's idea of probing a subset of queries to build sparse indices, but replaces the fixed last-Q tail with the non-reuse query positions that arise naturally in reuse workloads. KVCOMM is the closest prior method to our own thesis, and Section 9 returns to how SparseX positions itself against it &mdash; and against us.</span></p>
+</section>
+
+<!-- ================= 4. CONTRIBUTIONS ================= -->
+<section id="contributions">
+  <h2><span class="i18n" data-en="4. Contributions &amp; Headline Results" data-zh="4. 貢獻與主要結果">4. Contributions &amp; Headline Results</span></h2>
+  <p><span class="i18n"
+    data-en="With the problem framed &mdash; interleaved non-prefix reuse, made hard by prefix coupling and unsolved by fixed-rule patching &mdash; SparseX makes three contributions. The first is an observation turned into an algorithm; the second is the reuse method built on it; the third is a deep engine integration that turns the algorithm into throughput."
+    data-zh="在界定了問題之後 &mdash; 交錯的非前綴重用，因前綴耦合而困難、且固定規則的修補無法解決 &mdash; SparseX 提出三項貢獻。第一項是化為演算法的觀察；第二項是立基其上的重用方法；第三項是將演算法轉化為吞吐的深度引擎整合。">With the problem framed &mdash; interleaved non-prefix reuse, made hard by prefix coupling and unsolved by fixed-rule patching &mdash; SparseX makes three contributions. The first is an observation turned into an algorithm; the second is the reuse method built on it; the third is a deep engine integration that turns the algorithm into throughput.</span></p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C1 &middot; SparseQ-driven token selection" data-zh="C1 &middot; SparseQ 驅動的 token 選擇">C1 &middot; SparseQ-driven token selection</span></h4>
+      <p><span class="i18n" data-en="Under segment-level reuse, the non-reuse (original) tokens are exactly the queries that must run attention this pass. SparseX uses these queries as a probe to estimate which reused tokens matter most to the current output &mdash; a runtime sparse-pattern estimator that needs no auxiliary model." data-zh="在片段級重用下，非重用（原始）token 恰是本次必須執行注意力的 query。SparseX 以這些 query 作為探針，估計哪些重用 token 對當前輸出最重要 &mdash; 一個不需輔助模型的執行時稀疏模式估計器。">Under segment-level reuse, the non-reuse (original) tokens are exactly the queries that must run attention this pass. SparseX uses these queries as a probe to estimate which reused tokens matter most to the current output &mdash; a runtime sparse-pattern estimator that needs no auxiliary model.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C2 &middot; Sparse-KV Recomputation" data-zh="C2 &middot; Sparse-KV 重算">C2 &middot; Sparse-KV Recomputation</span></h4>
+      <p><span class="i18n" data-en="Arbitrary-position reuse is turned into a sparse-recomputation problem: RoPE-align every reused segment to its new position, then recompute only the selected top-k tokens to restore cross-segment interaction. Model-agnostic, training-free, plug-and-play for decoder-only LLMs." data-zh="任意位置的重用被轉化為稀疏重算問題：將每個重用片段以 RoPE 對齊到新位置，再僅重算選出的 top-k token 以還原跨片段互動。方法與模型無關、免訓練、對 decoder-only LLM 即插即用。">Arbitrary-position reuse is turned into a sparse-recomputation problem: RoPE-align every reused segment to its new position, then recompute only the selected top-k tokens to restore cross-segment interaction. Model-agnostic, training-free, plug-and-play for decoder-only LLMs.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="C3 &middot; SparseX-vLLM" data-zh="C3 &middot; SparseX-vLLM">C3 &middot; SparseX-vLLM</span></h4>
+      <p><span class="i18n" data-en="A vLLM v1 0.11.0 extension that unifies segment lookup and storage for chat, RAG, and agents. It stays compatible with PagedAttention, Prefix Cache, and FlashAttention/FlashInfer via virtual blocks, frozen-block pools, and a fused copy-and-RoPE kernel." data-zh="一個 vLLM v1 0.11.0 擴充，統一了對話、RAG 與 agent 的片段查找與儲存。它透過虛擬 block、frozen block pool，以及融合的 copy-and-RoPE kernel，維持與 PagedAttention、Prefix Cache 及 FlashAttention/FlashInfer 的相容。">A vLLM v1 0.11.0 extension that unifies segment lookup and storage for chat, RAG, and agents. It stays compatible with PagedAttention, Prefix Cache, and FlashAttention/FlashInfer via virtual blocks, frozen-block pools, and a fused copy-and-RoPE kernel.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The headline result is that SparseX recovers almost all of the quality of full recomputation at a small fraction of its TTFT. On LOCOMO with Qwen3-32B, full recompute scores 0.68 at 9.23 s; SparseX with hybrid attention scores 0.67 at 0.87 s &mdash; roughly a 10.6&times; TTFT reduction at 99% of the quality. On LongMemEval with Qwen3-30B-A3B, full recompute takes 15.58 s and SparseX takes 2.13 s (about 7.3&times;), while quality is preserved. The metric boxes below should be read against the baseline-pain numbers in Section 1.2: the gain is not merely a speed number, it is a speed number achieved without the quality collapse that naive reuse suffers."
+    data-zh="主要結果是：SparseX 以完整重算 TTFT 的一小部分，恢復了幾乎全部的品質。在 Qwen3-32B 的 LOCOMO 上，完整重算得 0.68、耗時 9.23 秒；SparseX 搭配混合注意力得 0.67、耗時 0.87 秒 &mdash; TTFT 約降至 1/10.6，而品質達 99%。在 Qwen3-30B-A3B 的 LongMemEval 上，完整重算耗時 15.58 秒、SparseX 耗時 2.13 秒（約 7.3 倍），品質獲得保留。下面的指標框應對照第 1.2 節的基線痛點來讀：這個增益不只是速度數字，而是在沒有樸素重用所受品質崩解的前提下取得的速度數字。">The headline result is that SparseX recovers almost all of the quality of full recomputation at a small fraction of its TTFT. On LOCOMO with Qwen3-32B, full recompute scores 0.68 at 9.23 s; SparseX with hybrid attention scores 0.67 at 0.87 s &mdash; roughly a 10.6&times; TTFT reduction at 99% of the quality. On LongMemEval with Qwen3-30B-A3B, full recompute takes 15.58 s and SparseX takes 2.13 s (about 7.3&times;), while quality is preserved. The metric boxes below should be read against the baseline-pain numbers in Section 1.2: the gain is not merely a speed number, it is a speed number achieved without the quality collapse that naive reuse suffers.</span></p>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">~10.6&times;</div><div class="label"><span class="i18n" data-en="Lower TTFT vs full recompute (LOCOMO / Qwen3-32B): 9.23 s &rarr; 0.87 s" data-zh="相對完整重算的 TTFT 降幅（LOCOMO / Qwen3-32B）：9.23 秒 &rarr; 0.87 秒">Lower TTFT vs full recompute (LOCOMO / Qwen3-32B): 9.23 s &rarr; 0.87 s</span></div></div>
+    <div class="metric-box"><div class="value">0.67 / 0.68</div><div class="label"><span class="i18n" data-en="SparseX vs full-recompute quality on LOCOMO (99% retained)" data-zh="SparseX 對完整重算的 LOCOMO 品質（保留 99%）">SparseX vs full-recompute quality on LOCOMO (99% retained)</span></div></div>
+    <div class="metric-box"><div class="value">0.98 / 0.97</div><div class="label"><span class="i18n" data-en="RULER avg, SparseX vs full recompute (Qwen3-32B)" data-zh="RULER 平均分，SparseX 對完整重算（Qwen3-32B）">RULER avg, SparseX vs full recompute (Qwen3-32B)</span></div></div>
+    <div class="metric-box"><div class="value">3-in-1</div><div class="label"><span class="i18n" data-en="One segment-reuse loop for chat + RAG + agents" data-zh="一套片段重用迴圈，涵蓋對話 + RAG + agent">One segment-reuse loop for chat + RAG + agents</span></div></div>
+  </div>
+</section>
+
+<!-- ================= 5. ARCHITECTURE ================= -->
+<section id="architecture">
+  <h2><span class="i18n" data-en="5. SparseX-vLLM Architecture" data-zh="5. SparseX-vLLM 架構">5. SparseX-vLLM Architecture</span></h2>
+  <p><span class="i18n"
+    data-en="Before the mechanism, it helps to see where SparseX lives inside a serving engine, because a recurring failure of prior reuse methods is that their algorithmic savings are eaten by data movement and incompatible execution paths. SparseX-vLLM threads its logic through vLLM's existing stages rather than replacing them: request preprocessing at the entrypoint, a two-way lookup in the KV Cache Manager, a unified scheduler output, a RoPE-realignment step in the Worker, and attention-metadata construction in the GPU Model Runner. The original PagedAttention path and FlashAttention/FlashInfer backends remain untouched at the interface level."
+    data-zh="在進入機制之前，先看清 SparseX 在服務引擎中的位置會有幫助，因為既有重用方法一再的失敗之處，是其演算法上的節省被資料搬移與不相容的執行路徑吃掉。SparseX-vLLM 將其邏輯穿插進 vLLM 既有的各個階段，而非取代它們：entrypoint 的請求前處理、KV Cache Manager 的雙向查找、統一的 scheduler 輸出、Worker 中的 RoPE 重對齊步驟，以及 GPU Model Runner 中的注意力 metadata 建構。原有的 PagedAttention 路徑與 FlashAttention/FlashInfer 後端，在介面層維持不變。">Before the mechanism, it helps to see where SparseX lives inside a serving engine, because a recurring failure of prior reuse methods is that their algorithmic savings are eaten by data movement and incompatible execution paths. SparseX-vLLM threads its logic through vLLM's existing stages rather than replacing them: request preprocessing at the entrypoint, a two-way lookup in the KV Cache Manager, a unified scheduler output, a RoPE-realignment step in the Worker, and attention-metadata construction in the GPU Model Runner. The original PagedAttention path and FlashAttention/FlashInfer backends remain untouched at the interface level.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/fig_4.png" alt="Figure 7: SparseX-vLLM system architecture">
+    <div class="fig-cap"><strong>Figure 7 (from paper):</strong>
+      <span class="i18n" data-en="SparseX-vLLM system architecture. SparseX modules are inserted into entrypoints, the KV Cache Manager, Scheduler, Worker, GPU Model Runner, and model attention layers, while vLLM's original PagedAttention and attention-backend execution path are preserved." data-zh="SparseX-vLLM 系統架構。SparseX 模組被插入 entrypoints、KV Cache Manager、Scheduler、Worker、GPU Model Runner 與模型注意力層，同時保留 vLLM 原有的 PagedAttention 與注意力後端執行路徑。">SparseX-vLLM system architecture. SparseX modules are inserted into entrypoints, the KV Cache Manager, Scheduler, Worker, GPU Model Runner, and model attention layers, while vLLM's original PagedAttention and attention-backend execution path are preserved.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="5.1 The request path, end to end" data-zh="5.1 端到端的請求路徑">5.1 The request path, end to end</span></h3>
+  <p><span class="i18n"
+    data-en="A single request flows through five stages. The diagram traces one prompt from arrival to attention, showing where reuse segments are looked up, realigned, and finally consumed by an unmodified attention backend."
+    data-zh="單一請求流經五個階段。下圖追蹤一個提示從抵達到注意力的過程，標示重用片段在何處被查找、重對齊，並最終被未修改的注意力後端消費。">A single request flows through five stages. The diagram traces one prompt from arrival to attention, showing where reuse segments are looked up, realigned, and finally consumed by an unmodified attention backend.</span></p>
+
+  <div class="vflow">
+    <div class="box blue"><h4>1 &middot; Entrypoint</h4><span class="i18n" data-en="Chat-template rendering, reuse-template preprocessing, and block-size padding so that reuse-segment boundaries align to the vLLM block size. The client may carry an extra key identifying the reuse namespace." data-zh="Chat-template 渲染、重用模板前處理，以及 block-size padding，使重用片段邊界對齊 vLLM 的 block 大小。客戶端可攜帶一個標識重用命名空間的 extra key。">Chat-template rendering, reuse-template preprocessing, and block-size padding so that reuse-segment boundaries align to the vLLM block size. The client may carry an extra key identifying the reuse namespace.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box red"><h4>2 &middot; KV Cache Manager (two-way lookup)</h4><span class="i18n" data-en="The non-reuse prefix portion uses native vLLM Prefix Cache; reuse segments are retrieved from the virtual-block list or frozen-block pool by a hash of segment token IDs plus the extra key. Both hit types are merged into one block table." data-zh="非重用前綴部分使用原生 vLLM Prefix Cache；重用片段則以「片段 token IDs 加 extra key」的雜湊，從虛擬 block 列表或 frozen block pool 取回。兩種命中被合併進同一張 block table。">The non-reuse prefix portion uses native vLLM Prefix Cache; reuse segments are retrieved from the virtual-block list or frozen-block pool by a hash of segment token IDs plus the extra key. Both hit types are merged into one block table.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box orange"><h4>3 &middot; Scheduler (unified output)</h4><span class="i18n" data-en="Prefix-cache hits, virtual-block hits, and newly allocated blocks are encoded into one scheduler output carrying the request layout, block table, slot mapping, and the SparseQ sparse mask for the batch." data-zh="Prefix-cache 命中、虛擬 block 命中與新配置的 block，被編碼進單一 scheduler 輸出，其中攜帶請求佈局、block table、slot mapping，以及該 batch 的 SparseQ 稀疏遮罩。">Prefix-cache hits, virtual-block hits, and newly allocated blocks are encoded into one scheduler output carrying the request layout, block table, slot mapping, and the SparseQ sparse mask for the batch.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4>4 &middot; Worker (RoPE realignment)</h4><span class="i18n" data-en="A fused copy-Delta-RoPE kernel moves reused KV from old pages into freshly allocated physical blocks, rotating Keys by the position difference and copying Values directly &mdash; the whole batch in one engine core." data-zh="一個融合的 copy-Delta-RoPE kernel 將重用的 KV 從舊分頁搬到新配置的物理 block，依位置差旋轉 Key、直接複製 Value &mdash; 整個 batch 在單一 engine core 內完成。">A fused copy-Delta-RoPE kernel moves reused KV from old pages into freshly allocated physical blocks, rotating Keys by the position difference and copying Values directly &mdash; the whole batch in one engine core.</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box gray"><h4>5 &middot; GPU Model Runner &amp; attention</h4><span class="i18n" data-en="Common Attention Metadata plus backend-specific metadata are built from the sparse mask and block table. Selected tokens run normal attention; other reused tokens read aligned KV directly &mdash; consumed by FlashAttention/FlashInfer with unchanged interface semantics." data-zh="Common Attention Metadata 與後端專屬 metadata 由稀疏遮罩與 block table 建構。被選中的 token 執行一般注意力；其他重用 token 直接讀取對齊後的 KV &mdash; 由 FlashAttention/FlashInfer 以不變的介面語意消費。">Common Attention Metadata plus backend-specific metadata are built from the sparse mask and block table. Selected tokens run normal attention; other reused tokens read aligned KV directly &mdash; consumed by FlashAttention/FlashInfer with unchanged interface semantics.</span></div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Architectural insight." data-zh="架構洞見。">Architectural insight.</span></strong>
+    <span class="i18n" data-en="SparseX deliberately avoids introducing user or session objects into the engine, which would change vLLM's abstraction boundary. Instead it extends only two primitives &mdash; the block hash (with an extra key for namespaces) and a virtual-block index &mdash; so that segment reuse rides on the same PagedAttention block pool, block table, and slot mapping as ordinary requests. This is why the sparse-recomputation algorithm actually yields throughput instead of being cancelled by data movement." data-zh="SparseX 刻意避免在引擎中引入 user 或 session 物件，那會改變 vLLM 的抽象邊界。取而代之，它只擴充兩個原語 &mdash; block 雜湊（加上用於命名空間的 extra key）與虛擬 block 索引 &mdash; 使片段重用得以與一般請求共用同一個 PagedAttention block pool、block table 與 slot mapping。這正是稀疏重算演算法真正帶來吞吐、而非被資料搬移抵銷的原因。">SparseX deliberately avoids introducing user or session objects into the engine, which would change vLLM's abstraction boundary. Instead it extends only two primitives &mdash; the block hash (with an extra key for namespaces) and a virtual-block index &mdash; so that segment reuse rides on the same PagedAttention block pool, block table, and slot mapping as ordinary requests. This is why the sparse-recomputation algorithm actually yields throughput instead of being cancelled by data movement.</span>
+  </div>
+
+  <p><span class="i18n"
+    data-en="It is equally worth noting what SparseX leaves untouched, because the compatibility argument rests on it. The PagedAttention CUDA kernels, continuous batching, the sampling path, and the FlashAttention/FlashInfer backends all run unmodified; SparseX adds a fused copy-Delta-RoPE kernel and a sparse-mask field to the attention metadata, but does not fork the attention kernels themselves. Native Prefix Cache continues to serve the non-reuse prefix of every request in parallel with segment reuse. The result is that a deployment can enable SparseX on an existing vLLM v1 0.11.0 stack without giving up the optimizations that stack already provides."
+    data-zh="同樣值得注意的是 SparseX 未觸動之處，因為相容性論證正立基於此。PagedAttention 的 CUDA kernel、continuous batching、sampling 路徑，以及 FlashAttention/FlashInfer 後端，全部原樣執行；SparseX 加入一個融合的 copy-Delta-RoPE kernel 與注意力 metadata 中的一個 sparse-mask 欄位，但並未分叉注意力 kernel 本身。原生 Prefix Cache 持續與片段重用並行地服務每個請求的非重用前綴。其結果是：一個部署可以在既有的 vLLM v1 0.11.0 堆疊上啟用 SparseX，而不必放棄該堆疊已提供的優化。">It is equally worth noting what SparseX leaves untouched, because the compatibility argument rests on it. The PagedAttention CUDA kernels, continuous batching, the sampling path, and the FlashAttention/FlashInfer backends all run unmodified; SparseX adds a fused copy-Delta-RoPE kernel and a sparse-mask field to the attention metadata, but does not fork the attention kernels themselves. Native Prefix Cache continues to serve the non-reuse prefix of every request in parallel with segment reuse. The result is that a deployment can enable SparseX on an existing vLLM v1 0.11.0 stack without giving up the optimizations that stack already provides.</span></p>
+</section>
+
+<!-- ================= 6. MECHANISM ================= -->
+<section id="mechanism">
+  <h2><span class="i18n" data-en="6. Core Mechanism" data-zh="6. 核心機制">6. Core Mechanism</span></h2>
+  <p><span class="i18n"
+    data-en="The mechanism has four moving parts that build on one another. First, cached KV is realigned to its new position so it is usable at all (6.1). Second, the non-reuse queries are used to select which reused tokens to recompute (6.2). Third, an overflow rule captures the local-neighbourhood interaction that a pure top-k selection would miss (6.3). Fourth, a full-then-sparse layer schedule makes the selection stable across prompt layouts (6.4). This subsection follows a concept-then-formula order: each idea is stated in plain terms before the equation that makes it precise."
+    data-zh="機制由四個互相銜接的部件構成。首先，快取 KV 被重對齊到新位置，使其根本可用（6.1）。其次，以非重用 query 選出要重算的重用 token（6.2）。第三，一條 overflow 規則捕捉純 top-k 選擇會漏掉的局部鄰域互動（6.3）。第四，一個先 full 後 sparse 的層排程，使選擇在不同提示佈局下穩定（6.4）。本小節採「先概念後公式」的順序：每個想法先以平實語言陳述，再給出使其精確的方程式。">The mechanism has four moving parts that build on one another. First, cached KV is realigned to its new position so it is usable at all (6.1). Second, the non-reuse queries are used to select which reused tokens to recompute (6.2). Third, an overflow rule captures the local-neighbourhood interaction that a pure top-k selection would miss (6.3). Fourth, a full-then-sparse layer schedule makes the selection stable across prompt layouts (6.4). This subsection follows a concept-then-formula order: each idea is stated in plain terms before the equation that makes it precise.</span></p>
+
+  <p><span class="i18n" data-en="Because the equations reuse a compact notation, the table below fixes each symbol once so the derivations that follow read cleanly." data-zh="由於各方程式共用一套緊湊的記號，下表先一次性固定每個符號，使其後的推導讀來清晰。">Because the equations reuse a compact notation, the table below fixes each symbol once so the derivations that follow read cleanly.</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Symbol" data-zh="符號">Symbol</span></th><th><span class="i18n" data-en="Meaning" data-zh="含義">Meaning</span></th></tr>
+    <tr><td>$T,\; d,\; \ell$</td><td><span class="i18n" data-en="Sequence length; head dimension; layer index" data-zh="序列長度；注意力頭維度；層索引">Sequence length; head dimension; layer index</span></td></tr>
+    <tr><td>$\mathcal{I}_{\text{reuse}},\; \mathcal{I}_{\text{nr}}$</td><td><span class="i18n" data-en="Position sets of reused-segment tokens and non-reuse (original) tokens; they partition the T positions" data-zh="重用片段 token 與非重用（原始）token 的位置集合；二者分割 T 個位置">Position sets of reused-segment tokens and non-reuse (original) tokens; they partition the $T$ positions</span></td></tr>
+    <tr><td>$R_m,\; \Delta = p'-p$</td><td><span class="i18n" data-en="RoPE rotation matrix at position m; displacement between a segment's new and old start positions" data-zh="位置 m 的 RoPE 旋轉矩陣；片段新舊起始位置之間的位移">RoPE rotation matrix at position $m$; displacement between a segment's new and old start positions</span></td></tr>
+    <tr><td>$Q_{\text{sq}},\; A_{\text{sq}},\; s_j$</td><td><span class="i18n" data-en="Probe queries at non-reuse positions; their attention to all keys; the summed importance of key position j" data-zh="非重用位置上的探針 query；其對所有 key 的注意力；key 位置 j 的加總重要性">Probe queries at non-reuse positions; their attention to all keys; the summed importance of key position $j$</span></td></tr>
+    <tr><td>$\mathcal{S}_{\text{key}},\; \mathcal{S}_{\text{ov}},\; \mathcal{S}_{\text{tail}},\; \mathcal{R}$</td><td><span class="i18n" data-en="Top-k selected keys; overflow boundary blocks; tail fallback; the full recompute set (their union with I_nr)" data-zh="Top-k 選中的 key；overflow 邊界 block；尾端退路；完整重算集合（其與 I_nr 的聯集）">Top-$k$ selected keys; overflow boundary blocks; tail fallback; the full recompute set (their union with $\mathcal{I}_{\text{nr}}$)</span></td></tr>
+    <tr><td>$\ell^{\star},\; e,\; h_v,\; b$</td><td><span class="i18n" data-en="Full-to-sparse boundary layer; extra key (namespace); virtual block hash; block size" data-zh="full 轉 sparse 的邊界層；extra key（命名空間）；虛擬 block 雜湊；block 大小">Full-to-sparse boundary layer; extra key (namespace); virtual block hash; block size</span></td></tr>
+  </table>
+
+  <h3><span class="i18n" data-en="6.1 RoPE alignment of a segment cache" data-zh="6.1 片段快取的 RoPE 對齊">6.1 RoPE alignment of a segment cache</span></h3>
+  <p><span class="i18n"
+    data-en="A Segment-Level Cache stores the multi-layer Key/Value states of a contiguous token subsequence so they can be reused at an arbitrary position later. The one obstacle to dropping a cached segment into a new sequence is positional: in models with rotary position embeddings (RoPE), each Key already carries its absolute position baked in, so a segment cached at positions starting at p is wrong if the new sequence places it starting at p'. Moving it verbatim introduces an attention phase shift. The saving grace is a property of RoPE: the attention score between a query at position m and a key at position n depends only on their relative displacement."
+    data-zh="Segment-Level Cache 儲存一段連續 token 子序列的多層 Key/Value 狀態，以便日後在任意位置重用。將快取片段放入新序列的唯一障礙是位置性的：在採用旋轉位置編碼（RoPE）的模型中，每個 Key 都已把其絕對位置嵌入其中，因此在起始位置 p 快取的片段，若新序列將其置於起始位置 p'，便是錯的。原封搬移會引入注意力相位偏移。救贖來自 RoPE 的一個性質：位置 m 的 query 與位置 n 的 key 之間的注意力分數，只取決於它們的相對位移。">A Segment-Level Cache stores the multi-layer Key/Value states of a contiguous token subsequence so they can be reused at an arbitrary position later. The one obstacle to dropping a cached segment into a new sequence is positional: in models with rotary position embeddings (RoPE), each Key already carries its absolute position baked in, so a segment cached at positions starting at $p$ is wrong if the new sequence places it starting at $p'$. Moving it verbatim introduces an attention phase shift. The saving grace is a property of RoPE: the attention score between a query at position $m$ and a key at position $n$ depends only on their relative displacement.</span></p>
+
+  <p><span class="i18n"
+    data-en="Concretely, if q and k are the base (pre-RoPE) vectors, the query and key actually used at positions m and n are the base vectors rotated by their absolute-position matrices; the inner product of two rotated vectors then collapses to a single rotation by their difference:"
+    data-zh="具體而言，若 q 與 k 是基（未經 RoPE 的）向量，位置 m 與 n 上實際使用的 query 與 key，是被其絕對位置矩陣旋轉後的基向量；兩個旋轉後向量的內積，隨即坍縮為一次以其差值的旋轉：">Concretely, if $q$ and $k$ are the base (pre-RoPE) vectors, the query and key actually used at positions $m$ and $n$ are the base vectors rotated by their absolute-position matrices; the inner product of two rotated vectors then collapses to a single rotation by their difference:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">RoPE</span>
+    $$\hat{q}_m^{\ell} = R_m\, q^{\ell}, \quad \hat{k}_n^{\ell} = R_n\, k^{\ell} \;\;\Longrightarrow\;\; \langle \hat{q}_m^{\ell}, \hat{k}_n^{\ell} \rangle = (q^{\ell})^{\top} R_{\,n-m}\, k^{\ell}$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="Because only the relative displacement matters, a cached Key can be migrated from old position n to new position n' by applying a single incremental rotation, directly in the cache domain, without ever recovering the unrotated base vector. Values carry no positional phase and are copied unchanged."
+    data-zh="因為只有相對位移重要，快取的 Key 可透過施加單一的增量旋轉，從舊位置 n 遷移到新位置 n'，直接在快取域中完成，而無需還原未旋轉的基向量。Value 不帶位置相位，原樣複製。">Because only the relative displacement matters, a cached Key can be migrated from old position $n$ to new position $n'$ by applying a single incremental rotation, directly in the cache domain, without ever recovering the unrotated base vector. Values carry no positional phase and are copied unchanged.</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">key migration</span>
+    $$\hat{k}_{n'}^{\ell} = R_{\,n'-n}\, \hat{k}_{n}^{\ell}$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="For a whole segment S every token shares the same displacement, so the alignment is one batched rotation. Writing the displacement as the offset between the segment's new and old start positions, segment alignment is:"
+    data-zh="對整個片段 S 而言，每個 token 共享相同的位移，因此對齊是一次批次化的旋轉。將位移寫為片段新舊起始位置之差，片段對齊為：">For a whole segment $S$ every token shares the same displacement, so the alignment is one batched rotation. Writing the displacement as the offset between the segment's new and old start positions, segment alignment is:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">segment align</span>
+    $$K_{\text{new}}^{\ell}(S) = \mathrm{Align}_{\Delta}\!\big(K_{\text{old}}^{\ell}(S)\big), \qquad V_{\text{new}}^{\ell}(S) = V_{\text{old}}^{\ell}(S), \qquad \Delta = p' - p$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="The cost is one read, rotation, and write of the cached Keys, i.e. O(|S| &middot; d_k). SparseX-vLLM fuses page movement, the Delta-RoPE Key rotation, and the Value copy into a single GPU kernel that aligns all requests in a scheduling batch inside one engine core, so realignment does not become the new bottleneck under high concurrency."
+    data-zh="其成本為對快取 Key 的一次讀取、旋轉與寫入，即 O(|S| &middot; d_k)。SparseX-vLLM 將分頁搬移、Delta-RoPE Key 旋轉與 Value 複製融合為單一 GPU kernel，於單一 engine core 內對齊一個排程 batch 中的所有請求，使重對齊在高並發下不致成為新的瓶頸。">The cost is one read, rotation, and write of the cached Keys, i.e. $O(|S| \cdot d_k)$. SparseX-vLLM fuses page movement, the Delta-RoPE Key rotation, and the Value copy into a single GPU kernel that aligns all requests in a scheduling batch inside one engine core, so realignment does not become the new bottleneck under high concurrency.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="What alignment does and does not fix." data-zh="對齊修正了什麼、又沒修正什麼。">What alignment does and does not fix.</span></strong>
+    <span class="i18n" data-en="RoPE alignment corrects the position of a reused segment, but it does not correct the prefix coupling of Section 2. The cached KV was produced under the old prefix; after alignment it is at the right position but still carries the wrong context. Restoring the missing cross-segment interaction is the job of the next three subsections." data-zh="RoPE 對齊修正了重用片段的位置，但並未修正第 2 節的前綴耦合。快取的 KV 是在舊前綴下產生的；對齊後它位於正確的位置，卻仍攜帶錯誤的上下文。還原缺失的跨片段互動，是接下來三個小節的工作。">RoPE alignment corrects the position of a reused segment, but it does not correct the prefix coupling of Section 2. The cached KV was produced under the old prefix; after alignment it is at the right position but still carries the wrong context. Restoring the missing cross-segment interaction is the job of the next three subsections.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.2 SparseQ: selecting tokens with the receiver's own queries" data-zh="6.2 SparseQ：以接收端自身的 query 選擇 token">6.2 SparseQ: selecting tokens with the receiver's own queries</span></h3>
+  <p><span class="i18n"
+    data-en="The key observation is that interleaved reuse already contains the probe it needs. A reused segment's KV is cached, so the current request does not need to generate its queries or run its attention. But every non-reuse (original) segment &mdash; a new user turn, a RAG instruction, an agent's routing text &mdash; must compute its queries and attend to all available keys to update its hidden state. The queries that must run attention therefore live only on the non-reuse positions. This is the SparseQ structure, and it arises for free during the forward pass."
+    data-zh="關鍵觀察是：交錯重用本身已包含它所需的探針。重用片段的 KV 已被快取，因此當前請求不需要產生其 query、也不需執行其注意力。但每個非重用（原始）片段 &mdash; 新的使用者輪次、一段 RAG 指令、一個 agent 的路由文字 &mdash; 都必須計算其 query，並對所有可得的 key 施以注意力以更新其隱藏狀態。因此，必須執行注意力的 query 只存在於非重用位置上。這就是 SparseQ 結構，且它在前向傳遞中免費出現。">The key observation is that interleaved reuse already contains the probe it needs. A reused segment's KV is cached, so the current request does not need to generate its queries or run its attention. But every non-reuse (original) segment &mdash; a new user turn, a RAG instruction, an agent's routing text &mdash; must compute its queries and attend to all available keys to update its hidden state. The queries that must run attention therefore live only on the non-reuse positions. This is the SparseQ structure, and it arises for free during the forward pass.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/fig_3_2_1.png" alt="Figure 3: The SparseQ structure that naturally forms in segment-level KV reuse">
+    <div class="fig-cap"><strong>Figure 3 (from paper):</strong>
+      <span class="i18n" data-en="The SparseQ structure naturally formed in segment-level KV reuse. Non-reuse segments must generate Query vectors and execute attention, while the KV tensors of reuse segments can be read from the cache." data-zh="片段級 KV 重用中自然形成的 SparseQ 結構。非重用片段必須產生 Query 向量並執行注意力，而重用片段的 KV 張量可直接自快取讀取。">The SparseQ structure naturally formed in segment-level KV reuse. Non-reuse segments must generate Query vectors and execute attention, while the KV tensors of reuse segments can be read from the cache.</span>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="Let the input of length T contain positions partitioned into two index sets: the reused-segment positions and the non-reuse positions. SparseX uses only the second set as its query probe, mirroring MInference's idea of estimating a sparse pattern from a small set of probing queries &mdash; but replacing MInference's fixed last-Q tail with the non-reuse indices that reuse naturally provides. Concretely, the probe queries are the rows of Q at the non-reuse positions:"
+    data-zh="設長度為 T 的輸入，其位置被分割為兩個索引集：重用片段位置與非重用位置。SparseX 僅以第二個集合作為其 query 探針，呼應 MInference「以一小組探測 query 估計稀疏模式」的想法 &mdash; 但把 MInference 固定的 last-Q 尾端，換成重用自然提供的非重用索引。具體而言，探針 query 是 Q 在非重用位置上的列：">Let the input of length $T$ contain positions partitioned into two index sets: the reused-segment positions $\mathcal{I}_{\text{reuse}}$ and the non-reuse positions $\mathcal{I}_{\text{nr}}$. SparseX uses only the second set as its query probe, mirroring MInference's idea of estimating a sparse pattern from a small set of probing queries &mdash; but replacing MInference's fixed last-Q tail with the non-reuse indices that reuse naturally provides. Concretely, the probe queries are the rows of $Q$ at the non-reuse positions:</span></p>
+
+  <div class="math-block">
+    $$Q_{\text{sq}} = Q[\mathcal{I}_{\text{nr}}] \in \mathbb{R}^{\,|\mathcal{I}_{\text{nr}}|\times d}$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="These probe queries attend to all keys of the current sequence (with the causal mask restricted to the probe rows), giving an attention matrix from non-reuse queries to every position:"
+    data-zh="這些探針 query 對當前序列的所有 key 施以注意力（因果遮罩限制在探針列上），得到一個從非重用 query 到每個位置的注意力矩陣：">These probe queries attend to all keys of the current sequence (with the causal mask restricted to the probe rows), giving an attention matrix from non-reuse queries to every position:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$A_{\text{sq}} = \mathrm{softmax}\!\left(\frac{Q_{\text{sq}}K^{\top}}{\sqrt{d}} + M_{\text{causal}}[\mathcal{I}_{\text{nr}}, :]\right)$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="Summing each key position's incoming attention over all probe queries gives a per-token importance score, and the top-k positions are chosen as the tokens to recompute:"
+    data-zh="將每個 key 位置從所有探針 query 收到的注意力加總，得到逐 token 的重要性分數，選出 top-k 位置作為要重算的 token：">Summing each key position's incoming attention over all probe queries gives a per-token importance score, and the top-$k$ positions are chosen as the tokens to recompute:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">(2)&ndash;(3)</span>
+    $$s_j = \sum_{i=1}^{|\mathcal{I}_{\text{nr}}|} A_{\text{sq}}[i, j], \qquad \mathcal{S}_{\text{key}} = \mathrm{TopK}\big(\{s_j\}_{j=1}^{T},\, k\big)$$
+  </div>
+
+  <p><span class="i18n"
+    data-en="The cost of the probe is O(|I_nr| &middot; T &middot; d) for the attention and O(T log k) for the selection. When the reuse ratio is high the number of non-reuse positions is far smaller than T, so this is much cheaper than the O(T^2 d) of full attention &mdash; and, crucially, the probe queries are ones the request must compute anyway, so SparseX adds neither an auxiliary model nor a separate dense probing stage. Selection uses a single score aggregated across all attention heads, giving one global token-importance estimate per request rather than a per-head pattern."
+    data-zh="探針的成本，注意力為 O(|I_nr| &middot; T &middot; d)、選擇為 O(T log k)。當重用比例高時，非重用位置的數量遠小於 T，因此這遠比完整注意力的 O(T^2 d) 便宜 &mdash; 且關鍵在於，探針 query 是請求無論如何都得計算的，因此 SparseX 既不增加輔助模型，也不增加獨立的密集探測階段。選擇使用跨所有注意力頭加總的單一分數，為每個請求給出一個全域 token 重要性估計，而非逐頭的模式。">The cost of the probe is $O(|\mathcal{I}_{\text{nr}}| \cdot T \cdot d)$ for the attention and $O(T \log k)$ for the selection. When the reuse ratio is high the number of non-reuse positions is far smaller than $T$, so this is much cheaper than the $O(T^2 d)$ of full attention &mdash; and, crucially, the probe queries are ones the request must compute anyway, so SparseX adds neither an auxiliary model nor a separate dense probing stage. Selection uses a single score aggregated across all attention heads, giving one global token-importance estimate per request rather than a per-head pattern.</span></p>
+
+  <p><span class="i18n" data-en="The complexity table makes the saving concrete. Full recomputation pays quadratic attention over the whole sequence; SparseX pays a small probe plus a sparse recompute over the selected set, and a linear alignment per reused segment. The saving grows with the reuse ratio, i.e. as the non-reuse fraction shrinks." data-zh="複雜度表使節省變得具體。完整重算對整個序列付出二次方注意力；SparseX 付出的是一個小型探針、加上對被選集合的稀疏重算，以及每個重用片段的線性對齊。節省隨重用比例增大 &mdash; 即隨非重用比例縮小 &mdash; 而增加。">The complexity table makes the saving concrete. Full recomputation pays quadratic attention over the whole sequence; SparseX pays a small probe plus a sparse recompute over the selected set, and a linear alignment per reused segment. The saving grows with the reuse ratio, i.e. as the non-reuse fraction shrinks.</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Step" data-zh="步驟">Step</span></th><th><span class="i18n" data-en="Cost" data-zh="成本">Cost</span></th><th><span class="i18n" data-en="Comment" data-zh="說明">Comment</span></th></tr>
+    <tr><td><span class="i18n" data-en="Full prefill (baseline)" data-zh="完整 prefill（基線）">Full prefill (baseline)</span></td><td>$O(T^2 d)$</td><td><span class="i18n" data-en="Quadratic attention over all T tokens, every layer" data-zh="每一層對全部 T 個 token 的二次方注意力">Quadratic attention over all $T$ tokens, every layer</span></td></tr>
+    <tr><td><span class="i18n" data-en="RoPE alignment per segment" data-zh="每片段 RoPE 對齊">RoPE alignment per segment</span></td><td>$O(|S|\, d_k)$</td><td><span class="i18n" data-en="One read, rotate, write of cached Keys; fused kernel, batch-wide" data-zh="對快取 Key 的一次讀取、旋轉、寫入；融合 kernel、跨 batch">One read, rotate, write of cached Keys; fused kernel, batch-wide</span></td></tr>
+    <tr><td><span class="i18n" data-en="SparseQ probe (Eq 1)" data-zh="SparseQ 探針（式 1）">SparseQ probe (Eq 1)</span></td><td>$O(|\mathcal{I}_{\text{nr}}|\, T\, d)$</td><td><span class="i18n" data-en="Cheap when |I_nr| &lt;&lt; T; queries already computed" data-zh="當 |I_nr| &lt;&lt; T 時很便宜；query 已被計算">Cheap when $|\mathcal{I}_{\text{nr}}| \ll T$; queries already computed</span></td></tr>
+    <tr><td><span class="i18n" data-en="Top-k selection (Eq 3)" data-zh="Top-k 選擇（式 3）">Top-$k$ selection (Eq 3)</span></td><td>$O(T \log k)$</td><td><span class="i18n" data-en="One selection, once, at the boundary layer" data-zh="一次選擇，於邊界層執行一次">One selection, once, at the boundary layer</span></td></tr>
+    <tr><td><span class="i18n" data-en="Later-layer recompute" data-zh="後期層重算">Later-layer recompute</span></td><td>$O(|\mathcal{R}|\, T\, d)$</td><td><span class="i18n" data-en="Only the recompute set R attends; the rest read aligned cache" data-zh="僅重算集合 R 施以注意力；其餘讀取對齊快取">Only the recompute set $\mathcal{R}$ attends; the rest read aligned cache</span></td></tr>
+  </table>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/fig_3_2_2.png" alt="Figure 4: Key-token estimation based on SparseQ vs MInference last-Q probing">
+    <div class="fig-cap"><strong>Figure 4 (from paper):</strong>
+      <span class="i18n" data-en="Key-token estimation based on SparseQ. SparseX replaces MInference's last-Q probing with SparseQ probing that naturally appears in KV reuse workloads: non-reuse queries are distributed across multiple prompt positions and estimate the reused Key tokens that require recomputation." data-zh="基於 SparseQ 的關鍵 token 估計。SparseX 以在 KV 重用工作負載中自然出現的 SparseQ 探測，取代 MInference 的 last-Q 探測：非重用 query 分散在多個提示位置，估計需要重算的重用 Key token。">Key-token estimation based on SparseQ. SparseX replaces MInference's last-Q probing with SparseQ probing that naturally appears in KV reuse workloads: non-reuse queries are distributed across multiple prompt positions and estimate the reused Key tokens that require recomputation.</span>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="Why the non-reuse queries are the right probe is the heart of the method. These tokens are the newly inserted instructions, questions, and routing text; they specify how the reused content should be interpreted and what the current request is trying to do. Their attention therefore points, more directly than any fixed heuristic, at the reused tokens that affect this request's output. As a fallback, when the prompt tail is entirely reused and contains no non-reuse queries, SparseX adds the last 64 queries of the final reuse segment to the recompute set, recovering behaviour close to MInference's original last-Q probing."
+    data-zh="非重用 query 為何是正確的探針，是本方法的核心。這些 token 是新插入的指令、問題與路由文字；它們規定了重用內容應如何被解讀、以及當前請求試圖做什麼。因此，它們的注意力比任何固定啟發式都更直接地指向會影響本請求輸出的重用 token。作為退路，當提示尾端完全是重用內容、且不含非重用 query 時，SparseX 將最後一個重用片段的最末 64 個 query 加入重算集合，恢復接近 MInference 原始 last-Q 探測的行為。">Why the non-reuse queries are the right probe is the heart of the method. These tokens are the newly inserted instructions, questions, and routing text; they specify how the reused content should be interpreted and what the current request is trying to do. Their attention therefore points, more directly than any fixed heuristic, at the reused tokens that affect this request's output. As a fallback, when the prompt tail is entirely reused and contains no non-reuse queries, SparseX adds the last 64 queries of the final reuse segment to the recompute set, recovering behaviour close to MInference's original last-Q probing.</span></p>
+
+  <h3><span class="i18n" data-en="6.3 Overflow: recovering local-neighbourhood interaction" data-zh="6.3 Overflow：恢復局部鄰域互動">6.3 Overflow: recovering local-neighbourhood interaction</span></h3>
+  <p><span class="i18n"
+    data-en="Top-k selection reproduces the vertical sparse pattern &mdash; a small set of globally important key tokens &mdash; but it does not reproduce the slash pattern, which captures local relative-position attention. Building a slash pattern the usual way would require the Key projection of every token, which contradicts the whole point of not projecting reused segments. SparseX resolves this with a cheap overflow approximation: for each non-reuse (SparseQ) interval, it expands outward by one block at both ends, pulling the last block of the previous reuse segment and the first block of the next reuse segment into the recomputation range."
+    data-zh="Top-k 選擇重現了 vertical 稀疏模式 &mdash; 一小組全域重要的 key token &mdash; 但它並未重現 slash 模式，後者捕捉局部相對位置的注意力。以慣常方式建構 slash 模式，需要每個 token 的 Key 投影，這與「不投影重用片段」的整個要點相牴觸。SparseX 以廉價的 overflow 近似解決此問題：對每個非重用（SparseQ）區間，向兩端各外擴一個 block，把前一個重用片段的最末 block 與下一個重用片段的最前 block 拉進重算範圍。">Top-$k$ selection reproduces the vertical sparse pattern &mdash; a small set of globally important key tokens &mdash; but it does not reproduce the slash pattern, which captures local relative-position attention. Building a slash pattern the usual way would require the Key projection of every token, which contradicts the whole point of not projecting reused segments. SparseX resolves this with a cheap overflow approximation: for each non-reuse (SparseQ) interval, it expands outward by one block at both ends, pulling the last block of the previous reuse segment and the first block of the next reuse segment into the recomputation range.</span></p>
+  <p><span class="i18n"
+    data-en="The intuition is a division of labour: the vertical pattern supplies global key tokens, while the overflow blocks supply the local boundary interaction that is most often missing exactly at the seams between a non-reuse segment and its reused neighbours. The full recomputation set is therefore the union of the non-reuse positions, the top-k selected keys, the overflow blocks, and the tail fallback:"
+    data-zh="其直覺是一種分工：vertical 模式提供全域 key token，而 overflow block 提供局部邊界互動 &mdash; 這種互動最常恰恰在非重用片段與其重用鄰居的接縫處缺失。因此，完整的重算集合是「非重用位置、top-k 選中的 key、overflow block，以及尾端退路」的聯集：">The intuition is a division of labour: the vertical pattern supplies global key tokens, while the overflow blocks supply the local boundary interaction that is most often missing exactly at the seams between a non-reuse segment and its reused neighbours. The full recomputation set is therefore the union of the non-reuse positions, the top-$k$ selected keys, the overflow blocks, and the tail fallback:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">recompute set</span>
+    $$\mathcal{R} = \mathcal{I}_{\text{nr}} \,\cup\, \mathcal{S}_{\text{key}} \,\cup\, \mathcal{S}_{\text{ov}} \,\cup\, \mathcal{S}_{\text{tail}}$$
+  </div>
+
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Every token in R runs full attention in the current context; every reused token outside R keeps its RoPE-aligned cached KV. The strip below shows one interval: the non-reuse segment (recomputed), its two overflow blocks (recomputed), and a globally selected key token elsewhere." data-zh="R 中的每個 token 在當前上下文執行完整注意力；R 之外的每個重用 token 保留其 RoPE 對齊後的快取 KV。下方條帶展示一個區間：非重用片段（重算）、其兩個 overflow block（重算），以及位於他處、被全域選中的一個 key token。">Every token in $\mathcal{R}$ runs full attention in the current context; every reused token outside $\mathcal{R}$ keeps its RoPE-aligned cached KV. The strip below shows one interval: the non-reuse segment (recomputed), its two overflow blocks (recomputed), and a globally selected key token elsewhere.</span></p>
+
+  <div class="segstrip">
+    <span class="seg reuse">Reuse (aligned)</span>
+    <span class="seg pick">&#8592; overflow</span>
+    <span class="seg orig">Non-reuse (recompute)</span>
+    <span class="seg pick">overflow &#8594;</span>
+    <span class="seg reuse">Reuse (aligned)</span>
+    <span class="seg pick">top-k key</span>
+    <span class="seg reuse">Reuse (aligned)</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.4 Full+Sparse hybrid attention on a layer threshold" data-zh="6.4 基於層閾值的 Full+Sparse 混合注意力">6.4 Full+Sparse hybrid attention on a layer threshold</span></h3>
+  <p><span class="i18n"
+    data-en="The final piece addresses when to make the selection, not just how. Methods such as CacheBlend select recompute tokens from first-layer or fixed early-layer signals, assuming early layers already reveal reliable, layout-insensitive token importance. SparseX tests this assumption directly with a layer-wise needle-in-a-haystack analysis, comparing two selection signals across two prompt layouts &mdash; the important cue placed before, versus after, the needle."
+    data-zh="最後一塊處理的是「何時」做選擇，而不只是「如何」。像 CacheBlend 這類方法，從第一層或固定的早期層訊號選擇重算 token，假設早期層已能揭示可靠且對佈局不敏感的 token 重要性。SparseX 以逐層的 needle-in-a-haystack 分析直接檢驗此假設，跨兩種提示佈局比較兩種選擇訊號 &mdash; 重要線索置於針之前，對比置於針之後。">The final piece addresses when to make the selection, not just how. Methods such as CacheBlend select recompute tokens from first-layer or fixed early-layer signals, assuming early layers already reveal reliable, layout-insensitive token importance. SparseX tests this assumption directly with a layer-wise needle-in-a-haystack analysis, comparing two selection signals across two prompt layouts &mdash; the important cue placed before, versus after, the needle.</span></p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/fig_3_4_1.png" alt="Figure 5: Top-token distribution based on KV deviation in the NIAH task">
+      <div class="fig-cap"><strong>Figure 5 (from paper):</strong>
+        <span class="i18n" data-en="Top-token distribution based on KV deviation (Qwen3-30B-A3B, NIAH). The layer at which the needle stabilizes depends strongly on whether the query cue precedes (left) or follows (right) the needle &mdash; an early-layer, fixed-layer selection is layout-sensitive." data-zh="基於 KV 偏差的 top-token 分佈（Qwen3-30B-A3B, NIAH）。針穩定下來的層數，強烈取決於 query 線索位於針之前（左）或之後（右） &mdash; 早期層、固定層的選擇對佈局敏感。">Top-token distribution based on KV deviation (Qwen3-30B-A3B, NIAH). The layer at which the needle stabilizes depends strongly on whether the query cue precedes (left) or follows (right) the needle &mdash; an early-layer, fixed-layer selection is layout-sensitive.</span>
+      </div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/fig_3_4_2.png" alt="Figure 6: Top-token distribution based on last-query attention scores in the NIAH task">
+      <div class="fig-cap"><strong>Figure 6 (from paper):</strong>
+        <span class="i18n" data-en="Top-token distribution based on last-query attention scores (same task). This signal forms a stable needle-localization signal within a similar layer range under both prompt layouts &mdash; motivating SparseQ, which generalizes last-Q probing to segment-level reuse." data-zh="基於 last-query 注意力分數的 top-token 分佈（同一任務）。此訊號在兩種提示佈局下，都在相近的層範圍內形成穩定的針定位訊號 &mdash; 這正是 SparseQ 的動機，它將 last-Q 探測推廣到片段級重用。">Top-token distribution based on last-query attention scores (same task). This signal forms a stable needle-localization signal within a similar layer range under both prompt layouts &mdash; motivating SparseQ, which generalizes last-Q probing to segment-level reuse.</span>
+      </div>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The two figures deliver the paper's key diagnostic. KV-deviation selection (Figure 5), the signal CacheBlend-style and embedding-similarity methods rely on, identifies the needle only after a number of layers that shifts with prompt layout: when the cue precedes the needle it stabilizes early, but when the cue follows the reused segment the model needs many more layers to form a stable signal. Last-query attention scoring (Figure 6) is far more layout-stable, concentrating on the needle within a similar layer range either way. SparseQ is precisely the generalization of this stable signal to segment-level reuse: instead of one tail query, it uses non-reuse queries distributed across the prompt."
+    data-zh="這兩張圖給出論文的關鍵診斷。KV 偏差選擇（圖 5）&mdash; CacheBlend 式與嵌入相似度方法所倚賴的訊號 &mdash; 只在隨提示佈局而移動的若干層之後才辨識出針：當線索位於針之前時它早早穩定，但當線索位於重用片段之後時，模型需要多得多的層才能形成穩定訊號。Last-query 注意力評分（圖 6）則對佈局穩定得多，兩種情況都在相近的層範圍內集中於針。SparseQ 正是將此穩定訊號推廣到片段級重用：它不用單一尾端 query，而用分散在提示各處的非重用 query。">The two figures deliver the paper's key diagnostic. KV-deviation selection (Figure 5), the signal CacheBlend-style and embedding-similarity methods rely on, identifies the needle only after a number of layers that shifts with prompt layout: when the cue precedes the needle it stabilizes early, but when the cue follows the reused segment the model needs many more layers to form a stable signal. Last-query attention scoring (Figure 6) is far more layout-stable, concentrating on the needle within a similar layer range either way. SparseQ is precisely the generalization of this stable signal to segment-level reuse: instead of one tail query, it uses non-reuse queries distributed across the prompt.</span></p>
+
+  <p><span class="i18n"
+    data-en="From this, SparseX schedules the selection by layer. Before a boundary layer the model runs full attention on all positions; at the boundary it performs one SparseQ selection using the KV that the full-attention layers have produced; after the boundary, later layers recompute only the selected tokens and read cached KV for the rest. The boundary is model-specific: roughly the first 15&ndash;20% of layers for small dense models such as Qwen3-8B, and closer to the first 10&ndash;15% for larger or MoE models. Conceptually, this places the selection in the second of three stages &mdash; early layers read structure, early-middle layers begin to localize the needle, and late layers refine semantics &mdash; so the choice is made once the key region has an observable contour but before full-attention cost is paid at every layer."
+    data-zh="據此，SparseX 依層排程選擇。在邊界層之前，模型對所有位置執行完整注意力；在邊界層，它以完整注意力各層所產生的 KV 執行一次 SparseQ 選擇；在邊界層之後，後續各層只重算被選中的 token，其餘讀取快取 KV。邊界因模型而異：對 Qwen3-8B 等小型稠密模型約為前 15&ndash;20% 的層，對較大或 MoE 模型則接近前 10&ndash;15%。就概念而言，這把選擇置於三個階段的第二階段 &mdash; 早期層讀取結構、早中期層開始定位針、後期層精修語意 &mdash; 因此選擇是在關鍵區域已有可觀察的輪廓之後、但在每一層都付出完整注意力成本之前做出的。">From this, SparseX schedules the selection by layer. Before a boundary layer the model runs full attention on all positions; at the boundary it performs one SparseQ selection using the KV that the full-attention layers have produced; after the boundary, later layers recompute only the selected tokens and read cached KV for the rest. The boundary is model-specific: roughly the first 15&ndash;20% of layers for small dense models such as Qwen3-8B, and closer to the first 10&ndash;15% for larger or MoE models. Conceptually, this places the selection in the second of three stages &mdash; early layers read structure, early-middle layers begin to localize the needle, and late layers refine semantics &mdash; so the choice is made once the key region has an observable contour but before full-attention cost is paid at every layer.</span></p>
+
+  <div class="flow">
+    <div class="step"><div class="c">0</div><div class="lbl"><span class="i18n" data-en="Early layers" data-zh="早期層">Early layers</span></div><div class="desc"><span class="i18n" data-en="Full attention on all positions; read structure and begin localizing" data-zh="對所有位置完整注意力；讀取結構並開始定位">Full attention on all positions; read structure and begin localizing</span></div></div>
+    <div class="step"><div class="c">&#8902;</div><div class="lbl"><span class="i18n" data-en="Boundary layer" data-zh="邊界層">Boundary layer</span></div><div class="desc"><span class="i18n" data-en="One SparseQ selection: pick the top-k reused key tokens" data-zh="一次 SparseQ 選擇：挑出 top-k 重用 key token">One SparseQ selection: pick the top-k reused key tokens</span></div></div>
+    <div class="step"><div class="c">&#8811;</div><div class="lbl"><span class="i18n" data-en="Later layers" data-zh="後期層">Later layers</span></div><div class="desc"><span class="i18n" data-en="Sparse-KV recompute only R; read aligned cache for the rest" data-zh="僅對 R 稀疏重算；其餘讀取對齊後的快取">Sparse-KV recompute only R; read aligned cache for the rest</span></div></div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Configurable cost." data-zh="可配置成本。">Configurable cost.</span></strong>
+    <span class="i18n" data-en="Hybrid attention adds computation, so SparseX-vLLM exposes the boundary as a knob. Simple tasks can push it toward layer 0 (sparse from the start); difficult long-context retrieval and complex reasoning benefit most from a later boundary, especially on fine-grained RULER subtasks where a first-layer-only selection is not stable enough." data-zh="混合注意力增加了計算，因此 SparseX-vLLM 將邊界作為一個旋鈕開放。簡單任務可將其推向第 0 層（一開始即稀疏）；困難的長上下文檢索與複雜推理，從較晚的邊界獲益最多，尤其在細粒度的 RULER 子任務上 &mdash; 那裡僅靠第一層的選擇不夠穩定。">Hybrid attention adds computation, so SparseX-vLLM exposes the boundary as a knob. Simple tasks can push it toward layer 0 (sparse from the start); difficult long-context retrieval and complex reasoning benefit most from a later boundary, especially on fine-grained RULER subtasks where a first-layer-only selection is not stable enough.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.5 The prefill algorithm, end to end" data-zh="6.5 端到端的 prefill 演算法">6.5 The prefill algorithm, end to end</span></h3>
+  <p><span class="i18n"
+    data-en="Assembling the four parts gives the end-to-end SparseX prefill (Appendix A of the paper). The pseudocode below traces one request from segment parsing through the layer-boundary selection to the final mixed full/sparse pass; note that the expensive top-k selection runs exactly once, at the boundary layer, and every later layer reuses that single decision."
+    data-zh="把四個部件組裝起來，便得到端到端的 SparseX prefill（論文附錄 A）。下方虛擬碼追蹤單一請求，從片段解析、經過層邊界選擇、到最終的混合 full/sparse 傳遞；注意昂貴的 top-k 選擇恰好在邊界層執行一次，其後每一層都重用這一個決策。">Assembling the four parts gives the end-to-end SparseX prefill (Appendix A of the paper). The pseudocode below traces one request from segment parsing through the layer-boundary selection to the final mixed full/sparse pass; note that the expensive top-$k$ selection runs exactly once, at the boundary layer, and every later layer reuses that single decision.</span></p>
+
+  <pre><code><span class="cm"># End-to-end SparseX segment-level prefill for one request</span>
+<span class="kw">def</span> <span class="fn">sparsex_prefill</span>(prompt, extra_key, boundary_layer):
+    <span class="cm"># 1. Split into interleaved reuse / non-reuse segments; pad to block size</span>
+    segments = <span class="fn">parse_and_pad</span>(prompt)              <span class="cm"># [Orig1, Reuse1, Orig2, ...]</span>
+    I_nr     = <span class="fn">non_reuse_positions</span>(segments)     <span class="cm"># the SparseQ probe indices</span>
+
+    <span class="cm"># 2. Materialize reused KV: retrieve, allocate, RoPE-align (Section 6.1)</span>
+    <span class="kw">for</span> S <span class="kw">in</span> reuse_segments(segments):
+        h_v   = <span class="fn">hash</span>(S.token_ids, extra_key)       <span class="cm"># namespaced virtual hash</span>
+        K_old, V_old = <span class="fn">lookup</span>(h_v)                 <span class="cm"># virtual block / frozen pool</span>
+        blk   = <span class="fn">alloc_physical_block</span>()
+        blk.K = <span class="fn">delta_rope</span>(K_old, delta=S.new_pos - S.old_pos)  <span class="cm"># fused kernel</span>
+        blk.V = V_old                                <span class="cm"># values need no rotation</span>
+
+    <span class="cm"># 3. Non-reuse prefix uses native vLLM Prefix Cache; misses prefill fresh</span>
+    <span class="fn">prefix_cache_fill</span>(non_reuse_prefix(segments))
+
+    <span class="cm"># 4. Early layers: full causal attention over ALL positions</span>
+    <span class="kw">for</span> layer <span class="kw">in</span> range(<span class="nu">0</span>, boundary_layer):
+        H = <span class="fn">full_attention</span>(H, layer)
+
+    <span class="cm"># 5. Boundary layer: one SparseQ selection (Eqs 1-3, Section 6.2-6.3)</span>
+    Q_sq  = Q[I_nr]
+    A_sq  = <span class="fn">softmax</span>(Q_sq @ K.T / sqrt(d) + M_causal[I_nr, :])
+    s     = A_sq.<span class="fn">sum</span>(axis=<span class="nu">0</span>)                     <span class="cm"># per-token importance</span>
+    S_key = <span class="fn">topk</span>(s, k)
+    R     = I_nr | S_key | <span class="fn">overflow</span>(I_nr) | tail_fallback   <span class="cm"># recompute set</span>
+
+    <span class="cm"># 6. Later layers: recompute only R, read aligned cache for the rest</span>
+    <span class="kw">for</span> layer <span class="kw">in</span> range(boundary_layer, L):
+        H[R]      = <span class="fn">attention</span>(Q[R], K, V, layer)   <span class="cm"># sparse-KV recomputation</span>
+        H[~R]     = <span class="fn">read_aligned_cache</span>(layer)     <span class="cm"># reused KV, untouched</span>
+
+    <span class="kw">return</span> <span class="fn">emit_first_token</span>(H)</code></pre>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Condensed and renamed for readability; the paper's Table 4 gives the exact operator sequence. The essential asymmetry is on the last two lines: only the recompute set R runs attention in the later layers, while every other reused token is served straight from its RoPE-aligned cache." data-zh="為可讀性而濃縮並重新命名；論文表 4 給出精確的算子序列。關鍵的不對稱在最後兩行：後期各層只有重算集合 R 執行注意力，其餘每個重用 token 皆直接由其 RoPE 對齊後的快取供應。">Condensed and renamed for readability; the paper's Table 4 gives the exact operator sequence. The essential asymmetry is on the last two lines: only the recompute set $\mathcal{R}$ runs attention in the later layers, while every other reused token is served straight from its RoPE-aligned cache.</span></p>
+</section>
+
+<!-- ================= 7. SYSTEM ================= -->
+<section id="system">
+  <h2><span class="i18n" data-en="7. System Engineering in vLLM" data-zh="7. vLLM 中的系統工程">7. System Engineering in vLLM</span></h2>
+  <p><span class="i18n"
+    data-en="The paper argues that a reuse algorithm only matters if it survives realistic serving constraints &mdash; paged KV management, batch scheduling, and GPU-memory watermarks. SparseX-vLLM therefore adds four storage primitives, all designed so that reused segments end up looking exactly like ordinary vLLM blocks by the time they reach the attention backend. The whole system is GPU-resident: it extends Prefix Cache to non-prefix workloads rather than adding a disk/CPU tier, though it composes with such tiers if present."
+    data-zh="論文主張，重用演算法唯有在能承受現實服務約束時才有意義 &mdash; 分頁 KV 管理、批次排程與 GPU 記憶體水位。因此 SparseX-vLLM 新增四個儲存原語，全部設計成：當重用片段抵達注意力後端時，看起來就與普通的 vLLM block 一模一樣。整個系統常駐 GPU：它將 Prefix Cache 擴充到非前綴工作負載，而非新增磁碟／CPU 層，儘管在有此類層時它能與之組合。">The paper argues that a reuse algorithm only matters if it survives realistic serving constraints &mdash; paged KV management, batch scheduling, and GPU-memory watermarks. SparseX-vLLM therefore adds four storage primitives, all designed so that reused segments end up looking exactly like ordinary vLLM blocks by the time they reach the attention backend. The whole system is GPU-resident: it extends Prefix Cache to non-prefix workloads rather than adding a disk/CPU tier, though it composes with such tiers if present.</span></p>
+
+  <h3><span class="i18n" data-en="7.1 The four storage primitives" data-zh="7.1 四個儲存原語">7.1 The four storage primitives</span></h3>
+  <p><span class="i18n" data-en="Each primitive solves one concrete engine problem; together they let one physical block pool serve Prefix Cache, a RAG knowledge base, and user/agent histories at once." data-zh="每個原語解決一個具體的引擎問題；合在一起，它們讓單一物理 block pool 同時服務 Prefix Cache、一個 RAG 知識庫，以及使用者／agent 歷史。">Each primitive solves one concrete engine problem; together they let one physical block pool serve Prefix Cache, a RAG knowledge base, and user/agent histories at once.</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Frozen block" data-zh="Frozen block">Frozen block</span></h4>
+      <p><span class="i18n" data-en="A cached block from knowledge-base prefill that is physically identical to a native vLLM block (same layout, block id, ref-counting) but is not auto-reclaimed when its ref count hits zero &mdash; so long-lived RAG knowledge is not evicted during low-reference intervals." data-zh="來自知識庫 prefill 的快取 block，物理上與原生 vLLM block 完全相同（相同佈局、block id、參考計數），但在其參考計數歸零時不會被自動回收 &mdash; 使長壽的 RAG 知識不致在低參考期間被驅逐。">A cached block from knowledge-base prefill that is physically identical to a native vLLM block (same layout, block id, ref-counting) but is not auto-reclaimed when its ref count hits zero &mdash; so long-lived RAG knowledge is not evicted during low-reference intervals.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Frozen-block pool" data-zh="Frozen-block pool">Frozen-block pool</span></h4>
+      <p><span class="i18n" data-en="A logical pool that records which blocks belong to the knowledge base, sharing the same physical blocks as native vLLM &mdash; no reserved memory region. When KV utilization exceeds a watermark (e.g. 90%), the least-referenced frozen blocks are dropped to protect ordinary requests." data-zh="一個邏輯 pool，記錄哪些 block 屬於知識庫，並與原生 vLLM 共享同一批物理 block &mdash; 不預留記憶體區。當 KV 使用率超過水位（如 90%）時，參考最少的 frozen block 會被丟棄，以保護一般請求。">A logical pool that records which blocks belong to the knowledge base, sharing the same physical blocks as native vLLM &mdash; no reserved memory region. When KV utilization exceeds a watermark (e.g. 90%), the least-referenced frozen blocks are dropped to protect ordinary requests.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Extra keys" data-zh="Extra keys">Extra keys</span></h4>
+      <p><span class="i18n" data-en="A namespace tag folded into the block hash, so identical token sequences from different knowledge bases or users do not falsely match. A block is reusable only when both token IDs and the extra key agree." data-zh="一個折入 block 雜湊的命名空間標籤，使來自不同知識庫或使用者的相同 token 序列不會誤匹配。唯有 token IDs 與 extra key 兩者皆一致時，block 才可重用。">A namespace tag folded into the block hash, so identical token sequences from different knowledge bases or users do not falsely match. A block is reusable only when both token IDs and the extra key agree.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Virtual block" data-zh="Virtual block">Virtual block</span></h4>
+      <p><span class="i18n" data-en="A position-, prefix-, and context-independent index that points at an existing physical block without copying KV, so it adds no GPU memory. On a hit, SparseX allocates a real block and copies the KV in with the fused copy-Delta-RoPE kernel." data-zh="一個與位置、前綴、上下文均無關的索引，指向一個既有物理 block 而不複製 KV，因此不增加 GPU 記憶體。命中時，SparseX 配置一個真實 block，並以融合的 copy-Delta-RoPE kernel 將 KV 複製進去。">A position-, prefix-, and context-independent index that points at an existing physical block without copying KV, so it adds no GPU memory. On a hit, SparseX allocates a real block and copies the KV in with the fused copy-Delta-RoPE kernel.</span></p>
+    </div>
+  </div>
+
+  <p><span class="i18n"
+    data-en="The namespace lookup is formalized as a virtual hash over a block's token sequence and its extra key, so multiple logical cache namespaces &mdash; ordinary Prefix Cache, RAG knowledge bases, and user histories &mdash; coexist inside one physical block pool without interfering:"
+    data-zh="命名空間查找被形式化為對一個 block 的 token 序列與其 extra key 的虛擬雜湊，使多個邏輯快取命名空間 &mdash; 普通 Prefix Cache、RAG 知識庫與使用者歷史 &mdash; 得以在單一物理 block pool 內共存而互不干擾：">The namespace lookup is formalized as a virtual hash over a block's token sequence and its extra key, so multiple logical cache namespaces &mdash; ordinary Prefix Cache, RAG knowledge bases, and user histories &mdash; coexist inside one physical block pool without interfering:</span></p>
+
+  <div class="math-block">
+    <span class="eq-label">virtual hash</span>
+    $$h_v = \mathrm{Hash}\big((x_i, x_{i+1}, \ldots, x_{i+b-1}),\; e\big)$$
+  </div>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Here b is the block size and e is the extra key. Ordinary prefix portions keep using vLLM's original prefix hash; only reuse segments use the virtual hash." data-zh="其中 b 是 block 大小，e 是 extra key。普通前綴部分繼續使用 vLLM 原始的前綴雜湊；只有重用片段使用虛擬雜湊。">Here $b$ is the block size and $e$ is the extra key. Ordinary prefix portions keep using vLLM's original prefix hash; only reuse segments use the virtual hash.</span></p>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Why this matters for reuse benefit." data-zh="這對重用效益為何重要。">Why this matters for reuse benefit.</span></strong>
+    <span class="i18n" data-en="The paper's Section 1.2 critique of prior work is that non-prefix reuse hits, if they cannot cooperate with Prefix Cache, force a request out of the optimized cache framework and reduce long-term hit rate. Virtual blocks and extra keys exist precisely so that a single request can hit ordinary prefix blocks and reused knowledge blocks in the same scheduling round, keeping both mechanisms live." data-zh="論文第 1.2 節對既有工作的批評是：非前綴重用命中若無法與 Prefix Cache 協作，會迫使請求離開已優化的快取框架、降低長期命中率。虛擬 block 與 extra key 的存在正是為了讓單一請求能在同一排程回合中同時命中普通前綴 block 與重用知識 block，使兩種機制皆保持有效。">The paper's Section 1.2 critique of prior work is that non-prefix reuse hits, if they cannot cooperate with Prefix Cache, force a request out of the optimized cache framework and reduce long-term hit rate. Virtual blocks and extra keys exist precisely so that a single request can hit ordinary prefix blocks and reused knowledge blocks in the same scheduling round, keeping both mechanisms live.</span>
+  </div>
+</section>
+
+<!-- ================= 8. RESULTS ================= -->
+<section id="results">
+  <h2><span class="i18n" data-en="8. Evaluation" data-zh="8. 評估">8. Evaluation</span></h2>
+  <p><span class="i18n"
+    data-en="All experiments run on an 8-GPU NVIDIA RTX 4090 server with SparseX-vLLM built on vLLM v1 0.11.0, comparing only against open-source KV-reuse methods reproducible on vLLM; LLM-as-a-judge tasks use GPT-5.1 as the judge. Every workload is a two-stage reuse simulation: a first request builds the reusable segments into the block pool, and a second request recombines them with fresh non-reuse text, on which quality and TTFT are measured. The full-recompute baseline stands in for the Prefix-Cache blind spot &mdash; a non-prefix workload where the default cache cannot hit."
+    data-zh="所有實驗在一台 8 GPU 的 NVIDIA RTX 4090 伺服器上執行，SparseX-vLLM 建於 vLLM v1 0.11.0，僅與可在 vLLM 上重現的開源 KV 重用方法比較；LLM-as-a-judge 任務以 GPT-5.1 作為評審。每個工作負載都是兩階段重用模擬：第一個請求把可重用片段建入 block pool，第二個請求將其與新的非重用文字重組，並在其上量測品質與 TTFT。完整重算基線代表 Prefix-Cache 的盲點 &mdash; 一個預設快取無法命中的非前綴工作負載。">All experiments run on an 8-GPU NVIDIA RTX 4090 server with SparseX-vLLM built on vLLM v1 0.11.0, comparing only against open-source KV-reuse methods reproducible on vLLM; LLM-as-a-judge tasks use GPT-5.1 as the judge. Every workload is a two-stage reuse simulation: a first request builds the reusable segments into the block pool, and a second request recombines them with fresh non-reuse text, on which quality and TTFT are measured. The full-recompute baseline stands in for the Prefix-Cache blind spot &mdash; a non-prefix workload where the default cache cannot hit.</span></p>
+
+  <h3><span class="i18n" data-en="8.1 Multi-round chat (LOCOMO, LongMemEval)" data-zh="8.1 多輪對話（LOCOMO、LongMemEval）">8.1 Multi-round chat (LOCOMO, LongMemEval)</span></h3>
+  <p><span class="i18n"
+    data-en="This is the canonical case: a long dialogue history repeats across requests, while a new user question is inserted at a different position each turn, so the reuse structure no longer satisfies strict prefix sharing. The table reports quality (higher is better) alongside TTFT in seconds (lower is better). Naive reuse is fast but loses quality by ignoring contextual coupling; SparseX stays close to full-recompute quality at a fraction of its TTFT, and the hybrid variant recovers the last of the gap."
+    data-zh="這是典型情況：長對話歷史在請求間重複，而新的使用者問題每輪插入於不同位置，因此重用結構不再滿足嚴格的前綴共享。下表報告品質（越高越好）以及以秒計的 TTFT（越低越好）。樸素重用快，但因忽略上下文耦合而損失品質；SparseX 以完整重算 TTFT 的一小部分維持接近其品質，混合變體則補回最後的差距。">This is the canonical case: a long dialogue history repeats across requests, while a new user question is inserted at a different position each turn, so the reuse structure no longer satisfies strict prefix sharing. The table reports quality (higher is better) alongside TTFT in seconds (lower is better). Naive reuse is fast but loses quality by ignoring contextual coupling; SparseX stays close to full-recompute quality at a fraction of its TTFT, and the hybrid variant recovers the last of the gap.</span></p>
+
+  <table>
+    <tr><th><span class="i18n" data-en="Model" data-zh="模型">Model</span></th><th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th><th>LOCOMO <span class="i18n" data-en="score" data-zh="分數">score</span></th><th>LOCOMO TTFT (s)</th><th>LongMemEval <span class="i18n" data-en="score" data-zh="分數">score</span></th><th>LongMemEval TTFT (s)</th></tr>
+    <tr><td rowspan="4">Qwen3-32B</td><td>Full recompute</td><td>0.68</td><td>9.23</td><td>&mdash;</td><td>&mdash;</td></tr>
+    <tr><td>Naive reuse</td><td class="cross">0.54</td><td>0.48</td><td>&mdash;</td><td>&mdash;</td></tr>
+    <tr><td>SparseX (no hybrid)</td><td>0.64</td><td>0.66</td><td>&mdash;</td><td>&mdash;</td></tr>
+    <tr><td><strong>SparseX (w/ hybrid)</strong></td><td class="check">0.67</td><td>0.87</td><td>&mdash;</td><td>&mdash;</td></tr>
+    <tr><td rowspan="3">Qwen3-30B-A3B</td><td>Full recompute</td><td>0.62</td><td>7.32</td><td>0.56</td><td>15.58</td></tr>
+    <tr><td>Naive reuse</td><td class="cross">0.44</td><td>0.55</td><td>0.51</td><td>1.01</td></tr>
+    <tr><td><strong>SparseX (w/ hybrid)</strong></td><td class="check">0.61</td><td>0.67</td><td class="check">0.60</td><td>2.13</td></tr>
+  </table>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="LongMemEval is not reported for Qwen3-32B because its context length exceeds that model's window. On Qwen3-30B-A3B, SparseX with hybrid attention even exceeds full recompute on LongMemEval (0.60 vs 0.56), which the paper attributes to sparse recomputation acting as a mild denoiser over a very long context." data-zh="Qwen3-32B 未報告 LongMemEval，因其上下文長度超過該模型的視窗。在 Qwen3-30B-A3B 上，SparseX 搭配混合注意力在 LongMemEval 上甚至超越完整重算（0.60 對 0.56），論文將此歸因於稀疏重算在極長上下文上起到溫和去噪的作用。">LongMemEval is not reported for Qwen3-32B because its context length exceeds that model's window. On Qwen3-30B-A3B, SparseX with hybrid attention even exceeds full recompute on LongMemEval (0.60 vs 0.56), which the paper attributes to sparse recomputation acting as a mild denoiser over a very long context.</span></p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2606.01751v2/app_locomo_lme.png" alt="Figure 8: Prompt construction for LongMemEval and LOCOMO">
+    <div class="fig-cap"><strong>Figure 8 (from paper):</strong>
+      <span class="i18n" data-en="Prompt construction for LongMemEval and LOCOMO, showing how a long dialogue history is reused as segments while a new question is inserted at a varying position." data-zh="LongMemEval 與 LOCOMO 的提示建構，展示長對話歷史如何以片段重用、同時新問題插入於變動的位置。">Prompt construction for LongMemEval and LOCOMO, showing how a long dialogue history is reused as segments while a new question is inserted at a varying position.</span>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="8.2 RULER long-context subtasks" data-zh="8.2 RULER 長上下文子任務">8.2 RULER long-context subtasks</span></h3>
+  <p><span class="i18n"
+    data-en="RULER stresses whether a reuse method keeps accuracy when key information appears at arbitrary prompt positions, across four subtasks: multi-query needle-in-a-haystack (MQ-NIAH), variable tracking (VT), common-words extraction (CWE), and frequent-words extraction (FWE). Variable tracking is the sharpest discriminator, because it forces the model to follow assignments scattered through the context &mdash; exactly where fixed-boundary or early-layer selection tends to miss global key tokens. SparseX with hybrid attention closes almost the entire gap to full recompute; naive reuse does not."
+    data-zh="RULER 檢驗當關鍵資訊出現在任意提示位置時，重用方法能否維持準確度，涵蓋四個子任務：多查詢 needle-in-a-haystack（MQ-NIAH）、變數追蹤（VT）、常見詞萃取（CWE）與高頻詞萃取（FWE）。變數追蹤是最鋒利的判別器，因為它迫使模型追蹤散佈於上下文各處的賦值 &mdash; 那正是固定邊界或早期層選擇容易漏掉全域 key token 之處。SparseX 搭配混合注意力幾乎補平了與完整重算的全部差距；樸素重用則否。">RULER stresses whether a reuse method keeps accuracy when key information appears at arbitrary prompt positions, across four subtasks: multi-query needle-in-a-haystack (MQ-NIAH), variable tracking (VT), common-words extraction (CWE), and frequent-words extraction (FWE). Variable tracking is the sharpest discriminator, because it forces the model to follow assignments scattered through the context &mdash; exactly where fixed-boundary or early-layer selection tends to miss global key tokens. SparseX with hybrid attention closes almost the entire gap to full recompute; naive reuse does not.</span></p>
+
+  <table>
+    <tr><th><span class="i18n" data-en="Model" data-zh="模型">Model</span></th><th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th><th>MQ-NIAH</th><th>VT</th><th>CWE</th><th>FWE</th><th><span class="i18n" data-en="Average" data-zh="平均">Average</span></th></tr>
+    <tr><td rowspan="4">Qwen3-8B</td><td>Full recompute</td><td>1.00</td><td>1.00</td><td>0.95</td><td>0.87</td><td>0.96</td></tr>
+    <tr><td>Naive reuse</td><td>0.69</td><td class="cross">0.33</td><td>0.92</td><td>0.82</td><td class="cross">0.69</td></tr>
+    <tr><td>SparseX (no hybrid)</td><td>0.90</td><td>0.80</td><td>0.95</td><td>0.86</td><td>0.88</td></tr>
+    <tr><td><strong>SparseX (w/ hybrid)</strong></td><td class="check">1.00</td><td class="check">0.94</td><td>0.94</td><td>0.89</td><td class="check">0.94</td></tr>
+    <tr><td rowspan="2">Qwen3-32B</td><td>Full recompute</td><td>1.00</td><td>1.00</td><td>0.97</td><td>0.92</td><td>0.97</td></tr>
+    <tr><td><strong>SparseX (w/ hybrid)</strong></td><td class="check">1.00</td><td class="check">1.00</td><td class="check">0.99</td><td>0.92</td><td class="check">0.98</td></tr>
+  </table>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Reported per-model averages of the four subtasks &mdash; Qwen3-8B: full 0.96, naive 0.69, CacheBlend 0.81, EPIC 0.77, SparseX-no-hybrid 0.88, SparseX-hybrid 0.94. Qwen3-32B: full 0.97, naive 0.79, CacheBlend 0.86, EPIC 0.82, SparseX-no-hybrid 0.91, SparseX-hybrid 0.98." data-zh="四個子任務的各模型平均分 &mdash; Qwen3-8B：完整 0.96、樸素 0.69、CacheBlend 0.81、EPIC 0.77、SparseX 無混合 0.88、SparseX 混合 0.94。Qwen3-32B：完整 0.97、樸素 0.79、CacheBlend 0.86、EPIC 0.82、SparseX 無混合 0.91、SparseX 混合 0.98。">Reported per-model averages of the four subtasks &mdash; Qwen3-8B: full 0.96, naive 0.69, CacheBlend 0.81, EPIC 0.77, SparseX-no-hybrid 0.88, SparseX-hybrid 0.94. Qwen3-32B: full 0.97, naive 0.79, CacheBlend 0.86, EPIC 0.82, SparseX-no-hybrid 0.91, SparseX-hybrid 0.98.</span></p>
+
+  <p><span class="i18n" data-en="Each RULER subtask is constructed so that the key information sits at arbitrary, non-prefix positions among reused filler, which is exactly the condition SparseQ is built for. The prompt-construction figures below show how the four subtasks lay out reused and non-reuse text; variable tracking (Figure 10) is the layout on which naive reuse falls furthest (0.33 on Qwen3-8B)." data-zh="每個 RULER 子任務的建構，都讓關鍵資訊位於重用填充文字之間任意的、非前綴的位置，這正是 SparseQ 所針對的條件。下方的提示建構圖展示四個子任務如何佈置重用與非重用文字；變數追蹤（圖 10）是樸素重用退化最劇的佈局（Qwen3-8B 上為 0.33）。">Each RULER subtask is constructed so that the key information sits at arbitrary, non-prefix positions among reused filler, which is exactly the condition SparseQ is built for. The prompt-construction figures below show how the four subtasks lay out reused and non-reuse text; variable tracking (Figure 10) is the layout on which naive reuse falls furthest (0.33 on Qwen3-8B).</span></p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_mq_niah.png" alt="Figure 9: Prompt construction for MQ-NIAH">
+      <div class="fig-cap"><strong>Figure 9 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for MQ-NIAH (multi-query needle-in-a-haystack): several needles are hidden among reused haystack segments and queried by non-reuse text." data-zh="MQ-NIAH（多查詢 needle-in-a-haystack）的提示建構：數根針被藏在重用的乾草堆片段之中，並由非重用文字查詢。">Prompt construction for MQ-NIAH (multi-query needle-in-a-haystack): several needles are hidden among reused haystack segments and queried by non-reuse text.</span>
+      </div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_vt.png" alt="Figure 10: Prompt construction for variable tracking">
+      <div class="fig-cap"><strong>Figure 10 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for variable tracking (VT): variable assignments are scattered through the reused context and must be followed to their final values &mdash; the sharpest discriminator between methods." data-zh="變數追蹤（VT）的提示建構：變數賦值散佈於重用上下文中，必須追蹤至其最終值 &mdash; 各方法間最鋒利的判別器。">Prompt construction for variable tracking (VT): variable assignments are scattered through the reused context and must be followed to their final values &mdash; the sharpest discriminator between methods.</span>
+      </div>
+    </div>
+  </div>
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_cwe.png" alt="Figure 11: Prompt construction for common words extraction">
+      <div class="fig-cap"><strong>Figure 11 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for common words extraction (CWE): the model must extract entity- or fact-related information from the reused context window." data-zh="常見詞萃取（CWE）的提示建構：模型必須從重用的上下文視窗中萃取與實體或事實相關的資訊。">Prompt construction for common words extraction (CWE): the model must extract entity- or fact-related information from the reused context window.</span>
+      </div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_fwe.png" alt="Figure 12: Prompt construction for frequent words extraction">
+      <div class="fig-cap"><strong>Figure 12 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for frequent words extraction (FWE): the model must identify the most frequent items across the reused context, testing aggregation over long spans." data-zh="高頻詞萃取（FWE）的提示建構：模型必須辨識重用上下文中最高頻的項目，檢驗跨長距離的聚合。">Prompt construction for frequent words extraction (FWE): the model must identify the most frequent items across the reused context, testing aggregation over long spans.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Reading the ablation." data-zh="讀懂消融。">Reading the ablation.</span></strong>
+    <span class="i18n" data-en="The gap between SparseX without and with hybrid attention is the clearest evidence for Section 6.4's argument. On Qwen3-8B the RULER average rises from 0.88 to 0.94 once the selection is deferred past the early layers, and the effect is concentrated exactly where the theory predicts: variable tracking, the most layout-sensitive subtask, improves from 0.80 to 0.94, while the already-easy CWE and FWE barely move. A first-layer-only selection is therefore not a minor simplification but the difference between missing and finding the scattered key tokens." data-zh="SparseX 無混合與有混合注意力之間的差距，是第 6.4 節論點最清楚的證據。在 Qwen3-8B 上，一旦將選擇延後至早期層之後，RULER 平均分便從 0.88 升至 0.94，且效果恰好集中在理論所預測之處：最依賴佈局的子任務變數追蹤，從 0.80 提升到 0.94，而本已容易的 CWE 與 FWE 幾乎不變。因此，僅靠第一層的選擇並非微小的簡化，而是「錯過」與「找到」那些散落的關鍵 token 之間的分野。">The gap between SparseX without and with hybrid attention is the clearest evidence for Section 6.4's argument. On Qwen3-8B the RULER average rises from 0.88 to 0.94 once the selection is deferred past the early layers, and the effect is concentrated exactly where the theory predicts: variable tracking, the most layout-sensitive subtask, improves from 0.80 to 0.94, while the already-easy CWE and FWE barely move. A first-layer-only selection is therefore not a minor simplification but the difference between missing and finding the scattered key tokens.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="8.3 Multi-agent systems (AutoGen, MAD)" data-zh="8.3 多 agent 系統（AutoGen、MAD）">8.3 Multi-agent systems (AutoGen, MAD)</span></h3>
+  <p><span class="i18n"
+    data-en="Finally, SparseX is dropped into two real multi-agent frameworks &mdash; AutoGen and multi-agent debate (MAD) &mdash; and evaluated in MASLab across mathematical, scientific, general-knowledge, and medical tasks. The point of this table is not a speed number but a quality-preservation claim: swapping vanilla execution for SparseX-backed reuse leaves accuracy close to unchanged across models, tasks, and frameworks, with only small drops on a few tasks. This is what lets the paper claim a single reuse loop is usable for agent workloads, not only chat and RAG."
+    data-zh="最後，SparseX 被放入兩個真實的多 agent 框架 &mdash; AutoGen 與多 agent 辯論（MAD） &mdash; 並在 MASLab 中跨數學、科學、通識與醫療任務評估。此表的重點不是速度數字，而是品質保持的主張：以 SparseX 支援的重用替換原始執行，使準確度在各模型、任務與框架間幾乎不變，僅少數任務有小幅下降。這正是論文得以主張「單一重用迴圈可用於 agent 工作負載、而不只是對話與 RAG」的依據。">Finally, SparseX is dropped into two real multi-agent frameworks &mdash; AutoGen and multi-agent debate (MAD) &mdash; and evaluated in MASLab across mathematical, scientific, general-knowledge, and medical tasks. The point of this table is not a speed number but a quality-preservation claim: swapping vanilla execution for SparseX-backed reuse leaves accuracy close to unchanged across models, tasks, and frameworks, with only small drops on a few tasks. This is what lets the paper claim a single reuse loop is usable for agent workloads, not only chat and RAG.</span></p>
+
+  <table>
+    <tr><th><span class="i18n" data-en="Task (Qwen2.5-7B)" data-zh="任務（Qwen2.5-7B）">Task (Qwen2.5-7B)</span></th><th>AutoGen <span class="i18n" data-en="vanilla" data-zh="原始">vanilla</span></th><th>AutoGen SparseX</th><th>MAD <span class="i18n" data-en="vanilla" data-zh="原始">vanilla</span></th><th>MAD SparseX</th></tr>
+    <tr><td>GSM-Hard</td><td>54.20</td><td>53.00</td><td>58.60</td><td>54.20</td></tr>
+    <tr><td>MATH</td><td>75.60</td><td>73.00</td><td>76.16</td><td>75.40</td></tr>
+    <tr><td>GPQA</td><td>30.36</td><td>29.02</td><td>25.00</td><td>25.67</td></tr>
+    <tr><td>AQUA-RAT</td><td>73.62</td><td>74.41</td><td>79.13</td><td>75.59</td></tr>
+  </table>
+  <p style="font-size:.85rem;color:#8fa4c0"><span class="i18n" data-en="Representative rows from Table 3; the full table spans more tasks (SciBench, MMLU-Pro, MedQA, MedMCQA) and the larger Qwen2.5-72B, which stays competitive after introducing SparseX." data-zh="取自表 3 的代表性列；完整表格涵蓋更多任務（SciBench、MMLU-Pro、MedQA、MedMCQA）與更大的 Qwen2.5-72B &mdash; 引入 SparseX 後仍具競爭力。">Representative rows from Table 3; the full table spans more tasks (SciBench, MMLU-Pro, MedQA, MedMCQA) and the larger Qwen2.5-72B, which stays competitive after introducing SparseX.</span></p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_autogen.png" alt="Figure 13: Prompt construction for AutoGen-style agent workflows">
+      <div class="fig-cap"><strong>Figure 13 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for AutoGen-style agent workflows, where each agent reuses shared context as segments." data-zh="AutoGen 式 agent 工作流的提示建構，其中每個 agent 以片段形式重用共享上下文。">Prompt construction for AutoGen-style agent workflows, where each agent reuses shared context as segments.</span>
+      </div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2606.01751v2/app_mad.png" alt="Figure 14: Prompt construction for multi-agent debate">
+      <div class="fig-cap"><strong>Figure 14 (from paper):</strong>
+        <span class="i18n" data-en="Prompt construction for multi-agent debate, where each debater reuses other agents' analyses at non-prefix positions." data-zh="多 agent 辯論的提示建構，其中每位辯論者在非前綴位置重用其他 agent 的分析。">Prompt construction for multi-agent debate, where each debater reuses other agents' analyses at non-prefix positions.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 8B. REPRODUCE ================= -->
+<section id="reproduce">
+  <h2><span class="i18n" data-en="9. Reproduction &amp; Usage" data-zh="9. 重現與使用">9. Reproduction &amp; Usage</span></h2>
+  <p><span class="i18n"
+    data-en="SparseX is released as an open-source vLLM extension, so the numbers above are reproducible on commodity hardware. The essentials, drawn from the paper's evaluation setup, are summarized below. The moving parts are a specific vLLM base version, a client that tags reusable text with an extra key, and the two-stage request pattern that first warms the cache and then measures reuse."
+    data-zh="SparseX 以開源 vLLM 擴充的形式釋出，因此上述數字可在一般硬體上重現。取自論文評估設定的要點整理如下。可變動的部件為：一個特定的 vLLM 基底版本、一個以 extra key 標記可重用文字的客戶端，以及先暖快取、再量測重用的兩階段請求模式。">SparseX is released as an open-source vLLM extension, so the numbers above are reproducible on commodity hardware. The essentials, drawn from the paper's evaluation setup, are summarized below. The moving parts are a specific vLLM base version, a client that tags reusable text with an extra key, and the two-stage request pattern that first warms the cache and then measures reuse.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Environment (as reported)." data-zh="環境（依論文所載）。">Environment (as reported).</span></strong>
+    <span class="i18n" data-en="8&times; NVIDIA GeForce RTX 4090; SparseX-vLLM built on vLLM v1 0.11.0; FlashAttention / FlashInfer backend; Qwen3 (8B / 32B / 30B-A3B MoE) and Qwen2.5 (7B / 72B); LLM-as-a-judge tasks judged by GPT-5.1. Code at github.com/MemTensor/SparseX." data-zh="8 張 NVIDIA GeForce RTX 4090；SparseX-vLLM 建於 vLLM v1 0.11.0；FlashAttention / FlashInfer 後端；Qwen3（8B / 32B / 30B-A3B MoE）與 Qwen2.5（7B / 72B）；LLM-as-a-judge 任務由 GPT-5.1 評審。程式碼於 github.com/MemTensor/SparseX。">8&times; NVIDIA GeForce RTX 4090; SparseX-vLLM built on vLLM v1 0.11.0; FlashAttention / FlashInfer backend; Qwen3 (8B / 32B / 30B-A3B MoE) and Qwen2.5 (7B / 72B); LLM-as-a-judge tasks judged by GPT-5.1. Code at <a href="https://github.com/MemTensor/SparseX">github.com/MemTensor/SparseX</a>.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="9.1 The two-stage reuse request" data-zh="9.1 兩階段重用請求">9.1 The two-stage reuse request</span></h3>
+  <p><span class="i18n"
+    data-en="Every evaluation follows the same protocol, and it is the right mental model for using the system. A first request encodes the reusable content and writes its segment KV into the block pool; a second request recombines those segments with fresh non-reuse text and is the one whose quality and TTFT are measured. The extra key is what makes a segment findable across the two requests and keeps different knowledge bases or users from colliding."
+    data-zh="每個評估都遵循相同的協定，而這也是使用本系統的正確心智模型。第一個請求編碼可重用內容，並將其片段 KV 寫入 block pool；第二個請求把這些片段與新的非重用文字重組，並在其上量測品質與 TTFT。extra key 使片段在兩個請求間可被找到，並使不同的知識庫或使用者不致碰撞。">Every evaluation follows the same protocol, and it is the right mental model for using the system. A first request encodes the reusable content and writes its segment KV into the block pool; a second request recombines those segments with fresh non-reuse text and is the one whose quality and TTFT are measured. The extra key is what makes a segment findable across the two requests and keeps different knowledge bases or users from colliding.</span></p>
+
+  <div class="vflow">
+    <div class="box blue"><h4><span class="i18n" data-en="Stage 1 &middot; Cache-build request" data-zh="階段 1 &middot; 建快取請求">Stage 1 &middot; Cache-build request</span></h4><span class="i18n" data-en="Send the reusable text (dialogue history, RAG documents, an agent's analysis) once, tagged with an extra key. Its segment KV completes prefill inside the vLLM engine and is written to the block pool (as a frozen block for a knowledge base, or an ordinary reusable block for a chat/agent history)." data-zh="將可重用文字（對話歷史、RAG 文件、某 agent 的分析）連同一個 extra key 送出一次。其片段 KV 在 vLLM 引擎內完成 prefill，並寫入 block pool（知識庫為 frozen block，對話／agent 歷史為普通可重用 block）。">Send the reusable text (dialogue history, RAG documents, an agent's analysis) once, tagged with an extra key. Its segment KV completes prefill inside the vLLM engine and is written to the block pool (as a frozen block for a knowledge base, or an ordinary reusable block for a chat/agent history).</span></div>
+    <div class="arrow">&darr;</div>
+    <div class="box green"><h4><span class="i18n" data-en="Stage 2 &middot; Evaluation request" data-zh="階段 2 &middot; 評估請求">Stage 2 &middot; Evaluation request</span></h4><span class="i18n" data-en="Send the real prompt, interleaving the same reusable segments (same text + same extra key) with new instructions and a question. SparseX retrieves and RoPE-aligns the segments, runs one SparseQ selection at the boundary layer, and recomputes only the selected tokens. Quality and TTFT are measured here." data-zh="送出真實提示，將相同的可重用片段（相同文字 + 相同 extra key）與新指令和一個問題交錯。SparseX 取回並以 RoPE 對齊片段、在邊界層執行一次 SparseQ 選擇、僅重算被選中的 token。品質與 TTFT 在此量測。">Send the real prompt, interleaving the same reusable segments (same text + same extra key) with new instructions and a question. SparseX retrieves and RoPE-aligns the segments, runs one SparseQ selection at the boundary layer, and recomputes only the selected tokens. Quality and TTFT are measured here.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="9.2 Key parameters to set" data-zh="9.2 需設定的關鍵參數">9.2 Key parameters to set</span></h3>
+  <p><span class="i18n" data-en="Two settings dominate the quality/latency trade-off. The layer boundary controls how much full attention precedes sparse recomputation, and the top-k budget controls how many reused tokens are recomputed at each later layer." data-zh="兩項設定主導品質／延遲的取捨。層邊界控制稀疏重算之前有多少完整注意力，top-k 預算控制後期各層重算多少重用 token。">Two settings dominate the quality/latency trade-off. The layer boundary controls how much full attention precedes sparse recomputation, and the top-$k$ budget controls how many reused tokens are recomputed at each later layer.</span></p>
+  <table>
+    <tr><th><span class="i18n" data-en="Parameter" data-zh="參數">Parameter</span></th><th><span class="i18n" data-en="Role" data-zh="作用">Role</span></th><th><span class="i18n" data-en="Reported guidance" data-zh="論文建議">Reported guidance</span></th></tr>
+    <tr><td><span class="i18n" data-en="Layer boundary" data-zh="層邊界">Layer boundary</span> $\ell^{\star}$</td><td><span class="i18n" data-en="Full attention before it; SparseQ selection at it; sparse recompute after it" data-zh="其前完整注意力；於其執行 SparseQ 選擇；其後稀疏重算">Full attention before it; SparseQ selection at it; sparse recompute after it</span></td><td><span class="i18n" data-en="First 15&ndash;20% of layers (small dense, e.g. Qwen3-8B); first 10&ndash;15% (larger / MoE). Lower for easy tasks, higher for hard retrieval." data-zh="前 15&ndash;20% 層（小型稠密，如 Qwen3-8B）；前 10&ndash;15%（較大／MoE）。簡單任務調低，困難檢索調高。">First 15&ndash;20% of layers (small dense, e.g. Qwen3-8B); first 10&ndash;15% (larger / MoE). Lower for easy tasks, higher for hard retrieval.</span></td></tr>
+    <tr><td><span class="i18n" data-en="Top-k budget" data-zh="Top-k 預算">Top-$k$ budget</span></td><td><span class="i18n" data-en="Number of globally important reused tokens recomputed per later layer" data-zh="後期各層重算的全域重要重用 token 數">Number of globally important reused tokens recomputed per later layer</span></td><td><span class="i18n" data-en="Set so the recompute set stays small relative to T; the overflow rule adds boundary blocks on top." data-zh="設定使重算集合相對 T 保持較小；overflow 規則再於其上加入邊界 block。">Set so the recompute set stays small relative to $T$; the overflow rule adds boundary blocks on top.</span></td></tr>
+    <tr><td><span class="i18n" data-en="Extra key" data-zh="Extra key">Extra key</span> $e$</td><td><span class="i18n" data-en="Namespace tag folded into the block hash for reuse segments" data-zh="折入重用片段 block 雜湊的命名空間標籤">Namespace tag folded into the block hash for reuse segments</span></td><td><span class="i18n" data-en="One per knowledge base / user; must match between the cache-build and evaluation requests." data-zh="每個知識庫／使用者一個；必須在建快取與評估請求之間一致。">One per knowledge base / user; must match between the cache-build and evaluation requests.</span></td></tr>
+    <tr><td><span class="i18n" data-en="Frozen-pool watermark" data-zh="Frozen-pool 水位">Frozen-pool watermark</span></td><td><span class="i18n" data-en="KV utilization above which least-referenced frozen blocks are dropped" data-zh="超過此 KV 使用率則丟棄參考最少的 frozen block">KV utilization above which least-referenced frozen blocks are dropped</span></td><td><span class="i18n" data-en="e.g. 90%; protects ordinary online requests from knowledge-base residency." data-zh="如 90%；保護一般線上請求不受知識庫常駐擠壓。">e.g. 90%; protects ordinary online requests from knowledge-base residency.</span></td></tr>
+  </table>
+  <div class="note">
+    <strong><span class="i18n" data-en="Faithfulness note." data-zh="忠實性說明。">Faithfulness note.</span></strong>
+    <span class="i18n" data-en="The exact CLI flags and Python API are in the released repository; the table above reports only the parameters and guidance stated in the paper, not invented command lines. Consult github.com/MemTensor/SparseX for the current interface." data-zh="精確的 CLI 旗標與 Python API 見已釋出的儲存庫；上表僅報告論文所述的參數與建議，而非杜撰的命令列。當前介面請參閱 github.com/MemTensor/SparseX。">The exact CLI flags and Python API are in the released repository; the table above reports only the parameters and guidance stated in the paper, not invented command lines. Consult github.com/MemTensor/SparseX for the current interface.</span>
+  </div>
+</section>
+
+<!-- ================= 10. RELATION TO OUR THESIS ================= -->
+<section id="decontamination">
+  <h2><span class="i18n" data-en="10. Relation to Decontaminated KV Selection" data-zh="10. 與去污染式 KV 選擇的關係">10. Relation to Decontaminated KV Selection</span></h2>
+  <p><span class="i18n"
+    data-en="This section positions SparseX against our own thesis, which frames cross-agent KV reuse as a subtractive, per-token, receiver-decision-relevance decontamination problem &mdash; distinct from KVCOMM, which performs additive re-alignment of shared KV. SparseX is the closest paper we have found to naming our premise, so it deserves a precise, honest reckoning: what does it actually do, and where does it stop short of &mdash; or overlap with &mdash; what we claim as new?"
+    data-zh="本節將 SparseX 相對於我方論點定位。我們的論點把跨 agent KV 重用框定為一個減法式、逐 token、以接收端決策相關性為準的去污染問題 &mdash; 與 KVCOMM 不同，後者對共享 KV 做加法式重對齊。SparseX 是我們找到的、最接近點名我方前提的論文，因此值得一次精確而誠實的清算：它究竟做了什麼？它在何處止步於 &mdash; 或重疊於 &mdash; 我們主張為新的部分？">This section positions SparseX against our own thesis, which frames cross-agent KV reuse as a subtractive, per-token, receiver-decision-relevance decontamination problem &mdash; distinct from KVCOMM, which performs additive re-alignment of shared KV. SparseX is the closest paper we have found to naming our premise, so it deserves a precise, honest reckoning: what does it actually do, and where does it stop short of &mdash; or overlap with &mdash; what we claim as new?</span></p>
+
+  <h3><span class="i18n" data-en="10.1 Three questions from the full text" data-zh="10.1 出自全文的三個問題">10.1 Three questions from the full text</span></h3>
+  <p><span class="i18n" data-en="Reading the full paper rather than the abstract, three questions decide how much of our gap it closes." data-zh="閱讀全文而非摘要，有三個問題決定它封住我方缺口的程度。">Reading the full paper rather than the abstract, three questions decide how much of our gap it closes.</span></p>
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="(a) Importance / relevance selection?" data-zh="(a) 重要性／相關性選擇？">(a) Importance / relevance selection?</span></h4>
+      <p><span class="i18n" data-en="Yes &mdash; and this is the honest overlap. SparseQ selects reused tokens by aggregated attention intensity from the non-reuse (receiver) queries: the new instructions and questions vote for which reused tokens they need. That is a per-token, receiver-conditioned relevance selection, not a fixed heuristic. It is materially close to the selection half of our contribution." data-zh="是 &mdash; 這正是誠實的重疊。SparseQ 以來自非重用（接收端）query 的加總注意力強度選擇重用 token：新的指令與問題為它們所需的重用 token 投票。這是一種逐 token、以接收端為條件的相關性選擇，而非固定啟發式。它在實質上接近我方貢獻中「選擇」的那一半。">Yes &mdash; and this is the honest overlap. SparseQ selects reused tokens by aggregated attention intensity from the non-reuse (receiver) queries: the new instructions and questions vote for which reused tokens they need. That is a per-token, receiver-conditioned relevance selection, not a fixed heuristic. It is materially close to the selection half of our contribution.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="(b) Subtraction / decontamination, or only additive repair?" data-zh="(b) 減法／去污染，抑或僅加法式修補？">(b) Subtraction / decontamination, or only additive repair?</span></h4>
+      <p><span class="i18n" data-en="Only additive. SparseX has two repair operators, both additive: a RoPE rotation that adds the correct positional phase, and a fresh recomputation that replaces a selected token's KV under the new context. It never estimates a per-token contaminant and subtracts it; reused tokens outside the selected set keep their original-prefix KV untouched." data-zh="僅為加法。SparseX 有兩個修復算子，皆為加法式：一個 RoPE 旋轉，加入正確的位置相位；以及一次重新計算，在新上下文下替換被選中 token 的 KV。它從不估計逐 token 的污染量並將其減去；被選集合之外的重用 token，其原始前綴 KV 原封不動。">Only additive. SparseX has two repair operators, both additive: a RoPE rotation that adds the correct positional phase, and a fresh recomputation that replaces a selected token's KV under the new context. It never estimates a per-token contaminant and subtracts it; reused tokens outside the selected set keep their original-prefix KV untouched.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="(c) Names the contamination phenomenon?" data-zh="(c) 為污染現象命名？">(c) Names the contamination phenomenon?</span></h4>
+      <p><span class="i18n" data-en="No. The paper calls it 'contextual coupling', 'representation error after a cache hit', and 'poorly controlled representation error'. The word 'contamination' does not appear, and the prefix-induced error is treated as something to route around by recomputing important tokens, not as a signal to be isolated and removed." data-zh="否。論文稱之為「上下文耦合」、「快取命中後的表徵誤差」與「控制不佳的表徵誤差」。「污染」一詞並未出現，且前綴引起的誤差被視為可藉重算重要 token 繞開之物，而非一個應被隔離並移除的訊號。">No. The paper calls it 'contextual coupling', 'representation error after a cache hit', and 'poorly controlled representation error'. The word 'contamination' does not appear, and the prefix-induced error is treated as something to route around by recomputing important tokens, not as a signal to be isolated and removed.</span></p>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="10.2 The one-line differentiator" data-zh="10.2 一句話的區分點">10.2 The one-line differentiator</span></h3>
+  <p><span class="i18n"
+    data-en="SparseX and KVCOMM both repair reused KV additively &mdash; SparseX by recomputing the tokens the receiver's queries vote most important, KVCOMM by adding an anchor-pool offset correction &mdash; whereas our thesis subtracts a receiver-conditioned contaminant estimate from each reused token's KV, correcting it in place without a full recomputation and without leaving the unselected tokens contaminated."
+    data-zh="SparseX 與 KVCOMM 都以加法方式修復重用 KV &mdash; SparseX 靠重算接收端 query 投票最重要的 token，KVCOMM 靠加上一個 anchor-pool 偏移修正 &mdash; 而我方論點則是從每個重用 token 的 KV 減去一個以接收端為條件的污染量估計，就地修正，而無需完整重算，也不讓未被選中的 token 繼續帶著污染。">SparseX and KVCOMM both repair reused KV additively &mdash; SparseX by recomputing the tokens the receiver's queries vote most important, KVCOMM by adding an anchor-pool offset correction &mdash; whereas our thesis subtracts a receiver-conditioned contaminant estimate from each reused token's KV, correcting it in place without a full recomputation and without leaving the unselected tokens contaminated.</span></p>
+
+  <div class="grid-2">
+    <div class="vflow" style="margin:0">
+      <div class="box orange" style="max-width:none"><h4><span class="i18n" data-en="SparseX / KVCOMM operator (additive)" data-zh="SparseX／KVCOMM 算子（加法）">SparseX / KVCOMM operator (additive)</span></h4>
+        <ul>
+          <li><span class="i18n" data-en="Align: add the RoPE phase for the new position" data-zh="對齊：為新位置加上 RoPE 相位">Align: add the RoPE phase for the new position</span></li>
+          <li><span class="i18n" data-en="Select important tokens (SparseQ) / shared tokens (KVCOMM)" data-zh="選擇重要 token（SparseQ）／共享 token（KVCOMM）">Select important tokens (SparseQ) / shared tokens (KVCOMM)</span></li>
+          <li><span class="i18n" data-en="Repair by recompute (SparseX) or add offset delta (KVCOMM)" data-zh="以重算修復（SparseX）或加上偏移量（KVCOMM）">Repair by recompute (SparseX) or add offset delta (KVCOMM)</span></li>
+          <li><span class="i18n" data-en="Unselected reused tokens keep original-prefix KV" data-zh="未選中的重用 token 保留原始前綴 KV">Unselected reused tokens keep original-prefix KV</span></li>
+        </ul>
+      </div>
+    </div>
+    <div class="vflow" style="margin:0">
+      <div class="box green" style="max-width:none"><h4><span class="i18n" data-en="Our thesis operator (subtractive)" data-zh="我方論點算子（減法）">Our thesis operator (subtractive)</span></h4>
+        <ul>
+          <li><span class="i18n" data-en="Estimate a per-token contaminant induced by the wrong prefix" data-zh="估計每個 token 因錯誤前綴而生的污染量">Estimate a per-token contaminant induced by the wrong prefix</span></li>
+          <li><span class="i18n" data-en="Weight it by receiver-decision relevance, not just attention mass" data-zh="以接收端決策相關性加權，而非僅注意力質量">Weight it by receiver-decision relevance, not just attention mass</span></li>
+          <li><span class="i18n" data-en="Subtract it in place &mdash; no full recompute of the token" data-zh="就地減去 &mdash; 不對該 token 做完整重算">Subtract it in place &mdash; no full recompute of the token</span></li>
+          <li><span class="i18n" data-en="Every reused token is decontaminated, not only the top-k" data-zh="每個重用 token 都被去污染，而非僅 top-k">Every reused token is decontaminated, not only the top-k</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="10.3 Honest verdict: does it close or narrow our gap?" data-zh="10.3 誠實裁決：它封住還是縮小了我方缺口？">10.3 Honest verdict: does it close or narrow our gap?</span></h3>
+  <p><span class="i18n"
+    data-en="The full text does more than the abstract suggested, and that is a genuine novelty consideration we should not soften. Read only as 'segment-level sharing with sparse recompute', SparseX sounds orthogonal to us. Read in full, its SparseQ is a per-token, receiver-query-driven relevance selection over reused tokens &mdash; which is materially the selection half of what we were treating as our own contribution. On the selection axis, SparseX (together with CacheBlend and KVCOMM) narrows our gap substantially: 'select which reused tokens matter to the receiver' can no longer be claimed as novel on its own."
+    data-zh="全文所做的，超出摘要的暗示，這是一項我們不應淡化的真實新穎性考量。若僅讀作「片段級共享加稀疏重算」，SparseX 聽起來與我們正交。讀完全文，其 SparseQ 是對重用 token 的、逐 token、由接收端 query 驅動的相關性選擇 &mdash; 這在實質上正是我們一直當作自身貢獻的「選擇」那一半。在選擇這一軸上，SparseX（連同 CacheBlend 與 KVCOMM）大幅縮小了我方缺口：「選出哪些重用 token 對接收端重要」本身已不能再被主張為新穎。">The full text does more than the abstract suggested, and that is a genuine novelty consideration we should not soften. Read only as 'segment-level sharing with sparse recompute', SparseX sounds orthogonal to us. Read in full, its SparseQ is a per-token, receiver-query-driven relevance selection over reused tokens &mdash; which is materially the selection half of what we were treating as our own contribution. On the selection axis, SparseX (together with CacheBlend and KVCOMM) narrows our gap substantially: 'select which reused tokens matter to the receiver' can no longer be claimed as novel on its own.</span></p>
+  <p><span class="i18n"
+    data-en="It does not, however, close the decontamination axis. Every repair operator in this literature is additive &mdash; recompute the important tokens (SparseX), add an offset correction (KVCOMM), patch first-layer deviations (CacheBlend). None estimates and subtracts a per-token contaminant, none treats the prefix-induced error as an isolable quantity to remove rather than a token to recompute, and none names contamination as the object of study. The unselected reused tokens are left as-is in every one of these methods. Our distinctive claim must therefore be sharpened away from selection and onto the operator: a cheap subtractive per-token decontamination that corrects every reused token in place, contrasted against recompute-the-important-ones. SparseX also hands us the strongest possible motivating citation for the premise itself &mdash; its prefix-coupling sentence in Section 2 is almost verbatim our starting point."
+    data-zh="然而，它並未封住去污染這一軸。此文獻中的每個修復算子都是加法式的 &mdash; 重算重要 token（SparseX）、加上偏移修正（KVCOMM）、修補第一層偏差（CacheBlend）。無一估計並減去逐 token 的污染量，無一將前綴引起的誤差視為一個可隔離、應被移除的量而非一個待重算的 token，也無一將污染本身作為研究對象命名。在這些方法中，未被選中的重用 token 一律原封不動。因此，我方的特出主張必須從「選擇」移開、聚焦於「算子」：一種廉價的、減法式的逐 token 去污染，就地修正每個重用 token，與「重算重要者」相對照。SparseX 同時也給了我們對前提本身最有力的動機引用 &mdash; 其第 2 節的前綴耦合句子，幾乎逐字就是我方的起點。">It does not, however, close the decontamination axis. Every repair operator in this literature is additive &mdash; recompute the important tokens (SparseX), add an offset correction (KVCOMM), patch first-layer deviations (CacheBlend). None estimates and subtracts a per-token contaminant, none treats the prefix-induced error as an isolable quantity to remove rather than a token to recompute, and none names contamination as the object of study. The unselected reused tokens are left as-is in every one of these methods. Our distinctive claim must therefore be sharpened away from selection and onto the operator: a cheap subtractive per-token decontamination that corrects every reused token in place, contrasted against recompute-the-important-ones. SparseX also hands us the strongest possible motivating citation for the premise itself &mdash; its prefix-coupling sentence in Section 2 is almost verbatim our starting point.</span></p>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Novelty threat, stated plainly." data-zh="明白陳述的新穎性威脅。">Novelty threat, stated plainly.</span></strong>
+    <span class="i18n" data-en="SparseX does per-token, receiver-relevance token selection &mdash; so the selection component of our idea is no longer novel and should be presented as adopted prior art, not a contribution. What remains open, and what we must defend as the contribution, is the subtractive decontamination operator: correcting each reused token in place by removing an estimated contaminant, rather than recomputing a chosen subset or adding an alignment/offset delta. If a reviewer reads SparseX and KVCOMM together, our paper survives only if that operator distinction is made load-bearing and empirically decisive." data-zh="SparseX 做了逐 token、以接收端相關性為準的 token 選擇 &mdash; 因此我方想法中的選擇成分已不再新穎，應被呈現為採用的既有技術，而非貢獻。仍然開放、且我們必須捍衛為貢獻的，是減法式去污染算子：藉由移除估計的污染量就地修正每個重用 token，而非重算一個選定子集或加上一個對齊／偏移量。若審稿人將 SparseX 與 KVCOMM 併讀，我方論文唯有把該算子區分做成承重且在實驗上具決定性，方能存活。">SparseX does per-token, receiver-relevance token selection &mdash; so the selection component of our idea is no longer novel and should be presented as adopted prior art, not a contribution. What remains open, and what we must defend as the contribution, is the subtractive decontamination operator: correcting each reused token in place by removing an estimated contaminant, rather than recomputing a chosen subset or adding an alignment/offset delta. If a reviewer reads SparseX and KVCOMM together, our paper survives only if that operator distinction is made load-bearing and empirically decisive.</span>
+  </div>
+</section>
+
+<!-- ================= 10. ASSESSMENT ================= -->
+<section id="assessment">
+  <h2><span class="i18n" data-en="11. Strengths &amp; Limitations" data-zh="11. 優點與限制">11. Strengths &amp; Limitations</span></h2>
+  <p><span class="i18n"
+    data-en="SparseX is a strong systems paper whose contribution is as much engineering as algorithm. The assessment below separates what it establishes from what it leaves open, read from the full text rather than the abstract."
+    data-zh="SparseX 是一篇紮實的系統論文，其貢獻中工程與演算法並重。下方的評估區分它所確立者與其留白，係讀自全文而非摘要。">SparseX is a strong systems paper whose contribution is as much engineering as algorithm. The assessment below separates what it establishes from what it leaves open, read from the full text rather than the abstract.</span></p>
+  <div class="grid-2">
+    <div>
+      <h4><span class="i18n" data-en="Strengths" data-zh="優點">Strengths</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="A genuinely general reuse abstraction: one segment-level loop covers chat, RAG, and agents, with arbitrary interleaving of reused and non-reuse text." data-zh="一個真正通用的重用抽象：單一片段級迴圈涵蓋對話、RAG 與 agent，並支援重用與非重用文字的任意交錯。">A genuinely general reuse abstraction: one segment-level loop covers chat, RAG, and agents, with arbitrary interleaving of reused and non-reuse text.</span></li>
+        <li><span class="i18n" data-en="The SparseQ probe is free: it reuses queries the request must compute anyway, avoiding the auxiliary model that CacheClip-style methods need." data-zh="SparseQ 探針是免費的：它重用請求無論如何都得計算的 query，避免了 CacheClip 式方法所需的輔助模型。">The SparseQ probe is free: it reuses queries the request must compute anyway, avoiding the auxiliary model that CacheClip-style methods need.</span></li>
+        <li><span class="i18n" data-en="Deep engine integration: virtual blocks, frozen-block pools, extra keys, and a fused copy-Delta-RoPE kernel keep reuse compatible with PagedAttention, Prefix Cache, and FlashAttention/FlashInfer." data-zh="深度引擎整合：虛擬 block、frozen-block pool、extra key 與融合的 copy-Delta-RoPE kernel，使重用與 PagedAttention、Prefix Cache 及 FlashAttention/FlashInfer 相容。">Deep engine integration: virtual blocks, frozen-block pools, extra keys, and a fused copy-Delta-RoPE kernel keep reuse compatible with PagedAttention, Prefix Cache, and FlashAttention/FlashInfer.</span></li>
+        <li><span class="i18n" data-en="The layer-wise diagnostic (Figures 5&ndash;6) is a real contribution on its own: it shows early-layer KV deviation is layout-sensitive and motivates deferring selection past the early layers." data-zh="逐層診斷（圖 5&ndash;6）本身就是一項真正的貢獻：它顯示早期層的 KV 偏差對佈局敏感，並為將選擇延後至早期層之後提供動機。">The layer-wise diagnostic (Figures 5&ndash;6) is a real contribution on its own: it shows early-layer KV deviation is layout-sensitive and motivates deferring selection past the early layers.</span></li>
+      </ul>
+    </div>
+    <div>
+      <h4><span class="i18n" data-en="Limitations" data-zh="限制">Limitations</span></h4>
+      <ul>
+        <li><span class="i18n" data-en="The layer boundary is a task- and model-specific hyperparameter (10&ndash;20% of layers), tuned rather than derived; the paper offers heuristics, not an automatic setting." data-zh="層邊界是一個依任務與模型而定的超參數（層數的 10&ndash;20%），是調出來而非推導出來的；論文提供的是啟發式，而非自動設定。">The layer boundary is a task- and model-specific hyperparameter (10&ndash;20% of layers), tuned rather than derived; the paper offers heuristics, not an automatic setting.</span></li>
+        <li><span class="i18n" data-en="Evaluation reports quality and TTFT but no end-to-end throughput or sustained-concurrency numbers, so the engine-level payoff is argued more than measured." data-zh="評估報告品質與 TTFT，但無端到端吞吐或持續並發的數字，因此引擎層級的回報是論述多於量測。">Evaluation reports quality and TTFT but no end-to-end throughput or sustained-concurrency numbers, so the engine-level payoff is argued more than measured.</span></li>
+        <li><span class="i18n" data-en="Correction is additive-only: unselected reused tokens keep their original-prefix KV, so residual contextual coupling on non-top-k tokens is never removed, only avoided by recomputing the important ones." data-zh="修正僅為加法式：未被選中的重用 token 保留其原始前綴 KV，因此非 top-k token 上的殘餘上下文耦合從未被移除，只是藉重算重要者而繞開。">Correction is additive-only: unselected reused tokens keep their original-prefix KV, so residual contextual coupling on non-top-k tokens is never removed, only avoided by recomputing the important ones.</span></li>
+        <li><span class="i18n" data-en="All experiments use RTX 4090s and the Qwen family; behaviour on other architectures, non-RoPE position schemes, and datacentre GPUs is left to future work." data-zh="所有實驗使用 RTX 4090 與 Qwen 系列；在其他架構、非 RoPE 位置方案與資料中心 GPU 上的行為留待未來工作。">All experiments use RTX 4090s and the Qwen family; behaviour on other architectures, non-RoPE position schemes, and datacentre GPUs is left to future work.</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Bottom line for our project." data-zh="對我方專案的結論。">Bottom line for our project.</span></strong>
+    <span class="i18n" data-en="SparseX narrows our gap on token selection but not on the decontamination operator, and it never names contamination. We should cite its Section 2 prefix-coupling sentence as the premise, adopt SparseQ-style receiver-query selection as prior art rather than contribution, and stake our novelty on subtractive in-place decontamination of every reused token." data-zh="SparseX 在 token 選擇上縮小了我方缺口，但在去污染算子上並未，且它從未為污染命名。我們應引用其第 2 節的前綴耦合句子作為前提，將 SparseQ 式的接收端 query 選擇採納為既有技術而非貢獻，並把我方新穎性押注於「對每個重用 token 的減法式就地去污染」。">SparseX narrows our gap on token selection but not on the decontamination operator, and it never names contamination. We should cite its Section 2 prefix-coupling sentence as the premise, adopt SparseQ-style receiver-query selection as prior art rather than contribution, and stake our novelty on subtractive in-place decontamination of every reused token.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="11.1 Takeaways for the survey" data-zh="11.1 綜述要點">11.1 Takeaways for the survey</span></h3>
+  <p><span class="i18n" data-en="For a reader scanning this page as one entry in the survey, the four cards below compress what SparseX is, why it matters to our line of work, and how to use it in a citation." data-zh="對於將本頁作為綜述中一則條目瀏覽的讀者，下方四張卡片濃縮了 SparseX 是什麼、為何對我方研究線重要，以及在引用中如何使用它。">For a reader scanning this page as one entry in the survey, the four cards below compress what SparseX is, why it matters to our line of work, and how to use it in a citation.</span></p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="What it is" data-zh="它是什麼">What it is</span></h4>
+      <p><span class="i18n" data-en="A training-free, model-agnostic vLLM extension for segment-level KV reuse that supports arbitrary interleaving of reused and fresh text, using receiver queries (SparseQ) to select tokens to recompute and RoPE to realign the rest." data-zh="一個免訓練、與模型無關的 vLLM 擴充，用於片段級 KV 重用，支援重用與新文字的任意交錯，以接收端 query（SparseQ）選擇要重算的 token、以 RoPE 重對齊其餘。">A training-free, model-agnostic vLLM extension for segment-level KV reuse that supports arbitrary interleaving of reused and fresh text, using receiver queries (SparseQ) to select tokens to recompute and RoPE to realign the rest.</span></p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="The premise to cite" data-zh="要引用的前提">The premise to cite</span></h4>
+      <p><span class="i18n" data-en="Its Section 2 prefix-coupling sentence &mdash; 'the hidden states and KV tensors of the same text segment often differ under different prefixes and different concatenation positions' &mdash; is the locked motivating citation for our decontamination premise." data-zh="其第 2 節的前綴耦合句 &mdash; 「同一段文字在不同前綴與不同拼接位置下，其隱藏狀態與 KV 張量往往不同」 &mdash; 是我方去污染前提所鎖定的動機引用。">Its Section 2 prefix-coupling sentence &mdash; 'the hidden states and KV tensors of the same text segment often differ under different prefixes and different concatenation positions' &mdash; is the locked motivating citation for our decontamination premise.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Overlap with us" data-zh="與我們的重疊">Overlap with us</span></h4>
+      <p><span class="i18n" data-en="Per-token, receiver-relevance token selection (SparseQ) is now prior art. The selection half of our idea is no longer novel and must be presented as adopted, not claimed." data-zh="逐 token、以接收端相關性為準的 token 選擇（SparseQ）現已是既有技術。我方想法中「選擇」的那一半不再新穎，必須呈現為採用而非主張。">Per-token, receiver-relevance token selection (SparseQ) is now prior art. The selection half of our idea is no longer novel and must be presented as adopted, not claimed.</span></p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="What stays ours" data-zh="仍屬我方者">What stays ours</span></h4>
+      <p><span class="i18n" data-en="The subtractive operator. SparseX (and KVCOMM) repair additively &mdash; recompute or add an offset. Subtracting a receiver-conditioned contaminant in place, for every reused token, remains unclaimed and is where our contribution must live." data-zh="減法算子。SparseX（與 KVCOMM）以加法方式修復 &mdash; 重算或加上偏移。就地為每個重用 token 減去一個以接收端為條件的污染量，仍無人主張，我方貢獻須落於此。">The subtractive operator. SparseX (and KVCOMM) repair additively &mdash; recompute or add an offset. Subtracting a receiver-conditioned contaminant in place, for every reused token, remains unclaimed and is where our contribution must live.</span></p>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <p><span class="i18n" data-en="SparseX: Efficient Segment-Level KV Cache Sharing for Interleaved LLM Serving (arXiv:2606.01751) &middot; Code: github.com/MemTensor/SparseX" data-zh="SparseX：面向交錯式 LLM 服務的高效片段級 KV Cache 共享（arXiv:2606.01751）&middot; 程式碼：github.com/MemTensor/SparseX">SparseX: Efficient Segment-Level KV Cache Sharing for Interleaved LLM Serving (arXiv:2606.01751) &middot; Code: github.com/MemTensor/SparseX</span></p>
+  <p><span class="i18n" data-en="Related pages in this survey:" data-zh="本綜述中的相關頁面：">Related pages in this survey:</span>
+    <a href="../kvcomm/index.html">KVCOMM</a> &middot;
+    <a href="../cacheblend/index.html">CacheBlend</a> &middot;
+    <a href="../epic/index.html">EPIC</a></p>
+  <p><span class="i18n" data-en="Analysis page for the Agentic AI Infrastructure Survey &middot; Generated 2026-07-09" data-zh="Agentic AI 基礎設施綜述之分析頁 &middot; 產生日期：2026-07-09">Analysis page for the Agentic AI Infrastructure Survey &middot; Generated 2026-07-09</span></p>
+</footer>
+
+<script>
+  function setLang(l){document.querySelectorAll('.i18n').forEach(function(e){if(e.dataset[l])e.innerHTML=e.dataset[l]});document.getElementById('lang-en').classList.toggle('active',l==='en');document.getElementById('lang-zh').classList.toggle('active',l==='zh');localStorage.setItem('lang',l);if(window.renderMathInElement){window.renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})}}
+  (function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>

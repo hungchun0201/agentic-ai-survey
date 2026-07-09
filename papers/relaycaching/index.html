@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelayCaching: Accelerating LLM Collaboration via Decoding KV Cache Reuse</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+/* ===== ACCENT (Emerald — cache strategies) ===== */
+:root{--accent:#2ecc71;--accent-rgb:46,204,113;--nav-bg:rgba(9,30,19,0.95)}
+
+/* ===== RESET & BASE ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:16px}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0e0b12;color:#d0d5e0;line-height:1.7}
+a{color:#6ec6ff;text-decoration:none;transition:color .2s}
+a:hover{color:#ff9f43}
+
+/* ===== STICKY NAV ===== */
+nav{position:sticky;top:0;z-index:1000;background:var(--nav-bg);backdrop-filter:blur(12px);border-bottom:1px solid rgba(var(--accent-rgb),0.25);padding:0 2rem}
+nav ul{display:flex;list-style:none;max-width:1200px;margin:0 auto;gap:0.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+nav ul::-webkit-scrollbar{display:none}
+nav ul li a{display:block;padding:0.85rem 1rem;color:#93c4a6;text-decoration:none;font-size:0.85rem;font-weight:500;white-space:nowrap;transition:color 0.2s,border-bottom 0.2s;border-bottom:2px solid transparent}
+nav ul li a:hover,nav ul li a.active{color:#fff;border-bottom:2px solid var(--accent)}
+.lang-switch{margin-left:auto;display:flex;align-items:center;gap:6px;list-style:none}
+.lang-switch a{color:rgba(255,255,255,.7);text-decoration:none;padding:4px 12px;border-radius:14px;font-size:.78rem;border:1px solid rgba(255,255,255,.3);transition:all .2s;cursor:pointer}
+.lang-switch a:hover,.lang-switch a.active{color:#fff;background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+
+/* ===== HERO ===== */
+.hero{background:linear-gradient(135deg,#0a1f14 0%,#0d2419 50%,#07281a 100%);padding:4.5rem 2rem 3.5rem;text-align:center;position:relative;overflow:hidden;color:#fff}
+.hero::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(var(--accent-rgb),.08) 0%,transparent 50%),radial-gradient(circle at 70% 60%,rgba(255,159,67,.04) 0%,transparent 50%);animation:heroGlow 15s ease-in-out infinite alternate}
+@keyframes heroGlow{0%{transform:translate(0,0)}100%{transform:translate(-2%,1%)}}
+.hero h1{text-align:center;font-size:2.6rem;font-weight:800;color:#fff;margin-bottom:.6rem;position:relative;line-height:1.2}
+.hero .sub{font-size:1.1rem;color:#9ecbb2;max-width:760px;margin:0 auto 1.5rem;position:relative}
+.hero .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;position:relative}
+.hero .badge{display:inline-block;background:rgba(var(--accent-rgb),0.18);border:1px solid rgba(var(--accent-rgb),0.4);color:var(--accent);padding:.3rem .9rem;border-radius:20px;font-size:.82rem;font-weight:600;position:relative;text-transform:none;letter-spacing:normal}
+
+/* ===== CONTAINER ===== */
+.container{max-width:1100px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ===== SECTIONS ===== */
+section{padding:2.5rem 0;border-bottom:1px solid rgba(110,198,255,.08)}
+section:last-of-type{border-bottom:none}
+h2{font-size:1.8rem;font-weight:700;color:#fff;margin:3rem 0 1.2rem;padding-bottom:.5rem;border-bottom:2px solid rgba(var(--accent-rgb),0.3);position:relative}
+h2::before{content:'';position:absolute;bottom:-2px;left:0;width:60px;height:2px;background:linear-gradient(90deg,#6ec6ff,#ff9f43)}
+h3{font-size:1.3rem;color:#e0e7f0;margin:1.8rem 0 .8rem;font-weight:600}
+h4{font-size:1.05rem;color:#ffb74d;margin:1.2rem 0 .6rem;font-weight:600}
+.container p,.container li{max-width:900px}
+
+/* ===== CODE ===== */
+pre{background:#1e1e2e;border:1px solid #2d2d44;border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.6;margin:.8rem 0}
+pre code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;color:#cdd6f4}
+code{font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;font-size:.85em}
+p code,li code,td code{background:rgba(var(--accent-rgb),0.08);padding:.1em .4em;border-radius:4px;color:var(--accent);font-size:.85em}
+.kw{color:#cba6f7}.fn{color:#89b4fa}.cm{color:#6c7086;font-style:italic}.st{color:#a6e3a1}.nu{color:#fab387}
+
+/* ===== TABLES ===== */
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th{background:rgba(var(--accent-rgb),0.1);color:var(--accent);padding:.6rem .8rem;text-align:left;font-weight:600;border-bottom:2px solid rgba(var(--accent-rgb),0.3)}
+td{padding:.55rem .8rem;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
+tr:hover td{background:rgba(110,198,255,.03)}
+
+/* ===== CARDS ===== */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:1.5rem 0}
+.card{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.1);border-radius:12px;padding:1.5rem 1.8rem;transition:border-color .3s,box-shadow .3s}
+.card:hover{border-color:rgba(var(--accent-rgb),0.3);box-shadow:0 4px 24px rgba(0,0,0,.3)}
+.card.hl{border-left:4px solid var(--accent)}
+.card h4{margin-top:0;color:#ffb74d}
+
+/* ===== FLOW ===== */
+.flow{display:flex;gap:0;margin:1.5rem 0;overflow-x:auto;padding-bottom:8px}
+.flow .step{flex:1;min-width:170px;text-align:center;position:relative}
+.flow .step .c{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 8px;font-weight:700;font-size:1rem;color:#fff}
+.flow .step:nth-child(1) .c{background:#0f3460}
+.flow .step:nth-child(2) .c{background:var(--accent);color:#07281a}
+.flow .step:nth-child(3) .c{background:#f5a623;color:#1a1030}
+.flow .step:nth-child(4) .c{background:#7e57c2}
+.flow .step .lbl{font-weight:600;font-size:.9rem;color:#e0e7f0}
+.flow .step .desc{font-size:.8rem;color:#8fa4c0;margin-top:3px}
+.flow .step::after{content:'';position:absolute;top:24px;right:-16px;width:32px;height:2px;background:rgba(255,255,255,.15)}
+.flow .step:last-child::after{display:none}
+
+/* ===== VFLOW ===== */
+.vflow{display:flex;flex-direction:column;gap:0;align-items:center;margin:1.5rem 0}
+.vflow .box{width:100%;max-width:760px;padding:1rem 1.2rem;border-radius:10px;font-size:.85rem;position:relative}
+.vflow .box.blue{background:rgba(15,52,96,.6);border:1px solid rgba(110,198,255,.3);color:#d0d5e0}
+.vflow .box.red{background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#d0d5e0}
+.vflow .box.green{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);color:#d0d5e0}
+.vflow .box.orange{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.35);color:#d0d5e0}
+.vflow .box.gray{background:rgba(45,45,68,.7);border:1px solid rgba(255,255,255,.1);color:#8fa4c0}
+.vflow .box.emerald{background:rgba(var(--accent-rgb),.12);border:1px solid rgba(var(--accent-rgb),.35);color:#d0d5e0}
+.vflow .box h4{margin:0 0 .4rem;font-size:.95rem}
+.vflow .box ul{margin:4px 0 0 16px;font-size:.82rem}
+.vflow .box li{margin-bottom:2px}
+.vflow .arrow{color:#6c7086;font-size:1.3rem;line-height:1;padding:2px 0}
+.vflow .branch{display:flex;gap:12px;width:100%;max-width:760px;flex-wrap:wrap}
+.vflow .branch .box{flex:1;min-width:200px}
+
+/* ===== TIMELINE BAR ===== */
+.tbar{display:flex;align-items:center;gap:0;margin:1rem 0 2.2rem;flex-wrap:nowrap;overflow-x:auto}
+.tbar .seg{height:56px;display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:500;white-space:nowrap;padding:0 14px;position:relative}
+.tbar .seg.a1{background:rgba(110,198,255,.22);color:#6ec6ff;border-radius:6px 0 0 6px}
+.tbar .seg.a2{background:rgba(245,166,35,.2);color:#f5a623;flex:1;min-width:110px}
+.tbar .seg.a3{background:rgba(233,69,96,.2);color:#e94560;flex:1.4;min-width:130px}
+.tbar .seg.a4{background:rgba(var(--accent-rgb),.22);color:var(--accent);border-radius:0 6px 6px 0;flex:1.9;min-width:150px}
+.tbar .seg .marker{position:absolute;bottom:-20px;left:0;right:0;font-size:.68rem;color:#8fa4c0;text-align:center}
+
+/* ===== DIAGRAM ===== */
+.diagram{background:#1e1e2e;border:1px solid #2d2d44;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+
+/* ===== NOTES ===== */
+.note{background:rgba(255,159,67,.06);border-left:4px solid #ffb74d;padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.note strong{color:#fff}
+.warn{background:rgba(var(--accent-rgb),.06);border-left:4px solid var(--accent);padding:1rem 1.4rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.88rem}
+.warn strong{color:#fff}
+
+/* ===== LISTS ===== */
+ul,ol{margin:8px 0 8px 22px}
+li{margin-bottom:5px}
+
+/* ===== METRIC BOXES ===== */
+.metric-boxes{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:1rem;margin:1.5rem 0}
+.metric-box{background:rgba(30,30,46,.7);border:1px solid rgba(var(--accent-rgb),0.2);border-radius:10px;padding:1.2rem;text-align:center}
+.metric-box .value{font-size:1.9rem;font-weight:700;color:var(--accent);line-height:1.1}
+.metric-box .label{font-size:.8rem;color:#8fa4c0;margin-top:4px}
+
+/* ===== INDICATORS ===== */
+.check{color:#2ecc71;font-weight:bold}
+.cross{color:#e94560;font-weight:bold}
+.partial{color:#ffb74d;font-weight:bold}
+
+/* ===== GRID-2 ===== */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+
+/* ===== FOOTER ===== */
+footer{text-align:center;padding:3rem 2rem;color:#8fa4c0;font-size:.82rem;border-top:1px solid rgba(110,198,255,.12)}
+footer a{color:#6ec6ff}
+
+/* ===== PAPER FIGURES ===== */
+.paper-fig{margin:1.8rem 0;text-align:center}
+.paper-fig img{display:block;margin:0 auto;max-width:100%;border-radius:8px;border:1px solid rgba(var(--accent-rgb),0.2);background:#fff;padding:12px}
+.paper-fig.fig-sm img{max-width:620px}
+.paper-fig .fig-cap{font-size:.82rem;color:#8fa4c0;margin-top:.5rem;max-width:800px;display:inline-block;text-align:left;line-height:1.5}
+.paper-fig .fig-cap strong{color:var(--accent)}
+.paper-fig-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:1.5rem 0}
+.paper-fig-row .paper-fig{margin:0}
+.paper-fig-row .paper-fig img{max-width:100%}
+
+/* ===== LATEX ===== */
+.math-block{background:rgba(30,30,46,.8);border:1px solid rgba(var(--accent-rgb),0.15);border-radius:8px;padding:1.2rem 1.5rem;margin:1rem 0;overflow-x:auto;text-align:center}
+.math-block .eq-label{float:right;color:#8fa4c0;font-size:.85rem}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+  html,body{overflow-x:clip}
+  .hero h1{font-size:1.7rem}
+  .container{padding:1rem}
+  .cards{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .paper-fig-row{grid-template-columns:1fr}
+  pre{font-size:.72rem;padding:.7rem}
+  table{display:block;overflow-x:auto}
+  nav ul{gap:0}
+  nav ul li a{padding:.7rem .6rem;font-size:.78rem}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <ul>
+    <li><a href="../../index.html">&larr; Agentic Survey</a></li>
+    <li><a href="#problem">Problem</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#observations">Observations</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#profiler">Layer Profiler</a></li>
+    <li><a href="#selection">Token Selection</a></li>
+    <li><a href="#results">Results</a></li>
+    <li><a href="#limits">Limitations</a></li>
+    <li><a href="#decontamination">Our Thesis</a></li>
+    <li><a href="#related">Related Work</a></li>
+    <li class="lang-switch"><a onclick="setLang('en')" id="lang-en" class="active">EN</a><a onclick="setLang('zh')" id="lang-zh">ZH</a></li>
+  </ul>
+</nav>
+
+<div class="hero">
+  <h1>RelayCaching</h1>
+  <p class="sub"><span class="i18n" data-en="Accelerating LLM Collaboration via Decoding KV Cache Reuse — treating one agent's decode-phase KV cache as a high-fidelity draft for the next agent's prefill, corrected by sparse per-token rectification." data-zh="透過解碼階段 KV Cache 重用加速 LLM 協作 —— 將上游 agent 解碼階段的 KV cache 視為下游 agent prefill 的高保真草稿，再以稀疏的逐 token 修正加以校正。">Accelerating LLM Collaboration via Decoding KV Cache Reuse — treating one agent's decode-phase KV cache as a high-fidelity draft for the next agent's prefill, corrected by sparse per-token rectification.</span>
+  </p>
+  <div class="badges">
+    <span class="badge">arXiv:2603.13289</span>
+    <span class="badge">Preprint, Feb 2026</span>
+    <span class="badge">Multi-Agent LLM</span>
+    <span class="badge">KV Cache Reuse</span>
+    <span class="badge">Training-free</span>
+    <span class="badge">Decode&rarr;Prefill</span>
+  </div>
+  <p style="color:#9ecbb2;font-size:.92rem;margin-top:1.2rem;position:relative;max-width:none">Yingsheng Geng, Yuchong Gao, Weihong Wu, Guyue Liu, Jiang Liu</p>
+  <p style="color:#6a947a;font-size:.85rem;position:relative;max-width:none"><span class="i18n" data-en="arXiv:2603.13289v1 [cs.LG], submitted 28 February 2026" data-zh="arXiv:2603.13289v1 [cs.LG]，2026 年 2 月 28 日提交">arXiv:2603.13289v1 [cs.LG], submitted 28 February 2026</span>
+  </p>
+</div>
+
+<div class="container">
+
+<!-- ====== 1. PROBLEM / MOTIVATION ====== -->
+<section id="problem">
+  <h2><span class="i18n" data-en="1. The Problem: Every Agent Re-Prefills the Last Agent's Output" data-zh="1. 問題：每個 agent 都在重新 prefill 上一個 agent 的輸出">1. The Problem: Every Agent Re-Prefills the Last Agent's Output</span></h2>
+  <p>
+    <span class="i18n" data-en="A multi-agent LLM system decomposes a task across specialized agents that communicate by writing text to one another. The content one agent decodes becomes verbatim input that the next agent must read. Because reading in a transformer means running a prefill pass to build the key-value (KV) cache, every hand-off re-encodes text that was already turned into KV state one stage earlier. This section builds the case that the redundant re-prefill is the dominant, growing latency term in collaborative inference, and that the obvious ways to remove it either break accuracy or fail on the positions where agent text actually lands." data-zh="多 agent LLM 系統將任務拆解給多個專職 agent，彼此以文字溝通。某個 agent 解碼出的內容，會原封不動成為下一個 agent 必須讀取的輸入。而在 transformer 中「讀取」意味著執行一次 prefill 以建立 key-value（KV）cache，因此每一次交接都在重新編碼上一階段早已轉成 KV 狀態的文字。本節將論證：這種冗餘的重新 prefill 是協作推理中最主要且持續成長的延遲項，而移除它的顯而易見做法，若非破壞準確度，就是在 agent 文字實際落點的位置上失效。">A multi-agent LLM system decomposes a task across specialized agents that communicate by writing text to one another. The content one agent decodes becomes verbatim input that the next agent must read. Because reading in a transformer means running a prefill pass to build the key-value (KV) cache, every hand-off re-encodes text that was already turned into KV state one stage earlier. This section builds the case that the redundant re-prefill is the dominant, growing latency term in collaborative inference, and that the obvious ways to remove it either break accuracy or fail on the positions where agent text actually lands.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="1.1 Why now — collaboration replaced the monolith" data-zh="1.1 為何是現在 —— 協作取代了單體模型">1.1 Why now — collaboration replaced the monolith</span></h3>
+  <p>
+    <span class="i18n" data-en="The dominant deployment pattern for hard tasks shifted from a single large model answering in one shot to orchestrated multi-agent programs — planner, coder, reviewer, tool-caller — that pass structured messages through many rounds. In these programs the shared context is monotonically accumulating: an Architect emits a specification, a Developer reads that specification and emits code, and a Reviewer reads specification plus code and emits a critique. Each downstream agent's prompt is the concatenation of everything its predecessors produced, so the prefill length of the last agent in a five-stage program can be an order of magnitude larger than the first. Pre-2024 serving stacks were tuned for one- to three-turn chat, where the prompt is short and mostly static; the 2026 collaborative workload instead spends the majority of its wall-clock time re-reading dynamically generated text that no static cache anticipated." data-zh="面對困難任務的主流部署方式，已從單一大模型一次作答，轉變為經過編排的多 agent 程式 —— planner、coder、reviewer、tool-caller —— 透過多輪傳遞結構化訊息。在這類程式中，共享脈絡是單調累積的：Architect 產出規格，Developer 讀取該規格並產出程式碼，Reviewer 讀取規格加程式碼並產出評論。每個下游 agent 的 prompt 都是其所有前驅產物的串接，因此五階段程式中最後一個 agent 的 prefill 長度，可能比第一個大上一個數量級。2024 年前的 serving 系統是為一到三輪對話調校的，其 prompt 短且大致靜態；而 2026 年的協作工作負載，卻把大部分實際時間花在重新讀取任何靜態 cache 都無法預期的動態生成文字上。">The dominant deployment pattern for hard tasks shifted from a single large model answering in one shot to orchestrated multi-agent programs — planner, coder, reviewer, tool-caller — that pass structured messages through many rounds. In these programs the shared context is monotonically accumulating: an Architect emits a specification, a Developer reads that specification and emits code, and a Reviewer reads specification plus code and emits a critique. Each downstream agent's prompt is the concatenation of everything its predecessors produced, so the prefill length of the last agent in a five-stage program can be an order of magnitude larger than the first. Pre-2024 serving stacks were tuned for one- to three-turn chat, where the prompt is short and mostly static; the 2026 collaborative workload instead spends the majority of its wall-clock time re-reading dynamically generated text that no static cache anticipated.</span>
+  </p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2603.13289v1/x1.png" alt="Figure 1: Overview of KV cache reuse in multi-agent LLM collaboration; Architect/Developer/Reviewer workflow and comparison of caching strategies">
+    <div class="fig-cap"><strong>Figure 1 (from paper):</strong> <span class="i18n" data-en="Top: a typical workflow where an Architect generates a spec, a Developer produces code from it, and a Reviewer evaluates the result — each agent's output becomes the next agent's input, causing cascading redundant prefill. Bottom: (a) prefix caching fails because the shared content is not a prefix; (b) pre-computed caching cannot handle dynamically generated content; (c) RelayCaching enables decode-to-prefill reuse via selective rectification." data-zh="上：典型工作流程中，Architect 產生規格、Developer 依規格產生程式碼、Reviewer 評估結果 —— 每個 agent 的輸出成為下一個 agent 的輸入，造成級聯的冗餘 prefill。下：(a) prefix caching 因為共享內容並非前綴而失效；(b) pre-computed caching 無法處理動態生成的內容；(c) RelayCaching 透過選擇性修正，實現解碼到 prefill 的重用。">Top: a typical workflow where an Architect generates a spec, a Developer produces code from it, and a Reviewer evaluates the result — each agent's output becomes the next agent's input, causing cascading redundant prefill. Bottom: (a) prefix caching fails because the shared content is not a prefix; (b) pre-computed caching cannot handle dynamically generated content; (c) RelayCaching enables decode-to-prefill reuse via selective rectification.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="1.2 A concrete trace — the Reviewer waits 3.89 seconds before it can think" data-zh="1.2 具體案例 —— Reviewer 在能開始思考前先等了 3.89 秒">1.2 A concrete trace — the Reviewer waits 3.89 seconds before it can think</span></h3>
+  <p>
+    <span class="i18n" data-en="Consider the three-stage program of Figure 1 running on a small model. The Architect decodes an 800-token specification. The Developer must first prefill that 800-token specification before it can begin decoding its 2,048-token code body; the Reviewer must then prefill the specification and the code — roughly 2,900 tokens — before it can emit its first critique token. In the paper's scaling measurement the cumulative reused context grows from 512 to 12,288 tokens as agents are chained, and a standard full-prefill pipeline spends 3.89 seconds building the KV cache of the final agent before that agent produces a single output token. That 3.89 seconds is pure re-encoding of text the pipeline already saw; from the user's standpoint it is dead time between the moment the previous agent finished writing and the moment the next agent starts responding." data-zh="考慮 Figure 1 中的三階段程式在小模型上執行。Architect 解碼出 800 個 token 的規格。Developer 必須先 prefill 這 800 個 token 的規格，才能開始解碼其 2,048 個 token 的程式碼主體；Reviewer 接著必須 prefill 規格加程式碼 —— 約 2,900 個 token —— 才能吐出第一個評論 token。在論文的擴展性量測中，隨著 agent 串接，累積重用脈絡從 512 成長到 12,288 個 token，而標準的 full-prefill 管線要花 3.89 秒建立最後一個 agent 的 KV cache，該 agent 才能產出第一個輸出 token。這 3.89 秒純粹是在重新編碼管線早已看過的文字；從使用者角度，這是上一個 agent 寫完到下一個 agent 開始回應之間的空白時間。">Consider the three-stage program of Figure 1 running on a small model. The Architect decodes an 800-token specification. The Developer must first prefill that 800-token specification before it can begin decoding its 2,048-token code body; the Reviewer must then prefill the specification and the code — roughly 2,900 tokens — before it can emit its first critique token. In the paper's scaling measurement the cumulative reused context grows from 512 to 12,288 tokens as agents are chained, and a standard full-prefill pipeline spends 3.89 seconds building the KV cache of the final agent before that agent produces a single output token. That 3.89 seconds is pure re-encoding of text the pipeline already saw; from the user's standpoint it is dead time between the moment the previous agent finished writing and the moment the next agent starts responding.</span>
+  </p>
+
+  <div class="tbar">
+    <div class="seg a1"><span class="i18n" data-en="Architect decode" data-zh="Architect 解碼">Architect decode</span><span class="marker"><span class="i18n" data-en="produces 800-tok spec" data-zh="產出 800-tok 規格">produces 800-tok spec</span></span></div>
+    <div class="seg a2"><span class="i18n" data-en="Dev re-prefill spec" data-zh="Dev 重新 prefill 規格">Dev re-prefill spec</span></div>
+    <div class="seg a3"><span class="i18n" data-en="Rev re-prefill spec+code" data-zh="Rev 重新 prefill 規格+程式碼">Rev re-prefill spec+code</span><span class="marker"><span class="i18n" data-en="up to 3.89 s dead time at 12k tokens" data-zh="12k tokens 時可達 3.89 秒空白">up to 3.89 s dead time at 12k tokens</span></span></div>
+    <div class="seg a4"><span class="i18n" data-en="only now: Reviewer thinks" data-zh="到此才：Reviewer 開始思考">only now: Reviewer thinks</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="1.3 The status-quo cost, quantified" data-zh="1.3 現狀成本的量化">1.3 The status-quo cost, quantified</span></h3>
+  <p>
+    <span class="i18n" data-en="The redundant prefill is not a rounding error. On the paper's per-agent breakdown (Qwen3-0.6B, 512-token prefix, 2,048-token output), time-to-first-token grows from 85.2 ms with two agents to 493.9 ms with five, and essentially all of that increase is re-encoding of shared upstream text. On the long-context measurement the same term reaches 3.89 seconds at 12,288 cumulative tokens. Beyond latency, the redundant KV state also inflates memory: the final agent materializes a cache for the entire accumulated transcript even though most of that transcript was already resident one stage earlier. Any serving stack that treats each agent as an independent request pays this cost on every hand-off in every program." data-zh="這種冗餘 prefill 並非可忽略的誤差。在論文的逐 agent 拆解中（Qwen3-0.6B、512-token 前綴、2,048-token 輸出），time-to-first-token 從兩個 agent 的 85.2 ms 成長到五個 agent 的 493.9 ms，而這個增量幾乎全部是共享上游文字的重新編碼。在長脈絡量測中，同一項在 12,288 個累積 token 時達到 3.89 秒。除了延遲之外，冗餘的 KV 狀態也膨脹記憶體：最後一個 agent 為整份累積文稿實體化了一份 cache，儘管其中大部分早在前一階段就已駐留。任何將每個 agent 視為獨立請求的 serving 系統，都會在每個程式的每次交接上付出這個成本。">The redundant prefill is not a rounding error. On the paper's per-agent breakdown (Qwen3-0.6B, 512-token prefix, 2,048-token output), time-to-first-token grows from 85.2 ms with two agents to 493.9 ms with five, and essentially all of that increase is re-encoding of shared upstream text. On the long-context measurement the same term reaches 3.89 seconds at 12,288 cumulative tokens. Beyond latency, the redundant KV state also inflates memory: the final agent materializes a cache for the entire accumulated transcript even though most of that transcript was already resident one stage earlier. Any serving stack that treats each agent as an independent request pays this cost on every hand-off in every program.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="1.4 Why the obvious fixes fail" data-zh="1.4 為何顯而易見的修法會失效">1.4 Why the obvious fixes fail</span></h3>
+  <p>
+    <span class="i18n" data-en="The reader immediately asks why the shared text is not simply cached and reused. Two established families of KV reuse exist, and the multi-agent setting breaks both. Prefix caching, as implemented in vLLM and SGLang, reuses a cached KV block only when the new request begins with exactly the same tokens at exactly the same positions. In a collaborative program the shared content almost never sits at the prefix — the Reviewer's prompt places the specification after its own system instructions and after the code, at non-prefix positions — so the strict positional-alignment requirement is violated and the cache is discarded. Pre-computed caching, exemplified by CacheBlend and EPIC, relaxes the prefix constraint by encoding reusable chunks offline and stitching them in at arbitrary positions, but it assumes the reusable content is static and known in advance, such as retrieval documents in a RAG pipeline. Agent outputs are generated at run time and are never available for offline encoding, so pre-computed caching has nothing to load." data-zh="讀者立刻會問：為何不直接把共享文字快取起來重用？現有兩大類 KV 重用方法，而多 agent 情境同時破壞了兩者。Prefix caching（如 vLLM 與 SGLang 的實作）只有在新請求以完全相同的 token、位於完全相同的位置開頭時，才能重用已快取的 KV 區塊。在協作程式中，共享內容幾乎從不位於前綴 —— Reviewer 的 prompt 把規格放在自己的系統指令之後、程式碼之後，位於非前綴位置 —— 因此嚴格的位置對齊要求被違反，cache 遭丟棄。Pre-computed caching（以 CacheBlend 與 EPIC 為代表）藉由離線編碼可重用區塊、再於任意位置縫合，來放寬前綴限制，但它假設可重用內容是靜態且事先已知的，例如 RAG 管線中的檢索文件。而 agent 輸出是在執行期生成、從不具備離線編碼的可能，因此 pre-computed caching 根本無物可載。">The reader immediately asks why the shared text is not simply cached and reused. Two established families of KV reuse exist, and the multi-agent setting breaks both. Prefix caching, as implemented in vLLM and SGLang, reuses a cached KV block only when the new request begins with exactly the same tokens at exactly the same positions. In a collaborative program the shared content almost never sits at the prefix — the Reviewer's prompt places the specification after its own system instructions and after the code, at non-prefix positions — so the strict positional-alignment requirement is violated and the cache is discarded. Pre-computed caching, exemplified by CacheBlend and EPIC, relaxes the prefix constraint by encoding reusable chunks offline and stitching them in at arbitrary positions, but it assumes the reusable content is static and known in advance, such as retrieval documents in a RAG pipeline. Agent outputs are generated at run time and are never available for offline encoding, so pre-computed caching has nothing to load.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="1.5 The fundamental obstacle — the reused cache is close but not identical" data-zh="1.5 根本障礙 —— 重用的 cache 相近但不完全相同">1.5 The fundamental obstacle — the reused cache is close but not identical</span></h3>
+  <p>
+    <span class="i18n" data-en="There is one cache the collaborative setting does possess for free: the KV state the upstream agent built while decoding its own output. That decoding KV cache already encodes exactly the tokens the downstream agent needs to read. The obstacle is that decoding KV and prefill KV for the same tokens are not bit-identical. When the upstream agent decoded the text it attended to one context; when the downstream agent prefills the same text it sits under a different prefix, and that prefix perturbs the attention that produces the key and value vectors. Reusing the decoding cache verbatim therefore injects a small error, and reusing it blindly across an entire agent chain lets that error compound. The naive correction — recompute the whole thing under the new prefix — is exactly the full prefill the method is trying to avoid. The real problem is therefore not whether the decoding cache is reusable, but whether the small set of positions where it genuinely deviates can be located and repaired without paying for the full prefill that would reveal them. RelayCaching's contribution is an empirical characterization showing that this deviating set is sparse and structured, plus a mechanism that finds and rectifies it cheaply." data-zh="協作情境確實免費擁有一份 cache：上游 agent 在解碼自身輸出時建立的 KV 狀態。這份解碼 KV cache 早已編碼了下游 agent 需要讀取的那些 token。障礙在於：對相同 token 而言，解碼 KV 與 prefill KV 並非位元完全相同。上游 agent 解碼該文字時所依附的脈絡，與下游 agent prefill 相同文字時所處的前綴不同，而該前綴會擾動產生 key 與 value 向量的注意力。因此原封不動重用解碼 cache 會注入微小誤差，而在整條 agent 鏈上盲目重用會使該誤差累積。天真的校正 —— 在新前綴下重算整份 —— 恰恰就是本方法試圖避免的 full prefill。真正的問題因此不在於解碼 cache 是否可重用，而在於：能否在不支付會揭露它們的 full prefill 的前提下，定位並修復那一小組真正偏離的位置。RelayCaching 的貢獻，正是一份實證刻畫，證明這組偏離位置是稀疏且結構化的，再加上一套能廉價找到並修正它的機制。">There is one cache the collaborative setting does possess for free: the KV state the upstream agent built while decoding its own output. That decoding KV cache already encodes exactly the tokens the downstream agent needs to read. The obstacle is that decoding KV and prefill KV for the same tokens are not bit-identical. When the upstream agent decoded the text it attended to one context; when the downstream agent prefills the same text it sits under a different prefix, and that prefix perturbs the attention that produces the key and value vectors. Reusing the decoding cache verbatim therefore injects a small error, and reusing it blindly across an entire agent chain lets that error compound. The naive correction — recompute the whole thing under the new prefix — is exactly the full prefill the method is trying to avoid. The real problem is therefore not whether the decoding cache is reusable, but whether the small set of positions where it genuinely deviates can be located and repaired without paying for the full prefill that would reveal them. RelayCaching's contribution is an empirical characterization showing that this deviating set is sparse and structured, plus a mechanism that finds and rectifies it cheaply.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="1.6 Position versus immediate prior work" data-zh="1.6 相對於直接相關工作的定位">1.6 Position versus immediate prior work</span></h3>
+  <p>
+    <span class="i18n" data-en="RelayCaching sits among a small set of cross-context KV reuse methods, and it is defined largely by what each of them leaves unaddressed for the dynamic multi-agent case." data-zh="RelayCaching 置身於一小群跨脈絡 KV 重用方法之中，其定位主要由這些方法在動態多 agent 情境下各自未能處理之處所界定。">RelayCaching sits among a small set of cross-context KV reuse methods, and it is defined largely by what each of them leaves unaddressed for the dynamic multi-agent case.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Prior method" data-zh="既有方法">Prior method</span></th>
+      <th><span class="i18n" data-en="What it reuses" data-zh="重用什麼">What it reuses</span></th>
+      <th><span class="i18n" data-en="What it leaves on the table" data-zh="未處理之處">What it leaves on the table</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>Prefix caching (vLLM, SGLang)</td><td><span class="i18n" data-en="Exact-prefix KV blocks" data-zh="精確前綴 KV 區塊">Exact-prefix KV blocks</span></td><td><span class="i18n" data-en="Requires strict positional alignment; agent content lives at non-prefix positions." data-zh="需嚴格位置對齊；agent 內容位於非前綴位置。">Requires strict positional alignment; agent content lives at non-prefix positions.</span></td></tr>
+      <tr><td>CacheBlend, EPIC</td><td><span class="i18n" data-en="Offline-encoded chunks, position-independent" data-zh="離線編碼區塊、與位置無關">Offline-encoded chunks, position-independent</span></td><td><span class="i18n" data-en="Assumes static offline content; value-norm detection misses cosine-governed decode deviation." data-zh="假設靜態離線內容；value-norm 偵測無法捕捉主導解碼偏離的餘弦相似度。">Assumes static offline content; value-norm detection misses the cosine-governed decode deviation.</span></td></tr>
+      <tr><td>DroidSpeak</td><td><span class="i18n" data-en="Pre-computed caches across shared-architecture models" data-zh="跨共享架構模型的預算 cache">Pre-computed caches across shared-architecture models</span></td><td><span class="i18n" data-en="Still pre-computed and cross-model; not runtime decode-to-prefill within an agent chain." data-zh="仍屬預算且跨模型；並非 agent 鏈內執行期的解碼到 prefill。">Still pre-computed and cross-model; not runtime decode-to-prefill within an agent chain.</span></td></tr>
+      <tr><td>APE</td><td><span class="i18n" data-en="Independently encoded caches via adaptive scaling" data-zh="以自適應縮放對齊獨立編碼 cache">Independently encoded caches via adaptive scaling</span></td><td><span class="i18n" data-en="Aligns independent encodings; does not exploit decode/prefill similarity." data-zh="對齊獨立編碼；未利用解碼/prefill 相似度。">Aligns independent encodings; does not exploit decode/prefill similarity.</span></td></tr>
+      <tr><td>KVCOMM</td><td><span class="i18n" data-en="Retrieval-based anchor pools that approximate KV offsets" data-zh="以檢索為基礎、近似 KV 偏移的 anchor pool">Retrieval-based anchor pools that approximate KV offsets</span></td><td><span class="i18n" data-en="Relies on external anchor samples; reuse rate declines as context diversity grows." data-zh="依賴外部 anchor 樣本；重用率隨脈絡多樣性上升而下降。">Relies on external anchor samples; reuse rate declines as context diversity grows.</span></td></tr>
+    </tbody>
+  </table>
+  <p>
+    <span class="i18n" data-en="KVCOMM (Ye et al., 2025) is the nearest neighbor: it is described as the first method to explicitly target cascading context redundancy in multi-agent inference, but it approximates the corrected KV by retrieving offsets from an external anchor pool, and its reuse rate falls as the running context diverges from the anchors. RelayCaching's stance is that no external reference is necessary — the upstream decoding cache is itself the best available approximation of the downstream prefill cache, and the only remaining work is to find and fix the sparse positions where the approximation is wrong." data-zh="KVCOMM（Ye et al., 2025）是最近的鄰居：它被描述為第一個明確針對多 agent 推理中級聯脈絡冗餘的方法，但它透過從外部 anchor pool 檢索偏移來近似校正後的 KV，且其重用率會隨著執行脈絡偏離 anchor 而下降。RelayCaching 的立場是：不需要任何外部參考 —— 上游解碼 cache 本身就是下游 prefill cache 最佳的可得近似，剩下的工作只是找到並修正該近似出錯的稀疏位置。">KVCOMM (Ye et al., 2025) is the nearest neighbor: it is described as the first method to explicitly target cascading context redundancy in multi-agent inference, but it approximates the corrected KV by retrieving offsets from an external anchor pool, and its reuse rate falls as the running context diverges from the anchors. RelayCaching's stance is that no external reference is necessary — the upstream decoding cache is itself the best available approximation of the downstream prefill cache, and the only remaining work is to find and fix the sparse positions where the approximation is wrong.</span>
+  </p>
+</section>
+
+<!-- ====== 2. OVERVIEW ====== -->
+<section id="overview">
+  <h2><span class="i18n" data-en="2. RelayCaching at a Glance" data-zh="2. RelayCaching 一覽">2. RelayCaching at a Glance</span></h2>
+  <p>
+    <span class="i18n" data-en="Having established that the upstream decoding cache is a close-but-imperfect draft of the downstream prefill cache, this section previews the paper's answer before the detailed mechanism. RelayCaching is a training-free inference method that reuses the decoding KV cache directly and repairs it in place, confining the repair to a narrow band of layers and a sparse set of tokens so that the reuse rate stays above 80% while accuracy tracks full prefilling." data-zh="在確立上游解碼 cache 是下游 prefill cache「相近但不完美的草稿」之後，本節在詳述機制前先預覽論文的解法。RelayCaching 是一個免訓練的推理方法，直接重用解碼 KV cache 並就地修復它，將修復限制在一小段層與一組稀疏 token，使重用率維持在 80% 以上，同時準確度貼近 full prefill。">Having established that the upstream decoding cache is a close-but-imperfect draft of the downstream prefill cache, this section previews the paper's answer before the detailed mechanism. RelayCaching is a training-free inference method that reuses the decoding KV cache directly and repairs it in place, confining the repair to a narrow band of layers and a sparse set of tokens so that the reuse rate stays above 80% while accuracy tracks full prefilling.</span>
+  </p>
+
+  <div class="flow">
+    <div class="step"><div class="c">1</div><div class="lbl"><span class="i18n" data-en="Profile (offline)" data-zh="剖析（離線）">Profile (offline)</span></div><div class="desc"><span class="i18n" data-en="Find the deviation-prone layer range and one detection layer from calibration data" data-zh="從校準資料找出易偏離的層範圍與一個偵測層">Find the deviation-prone layer range and one detection layer from calibration data</span></div></div>
+    <div class="step"><div class="c">2</div><div class="lbl"><span class="i18n" data-en="Capture (decode)" data-zh="擷取（解碼）">Capture (decode)</span></div><div class="desc"><span class="i18n" data-en="Store the upstream agent's pre-RoPE KV and accumulate per-token attention influence" data-zh="儲存上游 agent 的 pre-RoPE KV 並累積逐 token 注意力影響">Store the upstream agent's pre-RoPE KV and accumulate per-token attention influence</span></div></div>
+    <div class="step"><div class="c">3</div><div class="lbl"><span class="i18n" data-en="Select (prefill)" data-zh="選擇（prefill）">Select (prefill)</span></div><div class="desc"><span class="i18n" data-en="Re-apply RoPE, then pick tokens by deviation and by influence at the detection layer" data-zh="重新套用 RoPE，於偵測層依偏離與影響挑選 token">Re-apply RoPE, then pick tokens by deviation and by influence at the detection layer</span></div></div>
+    <div class="step"><div class="c">4</div><div class="lbl"><span class="i18n" data-en="Rectify (prefill)" data-zh="修正（prefill）">Rectify (prefill)</span></div><div class="desc"><span class="i18n" data-en="Recompute only the selected tokens inside the layer range; reuse everything else" data-zh="僅在層範圍內重算所選 token；其餘全部重用">Recompute only the selected tokens inside the layer range; reuse everything else</span></div></div>
+  </div>
+
+  <p>
+    <span class="i18n" data-en="The design rests on three empirical regularities (Section 3): the decoding cache is globally very close to the prefill cache, its deviation is concentrated in the middle layers in a U-shaped profile, and within those layers only a sparse and inter-layer-correlated set of tokens deviates. Because the deviation is confined this way, the method never has to recompute a full layer or a full sequence — it recomputes a handful of tokens in a middle band and reuses the rest verbatim." data-zh="此設計立基於三個實證規律（第 3 節）：解碼 cache 在整體上非常接近 prefill cache、其偏離集中在中間層並呈 U 形分布、且在這些層內只有一組稀疏且跨層相關的 token 偏離。正因偏離被如此限制，方法從不需要重算整層或整個序列 —— 它只重算中間帶的少數 token，其餘原封不動重用。">The design rests on three empirical regularities (Section 3): the decoding cache is globally very close to the prefill cache, its deviation is concentrated in the middle layers in a U-shaped profile, and within those layers only a sparse and inter-layer-correlated set of tokens deviates. Because the deviation is confined this way, the method never has to recompute a full layer or a full sequence — it recomputes a handful of tokens in a middle band and reuses the rest verbatim.</span>
+  </p>
+
+  <div class="cards">
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Contribution 1: Decode-to-prefill reuse premise" data-zh="貢獻 1：解碼到 prefill 的重用前提">Contribution 1: Decode-to-prefill reuse premise</span></h4>
+      <p>
+    <span class="i18n" data-en="An empirical study establishing that decoding KV caches are highly aligned with full-prefill caches, with value cosine similarity as the primary deviation indicator — so the decoding cache can serve as the draft for a downstream prefill." data-zh="一份實證研究，確立解碼 KV cache 與 full-prefill cache 高度對齊，並以 value 餘弦相似度作為主要偏離指標 —— 使解碼 cache 可作為下游 prefill 的草稿。">An empirical study establishing that decoding KV caches are highly aligned with full-prefill caches, with value cosine similarity as the primary deviation indicator — so the decoding cache can serve as the draft for a downstream prefill.</span>
+  </p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Contribution 2: Layer-range profiler" data-zh="貢獻 2：層範圍剖析器">Contribution 2: Layer-range profiler</span></h4>
+      <p>
+    <span class="i18n" data-en="An offline procedure that reads the U-shaped similarity profile to bound rectification to a middle layer range and to pick a single detection layer for token selection, from a small calibration set." data-zh="一個離線程序，讀取 U 形相似度分布以將修正限制在中間層範圍，並從小型校準集選出單一偵測層供 token 選擇之用。">An offline procedure that reads the U-shaped similarity profile to bound rectification to a middle layer range and to pick a single detection layer for token selection, from a small calibration set.</span>
+  </p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="Contribution 3: Two-criterion token selection" data-zh="貢獻 3：雙準則 token 選擇">Contribution 3: Two-criterion token selection</span></h4>
+      <p>
+    <span class="i18n" data-en="A per-token selector that unions a deviation criterion (value-cosine mismatch) with an influence criterion (accumulated decode attention plus trailing suffix), recomputing only the union and reusing the rest." data-zh="一個逐 token 選擇器，將偏離準則（value 餘弦不匹配）與影響準則（累積解碼注意力加上尾端後綴）取聯集，僅重算聯集、其餘重用。">A per-token selector that unions a deviation criterion (value-cosine mismatch) with an influence criterion (accumulated decode attention plus trailing suffix), recomputing only the union and reusing the rest.</span>
+  </p>
+    </div>
+  </div>
+
+  <div class="metric-boxes">
+    <div class="metric-box"><div class="value">&gt;80%</div><div class="label"><span class="i18n" data-en="KV cache reuse rate" data-zh="KV cache 重用率">KV cache reuse rate</span></div></div>
+    <div class="metric-box"><div class="value">4.7&times;</div><div class="label"><span class="i18n" data-en="TTFT reduction (up to 5 agents)" data-zh="TTFT 降幅（至 5 agent）">TTFT reduction (up to 5 agents)</span></div></div>
+    <div class="metric-box"><div class="value">9.2&times;</div><div class="label"><span class="i18n" data-en="TTFT speedup at 12,288 tokens" data-zh="12,288 token 時 TTFT 加速">TTFT speedup at 12,288 tokens</span></div></div>
+    <div class="metric-box"><div class="value">&asymp;0</div><div class="label"><span class="i18n" data-en="Accuracy loss vs full prefill" data-zh="相較 full prefill 的準確度損失">Accuracy loss vs full prefill</span></div></div>
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Key insight:" data-zh="核心洞察：">Key insight:</span></strong>
+    <span class="i18n" data-en=" The paper's framing is explicitly one of high fidelity plus sparse correction, not one of contamination. Its own words: decoding KV caches remain highly aligned with full-prefill counterparts, validating the reuse premise; deviations are sparse and localized. Recomputation is called rectification — restoring the reused cache toward what a full prefill would have produced — and no token is ever dropped, only reused or recomputed." data-zh=" 論文的框架明確是「高保真加稀疏校正」，而非「污染」。其原話為：解碼 KV cache 與 full-prefill 版本維持高度對齊，驗證了重用前提；偏離是稀疏且局部的。重算被稱為修正 —— 將重用的 cache 還原至 full prefill 本會產出的狀態 —— 且沒有任何 token 被丟棄，只有重用或重算。"> The paper's framing is explicitly one of high fidelity plus sparse correction, not one of contamination. Its own words: decoding KV caches remain highly aligned with full-prefill counterparts, validating the reuse premise; deviations are sparse and localized. Recomputation is called <em>rectification</em> — restoring the reused cache toward what a full prefill would have produced — and no token is ever dropped, only reused or recomputed.</span>
+  </div>
+</section>
+
+<!-- ====== 3. OBSERVATIONS ====== -->
+<section id="observations">
+  <h2><span class="i18n" data-en="3. Observations: Why the Draft Is Almost Right" data-zh="3. 觀察：為何這份草稿幾乎正確">3. Observations: Why the Draft Is Almost Right</span></h2>
+  <p>
+    <span class="i18n" data-en="The method is only justified if the decoding cache really is a good draft and its errors really are localized. Section 3 of the paper is an empirical characterization that answers exactly this, comparing decoding KV caches against their full-prefill counterparts and reporting three findings that together license direct reuse with targeted rectification. This section walks each finding and the measurement behind it." data-zh="唯有當解碼 cache 確實是好草稿、且其誤差確實局部化時，該方法才成立。論文第 3 節正是回答此問題的實證刻畫，將解碼 KV cache 與其 full-prefill 版本比較，報告了三個共同認可「直接重用加定向修正」的發現。本節逐一走過每個發現及其背後的量測。">The method is only justified if the decoding cache really is a good draft and its errors really are localized. Section 3 of the paper is an empirical characterization that answers exactly this, comparing decoding KV caches against their full-prefill counterparts and reporting three findings that together license direct reuse with targeted rectification. This section walks each finding and the measurement behind it.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="3.1 High macro-level alignment — value cosine is the weak axis" data-zh="3.1 高度宏觀對齊 —— value 餘弦是最弱的軸">3.1 High macro-level alignment — value cosine is the weak axis</span></h3>
+  <p>
+    <span class="i18n" data-en="The first finding is that, despite the prefix difference, decoding and full-prefill KV caches for the same tokens are on average very close. The paper measures both cosine similarity and norm similarity between the two caches across all layers and tokens on 2WikiMQA, and contrasts them against two lower bounds: a Random KV baseline and an Independent KV baseline in which the content is encoded without the shared context. The decoding cache sits far above both baselines, confirming that it carries genuine information about the tokens rather than noise. Among the metrics, value cosine similarity is the lowest — the axis along which the caches disagree most — so the rest of the analysis focuses on value cosine deviation as the quantity to detect and repair." data-zh="第一個發現是：儘管前綴不同，相同 token 的解碼與 full-prefill KV cache 平均而言非常接近。論文在 2WikiMQA 上量測兩份 cache 跨所有層與 token 的餘弦相似度與範數相似度，並與兩個下界對比：Random KV baseline 與 Independent KV baseline（後者在無共享脈絡下編碼內容）。解碼 cache 遠高於兩個 baseline，證實它承載的是關於這些 token 的真實資訊而非雜訊。在各指標中，value 餘弦相似度最低 —— 是兩份 cache 分歧最大的軸 —— 因此後續分析聚焦於 value 餘弦偏離，作為要偵測與修復的量。">The first finding is that, despite the prefix difference, decoding and full-prefill KV caches for the same tokens are on average very close. The paper measures both cosine similarity and norm similarity between the two caches across all layers and tokens on 2WikiMQA, and contrasts them against two lower bounds: a Random KV baseline and an Independent KV baseline in which the content is encoded without the shared context. The decoding cache sits far above both baselines, confirming that it carries genuine information about the tokens rather than noise. Among the metrics, value cosine similarity is the lowest — the axis along which the caches disagree most — so the rest of the analysis focuses on value cosine deviation as the quantity to detect and repair.</span>
+  </p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2603.13289v1/x2.png" alt="Figure 2: Macro-level KV similarity — average cosine and norm similarity between decoding and full-prefill KV caches on 2WikiMQA versus Random and Independent baselines">
+    <div class="fig-cap"><strong>Figure 2 (from paper):</strong> <span class="i18n" data-en="Average cosine and norm similarity between decoding KV caches and full-prefill KV caches across layers and tokens on 2WikiMQA, compared against Random KV and Independent KV. The decoding cache is far closer to the full-prefill reference than either baseline; value cosine similarity is the lowest metric and becomes the focus of subsequent analysis." data-zh="在 2WikiMQA 上，解碼 KV cache 與 full-prefill KV cache 跨層與 token 的平均餘弦與範數相似度，並與 Random KV 及 Independent KV 對比。解碼 cache 遠比兩個 baseline 更接近 full-prefill 參考；value 餘弦相似度為最低指標，成為後續分析的焦點。">Average cosine and norm similarity between decoding KV caches and full-prefill KV caches across layers and tokens on 2WikiMQA, compared against Random KV and Independent KV. The decoding cache is far closer to the full-prefill reference than either baseline; value cosine similarity is the lowest metric and becomes the focus of subsequent analysis.</span></div>
+  </div>
+
+  <p>
+    <span class="i18n" data-en="Formally, the token-wise value deviation at layer $\ell$ for position $j$ is one minus the head-averaged cosine similarity between the reused value vector and the full-prefill value vector:" data-zh="形式上，位置 $j$ 在層 $\ell$ 的逐 token value 偏離，定義為重用 value 向量與 full-prefill value 向量之間、對各頭平均的餘弦相似度取一減之：">Formally, the token-wise value deviation at layer $\ell$ for position $j$ is one minus the head-averaged cosine similarity between the reused value vector and the full-prefill value vector:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(1)</span>
+    $$d_{j,\ell} = 1 - \frac{1}{H}\sum_{h=1}^{H} \cos\!\left(v^{\text{reuse}}_{h,j,\ell},\; v^{\text{full}}_{h,j,\ell}\right)$$
+  </div>
+  <p>
+    <span class="i18n" data-en="Aggregating this deviation over the reused positions gives a layer-wise similarity score that summarizes how faithful the reused cache is at each depth:" data-zh="將此偏離在重用位置上聚合，得到一個逐層相似度分數，概括重用 cache 在每個深度的忠實程度：">Aggregating this deviation over the reused positions gives a layer-wise similarity score that summarizes how faithful the reused cache is at each depth:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(2)</span>
+    $$s_\ell = \frac{1}{\left|\mathcal{I}_{\text{reuse}}\right|}\sum_{j\in\mathcal{I}_{\text{reuse}}}\left(1 - d_{j,\ell}\right)$$
+  </div>
+
+  <h3><span class="i18n" data-en="3.2 U-shaped layer-wise deviation — the error lives in the middle" data-zh="3.2 U 形逐層偏離 —— 誤差住在中間">3.2 U-shaped layer-wise deviation — the error lives in the middle</span></h3>
+  <p>
+    <span class="i18n" data-en="The second finding refines where the disagreement sits. Plotting $s_\ell$ against layer index reveals a distinct U shape in value cosine similarity: shallow layers and deep layers remain highly faithful, while the middle layers dip — they carry the largest deviation and, when left uncorrected, dominate the degradation of downstream generation quality. The right panel confirms causality by a recovery experiment: replacing the reused decoding KV with true full-prefill KV up to or from a given layer shows that repairing the middle band recovers almost all of the lost fidelity, whereas repairing the already-faithful shallow or deep layers buys little. This is what lets the profiler bound recomputation to a middle layer range $[L_{\text{start}}, L_{\text{end}}]$ and skip the rest entirely." data-zh="第二個發現進一步刻畫分歧所在。將 $s_\ell$ 對層索引作圖，會在 value 餘弦相似度上顯現明顯的 U 形：淺層與深層維持高度忠實，而中間層下陷 —— 它們承載最大的偏離，若不校正，將主導下游生成品質的退化。右圖以一個還原實驗確認因果：將重用的解碼 KV「至某層」或「自某層起」替換為真正的 full-prefill KV，顯示修復中間帶幾乎能還原全部失去的忠實度，而修復本已忠實的淺層或深層則收益甚微。這正是剖析器能將重算限制在中間層範圍 $[L_{\text{start}}, L_{\text{end}}]$、其餘完全略過的依據。">The second finding refines where the disagreement sits. Plotting $s_\ell$ against layer index reveals a distinct U shape in value cosine similarity: shallow layers and deep layers remain highly faithful, while the middle layers dip — they carry the largest deviation and, when left uncorrected, dominate the degradation of downstream generation quality. The right panel confirms causality by a recovery experiment: replacing the reused decoding KV with true full-prefill KV up to or from a given layer shows that repairing the middle band recovers almost all of the lost fidelity, whereas repairing the already-faithful shallow or deep layers buys little. This is what lets the profiler bound recomputation to a middle layer range $[L_{\text{start}}, L_{\text{end}}]$ and skip the rest entirely.</span>
+  </p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x3.png" alt="Figure 3a: layer-wise similarity showing a U-shaped value cosine profile across layers">
+      <div class="fig-cap"><strong>Figure 3a:</strong> <span class="i18n" data-en="Layer-wise similarity between decoding and full-prefill KV caches. The value cosine similarity (red) traces a U shape: high at shallow and deep layers, lowest in the middle." data-zh="解碼與 full-prefill KV cache 之間的逐層相似度。value 餘弦相似度（紅）呈 U 形：在淺層與深層高、在中間最低。">Layer-wise similarity between decoding and full-prefill KV caches. The value cosine similarity (red) traces a U shape: high at shallow and deep layers, lowest in the middle.</span></div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x4.png" alt="Figure 3b: relative recovery of value cosine similarity when replacing reused KV with full-prefill KV up to or from a given layer">
+      <div class="fig-cap"><strong>Figure 3b:</strong> <span class="i18n" data-en="Relative recovery of value cosine similarity for post-reuse tokens when decoding KV is replaced by full-prefill KV up to, or from, a given layer index. Recomputing the middle layers yields the most efficient recovery." data-zh="當解碼 KV「至某層」或「自某層起」被替換為 full-prefill KV 時，重用後 token 的 value 餘弦相似度相對還原程度。重算中間層帶來最有效率的還原。">Relative recovery of value cosine similarity for post-reuse tokens when decoding KV is replaced by full-prefill KV up to, or from, a given layer index. Recomputing the middle layers yields the most efficient recovery.</span></div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="3.3 Sparse, correlated token-wise deviation — few tokens, and they persist" data-zh="3.3 稀疏且相關的逐 token 偏離 —— 少數 token，且會持續">3.3 Sparse, correlated token-wise deviation — few tokens, and they persist</span></h3>
+  <p>
+    <span class="i18n" data-en="The third finding localizes the error within the middle layers to a small set of token positions. Averaged over the middle layers, the token-wise deviation profile is sparse: most positions retain high fidelity, and only a minority spike. Two structural properties make these spikes exploitable. First, the high-deviation positions are consistent across the middle layers rather than scattering randomly per layer, so they can be identified at a single detection layer instead of every layer. Second, a Spearman rank-correlation analysis of value cosine deviation between adjacent layers is high, meaning that once a position emerges as high-deviation it tends to stay high-deviation deeper in the stack — the pattern is persistent and therefore predictable. Together these justify selecting tokens once, at one detection layer, and rectifying that same set across the whole middle band." data-zh="第三個發現把中間層內的誤差進一步定位到一小組 token 位置。在中間層上平均後，逐 token 偏離分布是稀疏的：大多數位置維持高保真，只有少數尖起。兩個結構性特性使這些尖峰可被利用。其一，高偏離位置在各中間層之間是一致的，而非每層隨機散布，因此可在單一偵測層而非每一層辨識它們。其二，相鄰層間 value 餘弦偏離的 Spearman 秩相關很高，意即一旦某位置浮現為高偏離，往深處也傾向維持高偏離 —— 此模式具持續性、因而可預測。兩者共同支持：在單一偵測層一次選出 token，並在整個中間帶修正同一組。">The third finding localizes the error within the middle layers to a small set of token positions. Averaged over the middle layers, the token-wise deviation profile is sparse: most positions retain high fidelity, and only a minority spike. Two structural properties make these spikes exploitable. First, the high-deviation positions are consistent across the middle layers rather than scattering randomly per layer, so they can be identified at a single detection layer instead of every layer. Second, a Spearman rank-correlation analysis of value cosine deviation between adjacent layers is high, meaning that once a position emerges as high-deviation it tends to stay high-deviation deeper in the stack — the pattern is persistent and therefore predictable. Together these justify selecting tokens once, at one detection layer, and rectifying that same set across the whole middle band.</span>
+  </p>
+
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x5.png" alt="Figure 4a: token-wise similarity averaged over layers, revealing a sparse set of high-deviation positions">
+      <div class="fig-cap"><strong>Figure 4a:</strong> <span class="i18n" data-en="Token-wise similarity between decoding and full-prefill KV caches, averaged over layers. The profile is sparse — most tokens retain high fidelity, and a small set spikes in deviation." data-zh="解碼與 full-prefill KV cache 之間、對層平均的逐 token 相似度。分布稀疏 —— 大多數 token 維持高保真，少數 token 的偏離尖起。">Token-wise similarity between decoding and full-prefill KV caches, averaged over layers. The profile is sparse — most tokens retain high fidelity, and a small set spikes in deviation.</span></div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x6.png" alt="Figure 4b: Spearman rank correlation of token-wise value cosine deviation between adjacent layers, showing persistence">
+      <div class="fig-cap"><strong>Figure 4b:</strong> <span class="i18n" data-en="Spearman rank correlation of token-wise value cosine deviations between adjacent layers. The high correlation shows that high-deviation positions, once they emerge, persist across depth — the deviation is predictable." data-zh="相鄰層間逐 token value 餘弦偏離的 Spearman 秩相關。高相關顯示高偏離位置一旦浮現便跨深度持續 —— 偏離是可預測的。">Spearman rank correlation of token-wise value cosine deviations between adjacent layers. The high correlation shows that high-deviation positions, once they emerge, persist across depth — the deviation is predictable.</span></div>
+    </div>
+  </div>
+
+  <div class="warn">
+    <strong><span class="i18n" data-en="Reading these three findings together:" data-zh="將三個發現合起來看：">Reading these three findings together:</span></strong>
+    <span class="i18n" data-en=" the decoding cache is globally faithful, its residual error is confined to a middle layer band, and inside that band the error is carried by a sparse, persistent set of tokens. Each finding removes one dimension of work: macro alignment removes the need to recompute at all in the common case, the U shape removes the shallow and deep layers, and token sparsity removes all but a few positions. What remains is a small rectangle in the (layer, token) grid — and that is the only region RelayCaching ever recomputes." data-zh=" 解碼 cache 在整體上是忠實的、其殘餘誤差被限制在中間層帶、且在該帶內誤差由一組稀疏且持續的 token 承載。每個發現各消除一個維度的工作量：宏觀對齊使常見情況根本無需重算、U 形消除淺層與深層、token 稀疏性消除除少數位置外的一切。剩下的只是 (層, token) 網格中的一個小矩形 —— 而那正是 RelayCaching 唯一會重算的區域。"> the decoding cache is globally faithful, its residual error is confined to a middle layer band, and inside that band the error is carried by a sparse, persistent set of tokens. Each finding removes one dimension of work: macro alignment removes the need to recompute at all in the common case, the U shape removes the shallow and deep layers, and token sparsity removes all but a few positions. What remains is a small rectangle in the (layer, token) grid — and that is the only region RelayCaching ever recomputes.</span>
+  </div>
+</section>
+
+<!-- ====== 4. ARCHITECTURE ====== -->
+<section id="architecture">
+  <h2><span class="i18n" data-en="4. Architecture: Profile Offline, Capture at Decode, Rectify at Prefill" data-zh="4. 架構：離線剖析、解碼時擷取、prefill 時修正">4. Architecture: Profile Offline, Capture at Decode, Rectify at Prefill</span></h2>
+  <p>
+    <span class="i18n" data-en="RelayCaching turns the three observations into a pipeline with one offline stage and two online stages. Offline, a layer-range profiler reads the U-shaped profile from calibration data. Online, while the upstream agent decodes, a cache manager stores the reusable KV and accumulates the influence signal; then, when the downstream agent prefills, the method re-aligns the cache to the new positions, selects the tokens to fix, and rectifies only those. This section describes the data flow; Sections 5 and 6 detail the profiler and the selector." data-zh="RelayCaching 將三個觀察轉化為一個含一個離線階段與兩個線上階段的管線。離線階段，層範圍剖析器從校準資料讀取 U 形分布。線上階段，在上游 agent 解碼時，cache 管理器儲存可重用 KV 並累積影響訊號；接著當下游 agent prefill 時，方法將 cache 重新對齊到新位置、選出要修復的 token，並僅修正這些。本節描述資料流；第 5、6 節詳述剖析器與選擇器。">RelayCaching turns the three observations into a pipeline with one offline stage and two online stages. Offline, a layer-range profiler reads the U-shaped profile from calibration data. Online, while the upstream agent decodes, a cache manager stores the reusable KV and accumulates the influence signal; then, when the downstream agent prefills, the method re-aligns the cache to the new positions, selects the tokens to fix, and rectifies only those. This section describes the data flow; Sections 5 and 6 detail the profiler and the selector.</span>
+  </p>
+
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2603.13289v1/x7.png" alt="Figure 5: Overview of RelayCaching — offline layer-range profiler, decode-time cache manager, and prefill-time selective rectification">
+    <div class="fig-cap"><strong>Figure 5 (from paper):</strong> <span class="i18n" data-en="(1) An offline layer-range profiler identifies a critical layer range and a detection layer from calibration data. (2) During stage-(i−1) decoding, the cache manager stores pre-RoPE KV caches, saves hidden states at L_start, and accumulates influence scores. (3) At stage-i prefilling, RelayCaching re-applies RoPE to align reused KV to the new positions, performs token selection at the detection layer via combined deviation- and influence-based criteria, and applies sparse rectification on the selected tokens within the layer range." data-zh="(1) 離線層範圍剖析器從校準資料辨識關鍵層範圍與一個偵測層。(2) 在第 (i−1) 階段解碼時，cache 管理器儲存 pre-RoPE KV cache、於 L_start 保存 hidden state、並累積影響分數。(3) 在第 i 階段 prefill 時，RelayCaching 重新套用 RoPE 以將重用 KV 對齊到新位置、於偵測層以偏離與影響的組合準則進行 token 選擇，並在層範圍內對所選 token 施以稀疏修正。">(1) An offline layer-range profiler identifies a critical layer range and a detection layer from calibration data. (2) During stage-(i−1) decoding, the cache manager stores pre-RoPE KV caches, saves hidden states at L_start, and accumulates influence scores. (3) At stage-i prefilling, RelayCaching re-applies RoPE to align reused KV to the new positions, performs token selection at the detection layer via combined deviation- and influence-based criteria, and applies sparse rectification on the selected tokens within the layer range.</span></div>
+  </div>
+
+  <p>
+    <span class="i18n" data-en="A subtle but essential detail is positional alignment. The upstream agent decoded its tokens at one set of absolute positions, but the downstream agent reads the same tokens at different positions in its own prompt. RelayCaching therefore stores the KV cache before rotary position embedding (pre-RoPE) is applied, and at reuse time re-applies RoPE for the new positions. This is precisely what lets the method work where prefix caching cannot: the reused content can land at any non-prefix position, because the rotary phase is re-derived from the downstream position rather than baked in at decode time." data-zh="一個微妙但關鍵的細節是位置對齊。上游 agent 在一組絕對位置解碼其 token，但下游 agent 在自己 prompt 中的不同位置讀取相同 token。因此 RelayCaching 在套用旋轉位置嵌入（RoPE）之前就儲存 KV cache（pre-RoPE），並在重用時為新位置重新套用 RoPE。這正是本方法能在 prefix caching 失效之處運作的原因：重用內容可落於任何非前綴位置，因為旋轉相位是依下游位置重新導出，而非在解碼時就固化。">A subtle but essential detail is positional alignment. The upstream agent decoded its tokens at one set of absolute positions, but the downstream agent reads the same tokens at different positions in its own prompt. RelayCaching therefore stores the KV cache before rotary position embedding (pre-RoPE) is applied, and at reuse time re-applies RoPE for the new positions. This is precisely what lets the method work where prefix caching cannot: the reused content can land at any non-prefix position, because the rotary phase is re-derived from the downstream position rather than baked in at decode time.</span>
+  </p>
+
+  <div class="vflow">
+    <div class="box gray">
+      <h4><span class="i18n" data-en="Offline — Layer-Range Profiler" data-zh="離線 —— 層範圍剖析器">Offline — Layer-Range Profiler</span></h4>
+      <p style="font-size:.82rem"><span class="i18n" data-en="On a small calibration set, measure per-layer similarity s_ℓ and inter-layer deviation correlation. Output the critical layer range [L_start, L_end] and one detection layer L_det. Done once per model." data-zh="在小型校準集上量測逐層相似度 s_ℓ 與跨層偏離相關性。輸出關鍵層範圍 [L_start, L_end] 與一個偵測層 L_det。每個模型只做一次。">On a small calibration set, measure per-layer similarity $s_\ell$ and inter-layer deviation correlation. Output the critical layer range $[L_{\text{start}}, L_{\text{end}}]$ and one detection layer $L_{\text{det}}$. Done once per model.</span>
+  </p>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="box blue">
+      <h4><span class="i18n" data-en="Online, stage (i−1) — Cache Manager at decode" data-zh="線上，第 (i−1) 階段 —— 解碼時的 Cache 管理器">Online, stage (i−1) — Cache Manager at decode</span></h4>
+      <ul>
+        <li>
+    <span class="i18n" data-en="Store pre-RoPE KV caches for the tokens the upstream agent emits." data-zh="為上游 agent 產出的 token 儲存 pre-RoPE KV cache。">Store pre-RoPE KV caches for the tokens the upstream agent emits.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="Save hidden states at L_start so the middle band can be recomputed later without re-running shallow layers." data-zh="於 L_start 保存 hidden state，使中間帶稍後可重算而無需重跑淺層。">Save hidden states at $L_{\text{start}}$ so the middle band can be recomputed later without re-running shallow layers.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="Accumulate the per-token influence score s_inf(j) from the decode-step attention weights." data-zh="從解碼步的注意力權重累積逐 token 影響分數 s_inf(j)。">Accumulate the per-token influence score $s_{\text{inf}}(j)$ from the decode-step attention weights.</span>
+  </li>
+      </ul>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="box emerald">
+      <h4><span class="i18n" data-en="Online, stage i — Selective Rectification at prefill" data-zh="線上，第 i 階段 —— prefill 時的選擇性修正">Online, stage i — Selective Rectification at prefill</span></h4>
+      <div class="branch" style="margin-top:8px">
+        <div class="box gray" style="max-width:none"><strong style="color:var(--accent)">Re-align</strong><br><span class="i18n" data-en="Re-apply RoPE to the reused KV for the new downstream positions." data-zh="為下游新位置對重用 KV 重新套用 RoPE。">Re-apply RoPE to the reused KV for the new downstream positions.</span></div>
+        <div class="box gray" style="max-width:none"><strong style="color:var(--accent)">Select</strong><br><span class="i18n" data-en="At L_det, take the union of deviation-selected and influence-selected tokens." data-zh="在 L_det 取偏離選中與影響選中 token 的聯集。">At $L_{\text{det}}$, take the union of deviation-selected and influence-selected tokens.</span></div>
+        <div class="box gray" style="max-width:none"><strong style="color:var(--accent)">Rectify</strong><br><span class="i18n" data-en="Recompute only the selected tokens within [L_start, L_end]; reuse all others." data-zh="僅在 [L_start, L_end] 內重算所選 token；其餘全部重用。">Recompute only the selected tokens within $[L_{\text{start}}, L_{\text{end}}]$; reuse all others.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h3><span class="i18n" data-en="4.1 The decode-time bookkeeping and why it is nearly free" data-zh="4.1 解碼時的簿記，以及它為何幾乎免費">4.1 The decode-time bookkeeping and why it is nearly free</span></h3>
+  <p>
+    <span class="i18n" data-en="The two online stages divide the work so that the expensive step never runs on the critical path. Everything the downstream rectification will need is captured while the upstream agent is already decoding — a phase that is memory-bandwidth-bound and has spare compute — so the extra bookkeeping overlaps with work that was happening anyway. Three things are recorded, and each maps directly to something the prefill stage would otherwise have to recompute." data-zh="兩個線上階段將工作切分，使昂貴的步驟從不落在關鍵路徑上。下游修正所需的一切，都在上游 agent 已在解碼時擷取 —— 該階段受記憶體頻寬限制、運算有餘裕 —— 因此額外簿記與本來就在進行的工作重疊。共記錄三樣東西，每一樣都直接對應到 prefill 階段本來得重算之物。">The two online stages divide the work so that the expensive step never runs on the critical path. Everything the downstream rectification will need is captured while the upstream agent is already decoding — a phase that is memory-bandwidth-bound and has spare compute — so the extra bookkeeping overlaps with work that was happening anyway. Three things are recorded, and each maps directly to something the prefill stage would otherwise have to recompute.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Stored at decode" data-zh="解碼時儲存">Stored at decode</span></th>
+      <th><span class="i18n" data-en="Why it is needed at prefill" data-zh="為何 prefill 時需要它">Why it is needed at prefill</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="i18n" data-en="Pre-RoPE KV cache" data-zh="Pre-RoPE KV cache">Pre-RoPE KV cache</span></td>
+        <td><span class="i18n" data-en="Storing the cache before rotary embedding lets the reuse stage re-apply RoPE at whatever downstream position the content lands, which is what breaks the prefix-only restriction of ordinary caching." data-zh="在旋轉嵌入前儲存 cache，讓重用階段能在下游內容落點的任意位置重新套用 RoPE，這正是打破一般快取「只限前綴」限制之處。">Storing the cache before rotary embedding lets the reuse stage re-apply RoPE at whatever downstream position the content lands, which is what breaks the prefix-only restriction of ordinary caching.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Hidden states at L_start" data-zh="L_start 的 hidden state">Hidden states at $L_{\text{start}}$</span></td>
+        <td><span class="i18n" data-en="Rectifying a token inside the middle band requires its layer-L_start input. Checkpointing that one layer's hidden state means the shallow layers never have to be re-run for the recomputed tokens." data-zh="修正中間帶內的 token 需要其 L_start 層輸入。checkpoint 該單層的 hidden state，意味著重算 token 時淺層從不需重跑。">Rectifying a token inside the middle band requires its layer-$L_{\text{start}}$ input. Checkpointing that one layer's hidden state means the shallow layers never have to be re-run for the recomputed tokens.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="Accumulated influence s_inf(j)" data-zh="累積影響 s_inf(j)">Accumulated influence $s_{\text{inf}}(j)$</span></td>
+        <td><span class="i18n" data-en="The influence criterion (Eq. 6) sums attention across decode steps. It can only be collected as decoding happens, so it is accumulated online rather than reconstructed later." data-zh="影響準則（式 6）跨解碼步加總注意力。它只能在解碼發生時收集，故線上累積，而非事後重建。">The influence criterion (Eq. 6) sums attention across decode steps. It can only be collected as decoding happens, so it is accumulated online rather than reconstructed later.</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    <span class="i18n" data-en="The checkpoint at $L_{\text{start}}$ is the detail that makes rectification cheap rather than merely selective. Without it, recomputing a middle-band token would still require running every shallow layer up to $L_{\text{start}}$ for that token; with it, the recomputation starts from the saved hidden state and touches only the layers inside the band. The reuse rate reported by the paper is therefore a faithful proxy for the compute saved: a token outside the selected set costs nothing at prefill, and a token inside it costs only the middle-band layers rather than the full stack." data-zh="$L_{\text{start}}$ 的 checkpoint，是使修正「廉價」而非僅僅「有選擇性」的關鍵細節。若無它，重算一個中間帶 token 仍需為該 token 跑完至 $L_{\text{start}}$ 的每個淺層；有了它，重算從保存的 hidden state 出發，只觸及帶內各層。因此論文報告的重用率是所省運算的忠實代理：所選集合外的 token 在 prefill 時零成本，集合內的 token 也只花中間帶各層、而非整個堆疊的成本。">The checkpoint at $L_{\text{start}}$ is the detail that makes rectification cheap rather than merely selective. Without it, recomputing a middle-band token would still require running every shallow layer up to $L_{\text{start}}$ for that token; with it, the recomputation starts from the saved hidden state and touches only the layers inside the band. The reuse rate reported by the paper is therefore a faithful proxy for the compute saved: a token outside the selected set costs nothing at prefill, and a token inside it costs only the middle-band layers rather than the full stack.</span>
+  </p>
+</section>
+
+<!-- ====== 5. LAYER-RANGE PROFILER ====== -->
+<section id="profiler">
+  <h2><span class="i18n" data-en="5. The Layer-Range Profiler" data-zh="5. 層範圍剖析器">5. The Layer-Range Profiler</span></h2>
+  <p>
+    <span class="i18n" data-en="The profiler converts the U-shaped similarity curve into two concrete outputs used at run time: the boundaries of the middle band to recompute, and the single layer at which token selection is performed. Both are read from a small calibration set once per model, so the profiler adds no per-request cost. This section states the two rules the paper uses." data-zh="剖析器將 U 形相似度曲線轉換為執行期使用的兩個具體輸出：要重算的中間帶邊界，以及進行 token 選擇的單一層。兩者皆在每個模型上從小型校準集讀取一次，因此剖析器不增加任何逐請求成本。本節說明論文使用的兩條規則。">The profiler converts the U-shaped similarity curve into two concrete outputs used at run time: the boundaries of the middle band to recompute, and the single layer at which token selection is performed. Both are read from a small calibration set once per model, so the profiler adds no per-request cost. This section states the two rules the paper uses.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="5.1 Bounding the critical layer range" data-zh="5.1 界定關鍵層範圍">5.1 Bounding the critical layer range</span></h3>
+  <p>
+    <span class="i18n" data-en="The end of the deviation-prone band is detected as the depth at which the similarity has both recovered above a data-derived threshold and stopped changing appreciably between adjacent layers. Writing $\mu_{\text{last}}$ and $\sigma_{\text{last}}$ for the mean and standard deviation of similarity in the deep, stable layers, the end layer is the first depth $\ell$ satisfying" data-zh="易偏離帶的結束，被偵測為相似度同時滿足「已回復至一個由資料導出的閾值之上」與「相鄰層之間不再有顯著變化」的深度。以 $\mu_{\text{last}}$ 與 $\sigma_{\text{last}}$ 表示深層穩定層之相似度的均值與標準差，結束層為第一個滿足下式的深度 $\ell$：">The end of the deviation-prone band is detected as the depth at which the similarity has both recovered above a data-derived threshold and stopped changing appreciably between adjacent layers. Writing $\mu_{\text{last}}$ and $\sigma_{\text{last}}$ for the mean and standard deviation of similarity in the deep, stable layers, the end layer is the first depth $\ell$ satisfying</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(3)</span>
+    $$s_\ell \geq b \quad\wedge\quad \left|s_\ell - s_{\ell-1}\right| < \lambda\,\sigma_{\text{last}}, \qquad b = \mu_{\text{last}} - \sigma_{\text{last}}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="The first clause requires the similarity to have climbed back into the stable regime; the second requires the curve to have flattened, so the chosen boundary is where the U has genuinely ended rather than a local wobble. The start of the band is set symmetrically at the shallow side where the similarity first departs from the stable regime, giving the range $[L_{\text{start}}, L_{\text{end}}]$." data-zh="第一項要求相似度已爬回穩定區間；第二項要求曲線已趨平，因此所選邊界是 U 真正結束之處，而非局部抖動。帶的起點在淺側對稱設定於相似度首次偏離穩定區間之處，得到範圍 $[L_{\text{start}}, L_{\text{end}}]$。">The first clause requires the similarity to have climbed back into the stable regime; the second requires the curve to have flattened, so the chosen boundary is where the U has genuinely ended rather than a local wobble. The start of the band is set symmetrically at the shallow side where the similarity first departs from the stable regime, giving the range $[L_{\text{start}}, L_{\text{end}}]$.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="5.2 Picking the detection layer" data-zh="5.2 選取偵測層">5.2 Picking the detection layer</span></h3>
+  <p>
+    <span class="i18n" data-en="Token selection needs one representative layer at which the deviating positions are already clearly separated from the faithful ones. The paper finds this transition point from the inter-layer deviation-correlation profile by locating where its curvature flips sign. Letting $\rho_\ell$ denote the correlation-profile value at layer $\ell$, the second-order difference" data-zh="Token 選擇需要一個具代表性的層，在該層上偏離位置已與忠實位置清楚分離。論文從跨層偏離相關性分布中，藉由定位其曲率變號之處找出此轉折點。令 $\rho_\ell$ 表示層 $\ell$ 的相關性分布值，其二階差分">Token selection needs one representative layer at which the deviating positions are already clearly separated from the faithful ones. The paper finds this transition point from the inter-layer deviation-correlation profile by locating where its curvature flips sign. Letting $\rho_\ell$ denote the correlation-profile value at layer $\ell$, the second-order difference</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(4)</span>
+    $$\alpha_\ell = \rho_\ell - 2\,\rho_{\ell-1} + \rho_{\ell-2}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="marks the layer where the correlation profile transitions from rising to falling — the point at which the persistent high-deviation set has fully emerged. That layer is chosen as the detection layer $L_{\text{det}}$, and all per-token scoring is read there. Because Section 3.3 established that the high-deviation set persists across depth, a set chosen at $L_{\text{det}}$ is a reliable proxy for the set that needs fixing across the whole band." data-zh="標記出相關性分布由升轉降的層 —— 也就是持續性高偏離集完全浮現的那一點。該層被選為偵測層 $L_{\text{det}}$，所有逐 token 分數皆於此讀取。由於第 3.3 節已確立高偏離集跨深度持續，於 $L_{\text{det}}$ 選出的集合，是整個帶內需修復集合的可靠代理。">marks the layer where the correlation profile transitions from rising to falling — the point at which the persistent high-deviation set has fully emerged. That layer is chosen as the detection layer $L_{\text{det}}$, and all per-token scoring is read there. Because Section 3.3 established that the high-deviation set persists across depth, a set chosen at $L_{\text{det}}$ is a reliable proxy for the set that needs fixing across the whole band.</span>
+  </p>
+</section>
+
+<!-- ====== 6. TOKEN SELECTION ====== -->
+<section id="selection">
+  <h2><span class="i18n" data-en="6. Token Selection: Two Criteria, One Union" data-zh="6. Token 選擇：雙準則、一個聯集">6. Token Selection: Two Criteria, One Union</span></h2>
+  <p>
+    <span class="i18n" data-en="This is the mechanism most relevant to our own line of work, so it is worth stating with care. At the detection layer, RelayCaching decides which reused tokens to recompute by scoring every position under two independent criteria and taking their union. The first criterion asks which tokens are most unfaithful to the full-prefill reference; the second asks which tokens matter most to the generation, as measured by the attention they received. Both are per-token, and both feed the same additive action — recompute the selected token's KV inside the middle band." data-zh="這是與我們自身研究線最相關的機制，值得謹慎陳述。在偵測層，RelayCaching 透過以兩個獨立準則為每個位置評分並取聯集，決定要重算哪些重用 token。第一個準則問：哪些 token 對 full-prefill 參考最不忠實；第二個準則問：以所受注意力衡量，哪些 token 對生成最重要。兩者皆為逐 token，且都導向同一個加法式動作 —— 在中間帶內重算所選 token 的 KV。">This is the mechanism most relevant to our own line of work, so it is worth stating with care. At the detection layer, RelayCaching decides which reused tokens to recompute by scoring every position under two independent criteria and taking their union. The first criterion asks which tokens are most unfaithful to the full-prefill reference; the second asks which tokens matter most to the generation, as measured by the attention they received. Both are per-token, and both feed the same additive action — recompute the selected token's KV inside the middle band.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="6.1 Deviation-based selection — repair what is most wrong" data-zh="6.1 偏離式選擇 —— 修復最錯的">6.1 Deviation-based selection — repair what is most wrong</span></h3>
+  <p>
+    <span class="i18n" data-en="The deviation criterion selects positions whose reused value vector disagrees most with the full-prefill value vector at the detection layer. Its per-token score is simply the value deviation of Equation 1 evaluated at $L_{\text{det}}$, and a position is selected when this score exceeds a multiple of the mean deviation over the reused positions:" data-zh="偏離準則挑選在偵測層上、其重用 value 向量與 full-prefill value 向量分歧最大的位置。其逐 token 分數即為方程式 1 於 $L_{\text{det}}$ 求得的 value 偏離，當該分數超過重用位置平均偏離的某個倍數時，該位置被選中：">The deviation criterion selects positions whose reused value vector disagrees most with the full-prefill value vector at the detection layer. Its per-token score is simply the value deviation of Equation 1 evaluated at $L_{\text{det}}$, and a position is selected when this score exceeds a multiple of the mean deviation over the reused positions:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(5)</span>
+    $$\mathcal{I}_{\text{dev}} = \left\{\, j\in\mathcal{I}_{\text{reuse}} \;\middle|\; s_{\text{dev}}(j) \geq \tau_{\text{dev}}\cdot\mu_{\text{dev}} \,\right\}, \qquad s_{\text{dev}}(j) = d_{j,\,L_{\text{det}}}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="The factor $\tau_{\text{dev}}$ is a sensitivity knob: raising it recomputes fewer tokens and reuses more, lowering it does the opposite. Note carefully what the reference is here. The score measures distance to the full-prefill KV — the very quantity the method is trying to avoid computing in full. It is available at selection time only because it is read at the single detection layer, not across the whole model, and the persistence property of Section 3.3 makes that one-layer reading a faithful proxy." data-zh="因子 $\tau_{\text{dev}}$ 是靈敏度旋鈕：調高則重算較少 token、重用較多，調低則相反。此處務必留意參考基準為何。該分數量測的是與 full-prefill KV 的距離 —— 正是本方法試圖避免完整計算的量。它之所以在選擇時可得，僅因為它是在單一偵測層讀取，而非跨整個模型；第 3.3 節的持續性特性使此單層讀取成為忠實代理。">The factor $\tau_{\text{dev}}$ is a sensitivity knob: raising it recomputes fewer tokens and reuses more, lowering it does the opposite. Note carefully what the reference is here. The score measures distance to the full-prefill KV — the very quantity the method is trying to avoid computing in full. It is available at selection time only because it is read at the single detection layer, not across the whole model, and the persistence property of Section 3.3 makes that one-layer reading a faithful proxy.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="6.2 Influence-based selection — protect what the generation leans on" data-zh="6.2 影響式選擇 —— 保護生成所倚賴的">6.2 Influence-based selection — protect what the generation leans on</span></h3>
+  <p>
+    <span class="i18n" data-en="A token can carry only a small value deviation yet still be worth recomputing if downstream generation attends to it heavily, because even a small error on a heavily-attended token propagates. The influence criterion captures this. During the upstream agent's decoding, RelayCaching accumulates, for each reused position $j$, the total attention weight it received across every decoding step $t$, every layer $\ell$, and every head $h$:" data-zh="一個 token 即使只帶有很小的 value 偏離，若下游生成大量注意它，仍值得重算，因為即使是被高度注意的 token 上的小誤差也會傳播。影響準則捕捉這一點。在上游 agent 解碼期間，RelayCaching 為每個重用位置 $j$ 累積它跨每個解碼步 $t$、每層 $\ell$、每頭 $h$ 所受到的總注意力權重：">A token can carry only a small value deviation yet still be worth recomputing if downstream generation attends to it heavily, because even a small error on a heavily-attended token propagates. The influence criterion captures this. During the upstream agent's decoding, RelayCaching accumulates, for each reused position $j$, the total attention weight it received across every decoding step $t$, every layer $\ell$, and every head $h$:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(6)</span>
+    $$s_{\text{inf}}(j) = \sum_{t,\,\ell,\,h} \alpha_{t,\ell,h,j}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="Positions whose accumulated influence exceeds a multiple of the mean are selected:" data-zh="累積影響超過平均某個倍數的位置被選中：">Positions whose accumulated influence exceeds a multiple of the mean are selected:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(7)</span>
+    $$\mathcal{I}_{\text{inf-score}} = \left\{\, j\in\mathcal{I}_{\text{reuse}} \;\middle|\; s_{\text{inf}}(j) \geq \tau_{\text{inf}}\cdot\mu_{\text{inf}} \,\right\}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="Attention-derived importance is biased toward early positions, yet the suffix tokens immediately before the reuse boundary tend to exert outsized influence on the newly appended content through attention locality. To correct this bias the method adds the last $K_{\text{suf}}$ trailing tokens as a suffix set, and the influence selection is the union of the score-based set and the suffix set:" data-zh="由注意力導出的重要性偏向早期位置，然而緊鄰重用邊界之前的後綴 token，往往透過注意力局部性對新附加內容施加超乎比例的影響。為校正此偏差，方法將最後 $K_{\text{suf}}$ 個尾端 token 作為後綴集加入，影響選擇即為分數集與後綴集的聯集：">Attention-derived importance is biased toward early positions, yet the suffix tokens immediately before the reuse boundary tend to exert outsized influence on the newly appended content through attention locality. To correct this bias the method adds the last $K_{\text{suf}}$ trailing tokens as a suffix set, and the influence selection is the union of the score-based set and the suffix set:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(8)</span>
+    $$\mathcal{I}_{\text{inf}} = \mathcal{I}_{\text{inf-score}} \cup \mathcal{I}_{\text{inf-suffix}}$$
+  </div>
+
+  <div class="note">
+    <strong><span class="i18n" data-en="Read this carefully — it is the crux for our differentiation." data-zh="請仔細閱讀 —— 這是我們差異化的關鍵。">Read this carefully — it is the crux for our differentiation.</span></strong>
+    <span class="i18n" data-en=" The influence score of Equation 6 is the attention the upstream agent's own decoding paid to position j. It is a source-side, task-agnostic quantity: it measures how much this token mattered to the generation that already happened, not how relevant it is to the downstream receiver's next decision. And its role is protective — a high-influence token is recomputed to keep it faithful, never down-weighted or removed. RelayCaching therefore has a genuine per-token importance score, but it is pointed at fidelity, not at relevance to the receiver." data-zh=" 方程式 6 的影響分數，是上游 agent 自身的解碼對位置 j 所付出的注意力。它是一個來源端、任務無關的量：它量測的是這個 token 對「已經發生」的生成有多重要，而非它對下游接收者「下一步決策」的相關性。而它的角色是保護性的 —— 高影響 token 被重算以維持忠實，從不被降權或移除。因此 RelayCaching 確實擁有一個真正的逐 token 重要性分數，但它指向的是忠實度，而非對接收者的相關性。"> The influence score of Equation 6 is the attention the <em>upstream</em> agent's own decoding paid to position $j$. It is a source-side, task-agnostic quantity: it measures how much this token mattered to the generation that already happened, not how relevant it is to the downstream receiver's next decision. And its role is protective — a high-influence token is recomputed to keep it faithful, never down-weighted or removed. RelayCaching therefore has a genuine per-token importance score, but it is pointed at fidelity, not at relevance to the receiver.</span>
+  </div>
+
+  <h3><span class="i18n" data-en="6.3 The final rectification set" data-zh="6.3 最終修正集">6.3 The final rectification set</span></h3>
+  <p>
+    <span class="i18n" data-en="The set of tokens actually recomputed is the union of the two criteria — the unfaithful tokens and the influential tokens:" data-zh="實際被重算的 token 集，是兩準則的聯集 —— 不忠實的 token 與有影響力的 token：">The set of tokens actually recomputed is the union of the two criteria — the unfaithful tokens and the influential tokens:</span>
+  </p>
+  <div class="math-block">
+    <span class="eq-label">(9)</span>
+    $$\mathcal{I}_{\text{final}} = \mathcal{I}_{\text{dev}} \cup \mathcal{I}_{\text{inf}}$$
+  </div>
+  <p>
+    <span class="i18n" data-en="Every position in $\mathcal{I}_{\text{final}}$ has its KV recomputed within $[L_{\text{start}}, L_{\text{end}}]$ starting from the hidden states saved at $L_{\text{start}}$; every position outside the set reuses the upstream decoding KV verbatim after RoPE re-alignment. The union — rather than an intersection or a weighted combination — is deliberate: a token is worth fixing if it is either badly wrong or heavily used, and missing either kind is what degrades accuracy. Because both selected subsets are sparse and the recomputation is confined to the middle band, the aggregate reuse rate remains above 80% even though two criteria contribute to the set." data-zh="$\mathcal{I}_{\text{final}}$ 中的每個位置，皆從 $L_{\text{start}}$ 保存的 hidden state 出發，在 $[L_{\text{start}}, L_{\text{end}}]$ 內重算其 KV；集合外的每個位置，則在 RoPE 重新對齊後原封不動重用上游解碼 KV。採聯集 —— 而非交集或加權組合 —— 是刻意的：一個 token 只要「錯得嚴重」或「被大量使用」其一，就值得修復，而漏掉任一種都會使準確度退化。由於兩個所選子集皆稀疏、且重算被限制在中間帶，即使有兩個準則貢獻於該集合，整體重用率仍維持在 80% 以上。">Every position in $\mathcal{I}_{\text{final}}$ has its KV recomputed within $[L_{\text{start}}, L_{\text{end}}]$ starting from the hidden states saved at $L_{\text{start}}$; every position outside the set reuses the upstream decoding KV verbatim after RoPE re-alignment. The union — rather than an intersection or a weighted combination — is deliberate: a token is worth fixing if it is either badly wrong or heavily used, and missing either kind is what degrades accuracy. Because both selected subsets are sparse and the recomputation is confined to the middle band, the aggregate reuse rate remains above 80% even though two criteria contribute to the set.</span>
+  </p>
+</section>
+
+<!-- ====== 7. RESULTS ====== -->
+<section id="results">
+  <h2><span class="i18n" data-en="7. Results" data-zh="7. 實驗結果">7. Results</span></h2>
+  <p>
+    <span class="i18n" data-en="The evaluation asks two questions: does the selective rectification preserve accuracy, and does the high reuse rate translate into a real latency reduction. The paper answers the first with accuracy tables across reasoning, knowledge, and code benchmarks, and the second with per-agent TTFT breakdowns and a long-context scaling curve. Numbers below are quoted from the paper's tables and figures." data-zh="評估提出兩個問題：選擇性修正是否保住準確度，以及高重用率是否轉化為真實的延遲降低。論文以橫跨推理、知識與程式的準確度表回答前者，以逐 agent TTFT 拆解與長脈絡擴展曲線回答後者。以下數字引自論文的表與圖。">The evaluation asks two questions: does the selective rectification preserve accuracy, and does the high reuse rate translate into a real latency reduction. The paper answers the first with accuracy tables across reasoning, knowledge, and code benchmarks, and the second with per-agent TTFT breakdowns and a long-context scaling curve. Numbers below are quoted from the paper's tables and figures.</span>
+  </p>
+
+  <p>
+    <span class="i18n" data-en="The setup below fixes the vocabulary used throughout the results: the models the caches come from, the tasks the agent chains solve, the baselines the method is measured against, and the axis (agent count) along which every plot is read." data-zh="以下設定固定了整份結果所用的語彙：cache 來源的模型、agent 鏈所解的任務、方法所對比的基準，以及每張圖所依循的軸（agent 數）。">The setup below fixes the vocabulary used throughout the results: the models the caches come from, the tasks the agent chains solve, the baselines the method is measured against, and the axis (agent count) along which every plot is read.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Axis" data-zh="面向">Axis</span></th>
+      <th><span class="i18n" data-en="Configurations used" data-zh="所用配置">Configurations used</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Models" data-zh="模型">Models</span></td><td>Llama-3.1-8B-Instruct <span class="i18n" data-en="(accuracy)" data-zh="（準確度）">(accuracy)</span>, Qwen2.5-Coder-7B-Instruct <span class="i18n" data-en="(code)" data-zh="（程式）">(code)</span>, Qwen3-0.6B <span class="i18n" data-en="(latency breakdown)" data-zh="（延遲拆解）">(latency breakdown)</span></td></tr>
+      <tr><td><span class="i18n" data-en="Benchmarks" data-zh="基準測試">Benchmarks</span></td><td>GSM8K <span class="i18n" data-en="(reasoning)" data-zh="（推理）">(reasoning)</span>, MMLU <span class="i18n" data-en="(knowledge)" data-zh="（知識）">(knowledge)</span>, HumanEval <span class="i18n" data-en="(code, Pass@1)" data-zh="（程式，Pass@1）">(code, Pass@1)</span>, AIME <span class="i18n" data-en="(TTFT)" data-zh="（TTFT）">(TTFT)</span>, 2WikiMQA <span class="i18n" data-en="(similarity study)" data-zh="（相似度研究）">(similarity study)</span></td></tr>
+      <tr><td><span class="i18n" data-en="Baselines" data-zh="基準方法">Baselines</span></td><td>Full Prefill <span class="i18n" data-en="(ceiling)" data-zh="（上限）">(ceiling)</span>, Zero Reuse, CacheBlend, EPIC, KVCOMM</td></tr>
+      <tr><td><span class="i18n" data-en="Sweep axis" data-zh="掃描軸">Sweep axis</span></td><td><span class="i18n" data-en="Number of collaborating agents, 2 to 5" data-zh="協作 agent 數，2 至 5">Number of collaborating agents, 2 to 5</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="7.1 Accuracy tracks full prefilling" data-zh="7.1 準確度貼近 full prefill">7.1 Accuracy tracks full prefilling</span></h3>
+  <p>
+    <span class="i18n" data-en="Table 1 reports task accuracy on GSM8K and MMLU with Llama-3.1-8B-Instruct and Pass@1 on HumanEval with Qwen2.5-Coder-7B-Instruct, as the number of collaborating agents grows from two to four. The comparison is against full prefilling (the accuracy ceiling), zero-reuse recomputation degradation baselines, and the three reuse baselines CacheBlend, EPIC, and KVCOMM. RelayCaching stays within a fraction of a point of full prefilling and, in several settings, matches or slightly exceeds it, while the pre-computed baselines fall sharply on the reasoning task." data-zh="表 1 報告在 GSM8K 與 MMLU 上以 Llama-3.1-8B-Instruct 的任務準確度，以及在 HumanEval 上以 Qwen2.5-Coder-7B-Instruct 的 Pass@1，隨協作 agent 數從二增至四。比較對象為 full prefill（準確度上限）、zero-reuse 基準，以及三個重用基準 CacheBlend、EPIC、KVCOMM。RelayCaching 與 full prefill 維持在零點幾分之內，並在若干設定上持平或略微超越，而 pre-computed 基準在推理任務上急遽下滑。">Table 1 reports task accuracy on GSM8K and MMLU with Llama-3.1-8B-Instruct and Pass@1 on HumanEval with Qwen2.5-Coder-7B-Instruct, as the number of collaborating agents grows from two to four. The comparison is against full prefilling (the accuracy ceiling), zero-reuse degradation baselines, and the three reuse baselines CacheBlend, EPIC, and KVCOMM. RelayCaching stays within a fraction of a point of full prefilling and, in several settings, matches or slightly exceeds it, while the pre-computed baselines fall sharply on the reasoning task.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Method" data-zh="方法">Method</span></th>
+      <th>GSM8K (2/3/4)</th>
+      <th>MMLU (2/3/4)</th>
+      <th>HumanEval (2/3/4)</th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="i18n" data-en="Full Prefill (ceiling)" data-zh="Full Prefill（上限）">Full Prefill (ceiling)</span></td><td>85.97 / 84.69 / 84.69</td><td>71.24 / 73.20 / 66.67</td><td>82.61 / 85.71 / 87.58</td></tr>
+      <tr><td>CacheBlend</td><td class="i18n"><span class="cross">76.72 / 58.73 / &mdash;</span></td><td>69.28 / 64.71 / 66.67</td><td>82.61 / 84.47 / &mdash;</td></tr>
+      <tr><td>EPIC</td><td><span class="cross">58.73 / 66.46 / 58.42</span></td><td>69.28 / 45.10 / 43.79</td><td>&mdash;</td></tr>
+      <tr><td>KVCOMM</td><td>84.23 / 82.34 / 84.91</td><td>68.63 / 69.28 / 66.01</td><td>&mdash;</td></tr>
+      <tr><td><strong>RelayCaching</strong></td><td><span class="check">84.84 / 85.50 / 85.17</span></td><td><span class="check">69.28 / 71.90 / 67.97</span></td><td><span class="check">82.61 / 85.09 / 87.58</span></td></tr>
+    </tbody>
+  </table>
+  <p>
+    <span class="i18n" data-en="The reasoning column is the discriminating one. EPIC's static token recomputation and CacheBlend's value-norm–based detection collapse to the high-50s / mid-60s on GSM8K, because neither captures the value-cosine axis that Section 3.1 identified as the true deviation indicator. KVCOMM is competitive on accuracy but, as the next subsection shows, pays for it with a declining reuse rate. RelayCaching is the only baseline that is simultaneously near the accuracy ceiling and above 80% reuse." data-zh="推理欄是關鍵的鑑別欄。EPIC 的靜態 token 重算與 CacheBlend 的 value-norm 偵測在 GSM8K 上跌至 50 多／60 出頭，因為兩者都未捕捉第 3.1 節指認為真正偏離指標的 value 餘弦軸。KVCOMM 在準確度上具競爭力，但如下一小節所示，其代價是下降的重用率。RelayCaching 是唯一同時貼近準確度上限且重用率在 80% 以上的方法。">The reasoning column is the discriminating one. EPIC's static token recomputation and CacheBlend's value-norm–based detection collapse to the high-50s / mid-60s on GSM8K, because neither captures the value-cosine axis that Section 3.1 identified as the true deviation indicator. KVCOMM is competitive on accuracy but, as the next subsection shows, pays for it with a declining reuse rate. RelayCaching is the only baseline that is simultaneously near the accuracy ceiling and above 80% reuse.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="7.2 Reuse rate holds as agents chain" data-zh="7.2 重用率隨 agent 串接維持穩定">7.2 Reuse rate holds as agents chain</span></h3>
+  <p>
+    <span class="i18n" data-en="Figure 6 plots the KV cache reuse rate against the number of agents for each benchmark. RelayCaching sustains roughly 80–90% reuse across GSM8K, MMLU, and HumanEval as the chain lengthens, whereas the retrieval-based KVCOMM reuse rate drifts down as the running context diverges from its anchor pool. The stability comes from the design: the reused draft is always the immediately upstream cache, which never becomes stale relative to the content being read." data-zh="圖 6 對每個基準繪出 KV cache 重用率隨 agent 數的變化。隨鏈條增長，RelayCaching 在 GSM8K、MMLU、HumanEval 上維持約 80–90% 的重用，而基於檢索的 KVCOMM 重用率則隨執行脈絡偏離其 anchor pool 而下滑。此穩定性源自設計：重用的草稿永遠是「緊鄰上游」的 cache，相對於所讀取的內容從不過時。">Figure 6 plots the KV cache reuse rate against the number of agents for each benchmark. RelayCaching sustains roughly 80–90% reuse across GSM8K, MMLU, and HumanEval as the chain lengthens, whereas the retrieval-based KVCOMM reuse rate drifts down as the running context diverges from its anchor pool. The stability comes from the design: the reused draft is always the immediately upstream cache, which never becomes stale relative to the content being read.</span>
+  </p>
+  <div class="paper-fig-row">
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x9.png" alt="Figure 6a: KV cache reuse rate on GSM8K versus number of agents">
+      <div class="fig-cap"><strong>Figure 6a (GSM8K):</strong> <span class="i18n" data-en="Reuse rate versus number of agents. RelayCaching holds 80–90% reuse; retrieval-based baselines decline as the chain grows." data-zh="重用率對 agent 數。RelayCaching 維持 80–90% 重用；基於檢索的基準隨鏈增長而下降。">Reuse rate versus number of agents. RelayCaching holds 80–90% reuse; retrieval-based baselines decline as the chain grows.</span></div>
+    </div>
+    <div class="paper-fig">
+      <img src="https://arxiv.org/html/2603.13289v1/x10.png" alt="Figure 6b: KV cache reuse rate on MMLU versus number of agents">
+      <div class="fig-cap"><strong>Figure 6b (MMLU):</strong> <span class="i18n" data-en="The same reuse-rate comparison on MMLU, with RelayCaching maintaining roughly 80–85% reuse across agent counts." data-zh="MMLU 上的相同重用率比較，RelayCaching 在各 agent 數維持約 80–85% 重用。">The same reuse-rate comparison on MMLU, with RelayCaching maintaining roughly 80–85% reuse across agent counts.</span></div>
+    </div>
+  </div>
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2603.13289v1/x11.png" alt="Figure 6c: KV cache reuse rate on HumanEval versus number of agents">
+    <div class="fig-cap"><strong>Figure 6c (HumanEval):</strong> <span class="i18n" data-en="Reuse rate on the code-generation benchmark, where RelayCaching reaches roughly 85–90% reuse — the highest of the three tasks — while accuracy stays at the full-prefill level." data-zh="程式生成基準上的重用率，RelayCaching 達到約 85–90% 重用 —— 三項任務中最高 —— 同時準確度維持在 full prefill 水準。">Reuse rate on the code-generation benchmark, where RelayCaching reaches roughly 85–90% reuse — the highest of the three tasks — while accuracy stays at the full-prefill level.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="7.3 Latency: up to 4.7× per agent, 9.2× at long context" data-zh="7.3 延遲：逐 agent 最高 4.7×、長脈絡 9.2×">7.3 Latency: up to 4.7× per agent, 9.2× at long context</span></h3>
+  <p>
+    <span class="i18n" data-en="Table 2 gives the per-agent time-to-first-token on Qwen3-0.6B with a 512-token prefix and 2,048-token outputs. As the reused context accumulates down the chain, the full-prefill TTFT climbs steeply while RelayCaching's grows slowly, widening the speedup from 2.10× at two agents to 4.71× at five." data-zh="表 2 給出 Qwen3-0.6B 上、512-token 前綴與 2,048-token 輸出的逐 agent time-to-first-token。隨重用脈絡沿鏈累積，full-prefill 的 TTFT 陡升，而 RelayCaching 增長緩慢，使加速比從兩個 agent 的 2.10× 擴大到五個 agent 的 4.71×。">Table 2 gives the per-agent time-to-first-token on Qwen3-0.6B with a 512-token prefix and 2,048-token outputs. As the reused context accumulates down the chain, the full-prefill TTFT climbs steeply while RelayCaching's grows slowly, widening the speedup from 2.10× at two agents to 4.71× at five.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Agent index" data-zh="Agent 序號">Agent index</span></th>
+      <th><span class="i18n" data-en="Full Prefill TTFT" data-zh="Full Prefill TTFT">Full Prefill TTFT</span></th>
+      <th><span class="i18n" data-en="RelayCaching TTFT" data-zh="RelayCaching TTFT">RelayCaching TTFT</span></th>
+      <th><span class="i18n" data-en="Speedup" data-zh="加速比">Speedup</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td>2</td><td>85.2 ms</td><td>40.6 ms</td><td>2.10&times;</td></tr>
+      <tr><td>3</td><td>180.2 ms</td><td>57.0 ms</td><td>3.16&times;</td></tr>
+      <tr><td>4</td><td>321.5 ms</td><td>73.2 ms</td><td>4.39&times;</td></tr>
+      <tr><td>5</td><td><strong>493.9 ms</strong></td><td><strong>104.8 ms</strong></td><td><strong>4.71&times;</strong></td></tr>
+    </tbody>
+  </table>
+  <p>
+    <span class="i18n" data-en="Figure 8 extends this to long context by measuring the downstream agent's average TTFT as the cumulative output length scales from 512 to 12,288 tokens. At the largest context the full-prefill pipeline spends 3.89 seconds building the cache, while RelayCaching produces the first token in 0.42 seconds — a 9.2× reduction. The gap widens with context length precisely because the reused fraction grows: the longer the shared transcript, the more of it can be relayed instead of re-encoded." data-zh="圖 8 藉由量測下游 agent 的平均 TTFT 隨累積輸出長度從 512 擴展到 12,288 token，將此延伸至長脈絡。在最大脈絡下，full-prefill 管線花 3.89 秒建立 cache，而 RelayCaching 在 0.42 秒內產出第一個 token —— 降低 9.2×。此差距隨脈絡長度擴大，正因重用比例增長：共享文稿越長，可被中繼而非重新編碼的部分就越多。">Figure 8 extends this to long context by measuring the downstream agent's average TTFT as the cumulative output length scales from 512 to 12,288 tokens. At the largest context the full-prefill pipeline spends 3.89 seconds building the cache, while RelayCaching produces the first token in 0.42 seconds — a 9.2× reduction. The gap widens with context length precisely because the reused fraction grows: the longer the shared transcript, the more of it can be relayed instead of re-encoded.</span>
+  </p>
+  <div class="paper-fig fig-sm">
+    <img src="https://arxiv.org/html/2603.13289v1/x15.png" alt="Figure 8: scalability of TTFT with cumulative context length from 512 to 12,288 tokens">
+    <div class="fig-cap"><strong>Figure 8 (from paper):</strong> <span class="i18n" data-en="Average downstream TTFT as cumulative output length scales from 512 to 12,288 tokens. RelayCaching's TTFT grows far more slowly than full prefilling, reaching a 9.2× reduction (0.42 s vs 3.89 s) at 12,288 tokens." data-zh="下游平均 TTFT 隨累積輸出長度從 512 擴展到 12,288 token。RelayCaching 的 TTFT 增長遠慢於 full prefill，在 12,288 token 時達到 9.2× 降低（0.42 秒對 3.89 秒）。">Average downstream TTFT as cumulative output length scales from 512 to 12,288 tokens. RelayCaching's TTFT grows far more slowly than full prefilling, reaching a 9.2× reduction (0.42 s vs 3.89 s) at 12,288 tokens.</span></div>
+  </div>
+
+  <h3><span class="i18n" data-en="7.4 Ablation and sensitivity" data-zh="7.4 消融與敏感度">7.4 Ablation and sensitivity</span></h3>
+  <p>
+    <span class="i18n" data-en="The ablation (Table 3, GSM8K, Llama-3.1-8B-Instruct) removes each component in turn and confirms that both selection criteria are load-bearing: dropping the deviation criterion or the influence criterion each lowers accuracy relative to the full method, and the suffix correction contributes a smaller but consistent gain. The sensitivity study (Figure 7) sweeps the two selection factors and the suffix length, showing the expected trade-off — a larger deviation or influence factor recomputes fewer tokens and raises the reuse rate at a gradual accuracy cost, so the defaults sit where accuracy is still at the full-prefill level while reuse remains above 80%." data-zh="消融（表 3，GSM8K，Llama-3.1-8B-Instruct）逐一移除各元件，確認兩個選擇準則皆為承重：移除偏離準則或影響準則，各自相對於完整方法降低準確度，而後綴校正貢獻較小但一致的增益。敏感度研究（圖 7）掃描兩個選擇因子與後綴長度，顯示預期的取捨 —— 較大的偏離或影響因子重算較少 token 並提高重用率，代價為漸進的準確度損失，因此預設值落在「準確度仍處 full-prefill 水準、重用率仍在 80% 以上」之處。">The ablation (Table 3, GSM8K, Llama-3.1-8B-Instruct) removes each component in turn and confirms that both selection criteria are load-bearing: dropping the deviation criterion or the influence criterion each lowers accuracy relative to the full method, and the suffix correction contributes a smaller but consistent gain. The sensitivity study (Figure 7) sweeps the two selection factors and the suffix length, showing the expected trade-off — a larger deviation or influence factor recomputes fewer tokens and raises the reuse rate at a gradual accuracy cost, so the defaults sit where accuracy is still at the full-prefill level while reuse remains above 80%.</span>
+  </p>
+  <div class="note">
+    <strong><span class="i18n" data-en="Scope caveat." data-zh="適用範圍提醒。">Scope caveat.</span></strong>
+    <span class="i18n" data-en=" The efficiency numbers are reported on small models (Qwen3-0.6B for the TTFT breakdown) and short prefixes; the accuracy tables use 7–8B models. The appendix reports that the U-shaped layer profile and sparse token deviation recur across six model families, which supports the generality of the observations, but the headline 4.7× and 9.2× figures are specific to the measured configurations and should be read as such." data-zh=" 效率數字是在小模型（TTFT 拆解用 Qwen3-0.6B）與短前綴上報告的；準確度表使用 7–8B 模型。附錄報告 U 形層分布與稀疏 token 偏離在六個模型家族中重現，支持觀察的普遍性，但標題的 4.7× 與 9.2× 是特定於所量測配置的，應照此理解。"> The efficiency numbers are reported on small models (Qwen3-0.6B for the TTFT breakdown) and short prefixes; the accuracy tables use 7–8B models. The appendix reports that the U-shaped layer profile and sparse token deviation recur across six model families, which supports the generality of the observations, but the headline 4.7× and 9.2× figures are specific to the measured configurations and should be read as such.</span>
+  </div>
+</section>
+
+<!-- ====== 8. LIMITATIONS ====== -->
+<section id="limits">
+  <h2><span class="i18n" data-en="8. Limitations and When Reuse Breaks" data-zh="8. 限制，以及重用何時失效">8. Limitations and When Reuse Breaks</span></h2>
+  <p>
+    <span class="i18n" data-en="RelayCaching's guarantees are inherited entirely from the three empirical observations, so the method's failure modes are exactly the settings where those observations weaken. Naming them precisely is useful both for reading the paper's scope honestly and for locating where a different design would be needed." data-zh="RelayCaching 的保證全然繼承自三個實證觀察，因此該方法的失效模式，恰是這些觀察減弱的情境。精確地指出它們，對誠實理解論文的適用範圍、以及定位「何處需要不同的設計」皆有用。">RelayCaching's guarantees are inherited entirely from the three empirical observations, so the method's failure modes are exactly the settings where those observations weaken. Naming them precisely is useful both for reading the paper's scope honestly and for locating where a different design would be needed.</span>
+  </p>
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="The premise it depends on" data-zh="它所依賴的前提">The premise it depends on</span></h4>
+      <ul>
+        <li>
+    <span class="i18n" data-en="Reuse only helps when the shared content is a large fraction of the downstream prompt; a receiver that reads only a short quote from upstream has little to relay." data-zh="唯有當共享內容佔下游 prompt 的大部分時，重用才有幫助；只讀取上游一小段引文的接收者可中繼者甚少。">Reuse only helps when the shared content is a large fraction of the downstream prompt; a receiver that reads only a short quote from upstream has little to relay.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="The layer band and detection layer are profiled per model on calibration data; a model or task whose deviation profile is not U-shaped would need re-profiling and might not confine cleanly to a middle band." data-zh="層帶與偵測層是依模型在校準資料上剖析的；若某模型或任務的偏離分布非 U 形，則需重新剖析，且可能無法乾淨地侷限於中間帶。">The layer band and detection layer are profiled per model on calibration data; a model or task whose deviation profile is not U-shaped would need re-profiling and might not confine cleanly to a middle band.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="Token deviation must stay sparse. A hand-off that perturbs many positions — a large prefix shift, or an agent that rewrites rather than appends — erodes the sparsity that keeps the reuse rate high." data-zh="Token 偏離須維持稀疏。若某次交接擾動許多位置 —— 大幅前綴位移，或一個改寫而非附加的 agent —— 便會侵蝕維持高重用率的稀疏性。">Token deviation must stay sparse. A hand-off that perturbs many positions — a large prefix shift, or an agent that rewrites rather than appends — erodes the sparsity that keeps the reuse rate high.</span>
+  </li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="What the evaluation does not yet show" data-zh="評估尚未展示之處">What the evaluation does not yet show</span></h4>
+      <ul>
+        <li>
+    <span class="i18n" data-en="The headline TTFT numbers come from a 0.6B model with a 512-token prefix; the interaction between selective rectification and production-scale batching or paged-attention kernels is not measured." data-zh="標題 TTFT 數字來自 0.6B 模型與 512-token 前綴；選擇性修正與生產規模 batching 或 paged-attention kernel 之間的交互作用未被量測。">The headline TTFT numbers come from a 0.6B model with a 512-token prefix; the interaction between selective rectification and production-scale batching or paged-attention kernels is not measured.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="Accuracy is reported on short-form reasoning, knowledge, and code benchmarks; long-horizon agent programs where small per-hop errors could accumulate over dozens of rounds are not stress-tested." data-zh="準確度是在短篇推理、知識與程式基準上報告的；「小的逐跳誤差可能在數十輪中累積」的長程 agent 程式並未被壓力測試。">Accuracy is reported on short-form reasoning, knowledge, and code benchmarks; long-horizon agent programs where small per-hop errors could accumulate over dozens of rounds are not stress-tested.</span>
+  </li>
+        <li>
+    <span class="i18n" data-en="The extra decode-time memory for pre-RoPE KV, the L_start checkpoint, and the influence tallies is described qualitatively as small but is not quantified against the KV footprint it saves." data-zh="Pre-RoPE KV、L_start checkpoint 與影響計數的額外解碼時記憶體，被定性描述為小，但未相對於它所節省的 KV 佔用加以量化。">The extra decode-time memory for pre-RoPE KV, the $L_{\text{start}}$ checkpoint, and the influence tallies is described qualitatively as small but is not quantified against the KV footprint it saves.</span>
+  </li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    <span class="i18n" data-en="None of these undermines the paper's central claim, which is narrow and well supported: within the profiled regime, the decoding cache is a reusable draft and sparse rectification restores fidelity cheaply. They do mark the boundary of that regime, and it is precisely at that boundary — faithful-but-irrelevant content, accumulating multi-hop error, the receiver's task diverging from the source's — that a receiver-centric, subtractive treatment becomes the natural next question." data-zh="這些皆不動搖論文的核心主張，該主張既狹窄又獲良好支持：在所剖析的範圍內，解碼 cache 是可重用的草稿，而稀疏修正能廉價還原忠實度。它們確實標出了該範圍的邊界，而正是在該邊界上 —— 忠實但不相關的內容、累積的多跳誤差、接收者任務偏離來源 —— 一個以接收者為中心、減法式的處理，成為自然的下一個問題。">None of these undermines the paper's central claim, which is narrow and well supported: within the profiled regime, the decoding cache is a reusable draft and sparse rectification restores fidelity cheaply. They do mark the boundary of that regime, and it is precisely at that boundary — faithful-but-irrelevant content, accumulating multi-hop error, the receiver's task diverging from the source's — that a receiver-centric, subtractive treatment becomes the natural next question.</span>
+  </p>
+</section>
+
+<!-- ====== 9. RELATION TO DECONTAMINATED KV SELECTION (OUR THESIS) ====== -->
+<section id="decontamination">
+  <h2><span class="i18n" data-en="9. Relation to Decontaminated KV Selection" data-zh="9. 與「去污染 KV 選擇」的關係">9. Relation to Decontaminated KV Selection</span></h2>
+  <p>
+    <span class="i18n" data-en="Our own line of work frames cross-agent KV reuse as a subtractive, per-token, receiver-decision-relevance decontamination problem: when one agent's cache is reused by another, part of what it carries is irrelevant or even misleading to the receiver's next decision, and the right operation is to remove or down-weight that part — to decontaminate — rather than to faithfully reproduce it. KVCOMM, by contrast, is additive re-alignment: it repairs the reused cache toward a corrected reference. RelayCaching is the closest citer to our work on the selection axis, because it, uniquely among the reuse methods, scores each reused token by importance. This section positions it precisely against our thesis, using the full paper rather than the abstract." data-zh="我們自身的研究線，將跨 agent KV 重用視為一個減法式、逐 token、以接收者決策相關性為準的去污染問題：當一個 agent 的 cache 被另一個重用時，它所承載的一部分內容對接收者的下一步決策是不相關、甚至誤導的，正確的操作是移除或降權該部分 —— 去污染 —— 而非忠實地重現它。相對地，KVCOMM 是加法式的重新對齊：它將重用 cache 修復至一個校正後的參考。RelayCaching 在選擇軸上是最接近我們工作的引用者，因為在所有重用方法中，唯獨它為每個重用 token 以重要性評分。本節以完整論文（而非摘要）將它精確定位於我們的論點之旁。">Our own line of work frames cross-agent KV reuse as a <strong>subtractive, per-token, receiver-decision-relevance decontamination</strong> problem: when one agent's cache is reused by another, part of what it carries is irrelevant or even misleading to the receiver's next decision, and the right operation is to remove or down-weight that part — to decontaminate — rather than to faithfully reproduce it. KVCOMM, by contrast, is additive re-alignment: it repairs the reused cache toward a corrected reference. RelayCaching is the closest citer to our work on the selection axis, because it, uniquely among the reuse methods, scores each reused token by importance. This section positions it precisely against our thesis, using the full paper rather than the abstract.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="9.1 The three diagnostic questions, answered from the full text" data-zh="9.1 三個診斷問題，依全文作答">9.1 The three diagnostic questions, answered from the full text</span></h3>
+  <p>
+    <span class="i18n" data-en="We ask of every cross-agent KV reuse paper the same three questions, because they separate a fidelity method from a decontamination method." data-zh="我們對每一篇跨 agent KV 重用論文都問同樣的三個問題，因為它們能區分「忠實度方法」與「去污染方法」。">We ask of every cross-agent KV reuse paper the same three questions, because they separate a fidelity method from a decontamination method.</span>
+  </p>
+  <table>
+    <thead><tr>
+      <th><span class="i18n" data-en="Diagnostic question" data-zh="診斷問題">Diagnostic question</span></th>
+      <th><span class="i18n" data-en="RelayCaching's answer (from full text)" data-zh="RelayCaching 的答案（依全文）">RelayCaching's answer (from full text)</span></th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="i18n" data-en="(a) Does it do per-token importance selection?" data-zh="(a) 是否進行逐 token 重要性選擇？">(a) Does it do per-token importance selection?</span></td>
+        <td><span class="check">Yes.</span> <span class="i18n" data-en="Genuinely so — Equations 5–9 score each reused position by value-cosine deviation (Eq. 5) unioned with accumulated decode attention plus a trailing suffix (Eqs. 6–8). This is a real per-token importance score, and it is what makes RelayCaching the closest citer to our selection idea." data-zh="確實如此 —— 方程式 5–9 以 value 餘弦偏離（式 5）聯集累積解碼注意力加尾端後綴（式 6–8）為每個重用位置評分。這是一個真正的逐 token 重要性分數，也正是使 RelayCaching 成為最接近我們選擇構想之引用者的原因。">Genuinely so — Equations 5–9 score each reused position by value-cosine deviation (Eq. 5) unioned with accumulated decode attention plus a trailing suffix (Eqs. 6–8). This is a real per-token importance score, and it is what makes RelayCaching the closest citer to our selection idea.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="(b) Is the action subtractive (decontamination) or additive (repair/avoidance)?" data-zh="(b) 動作是減法（去污染）還是加法（修復／規避）？">(b) Is the action subtractive (decontamination) or additive (repair/avoidance)?</span></td>
+        <td><span class="cross">Purely additive.</span> <span class="i18n" data-en="Selected tokens are recomputed to restore fidelity to the full-prefill reference; the paper calls this rectification. No token is ever dropped, masked, or down-weighted — every position is either reused verbatim or recomputed. There is no subtraction and no decontamination anywhere in the method." data-zh="純粹加法。所選 token 被重算以還原對 full-prefill 參考的忠實度；論文稱之為修正（rectification）。沒有任何 token 被丟棄、遮蔽或降權 —— 每個位置若非原封重用便是重算。方法中任何一處都不存在減法，也不存在去污染。">Selected tokens are recomputed to restore fidelity to the full-prefill reference; the paper calls this <em>rectification</em>. No token is ever dropped, masked, or down-weighted — every position is either reused verbatim or recomputed. There is no subtraction and no decontamination anywhere in the method.</span></td>
+      </tr>
+      <tr>
+        <td><span class="i18n" data-en="(c) Does it name the contamination phenomenon?" data-zh="(c) 是否指名污染現象？">(c) Does it name the contamination phenomenon?</span></td>
+        <td><span class="cross">No.</span> <span class="i18n" data-en="The framing is the opposite: decoding KV caches remain highly aligned with full-prefill counterparts, deviations are sparse and localized. The reused cache is treated as a high-fidelity draft carrying an occasional numeric error — never as carrying receiver-irrelevant or harmful information. The word contamination, and any notion of the cache misleading the receiver, is absent." data-zh="其框架恰恰相反：解碼 KV cache 與 full-prefill 版本維持高度對齊、偏離稀疏且局部。重用 cache 被視為承載偶發數值誤差的高保真草稿 —— 從不被視為承載對接收者不相關或有害的資訊。「污染」一詞、以及任何「cache 誤導接收者」的概念，皆不存在。">The framing is the opposite: decoding KV caches remain highly aligned with full-prefill counterparts, deviations are sparse and localized. The reused cache is treated as a high-fidelity draft carrying an occasional numeric error — never as carrying receiver-irrelevant or harmful information. The word <em>contamination</em>, and any notion of the cache misleading the receiver, is absent.</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3><span class="i18n" data-en="9.2 The one-line differentiator" data-zh="9.2 一句話的差異點">9.2 The one-line differentiator</span></h3>
+  <div class="warn">
+    <span class="i18n" data-en="RelayCaching scores each reused token by its infidelity to the full-prefill reference and by the attention the source agent's own decoding paid to it, then recomputes the selected tokens to make the cache more faithful; our approach scores each reused token by its relevance — or harm — to the receiver agent's next decision, then subtracts the contaminating tokens to make the cache safer to consume. Same object, per-token scoring of reused cross-agent KV; opposite target (source-side fidelity vs receiver-side decision relevance) and opposite action (additive recompute vs subtractive decontamination)." data-zh="RelayCaching 以每個重用 token「對 full-prefill 參考的不忠實度」以及「來源 agent 自身解碼對它付出的注意力」評分，再重算所選 token 以使 cache 更忠實；我們的方法以每個重用 token「對接收者 agent 下一步決策的相關性 —— 或危害」評分，再減去污染 token 以使 cache 更安全可用。相同的對象：逐 token 為重用的跨 agent KV 評分；相反的目標（來源端忠實度 對 接收端決策相關性）與相反的動作（加法重算 對 減法去污染）。">RelayCaching scores each reused token by its <strong>infidelity to the full-prefill reference</strong> and by the attention the <strong>source</strong> agent's own decoding paid to it, then <strong>recomputes</strong> the selected tokens to make the cache more faithful; our approach scores each reused token by its <strong>relevance — or harm — to the receiver agent's next decision</strong>, then <strong>subtracts</strong> the contaminating tokens to make the cache safer to consume. Same object (per-token scoring of reused cross-agent KV); opposite target (source-side fidelity vs receiver-side decision relevance) and opposite action (additive recompute vs subtractive decontamination).</span>
+  </div>
+
+  <h3><span class="i18n" data-en="9.3 A worked example — where the two targets diverge" data-zh="9.3 一個實例 —— 兩種目標的分歧之處">9.3 A worked example — where the two targets diverge</span></h3>
+  <p>
+    <span class="i18n" data-en="The cleanest way to see that fidelity and receiver-relevance are different targets is a case where they disagree. Suppose the upstream Developer agent's output contains a long block of boilerplate imports that it attended to heavily while generating (so its accumulated influence is high) and that a full prefill would reproduce almost exactly (so its value deviation is low). RelayCaching's verdict on this block is unambiguous: high influence triggers recomputation under Equation 7, and because deviation is low the recompute simply confirms the reused values — effort spent to keep a faithful copy faithful. Now suppose the downstream Reviewer's task is to judge algorithmic correctness, for which the import boilerplate is irrelevant and its strong KV presence only dilutes the attention the Reviewer can place on the logic. A fidelity method has no way to express this: the block is faithful, so by its objective it is already correct and must be preserved. A decontamination method reaches the opposite verdict — the block is faithful yet irrelevant to the receiver's decision, so it should be down-weighted or removed, not recomputed. Same token, same two signals, opposite action, because the objective is receiver-decision relevance rather than reproduction fidelity." data-zh="要看清「忠實度」與「接收者相關性」是不同目標，最乾淨的方式是找一個兩者判定相反的情況。假設上游 Developer agent 的輸出含有一大段樣板 import，它在生成時大量注意此段（故其累積影響高），而 full prefill 會幾乎原樣重現它（故其 value 偏離低）。RelayCaching 對此段的判定明確：高影響依方程式 7 觸發重算，而由於偏離低，重算只是確認重用值 —— 為「讓忠實的副本維持忠實」而付出的心力。現在假設下游 Reviewer 的任務是判斷演算法正確性，對此 import 樣板不相關，其強烈的 KV 存在只會稀釋 Reviewer 能放在邏輯上的注意力。忠實度方法無法表達這一點：該段是忠實的，故依其目標它已然正確、必須保留。去污染方法則得出相反判定 —— 該段忠實卻對接收者的決策不相關，因此應被降權或移除，而非重算。相同的 token、相同的兩個訊號、相反的動作，只因目標是「接收者決策相關性」而非「重現忠實度」。">The cleanest way to see that fidelity and receiver-relevance are different targets is a case where they disagree. Suppose the upstream Developer agent's output contains a long block of boilerplate imports that it attended to heavily while generating (so its accumulated influence is high) and that a full prefill would reproduce almost exactly (so its value deviation is low). RelayCaching's verdict on this block is unambiguous: high influence triggers recomputation under Equation 7, and because deviation is low the recompute simply confirms the reused values — effort spent to keep a faithful copy faithful. Now suppose the downstream Reviewer's task is to judge algorithmic correctness, for which the import boilerplate is irrelevant and its strong KV presence only dilutes the attention the Reviewer can place on the logic. A fidelity method has no way to express this: the block is faithful, so by its objective it is already correct and must be preserved. A decontamination method reaches the opposite verdict — the block is faithful yet irrelevant to the receiver's decision, so it should be down-weighted or removed, not recomputed. Same token, same two signals, opposite action, because the objective is receiver-decision relevance rather than reproduction fidelity.</span>
+  </p>
+
+  <h3><span class="i18n" data-en="9.4 Honest verdict on the novelty gap" data-zh="9.4 對新穎性缺口的誠實判定">9.4 Honest verdict on the novelty gap</span></h3>
+  <p>
+    <span class="i18n" data-en="The full text is more than the abstract suggested, and the honest reading is that RelayCaching narrows — but does not close — our decontamination gap, while it does close a loosely worded version of our novelty claim. The distinction matters and is worth stating plainly." data-zh="全文比摘要所暗示的更多，誠實的解讀是：RelayCaching 縮小 —— 但未封閉 —— 我們的去污染缺口，同時它確實封閉了我們新穎性主張的一個「措辭寬鬆」版本。這個區別很重要，值得明講。">The full text is more than the abstract suggested, and the honest reading is that RelayCaching <strong>narrows — but does not close</strong> — our decontamination gap, while it <strong>does close a loosely worded version of our novelty claim</strong>. The distinction matters and is worth stating plainly.</span>
+  </p>
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="i18n" data-en="What is no longer defensible" data-zh="不再站得住腳的">What is no longer defensible</span></h4>
+      <p>
+    <span class="i18n" data-en="The bare phrase per-token importance scoring of reused cross-agent KV can no longer be claimed as ours alone. RelayCaching has exactly that: a value-deviation criterion unioned with an accumulated-attention influence criterion, evaluated position by position. If our novelty is stated only at that altitude, this paper is prior art that pre-empts it. Any claim we make must drop the generic per-token-scoring framing." data-zh="「為重用的跨 agent KV 做逐 token 重要性評分」這句話本身，已不能主張為我們獨有。RelayCaching 正是如此：一個 value 偏離準則聯集一個累積注意力影響準則，逐位置評估。若我們的新穎性僅停在這個高度陳述，本論文即為預先佔用它的先前技術。我們的任何主張都必須捨棄這個泛用的「逐 token 評分」框架。">The bare phrase "per-token importance scoring of reused cross-agent KV" can no longer be claimed as ours alone. RelayCaching has exactly that: a value-deviation criterion unioned with an accumulated-attention influence criterion, evaluated position by position. If our novelty is stated only at that altitude, this paper is prior art that pre-empts it. Any claim we make must drop the generic per-token-scoring framing.</span>
+  </p>
+    </div>
+    <div class="card hl">
+      <h4><span class="i18n" data-en="What remains genuinely open" data-zh="仍真正開放的">What remains genuinely open</span></h4>
+      <p>
+    <span class="i18n" data-en="Three axes are untouched by RelayCaching: (i) the action is subtractive — removing or down-weighting KV — not additive recompute; (ii) the scoring target is the receiver's decision relevance, not fidelity to a full-prefill reference; (iii) the phenomenon is named and modeled as contamination, i.e. reused KV that is faithful yet still harmful to consume. RelayCaching addresses none of these; on all three it is on the opposite side." data-zh="有三個軸未被 RelayCaching 觸及：(i) 動作是減法 —— 移除或降權 KV —— 而非加法重算；(ii) 評分目標是接收者的決策相關性，而非對 full-prefill 參考的忠實度；(iii) 該現象被指名並建模為污染，亦即「忠實卻仍有害可用」的重用 KV。RelayCaching 對這三者皆未著墨；在三者上它都站在相反的一側。">Three axes are untouched by RelayCaching: (i) the action is <strong>subtractive</strong> — removing or down-weighting KV — not additive recompute; (ii) the scoring target is the <strong>receiver's decision relevance</strong>, not fidelity to a full-prefill reference; (iii) the phenomenon is <strong>named and modeled as contamination</strong>, i.e. reused KV that is faithful yet still harmful to consume. RelayCaching addresses none of these; on all three it is on the opposite side.</span>
+  </p>
+    </div>
+  </div>
+  <div class="note">
+    <strong><span class="i18n" data-en="The genuine threat to flag." data-zh="須標記的真實威脅。">The genuine threat to flag.</span></strong>
+    <span class="i18n" data-en=" A reviewer who reads quickly can see RelayCaching's value-deviation-plus-accumulated-attention selector and conclude that our per-token score is the same idea. The two are structurally similar signals; the difference is not in the existence of a score but in what the score points at and what is done with the selected tokens. Our defense must therefore never rest on having a per-token score — it must rest on the action (subtract, not recompute) and the target (receiver-decision relevance, not source-side fidelity), and on naming and demonstrating a contamination effect that a fidelity-restoring method like RelayCaching cannot even express, because in its worldview a faithful cache is by definition a good one." data-zh=" 一個讀得快的審稿人，可能看到 RelayCaching 的「value 偏離加累積注意力」選擇器，就斷定我們的逐 token 分數是同一個構想。兩者是結構相似的訊號；差別不在分數是否存在，而在分數指向什麼、以及對所選 token 做了什麼。因此我們的辯護絕不能立基於「我們有逐 token 分數」—— 它必須立基於「動作」（減法，而非重算）與「目標」（接收者決策相關性，而非來源端忠實度），以及指名並示範一個「像 RelayCaching 這樣的忠實度還原方法連表達都無法表達」的污染效應，因為在它的世界觀裡，忠實的 cache 依定義就是好的 cache。"> A reviewer who reads quickly can see RelayCaching's value-deviation-plus-accumulated-attention selector and conclude that our per-token score is the same idea. The two are structurally similar signals; the difference is not in the existence of a score but in what the score points at and what is done with the selected tokens. Our defense must therefore never rest on having a per-token score — it must rest on the action (subtract, not recompute) and the target (receiver-decision relevance, not source-side fidelity), and on naming and demonstrating a contamination effect that a fidelity-restoring method like RelayCaching cannot even express, because in its worldview a faithful cache is by definition a good one.</span>
+  </div>
+</section>
+
+<!-- ====== 9. RELATED WORK ====== -->
+<section id="related">
+  <h2><span class="i18n" data-en="10. Related Work in Context" data-zh="10. 脈絡中的相關工作">10. Related Work in Context</span></h2>
+  <p>
+    <span class="i18n" data-en="RelayCaching organizes prior KV reuse into three families and defines itself against each. The compact map below situates it, and clarifies why the multi-agent, runtime-generated setting is the axis along which it claims novelty." data-zh="RelayCaching 將既有 KV 重用整理為三個家族，並以此界定自身。下方精簡地圖將它定位，並闡明「多 agent、執行期生成」情境為何是它主張新穎性的軸。">RelayCaching organizes prior KV reuse into three families and defines itself against each. The compact map below situates it, and clarifies why the multi-agent, runtime-generated setting is the axis along which it claims novelty.</span>
+  </p>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="i18n" data-en="Prefix caching" data-zh="Prefix caching">Prefix caching</span></h4>
+      <p>
+    <span class="i18n" data-en="vLLM and SGLang reuse exact-match KV at the prefix. Correct and cheap when the prefix repeats, but the shared content in agent chains sits at non-prefix positions, so the positional-alignment requirement rules it out." data-zh="vLLM 與 SGLang 在前綴重用精確匹配的 KV。當前綴重複時正確且廉價，但 agent 鏈中的共享內容位於非前綴位置，位置對齊要求使其出局。">vLLM and SGLang reuse exact-match KV at the prefix. Correct and cheap when the prefix repeats, but the shared content in agent chains sits at non-prefix positions, so the positional-alignment requirement rules it out.</span>
+  </p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Pre-computed caching" data-zh="Pre-computed caching">Pre-computed caching</span></h4>
+      <p>
+    <span class="i18n" data-en="CacheBlend, EPIC, and DroidSpeak encode reusable chunks offline for position-independent stitching. Effective for static RAG documents; inapplicable to agent outputs, which exist only at run time. CacheBlend's value-norm detection also misses the value-cosine deviation axis." data-zh="CacheBlend、EPIC、DroidSpeak 將可重用區塊離線編碼以進行位置無關的縫合。對靜態 RAG 文件有效；對僅存在於執行期的 agent 輸出則不適用。CacheBlend 的 value-norm 偵測也漏掉 value 餘弦偏離軸。">CacheBlend, EPIC, and DroidSpeak encode reusable chunks offline for position-independent stitching. Effective for static RAG documents; inapplicable to agent outputs, which exist only at run time. CacheBlend's value-norm detection also misses the value-cosine deviation axis.</span>
+  </p>
+    </div>
+    <div class="card">
+      <h4><span class="i18n" data-en="Collaborative-inference reuse" data-zh="協作推理重用">Collaborative-inference reuse</span></h4>
+      <p>
+    <span class="i18n" data-en="APE aligns independently encoded caches via adaptive scaling; KVCOMM is the first to target cascading multi-agent redundancy via retrieval-based anchor pools. RelayCaching removes the external reference entirely, reusing the immediately upstream decoding cache and rectifying it in place." data-zh="APE 以自適應縮放對齊獨立編碼的 cache；KVCOMM 為第一個透過檢索式 anchor pool 針對級聯多 agent 冗餘者。RelayCaching 完全移除外部參考，重用緊鄰上游的解碼 cache 並就地修正。">APE aligns independently encoded caches via adaptive scaling; KVCOMM is the first to target cascading multi-agent redundancy via retrieval-based anchor pools. RelayCaching removes the external reference entirely, reusing the immediately upstream decoding cache and rectifying it in place.</span>
+  </p>
+    </div>
+  </div>
+  <p>
+    <span class="i18n" data-en="Read as a whole, the related work confirms that the prior art on cross-context KV reuse is uniformly additive: it either matches, stitches, aligns, or rectifies caches toward a correct reference. None of these methods asks whether a faithful reused cache might still carry information that the receiving agent should not consume — the question our decontamination line is built on." data-zh="整體來看，相關工作證實跨脈絡 KV 重用的先前技術一律是加法式的：它們或匹配、或縫合、或對齊、或將 cache 修正至一個正確參考。這些方法沒有一個追問：一份忠實的重用 cache，是否仍可能承載接收 agent 不該取用的資訊 —— 而這正是我們去污染研究線所立基的問題。">Read as a whole, the related work confirms that the prior art on cross-context KV reuse is uniformly additive: it either matches, stitches, aligns, or rectifies caches toward a correct reference. None of these methods asks whether a faithful reused cache might still carry information that the receiving agent should not consume — the question our decontamination line is built on.</span>
+  </p>
+</section>
+
+</div>
+
+<footer>
+  <p>
+    <span class="i18n" data-en="RelayCaching: Accelerating LLM Collaboration via Decoding KV Cache Reuse (arXiv:2603.13289). Analysis page for the agentic-ai-survey." data-zh="RelayCaching：透過解碼 KV Cache 重用加速 LLM 協作（arXiv:2603.13289）。agentic-ai-survey 分析頁。">RelayCaching: Accelerating LLM Collaboration via Decoding KV Cache Reuse (arXiv:2603.13289). Analysis page for the agentic-ai-survey.</span>
+  </p>
+  <p>
+    <span class="i18n" data-en="Figures reproduced from the arXiv HTML version for scholarly commentary. Generated 2026-07-09." data-zh="圖片轉載自 arXiv HTML 版本以供學術評註。產生日期：2026-07-09。">Figures reproduced from the arXiv HTML version for scholarly commentary. Generated 2026-07-09.</span>
+  </p>
+  <p><a href="../../index.html"><span class="i18n" data-en="&larr; Back to Agentic Survey" data-zh="&larr; 返回 Agentic Survey">&larr; Back to Agentic Survey</span></a></p>
+</footer>
+
+<script>
+function setLang(l){
+  document.querySelectorAll('.i18n').forEach(function(e){
+    if(e.dataset[l]) e.innerHTML = e.dataset[l];
+  });
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.getElementById('lang-zh').classList.toggle('active', l === 'zh');
+  localStorage.setItem('lang', l);
+  if (window.renderMathInElement) {
+    window.renderMathInElement(document.body, {
+      delimiters: [
+        {left: '$$', right: '$$', display: true},
+        {left: '$',  right: '$',  display: false}
+      ]
+    });
+  }
+}
+(function(){var l=localStorage.getItem('lang')||'en';setLang(l)})();
+</script>
+</body>
+</html>
