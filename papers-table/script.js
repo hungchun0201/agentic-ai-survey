@@ -23,7 +23,18 @@ const PALETTE = [
   ["#fefce8", "#a16207"], ["#f0f9ff", "#0369a1"],
 ];
 
+// Fixed colors for semantically ordered tags (acceptance tiers): the hash
+// palette gave Oral and Poster near-identical colors, hiding the ranking.
+const FIXED_TAG_COLORS = {
+  "Oral":       ["#fee2e2", "#991b1b"],
+  "Spotlight":  ["#fef3c7", "#92400e"],
+  "Poster":     ["#dbeafe", "#1e40af"],
+  "Preprint":   ["#f1f5f9", "#334155"],
+  "Unverified": ["#f1f5f9", "#64748b"],
+};
+
 function tagColor(tag) {
+  if (FIXED_TAG_COLORS[tag]) return FIXED_TAG_COLORS[tag];
   let h = 2166136261 >>> 0;
   for (let i = 0; i < tag.length; i++) {
     h = ((h ^ tag.charCodeAt(i)) * 16777619) >>> 0;
