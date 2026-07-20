@@ -10,7 +10,7 @@
 const NOT_SPEC = "Not Specified";
 
 // Known subtables — add an entry here when you add a new schema YAML.
-const AVAILABLE_DOMAINS = ["ai-networking", "inference-modeling", "kv-offloading", "mas"];
+const AVAILABLE_DOMAINS = ["ai-networking", "inference-modeling", "kv-offloading", "mas", "dynamic-mas"];
 
 // Deterministic tag-color palette.
 const PALETTE = [
