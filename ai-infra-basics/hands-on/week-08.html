@@ -261,11 +261,13 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --dataset-name sharegpt \
   --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
   --num-prompts <span class="nr">100</span> --request-rate <span class="nr">4</span> \
+  --save-result --result-filename results_no_chunk.json \
   2&gt;&amp;1 | tee results_no_chunk.txt
 
-<span class="cm"># Key metric to look for: ITL p99 vs p50 ratio</span>
-<span class="cm"># High ratio = high variance = HOL blocking present</span>
-grep <span class="st">"ITL"</span> results_no_chunk.txt</code></pre>
+<span class="cm"># --save-result writes per-request ttfts/itls arrays to JSON (needed for Step 4 timeseries).</span>
+<span class="cm"># The .txt file only contains summary stats — Mean/Median/P99 TTFT and TPOT.</span>
+<span class="cm"># Key metric to look for: ITL p99 vs p50 ratio (high ratio = HOL blocking present)</span>
+grep <span class="st">"ITL\|TPOT"</span> results_no_chunk.txt</code></pre>
     </div>
 
     <div class="step">
@@ -280,6 +282,7 @@ grep <span class="st">"ITL"</span> results_no_chunk.txt</code></pre>
   --dataset-name sharegpt \
   --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
   --num-prompts <span class="nr">100</span> --request-rate <span class="nr">4</span> \
+  --save-result --result-filename results_chunk_default.json \
   2&gt;&amp;1 | tee results_chunk_default.txt</code></pre>
     </div>
 
@@ -325,21 +328,24 @@ grep <span class="st">"ITL"</span> results_no_chunk.txt</code></pre>
       <p><span class="i18n"
         data-en="Plot per-token ITL over time for both no-chunked and chunked configurations. Without chunked prefill, you should see periodic spikes when large prefills enter the batch. With chunked prefill, the timeseries should be smoother."
         data-zh="繪製無分塊和有分塊配置的每 token ITL 隨時間變化圖。無分塊預填充時，應在大型預填充進入批次時看到週期性峰值。有分塊預填充時，時間序列應更平滑。">Plot per-token ITL over time for both no-chunked and chunked configurations. Without chunked prefill, you should see periodic spikes when large prefills enter the batch. With chunked prefill, the timeseries should be smoother.</span></p>
-      <pre><code><span class="kw">import</span> re, json, matplotlib.pyplot <span class="kw">as</span> plt
+      <pre><code><span class="kw">import</span> json, matplotlib.pyplot <span class="kw">as</span> plt
 
-<span class="kw">def</span> <span class="fn">parse_itl_timeseries</span>(filepath):
-    itls = []
-    <span class="kw">with</span> open(filepath) <span class="kw">as</span> f:
-        <span class="kw">for</span> line <span class="kw">in</span> f:
-            m = re.search(<span class="st">r"itls=\[(.*?)\]"</span>, line)
-            <span class="kw">if</span> m:
-                itls.extend([float(x) <span class="kw">for</span> x <span class="kw">in</span> m.group(<span class="nr">1</span>).split(<span class="st">","</span>) <span class="kw">if</span> x.strip()])
-    <span class="kw">return</span> itls
+<span class="kw">def</span> <span class="fn">parse_itl_timeseries</span>(json_path):
+    <span class="cm"># benchmark_serving.py --save-result writes itls as a list-of-lists in seconds:</span>
+    <span class="cm">#   data["itls"] = [[req0_itl0, req0_itl1, ...], [req1_itl0, ...], ...]</span>
+    <span class="cm"># Flatten across requests in the order they were issued, then convert s -&gt; ms.</span>
+    <span class="kw">with</span> open(json_path) <span class="kw">as</span> f:
+        data = json.load(f)
+    flat = []
+    <span class="kw">for</span> req_itls <span class="kw">in</span> data.get(<span class="st">"itls"</span>, []):
+        flat.extend(req_itls)
+    <span class="kw">return</span> [v * <span class="nr">1000</span> <span class="kw">for</span> v <span class="kw">in</span> flat]
 
-fig, (ax1, ax2) = plt.subplots(<span class="nr">1</span>, <span class="nr">2</span>, figsize=(<span class="nr">14</span>, <span class="nr">4</span>))
+fig, (ax1, ax2) = plt.subplots(<span class="nr">1</span>, <span class="nr">2</span>, figsize=(<span class="nr">14</span>, <span class="nr">4</span>), sharey=<span class="nb">True</span>)
 
-itl_no_chunk = parse_itl_timeseries(<span class="st">"results_no_chunk.txt"</span>)
-itl_chunked  = parse_itl_timeseries(<span class="st">"results_chunk_default.txt"</span>)
+itl_no_chunk = parse_itl_timeseries(<span class="st">"results_no_chunk.json"</span>)
+itl_chunked  = parse_itl_timeseries(<span class="st">"results_chunk_default.json"</span>)
+<span class="nb">assert</span> itl_no_chunk <span class="kw">and</span> itl_chunked, <span class="st">"empty itls — did you pass --save-result to benchmark_serving.py?"</span>
 
 ax1.plot(itl_no_chunk, alpha=<span class="nr">0.7</span>, color=<span class="st">"#e74c3c"</span>)
 ax1.set_title(<span class="st">"No Chunked Prefill — ITL Spikes"</span>)
@@ -607,7 +613,7 @@ num_new_tokens = <span class="fn">min</span>(num_new_tokens, token_budget)</code
 
   <h3><span class="i18n" data-en="Q2: How to choose max-num-batched-tokens?" data-zh="Q2：如何選擇 max-num-batched-tokens？">Q2: How to choose max-num-batched-tokens?</span></h3>
   <div class="card highlight-green">
-    <p><strong><span class="i18n" data-en="The tradeoff:" data-zh="取捨：">The tradeoff:</span></strong> <span class="i18n" data-en="Too small (e.g., 256): prefill chunks are tiny, good ITL protection but high overhead (many short GEMMs, poor hardware utilization for prefill compute). Too large (e.g., 32768): chunks are huge, poor decode protection, long request monopolizes the batch. The default of 2048-8192 is a practical sweet spot for most real-time serving use cases." data-zh="太小（例如 256）：prefill 塊很小，良好的 ITL 保護但高開銷（許多短 GEMM，prefill 計算的硬體利用率差）。太大（例如 32768）：塊很大，decode 保護差，長請求獨佔批次。2048-8192 的默認值對於大多數實時服務使用案例是一個實用的最佳點。">Too small (e.g., 256): prefill chunks are tiny, good ITL protection but high overhead (many short GEMMs, poor hardware utilization for prefill compute). Too large (e.g., 32768): chunks are huge, poor decode protection, long request monopolizes the batch. The default of 2048-8192 is a practical sweet spot for most real-time serving use cases.</span></p>
+    <p><strong><span class="i18n" data-en="The tradeoff:" data-zh="取捨：">The tradeoff:</span></strong> <span class="i18n" data-en="Too small (e.g., 256): prefill chunks are tiny — good ITL protection, but at some point the overhead bites (many short GEMMs, poor prefill GEMM utilization). Too large (e.g., 32768): chunks are huge, poor decode protection, one long request monopolizes the batch. But do not trust a fixed default blindly — our own H200 sweep contradicted the naive 'larger chunk = higher throughput' intuition: throughput peaked at chunk=512 (928 tok/s) and fell to 722–740 tok/s at 2048–4096. With short ShareGPT prompts a smaller chunk leaves more of each step's token budget for decode, so the scheduler co-batches more decodes per step and the pipeline stays fuller — that interleaving gain outweighed the GEMM-efficiency loss at these prompt lengths. The right value is workload-dependent: sweep it (Experiment 3) on your own prompt-length distribution rather than copying 2048-8192." data-zh="太小（例如 256）：prefill 塊很小 — ITL 保護好，但到某個點開銷會咬人（許多短 GEMM，prefill GEMM 利用率差）。太大（例如 32768）：塊很大，decode 保護差，單一長請求獨佔批次。但別盲信固定預設值 — 我們自己的 H200 掃描就推翻了「塊越大吞吐越高」的直覺：吞吐量在 chunk=512 達到峰值（928 tok/s），到 2048–4096 反而掉到 722–740 tok/s。對於短的 ShareGPT prompt，較小的塊在每步留下更多 token 預算給 decode，排程器每步可以共批更多 decode、管線維持更滿 — 在這個 prompt 長度下，這個交錯增益勝過了 GEMM 效率的損失。正確的值取決於 workload：在你自己的 prompt 長度分佈上掃描它（實驗 3），而不是照抄 2048-8192。">Too small (e.g., 256): prefill chunks are tiny — good ITL protection, but at some point the overhead bites (many short GEMMs, poor prefill GEMM utilization). Too large (e.g., 32768): chunks are huge, poor decode protection, one long request monopolizes the batch. But do not trust a fixed default blindly — our own H200 sweep contradicted the naive 'larger chunk = higher throughput' intuition: throughput peaked at chunk=512 (928 tok/s) and fell to 722–740 tok/s at 2048–4096. With short ShareGPT prompts a smaller chunk leaves more of each step's token budget for decode, so the scheduler co-batches more decodes per step and the pipeline stays fuller — that interleaving gain outweighed the GEMM-efficiency loss at these prompt lengths. The right value is workload-dependent: sweep it (Experiment 3) on your own prompt-length distribution rather than copying 2048-8192.</span></p>
     <p><strong><span class="i18n" data-en="Priority for real-time chat:" data-zh="實時聊天的優先級：">Priority for real-time chat:</span></strong> <span class="i18n" data-en="ITL matters more than TTFT for streaming UX. A 100ms stutter every 5 seconds (from a large prefill blocking decode) is very noticeable. A 200ms longer TTFT is barely perceptible since the user expects to wait for the first token anyway. Set max-num-batched-tokens to protect ITL, accept higher TTFT for new requests." data-zh="對於串流 UX，ITL 比 TTFT 更重要。每 5 秒一次 100ms 卡頓（來自大型 prefill 阻塞 decode）非常明顯。200ms 更長的 TTFT 幾乎不明顯，因為用戶本來就期望等待第一個 token。設置 max-num-batched-tokens 以保護 ITL，接受新請求更高的 TTFT。">ITL matters more than TTFT for streaming UX. A 100ms stutter every 5 seconds (from a large prefill blocking decode) is very noticeable. A 200ms longer TTFT is barely perceptible since the user expects to wait for the first token anyway. Set max-num-batched-tokens to protect ITL, accept higher TTFT for new requests.</span></p>
   </div>
 

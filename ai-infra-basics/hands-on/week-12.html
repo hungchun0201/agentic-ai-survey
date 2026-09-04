@@ -254,16 +254,19 @@ vllm serve hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
     <div class="step">
       <div class="step-num s1">1</div>
       <h4><span class="i18n" data-en="Throughput Comparison — BF16 / FP8 / AWQ-INT4" data-zh="吞吐量比較 — BF16 / FP8 / AWQ-INT4">Throughput Comparison — BF16 / FP8 / AWQ-INT4</span></h4>
-      <p><span class="i18n" data-en="Sweep batch sizes 1, 16, 64 for all three formats using benchmark_throughput.py. This reveals the roofline crossover: at small batch sizes INT4 wins on bandwidth, at large batch sizes formats converge as compute dominates." data-zh="使用 benchmark_throughput.py 對所有三種格式掃描 batch size 1、16、64。這揭示了屋頂線交叉：在小 batch size 時 INT4 在頻寬上勝出，在大 batch size 時格式收斂，因為算力佔主導。">Sweep batch sizes 1, 16, 64 for all three formats using benchmark_throughput.py. This reveals the roofline crossover: at small batch sizes INT4 wins on bandwidth, at large batch sizes formats converge as compute dominates.</span></p>
-      <pre><code><span class="kw">for</span> fmt_port <span class="kw">in</span> <span class="st">"bf16:8000"</span> <span class="st">"fp8:8001"</span> <span class="st">"awq:8002"</span>; <span class="kw">do</span>
-  fmt=${fmt_port%%:*}; port=${fmt_port##*:}
+      <p><span class="i18n" data-en="Sweep max batch size (engine's max-num-seqs) at 1, 16, 64 for all three formats using benchmark_throughput.py. Note: benchmark_throughput.py is an OFFLINE benchmark — it builds its own engine and does not connect to the servers started in §Setup (those are only used by Step 3). --num-prompts is the total request count (fixed at 200 for a stable sample); --max-num-seqs is what actually caps the concurrent batch — this is the knob that reveals the roofline crossover: at small batch sizes INT4 wins on bandwidth, at large batch sizes formats converge as compute dominates." data-zh="使用 benchmark_throughput.py 對三種格式掃描引擎最大 batch size（max-num-seqs = 1、16、64）。注意：benchmark_throughput.py 是離線 benchmark — 它建立自己的引擎，不會連到 §Setup 啟動的伺服器（那些只給 Step 3 用）。--num-prompts 是請求總數（固定 200 取樣穩定）；--max-num-seqs 才是真正限制並發 batch 的旋鈕 — 這個旋鈕揭示屋頂線交叉：小 batch 時 INT4 在頻寬上勝出，大 batch 時格式收斂，因為算力佔主導。">Sweep max batch size (engine's max-num-seqs) at 1, 16, 64 for all three formats using benchmark_throughput.py. Note: benchmark_throughput.py is an OFFLINE benchmark — it builds its own engine and does not connect to the servers started in §Setup (those are only used by Step 3). --num-prompts is the total request count (fixed at 200 for a stable sample); --max-num-seqs is what actually caps the concurrent batch — this is the knob that reveals the roofline crossover: at small batch sizes INT4 wins on bandwidth, at large batch sizes formats converge as compute dominates.</span></p>
+      <pre><code><span class="kw">for</span> fmt <span class="kw">in</span> bf16 fp8 awq; <span class="kw">do</span>
+  <span class="kw">case</span> $fmt <span class="kw">in</span>
+    bf16) extra_args=<span class="st">"--dtype bfloat16"</span>;     model=<span class="st">"meta-llama/Llama-3.1-8B-Instruct"</span> ;;
+    fp8)  extra_args=<span class="st">"--quantization fp8"</span>;  model=<span class="st">"meta-llama/Llama-3.1-8B-Instruct"</span> ;;
+    awq)  extra_args=<span class="st">"--quantization awq"</span>;  model=<span class="st">"hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"</span> ;;
+  <span class="kw">esac</span>
   <span class="kw">for</span> bs <span class="kw">in</span> 1 16 64; <span class="kw">do</span>
     python benchmarks/benchmark_throughput.py \
-      --backend openai-chat \
-      --port $port \
-      --model meta-llama/Llama-3.1-8B-Instruct \
+      --model $model $extra_args \
       --input-len <span class="nr">512</span> --output-len <span class="nr">128</span> \
-      --num-prompts $bs \
+      --num-prompts <span class="nr">200</span> \
+      --max-num-seqs $bs \
       <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_tp_${fmt}_bs${bs}.txt
   <span class="kw">done</span>
 <span class="kw">done</span></code></pre>
@@ -294,10 +297,10 @@ vllm serve hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
     <div class="step">
       <div class="step-num s3">3</div>
       <h4><span class="i18n" data-en="Serving Benchmark — TTFT, ITL, Output tok/s" data-zh="服務基準測試 — TTFT、ITL、輸出 tok/s">Serving Benchmark — TTFT, ITL, Output tok/s</span></h4>
-      <p><span class="i18n" data-en="Run benchmark_serving.py against each format's running server. Use rate=inf (closed-loop) to saturate each server and measure maximum throughput. Also run rate=1 to compare latency at low load." data-zh="對每種格式的運行中伺服器執行 benchmark_serving.py。使用 rate=inf（封閉迴路）使每個伺服器飽和並測量最大吞吐量。同時執行 rate=1 以比較低負載下的延遲。">Run benchmark_serving.py against each format's running server. Use rate=inf (closed-loop) to saturate each server and measure maximum throughput. Also run rate=1 to compare latency at low load.</span></p>
+      <p><span class="i18n" data-en="Run benchmark_serving.py against each format's running server. Sweep three request rates: rate=1 (low load, latency-focused), rate=4 req/s (moderate load — this is the rr=4 operating point reported in §Results and §Analysis), and rate=inf (closed-loop, saturates the server for maximum throughput). The rr=4 point is the most instructive: it is where AWQ-INT4's per-step dequant overhead surfaces as a TTFT/ITL cliff while FP8 stays flat." data-zh="對每種格式的運行中伺服器執行 benchmark_serving.py。掃描三種請求速率：rate=1（低負載，聚焦延遲）、rate=4 req/s（中度負載 — 這是 §Results 和 §Analysis 報告的 rr=4 工作點）、rate=inf（封閉迴路，使伺服器飽和以測量最大吞吐量）。rr=4 這個點最有啟發性：它正是 AWQ-INT4 每 step 去量化開銷顯現為 TTFT/ITL 懸崖、而 FP8 維持平穩之處。">Run benchmark_serving.py against each format's running server. Sweep three request rates: rate=1 (low load, latency-focused), rate=4 req/s (moderate load — this is the rr=4 operating point reported in §Results and §Analysis), and rate=inf (closed-loop, saturates the server for maximum throughput). The rr=4 point is the most instructive: it is where AWQ-INT4's per-step dequant overhead surfaces as a TTFT/ITL cliff while FP8 stays flat.</span></p>
       <pre><code><span class="kw">for</span> fmt_port <span class="kw">in</span> <span class="st">"bf16:8000"</span> <span class="st">"fp8:8001"</span> <span class="st">"awq:8002"</span>; <span class="kw">do</span>
   fmt=${fmt_port%%:*}; port=${fmt_port##*:}
-  <span class="kw">for</span> rate <span class="kw">in</span> 1 inf; <span class="kw">do</span>
+  <span class="kw">for</span> rate <span class="kw">in</span> 1 4 inf; <span class="kw">do</span>
     python benchmarks/benchmark_serving.py \
       --backend vllm --port $port \
       --model meta-llama/Llama-3.1-8B-Instruct \

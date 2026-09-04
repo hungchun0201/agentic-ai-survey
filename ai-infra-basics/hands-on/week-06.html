@@ -357,13 +357,15 @@ print(state2[<span class="st">"answer2"</span>])</code></pre>
       <div class="step-num s4">4</div>
       <h4><span class="i18n" data-en="vLLM APC vs SGLang Radix — Head-to-Head" data-zh="vLLM APC vs SGLang Radix — 直接比較">vLLM APC vs SGLang Radix — Head-to-Head</span></h4>
       <p><span class="i18n"
-        data-en="Run the same generated-shared-prefix workload against vLLM APC (port 8000) and SGLang Radix (port 8001) and compare TTFT, throughput, and cache hit rate."
-        data-zh="對 vLLM APC（端口 8000）和 SGLang Radix（端口 8001）執行相同的生成共享前綴工作負載，並比較 TTFT、吞吐量和快取命中率。">Run the same generated-shared-prefix workload against vLLM APC (port 8000) and SGLang Radix (port 8001) and compare TTFT, throughput, and cache hit rate.</span></p>
-      <pre><code><span class="cm"># vLLM APC benchmark</span>
+        data-en="Build an equivalent shared-prefix workload on each side and compare TTFT, throughput, and cache hit rate. The two frameworks use different dataset generators: vLLM's <code>benchmark_serving.py</code> does <strong>not</strong> accept SGLang's <code>generated-shared-prefix</code> name, so use vLLM's <code>random</code> dataset with <code>--random-prefix-len</code> (a fixed prefix prepended to — and shared across — every request, which is exactly what APC caches). Match the shared-prefix length (512 tokens here) so the comparison is apples-to-apples."
+        data-zh="在兩邊各建立等價的共享前綴工作負載，並比較 TTFT、吞吐量和快取命中率。兩個框架使用不同的資料集產生器：vLLM 的 <code>benchmark_serving.py</code> <strong>不接受</strong> SGLang 的 <code>generated-shared-prefix</code> 名稱，因此 vLLM 端要用 <code>random</code> 資料集搭配 <code>--random-prefix-len</code>（一段固定前綴會被加到每個請求前、並在所有請求間共享，這正是 APC 會快取的部分）。對齊共享前綴長度（這裡用 512 token）讓比較公平。">Build an equivalent shared-prefix workload on each side and compare TTFT, throughput, and cache hit rate. vLLM's <code>benchmark_serving.py</code> does <strong>not</strong> accept SGLang's <code>generated-shared-prefix</code> name, so use vLLM's <code>random</code> dataset with <code>--random-prefix-len</code> (a fixed prefix shared across every request — exactly what APC caches). Match the prefix length (512 tokens) for an apples-to-apples comparison.</span></p>
+      <pre><code><span class="cm"># vLLM APC benchmark — random dataset with a 512-token SHARED prefix</span>
 python benchmarks/benchmark_serving.py \
   --backend vllm --port <span class="nr">8000</span> \
   --model meta-llama/Llama-3.1-8B-Instruct \
-  --dataset-name generated-shared-prefix \
+  --dataset-name random \
+  --random-prefix-len <span class="nr">512</span> \
+  --random-input-len <span class="nr">256</span> --random-output-len <span class="nr">128</span> \
   --num-prompts <span class="nr">200</span> --request-rate <span class="nr">4</span> \
   2&gt;&amp;1 | tee results_vllm_apc.txt
 
@@ -377,19 +379,27 @@ python -m sglang.bench_serving \
 
     <div class="step">
       <div class="step-num s5">5</div>
-      <h4><span class="i18n" data-en="Vary Number of Few-Shot Examples" data-zh="變化少樣本示例數量">Vary Number of Few-Shot Examples</span></h4>
+      <h4><span class="i18n" data-en="Sweep Shared-Prefix Length" data-zh="掃描共享前綴長度">Sweep Shared-Prefix Length</span></h4>
       <p><span class="i18n"
-        data-en="Control the number of few-shot examples in the shared prefix (1, 3, 5, 10 examples). More examples means a longer shared prefix and higher potential cache savings."
-        data-zh="控制共享前綴中的少樣本示例數量（1、3、5、10 個示例）。更多示例意味著更長的共享前綴和更高的潛在快取節省。">Control the number of few-shot examples in the shared prefix (1, 3, 5, 10 examples). More examples means a longer shared prefix and higher potential cache savings.</span></p>
-      <pre><code><span class="kw">for</span> num_shots <span class="kw">in</span> 1 3 5 10; <span class="kw">do</span>
-  echo <span class="st">"=== ${num_shots}-shot ==="</span>
+        data-en="Vary the length of the shared system prompt that all prompts in a group share (100 / 300 / 500 / 1000 tokens — roughly 1, 3, 5, 10 few-shot examples). For the SGLang <code>generated-shared-prefix</code> dataset, the correct flag is <code>--gsp-system-prompt-len</code> (length in tokens of the shared prefix). A longer shared prefix means more KV cache that can be reused on every hit — TTFT should stay flat while the equivalent radix-disabled run grows linearly with prefix length."
+        data-zh="變化所有共享提示組中共享的系統提示長度（100 / 300 / 500 / 1000 token — 大致對應 1、3、5、10 個 few-shot 範例）。對於 SGLang <code>generated-shared-prefix</code> 資料集，正確的參數是 <code>--gsp-system-prompt-len</code>（共享前綴的 token 長度）。更長的共享前綴代表每次命中可以重用更多 KV cache — TTFT 應保持平坦，而等價的關閉 radix 版本則會隨前綴長度線性增加。">Vary the length of the shared system prompt (100 / 300 / 500 / 1000 tokens). For the SGLang <code>generated-shared-prefix</code> dataset, use <code>--gsp-system-prompt-len</code>. Longer shared prefix = more KV cache reused per hit; TTFT should stay flat while a radix-off baseline grows linearly.</span></p>
+      <pre><code><span class="cm"># Sweep shared-prefix length (radix ON, port 8001)</span>
+<span class="kw">for</span> prefix_len <span class="kw">in</span> 100 300 500 1000; <span class="kw">do</span>
+  echo <span class="st">"=== gsp-system-prompt-len=${prefix_len} ==="</span>
   python -m sglang.bench_serving \
     --backend sglang --port <span class="nr">8001</span> \
     --dataset-name generated-shared-prefix \
-    --num-output-sentences $num_shots \
+    --gsp-num-groups <span class="nr">8</span> \
+    --gsp-prompts-per-group <span class="nr">25</span> \
+    --gsp-system-prompt-len $prefix_len \
+    --gsp-question-len <span class="nr">128</span> \
+    --gsp-output-len <span class="nr">128</span> \
     --num-prompts <span class="nr">200</span> --request-rate <span class="nr">4</span> \
-    2&gt;&amp;1 | tee results_radix_${num_shots}shot.txt
-<span class="kw">done</span></code></pre>
+    2&gt;&amp;1 | tee results_radix_prefix${prefix_len}.txt
+<span class="kw">done</span>
+
+<span class="cm"># Optional: re-run the same sweep against the radix-OFF server (port 8004)</span>
+<span class="cm"># to see TTFT grow linearly with prefix_len when there is no cache.</span></code></pre>
     </div>
 
     <div class="step">

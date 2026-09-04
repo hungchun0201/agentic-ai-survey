@@ -305,30 +305,35 @@ kill %1</code></pre>
     <div class="step">
       <div class="step-num s3">3</div>
       <h4><span class="i18n" data-en="Expert Routing Analysis" data-zh="專家路由分析">Expert Routing Analysis</span></h4>
-      <p><span class="i18n" data-en="Instrument the routing logic to observe which experts are selected for a sample of tokens. Patch the MoE forward pass to log router logits:" data-zh="對路由邏輯進行插樁以觀察樣本 token 選擇了哪些專家。修補 MoE 前向傳播以記錄路由器 logits：">Instrument the routing logic to observe which experts are selected for a sample of tokens. Patch the MoE forward pass to log router logits:</span></p>
-      <pre><code><span class="cm"># expert_probe.py — log expert selection frequencies</span>
-<span class="kw">from</span> vllm <span class="kw">import</span> LLM, SamplingParams
+      <p><span class="i18n" data-en="Mixtral natively exposes its router logits through HuggingFace transformers — pass <code>output_router_logits=True</code> and the model returns per-layer routing scores for every token. This is far more reliable than trying to hook vLLM's fused-MoE CUDA kernel (which permutes tokens internally and exposes no Python callback). Use it to measure how evenly the 8 experts are utilized:" data-zh="Mixtral 透過 HuggingFace transformers 原生暴露其 router logits — 傳入 <code>output_router_logits=True</code>，模型就會回傳每層每個 token 的路由分數。這比嘗試 hook vLLM 的 fused-MoE CUDA kernel（它在內部置換 token 且不提供 Python callback）可靠得多。用這個來測量 8 個專家的使用是否均衡：">Mixtral natively exposes its router logits through HuggingFace transformers — pass <code>output_router_logits=True</code> and the model returns per-layer routing scores for every token. This is far more reliable than trying to hook vLLM's fused-MoE CUDA kernel (which permutes tokens internally and exposes no Python callback). Use it to measure how evenly the 8 experts are utilized:</span></p>
+      <pre><code><span class="cm"># expert_probe.py — measure expert load balance via HF router logits</span>
 <span class="kw">import</span> torch, collections
+<span class="kw">from</span> transformers <span class="kw">import</span> AutoModelForCausalLM, AutoTokenizer
 
-llm = <span class="fn">LLM</span>(
-    model=<span class="st">"mistralai/Mixtral-8x7B-Instruct-v0.1"</span>,
-    tensor_parallel_size=<span class="nr">2</span>,
-)
+model_id = <span class="st">"mistralai/Mixtral-8x7B-Instruct-v0.1"</span>
+tok = AutoTokenizer.<span class="fn">from_pretrained</span>(model_id)
+model = AutoModelForCausalLM.<span class="fn">from_pretrained</span>(
+    model_id, torch_dtype=torch.bfloat16, device_map=<span class="st">"auto"</span>,  <span class="cm"># shards across 2 GPUs</span>
+).<span class="fn">eval</span>()
 
-<span class="cm"># Patch router to capture selections</span>
-expert_counts = collections.<span class="fn">defaultdict</span>(<span class="kw">lambda</span>: collections.<span class="fn">Counter</span>())
+prompt = <span class="st">"Explain quantum computing in simple terms."</span>
+inputs = <span class="fn">tok</span>(prompt, return_tensors=<span class="st">"pt"</span>).<span class="fn">to</span>(model.device)
 
-<span class="kw">def</span> <span class="fn">hook_router</span>(layer_idx, expert_indices):
-    <span class="kw">for</span> idx <span class="kw">in</span> expert_indices.<span class="fn">flatten</span>().<span class="fn">tolist</span>():
-        expert_counts[layer_idx][idx] += <span class="nr">1</span>
+<span class="kw">with</span> torch.<span class="fn">no_grad</span>():
+    out = <span class="fn">model</span>(**inputs, output_router_logits=<span class="kw">True</span>)
 
-prompts = [<span class="st">"Explain quantum computing in simple terms."</span>] * <span class="nr">50</span>
-outputs = llm.<span class="fn">generate</span>(prompts, <span class="fn">SamplingParams</span>(max_tokens=<span class="nr">128</span>))
+<span class="cm"># out.router_logits: tuple of [num_tokens, num_experts] per MoE layer</span>
+expert_counts = collections.<span class="fn">defaultdict</span>(collections.Counter)
+<span class="kw">for</span> layer_idx, logits <span class="kw">in</span> <span class="fn">enumerate</span>(out.router_logits):
+    top2 = torch.<span class="fn">topk</span>(logits, k=<span class="nr">2</span>, dim=-<span class="nr">1</span>).indices  <span class="cm"># [T, 2]</span>
+    <span class="kw">for</span> e <span class="kw">in</span> top2.<span class="fn">flatten</span>().<span class="fn">tolist</span>():
+        expert_counts[layer_idx][e] += <span class="nr">1</span>
 
-<span class="cm"># Print expert load balance per layer</span>
+<span class="cm"># Print expert load balance per layer (uniform would be 12.5% each)</span>
 <span class="kw">for</span> layer, counts <span class="kw">in</span> <span class="fn">sorted</span>(expert_counts.<span class="fn">items</span>()):
     total = <span class="fn">sum</span>(counts.<span class="fn">values</span>())
-    <span class="fn">print</span>(<span class="st">f"Layer {layer}:"</span>, {k: <span class="st">f"{v/total:.1%}"</span> <span class="kw">for</span> k,v <span class="kw">in</span> counts.<span class="fn">most_common</span>(<span class="nr">8</span>)})</code></pre>
+    dist = {k: <span class="st">f"{v/total:.1%}"</span> <span class="kw">for</span> k, v <span class="kw">in</span> counts.<span class="fn">most_common</span>(<span class="nr">8</span>)}
+    <span class="fn">print</span>(<span class="st">f"Layer {layer}:"</span>, dist)</code></pre>
     </div>
 
     <div class="step">
@@ -554,7 +559,7 @@ kill %1</code></pre>
   <span class="section-label"><span class="i18n" data-en="Analysis" data-zh="分析">Analysis</span></span>
   <h2 class="section-title"><span class="i18n" data-en="Written Analysis &mdash; Reference Answers" data-zh="書面分析 — 參考解答">Written Analysis &mdash; Reference Answers</span></h2>
 
-  <p><span class="i18n" data-en="Mixtral was unavailable in our offline HF cache (see Hardware callout above), so the answers below combine arithmetic on Mixtral's published architecture with our measured Llama-3.1-8B TP=1 vs TP=2 numbers and the 70B TP=2 numbers from Week 13." data-zh="Mixtral 在我們的 offline HF cache 中不可用（見上方 Hardware 警示），所以以下解答結合 Mixtral 公開架構上的算術與我們測量的 Llama-3.1-8B TP=1 vs TP=2 數字，以及 Week 13 的 70B TP=2 數字。">Mixtral was unavailable in our offline HF cache (see Hardware callout above), so the answers below combine arithmetic on Mixtral's published architecture with our measured Llama-3.1-8B TP=1 vs TP=2 numbers and the 70B TP=2 numbers from Week 13.</span></p>
+  <p><span class="i18n" data-en="The answers below combine the real Mixtral-8x7B TP=2 measurements from the Results section above (offline throughput, bs=1 latency, online serving on 2× H200) with arithmetic on Mixtral's published architecture, our measured Llama-3.1-8B TP=1 vs TP=2 numbers, and the 70B TP=2 numbers from Week 13." data-zh="以下解答結合上方 Results 段落的 Mixtral-8x7B TP=2 真實量測（離線吞吐量、bs=1 延遲、2× H200 線上服務），加上 Mixtral 公開架構上的算術、我們測量的 Llama-3.1-8B TP=1 vs TP=2 數字，以及 Week 13 的 70B TP=2 數字。">The answers below combine the real Mixtral-8x7B TP=2 measurements from the Results section above (offline throughput, bs=1 latency, online serving on 2× H200) with arithmetic on Mixtral's published architecture, our measured Llama-3.1-8B TP=1 vs TP=2 numbers, and the 70B TP=2 numbers from Week 13.</span></p>
 
   <h3><span class="i18n" data-en="Q1: Mixtral memory vs Llama-3.1-70B memory" data-zh="Q1：Mixtral 記憶體 vs Llama-3.1-70B 記憶體">Q1: Mixtral memory vs Llama-3.1-70B memory</span></h3>
   <div class="card highlight-green">
@@ -578,8 +583,8 @@ kill %1</code></pre>
 
   <h3><span class="i18n" data-en="Q4: vLLM vs SGLang on Mixtral" data-zh="Q4：vLLM vs SGLang 在 Mixtral 上">Q4: vLLM vs SGLang on Mixtral</span></h3>
   <div class="card highlight-green">
-    <p><span class="i18n" data-en="We could not measure this directly because Mixtral wasn't in our offline HF cache. From dense-model measurements in earlier weeks (Week 1, Week 2), the consistent pattern is: SGLang wins steady-state throughput by ~10–25% on H100 because of its RadixAttention prefix sharing (Week 6) and overlapped scheduler — both effects show up as fewer wasted decode slots per second. vLLM tends to win on TTFT consistency and on workloads with a wide tail of unique prompts (no prefix to share)." data-zh="我們無法直接測量這點，因為 Mixtral 不在我們的 offline HF cache 中。從前幾週（Week 1, Week 2）的 dense 模型測量結果，一致的模式是：SGLang 在 H100 上以 ~10–25% 贏得穩態吞吐量，因為 RadixAttention prefix 共享（Week 6）和重疊式排程器 — 兩個效應都表現為每秒更少的浪費 decode slot。vLLM 往往在 TTFT 一致性以及具有寬尾獨特 prompt（沒有 prefix 可共享）的 workload 上勝出。">We could not measure this directly (Mixtral not in offline cache). From the dense-model measurements in Weeks 1–2: SGLang typically wins steady-state throughput by ~10–25% on H100 thanks to RadixAttention prefix sharing (Week 6) and an overlapped scheduler. vLLM tends to win on TTFT consistency and on workloads with a wide tail of unique prompts (no prefix to share).</span></p>
-    <p><span class="i18n" data-en="For MoE specifically, the throughput gap should be smaller than for dense models because both engines call into nearly identical fused-MoE CUDA kernels (vLLM uses fused_moe_kernel, SGLang upstreams the same kernel) — the engine-level scheduling differences matter less when 60–70% of step time is spent in the expert kernel itself. Our prediction (to be verified once Mixtral is staged): SGLang ~5–10% ahead on throughput at high request rate, parity on TTFT." data-zh="對於 MoE 特別來說，throughput gap 應該比 dense 模型小，因為兩個引擎呼叫幾乎相同的 fused-MoE CUDA kernel（vLLM 用 fused_moe_kernel，SGLang 上游同一個 kernel） — 當 60–70% 的 step 時間花在 expert kernel 本身時，引擎層級的排程差異就不那麼重要了。我們的預測（等 Mixtral 上線後驗證）：高請求速率下 SGLang throughput 領先 ~5–10%，TTFT 持平。">For MoE specifically the gap should be smaller than for dense — both engines call nearly identical fused-MoE CUDA kernels, so engine-level scheduling matters less when 60–70% of step time is in the expert kernel. Prediction (pending Mixtral availability): SGLang ~5–10% ahead on throughput at high request rate, TTFT parity.</span></p>
+    <p><span class="i18n" data-en="The Results section above reports our Mixtral run on vLLM only — we did not run the SGLang-on-Mixtral comparison side-by-side, so the engine comparison below is inferred rather than measured. From dense-model measurements in earlier weeks (Week 1, Week 2), the consistent pattern is: SGLang wins steady-state throughput by ~10–25% on H100 because of its RadixAttention prefix sharing (Week 6) and overlapped scheduler — both effects show up as fewer wasted decode slots per second. vLLM tends to win on TTFT consistency and on workloads with a wide tail of unique prompts (no prefix to share)." data-zh="上方 Results 段落只回報了我們在 vLLM 上的 Mixtral 量測 — 我們沒有並排執行 SGLang-on-Mixtral 比較，所以以下引擎比較是推論而非實測。從前幾週（Week 1, Week 2）的 dense 模型測量結果，一致的模式是：SGLang 在 H100 上以 ~10–25% 贏得穩態吞吐量，因為 RadixAttention prefix 共享（Week 6）和重疊式排程器 — 兩個效應都表現為每秒更少的浪費 decode slot。vLLM 往往在 TTFT 一致性以及具有寬尾獨特 prompt（沒有 prefix 可共享）的 workload 上勝出。">The Results section above reports our Mixtral run on vLLM only — we did not run the SGLang-on-Mixtral comparison side-by-side, so the engine comparison below is inferred rather than measured. From the dense-model measurements in Weeks 1–2: SGLang typically wins steady-state throughput by ~10–25% on H100 thanks to RadixAttention prefix sharing (Week 6) and an overlapped scheduler. vLLM tends to win on TTFT consistency and on workloads with a wide tail of unique prompts (no prefix to share).</span></p>
+    <p><span class="i18n" data-en="For MoE specifically, the throughput gap should be smaller than for dense models because both engines call into nearly identical fused-MoE CUDA kernels (vLLM uses fused_moe_kernel, SGLang upstreams the same kernel) — the engine-level scheduling differences matter less when 60–70% of step time is spent in the expert kernel itself. Our prediction (verify by running Step 4's SGLang command against the vLLM Mixtral numbers in the Results section): SGLang ~5–10% ahead on throughput at high request rate, parity on TTFT." data-zh="對於 MoE 特別來說，throughput gap 應該比 dense 模型小，因為兩個引擎呼叫幾乎相同的 fused-MoE CUDA kernel（vLLM 用 fused_moe_kernel，SGLang 上游同一個 kernel） — 當 60–70% 的 step 時間花在 expert kernel 本身時，引擎層級的排程差異就不那麼重要了。我們的預測（執行 Step 4 的 SGLang 命令並與 Results 段落的 vLLM Mixtral 數字對照即可驗證）：高請求速率下 SGLang throughput 領先 ~5–10%，TTFT 持平。">For MoE specifically the gap should be smaller than for dense — both engines call nearly identical fused-MoE CUDA kernels, so engine-level scheduling matters less when 60–70% of step time is in the expert kernel. Prediction (verify by running Step 4's SGLang command against the vLLM Mixtral numbers in the Results section): SGLang ~5–10% ahead on throughput at high request rate, TTFT parity.</span></p>
   </div>
 </div>
 

@@ -254,9 +254,12 @@ CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --disable-log-requests &amp;
 sleep 30
 
-<span class="cm"># Measure TTFT across input lengths 128, 512, 1024, 2048 tokens</span>
+<span class="cm"># Measure TTFT across input lengths 128, 512, 1024, 2048 tokens.</span>
+<span class="cm"># IMPORTANT: must use stream=True and capture first content chunk.</span>
+<span class="cm"># A non-streaming requests.post() returns only after ALL tokens are</span>
+<span class="cm"># generated, which is e2e latency, not TTFT.</span>
 python - &lt;&lt;'PYEOF'
-import time, requests
+import time, json, requests
 
 URL = "http://localhost:8000/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
@@ -271,17 +274,25 @@ INPUT_CONFIGS = {
     2048: make_prompt(1460),
 }
 
+def measure_ttft_ms(prompt):
+    t0 = time.perf_counter()
+    with requests.post(URL, json={
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt + " Summarize briefly."}],
+        "max_tokens": 30,
+        "stream": True}, stream=True, timeout=300) as r:
+        for line in r.iter_lines():
+            if not line or not line.startswith(b"data: ") or b"[DONE]" in line:
+                continue
+            delta = json.loads(line[6:])["choices"][0].get("delta", {})
+            if delta.get("content"):
+                return (time.perf_counter() - t0) * 1000
+    return float('nan')
+
 print(f"{'input_len':>10} | {'ttft_ms p50':>12} | {'ttft_ms p99':>12}")
 print("-" * 42)
 for approx_tokens, prompt in INPUT_CONFIGS.items():
-    ttfts = []
-    for _ in range(10):
-        t0 = time.perf_counter()
-        requests.post(URL, json={
-            "model": MODEL,
-            "messages": [{"role": "user", "content": prompt + " Summarize briefly."}],
-            "max_tokens": 30}, timeout=300)
-        ttfts.append((time.perf_counter() - t0) * 1000)
+    ttfts = [measure_ttft_ms(prompt) for _ in range(10)]
     s = sorted(ttfts)
     print(f"{approx_tokens:>10} | {s[4]:>12.1f} | {s[-1]:>12.1f}")
 PYEOF
@@ -326,9 +337,11 @@ CUDA_VISIBLE_DEVICES=1 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --disable-log-requests &amp;
 sleep 40
 
-<span class="cm"># Measure TTFT across same input lengths — compare with baseline</span>
+<span class="cm"># Measure TTFT across same input lengths — compare with baseline.</span>
+<span class="cm"># Same streaming-required pattern as Exp 1: requests.post() without</span>
+<span class="cm"># stream=True hides KV-transfer + decode-startup inside e2e latency.</span>
 python - &lt;&lt;'PYEOF'
-import time, requests
+import time, json, requests
 
 PREFILL_URL = "http://localhost:8100/v1/chat/completions"
 DECODE_URL  = "http://localhost:8200/v1/chat/completions"
@@ -344,17 +357,25 @@ INPUT_CONFIGS = {
     2048: make_prompt(1460),
 }
 
+def measure_ttft_ms(prompt):
+    t0 = time.perf_counter()
+    with requests.post(PREFILL_URL, json={
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt + " Summarize briefly."}],
+        "max_tokens": 30,
+        "stream": True}, stream=True, timeout=300) as r:
+        for line in r.iter_lines():
+            if not line or not line.startswith(b"data: ") or b"[DONE]" in line:
+                continue
+            delta = json.loads(line[6:])["choices"][0].get("delta", {})
+            if delta.get("content"):
+                return (time.perf_counter() - t0) * 1000
+    return float('nan')
+
 print(f"{'input_len':>10} | {'ttft_ms p50':>12} | {'ttft_ms p99':>12}")
 print("-" * 42)
 for approx_tokens, prompt in INPUT_CONFIGS.items():
-    ttfts = []
-    for _ in range(10):
-        t0 = time.perf_counter()
-        requests.post(PREFILL_URL, json={
-            "model": MODEL,
-            "messages": [{"role": "user", "content": prompt + " Summarize briefly."}],
-            "max_tokens": 30}, timeout=300)
-        ttfts.append((time.perf_counter() - t0) * 1000)
+    ttfts = [measure_ttft_ms(prompt) for _ in range(10)]
     s = sorted(ttfts)
     print(f"{approx_tokens:>10} | {s[4]:>12.1f} | {s[-1]:>12.1f}")
 PYEOF
@@ -402,8 +423,10 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --disable-log-requests &amp;
 sleep 40
 
+<span class="cm"># Same streaming-required pattern as Exp 1: without stream=True the</span>
+<span class="cm"># response returns only after ALL tokens, so you'd record e2e, not TTFT.</span>
 python - &lt;&lt;'PYEOF'
-import time, requests
+import time, json, requests
 
 URL   = "http://localhost:8000/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
@@ -414,18 +437,28 @@ configs = {
     "short_input_long_output":   ("Write a detailed essay on neural networks.",    200),
 }
 
-print(f"{'workload':40} | {'ttft_ms':>8} | {'e2e_ms':>8}")
+def measure(prompt, max_tok):
+    t0, ttft = time.perf_counter(), None
+    with requests.post(URL, json={"model": MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tok,
+            "stream": True}, stream=True, timeout=300) as r:
+        for line in r.iter_lines():
+            if not line or not line.startswith(b"data: ") or b"[DONE]" in line:
+                continue
+            delta = json.loads(line[6:])["choices"][0].get("delta", {})
+            if ttft is None and delta.get("content"):
+                ttft = (time.perf_counter() - t0) * 1000
+    return ttft or float('nan'), (time.perf_counter() - t0) * 1000
+
+print(f"{'workload':40} | {'ttft_p50':>8} | {'e2e_p50':>8}")
 print("-" * 65)
 for label, (prompt, max_tok) in configs.items():
     ttfts, e2es = [], []
     for _ in range(8):
-        t0 = time.perf_counter()
-        r  = requests.post(URL, json={"model": MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tok}, timeout=300)
-        e2e = (time.perf_counter() - t0) * 1000
-        e2es.append(e2e)
-    print(f"{label:40} | {sorted(e2es)[3]:>8.1f} | {sorted(e2es)[-1]:>8.1f}")
+        t, e = measure(prompt, max_tok)
+        ttfts.append(t); e2es.append(e)
+    print(f"{label:40} | {sorted(ttfts)[3]:>8.1f} | {sorted(e2es)[3]:>8.1f}")
 PYEOF
 
 kill %1; sleep 10</code></pre>

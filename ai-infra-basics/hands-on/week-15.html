@@ -205,8 +205,8 @@ footer a{color:var(--cyan)}
   <div class="card highlight-green">
     <h4><span class="i18n" data-en="How Prefix Cache Lookup Works (vLLM APC)" data-zh="前綴快取查找如何運作（vLLM APC）">How Prefix Cache Lookup Works (vLLM APC)</span></h4>
     <p><span class="i18n"
-      data-en="vLLM divides the KV cache into fixed-size blocks (typically 16 tokens each). For a request with tokens [t1, t2, ..., tN], the scheduler computes a hash of each full block of tokens. If the hash matches a cached block, that block's KV data is reused. The scheduler finds the longest prefix match and only runs prefill from that point forward. The hit/miss logic lives in vllm/core/block/prefix_caching_block.py."
-      data-zh="vLLM 將 KV 快取分成固定大小的塊（通常每塊 16 個 token）。對於有 token [t1, t2, ..., tN] 的請求，調度器計算每個完整 token 塊的哈希。如果哈希匹配到已快取的塊，則重用該塊的 KV 數據。調度器找到最長的前綴匹配，並只從該點開始執行預填充。命中/未命中邏輯位於 vllm/core/block/prefix_caching_block.py。">vLLM divides the KV cache into fixed-size blocks (typically 16 tokens each). For a request with tokens [t1, t2, ..., tN], the scheduler computes a hash of each full block of tokens. If the hash matches a cached block, that block's KV data is reused. The scheduler finds the longest prefix match and only runs prefill from that point forward. The hit/miss logic lives in vllm/core/block/prefix_caching_block.py.</span></p>
+      data-en="vLLM divides the KV cache into fixed-size blocks (typically 16 tokens each). For a request with tokens [t1, t2, ..., tN], the scheduler computes a hash of each full block of tokens. If the hash matches a cached block, that block's KV data is reused. The scheduler finds the longest prefix match and only runs prefill from that point forward. In vLLM v1, the hash function lives in vllm/v1/core/kv_cache_utils.py (hash_request_tokens), the cache-hit lookup happens in vllm/v1/core/block_pool.py (get_cached_block), and the per-request orchestration is in vllm/v1/core/kv_cache_manager.py (get_computed_blocks)."
+      data-zh="vLLM 將 KV 快取分成固定大小的塊（通常每塊 16 個 token）。對於有 token [t1, t2, ..., tN] 的請求，調度器計算每個完整 token 塊的哈希。如果哈希匹配到已快取的塊，則重用該塊的 KV 數據。調度器找到最長的前綴匹配，並只從該點開始執行預填充。在 vLLM v1 中，hash 函數位於 vllm/v1/core/kv_cache_utils.py（hash_request_tokens），快取命中查找發生在 vllm/v1/core/block_pool.py（get_cached_block），單一請求的調度邏輯位於 vllm/v1/core/kv_cache_manager.py（get_computed_blocks）。">vLLM divides the KV cache into fixed-size blocks (typically 16 tokens each). For a request with tokens [t1, t2, ..., tN], the scheduler computes a hash of each full block of tokens. If the hash matches a cached block, that block's KV data is reused. The scheduler finds the longest prefix match and only runs prefill from that point forward. In vLLM v1, the hash function lives in vllm/v1/core/kv_cache_utils.py (hash_request_tokens), the cache-hit lookup happens in vllm/v1/core/block_pool.py (get_cached_block), and the per-request orchestration is in vllm/v1/core/kv_cache_manager.py (get_computed_blocks).</span></p>
   </div>
 </div>
 
@@ -332,11 +332,13 @@ kill %1; sleep 5</code></pre>
       <h4><span class="i18n" data-en="Cross-Restart Persistence Test" data-zh="跨重啟持久性測試">Cross-Restart Persistence Test</span></h4>
       <p><span class="i18n" data-en="This is the key experiment that differentiates LMCache from APC. Populate the LMCache store, kill vLLM, restart it, and verify the first post-restart request is still warm — served from NVMe, not recomputed:" data-zh="這是區分 LMCache 和 APC 的關鍵實驗。填充 LMCache 存儲，終止 vLLM，重啟它，並驗證重啟後的第一個請求仍然是暖的——從 NVMe 提供服務，而不是重新計算：">This is the key experiment that differentiates LMCache from APC. Populate the LMCache store, kill vLLM, restart it, and verify the first post-restart request is still warm — served from NVMe, not recomputed:</span></p>
       <pre><code><span class="cm"># Step 1: Start vLLM + LMCache integration</span>
+<span class="cm"># NOTE: the connector name must be the V1-suffixed "LMCacheConnectorV1"</span>
+<span class="cm"># (plain "LMCacheConnector" fails to load — see Setup notes in Results)</span>
 LMCACHE_CONFIG_FILE=lmcache_config.yaml \
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --port 8000 \
   --enable-prefix-caching \
-  --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
   --disable-log-requests &amp;
 sleep 30
 
@@ -364,7 +366,7 @@ LMCACHE_CONFIG_FILE=lmcache_config.yaml \
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --port 8000 \
   --enable-prefix-caching \
-  --kv-transfer-config '{"kv_connector":"LMCacheConnector","kv_role":"kv_both"}' \
+  --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
   --disable-log-requests &amp;
 sleep 30
 
@@ -679,8 +681,9 @@ PYEOF</code></pre>
   <div class="card highlight-purple">
     <h4><span class="i18n" data-en="Files to Read" data-zh="閱讀檔案">Files to Read</span></h4>
     <ul>
-      <li><span class="file-tag">vllm/core/block/prefix_caching_block.py</span> — <span class="i18n" data-en="PrefixCachingBlockAllocator: hash-based block deduplication engine. Study compute_hash() and how blocks are promoted to the prefix cache pool on eviction" data-zh="PrefixCachingBlockAllocator：基於哈希的塊去重引擎。研究 compute_hash() 以及塊如何在驅逐時被提升到前綴快取池">PrefixCachingBlockAllocator: hash-based block deduplication engine. Study compute_hash() and how blocks are promoted to the prefix cache pool on eviction</span></li>
-      <li><span class="file-tag">vllm/core/block_manager.py</span> — <span class="i18n" data-en="BlockSpaceManagerV2.allocate(): how the scheduler finds the longest matching prefix and allocates only the uncached suffix blocks for prefill" data-zh="BlockSpaceManagerV2.allocate()：調度器如何找到最長匹配前綴並只為預填充分配未快取的後綴塊">BlockSpaceManagerV2.allocate(): how the scheduler finds the longest matching prefix and allocates only the uncached suffix blocks for prefill</span></li>
+      <li><span class="file-tag">vllm/v1/core/kv_cache_utils.py</span> — <span class="i18n" data-en="hash_request_tokens() and BlockHashType: how a request's token sequence is chunked into block_size windows and rolling-hashed into a list of BlockHashType keys that drive every cache lookup downstream" data-zh="hash_request_tokens() 與 BlockHashType：請求的 token 序列如何被切成 block_size 視窗並 rolling-hash 成 BlockHashType key list，下游所有快取查找都靠這份 key list">hash_request_tokens() and BlockHashType: how a request's token sequence is chunked into block_size windows and rolling-hashed into a list of BlockHashType keys that drive every cache lookup downstream</span></li>
+      <li><span class="file-tag">vllm/v1/core/block_pool.py</span> — <span class="i18n" data-en="BlockPool: maintains cached_block_hash_to_block (the hash→KVCacheBlock dict). Read get_cached_block() to see how a hit just bumps ref_count instead of recomputing, and cache_full_blocks() for how a freshly-prefilled block is registered as cached" data-zh="BlockPool：維護 cached_block_hash_to_block（hash→KVCacheBlock 字典）。看 get_cached_block() 了解命中如何只增加 ref_count 而不重算，再看 cache_full_blocks() 了解剛 prefill 完的 block 如何被登記為已快取">BlockPool: maintains cached_block_hash_to_block (the hash→KVCacheBlock dict). Read get_cached_block() to see how a hit just bumps ref_count instead of recomputing, and cache_full_blocks() for how a freshly-prefilled block is registered as cached</span></li>
+      <li><span class="file-tag">vllm/v1/core/kv_cache_manager.py</span> — <span class="i18n" data-en="KVCacheManager.get_computed_blocks() and allocate_slots(): walks the request's BlockHashType list, calls block_pool.get_cached_block() per hash to find the longest cached prefix, then only allocates suffix blocks for prefill — this is the entry point the scheduler calls for every new request" data-zh="KVCacheManager.get_computed_blocks() 與 allocate_slots()：走過請求的 BlockHashType list，每個 hash 都呼叫 block_pool.get_cached_block() 找到最長的已快取前綴，然後只為後綴 block 分配空間做 prefill — 這是 scheduler 對每個新請求呼叫的進入點">KVCacheManager.get_computed_blocks() and allocate_slots(): walks the request's BlockHashType list, calls block_pool.get_cached_block() per hash to find the longest cached prefix, then only allocates suffix blocks for prefill — this is the entry point the scheduler calls for every new request</span></li>
       <li><span class="file-tag">lmcache/vllm_injection.py</span> — <span class="i18n" data-en="LMCache vLLM connector: monkey-patches vLLM's attention layer to intercept KV tensors for store/load operations at each layer" data-zh="LMCache vLLM 連接器：對 vLLM 的注意力層進行猴子補丁，以在每層攔截 KV 張量進行存儲/載入操作">LMCache vLLM connector: monkey-patches vLLM's attention layer to intercept KV tensors for store/load operations at each layer</span></li>
       <li><span class="file-tag">lmcache/storage_backend/local_disk.py</span> — <span class="i18n" data-en="NVMe-backed KV store: chunked tensor serialization using safetensors format, file naming scheme, and async write pipeline" data-zh="NVMe 支援的 KV 存儲：使用 safetensors 格式的分塊張量序列化、文件命名方案和異步寫入管道">NVMe-backed KV store: chunked tensor serialization using safetensors format, file naming scheme, and async write pipeline</span></li>
     </ul>

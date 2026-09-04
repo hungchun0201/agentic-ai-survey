@@ -17,4 +17,11 @@ GitHub Pages site for agentic AI survey. Deployed at `https://hungchun0201.githu
 - No ASCII art — use HTML elements (`.vflow`, `.flow`, `.tbar`, `.diagram`, `.cards`)
 - Paper figures: white `background:#fff` on all images, `fig-sm` for oversized, KaTeX CDN for LaTeX
 - File path references: always use full paths (e.g., `vllm/v1/core/sched/scheduler.py` not `scheduler.py`)
-
+<!-- ARIS:BEGIN -->
+## ARIS Skill Scope
+ARIS skills installed in this project: 81 entries.
+Manifest: `.aris/installed-skills.txt` (lists every skill ARIS installed and its upstream target).
+For ARIS workflows, prefer the project-local skills under `.claude/skills/` over global skills.
+Do not modify or delete files inside any skill that is a symlink (symlinks point into `/home/hclin/aris_repo`).
+Update with: `bash /home/hclin/aris_repo/tools/install_aris.sh`  (re-runnable; reconciles new/removed skills).
+<!-- ARIS:END -->

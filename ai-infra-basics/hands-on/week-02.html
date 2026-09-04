@@ -260,13 +260,41 @@ python -c <span class="st">"import sglang; print(sglang.__version__)"</span></co
     <div class="step">
       <div class="step-num s4">4</div>
       <h4><span class="i18n" data-en="PyTorch Profiler + Perfetto Trace" data-zh="PyTorch Profiler + Perfetto 追蹤">PyTorch Profiler + Perfetto Trace</span></h4>
-      <p><span class="i18n" data-en="Enable the PyTorch profiler and export a trace for visualization in Perfetto UI:" data-zh="啟用 PyTorch Profiler 並匯出追蹤以在 Perfetto UI 中視覺化：">Enable the PyTorch profiler and export a trace for visualization in Perfetto UI:</span></p>
-      <pre><code><span class="cm"># Run vLLM with profiling enabled</span>
+      <p><span class="i18n" data-en="vLLM ships a torch.profiler integration that is gated by an env var AND two HTTP endpoints. Setting the env var alone produces NO trace — you must explicitly POST to /start_profile and /stop_profile around the requests you want to capture. Keep the captured window short (a few requests) — full prefill+decode of 100 prompts can produce a multi-GB JSON that crashes Perfetto." data-zh="vLLM 內建的 torch.profiler 整合需要同時設定 env var 與呼叫兩個 HTTP endpoint。只設 env var 不會產生任何 trace — 你必須明確 POST 到 /start_profile 與 /stop_profile 來框出要捕捉的請求。捕捉視窗請放短（幾個請求即可）— 完整跑 100 個 prompt 的 prefill+decode 會產生多 GB 的 JSON，Perfetto 會打不開。">vLLM ships a torch.profiler integration that is gated by an env var AND two HTTP endpoints. Setting the env var alone produces NO trace — you must explicitly POST to /start_profile and /stop_profile around the requests you want to capture. Keep the captured window short (a few requests) — full prefill+decode of 100 prompts can produce a multi-GB JSON that crashes Perfetto.</span></p>
+      <pre><code><span class="cm"># Terminal 1 — start vLLM with profiling DIR set (REQUIRED before launch)</span>
+mkdir -p ./profiles
 VLLM_TORCH_PROFILER_DIR=./profiles vllm serve \
-  meta-llama/Llama-3.1-8B-Instruct --port 8000
+  meta-llama/Llama-3.1-8B-Instruct \
+  --port <span class="nr">8000</span> \
+  --max-model-len <span class="nr">4096</span>
 
-<span class="cm"># Send a few requests, then open the trace:</span>
-<span class="cm"># Go to https://ui.perfetto.dev and load the .json trace file</span></code></pre>
+<span class="cm"># Terminal 2 — wait until ready, then frame the capture window</span>
+<span class="kw">until</span> curl -s http://localhost:8000/health &gt; /dev/null; <span class="kw">do</span> sleep <span class="nr">1</span>; <span class="kw">done</span>
+
+<span class="cm"># Start the profiler (returns immediately; profiler is now recording)</span>
+curl -X POST http://localhost:8000/start_profile
+
+<span class="cm"># Send 3-5 requests — these are what gets captured</span>
+<span class="kw">for</span> i <span class="kw">in</span> <span class="nr">1</span> <span class="nr">2</span> <span class="nr">3</span>; <span class="kw">do</span>
+  curl -s http://localhost:8000/v1/completions \
+    -H <span class="st">"Content-Type: application/json"</span> \
+    -d <span class="st">'{"model":"meta-llama/Llama-3.1-8B-Instruct","prompt":"Explain attention in one paragraph:","max_tokens":64}'</span> &gt; /dev/null
+<span class="kw">done</span>
+
+<span class="cm"># Stop and flush the trace to disk (this can take 30-60s for the JSON dump)</span>
+curl -X POST http://localhost:8000/stop_profile
+
+<span class="cm"># Trace appears as ./profiles/&lt;hostname&gt;_&lt;pid&gt;.&lt;timestamp&gt;.pt.trace.json.gz</span>
+ls -lh ./profiles/
+
+<span class="cm"># Open https://ui.perfetto.dev in a browser, click "Open trace file",</span>
+<span class="cm"># and select the .pt.trace.json.gz file (Perfetto reads gzip directly).</span></code></pre>
+      <div class="callout warn" style="margin-top:0.75rem">
+        <strong><span class="i18n" data-en="Common gotchas:" data-zh="常見坑：">Common gotchas:</span></strong>
+        <span class="i18n"
+          data-en="(1) If <code>VLLM_TORCH_PROFILER_DIR</code> is not set when vLLM starts, the /start_profile endpoint returns 404 — you must restart with the env var. (2) The trace is only flushed when /stop_profile is called; killing the server with Ctrl-C loses the capture. (3) If the JSON is &gt;500 MB, Perfetto's web UI may stall — re-capture with fewer requests or shorter <code>max_tokens</code>."
+          data-zh="(1) 啟動 vLLM 時若沒設 <code>VLLM_TORCH_PROFILER_DIR</code>，/start_profile endpoint 會回 404 — 必須帶著 env var 重啟。(2) trace 只有在 /stop_profile 被呼叫時才會 flush；用 Ctrl-C 殺 server 會丟掉資料。(3) JSON 若 &gt;500 MB，Perfetto Web UI 可能卡住 — 用更少 request 或更短的 <code>max_tokens</code> 重新捕捉。">(1) If <code>VLLM_TORCH_PROFILER_DIR</code> is not set when vLLM starts, the /start_profile endpoint returns 404 — you must restart with the env var. (2) The trace is only flushed when /stop_profile is called; killing the server with Ctrl-C loses the capture. (3) If the JSON is &gt;500 MB, Perfetto's web UI may stall — re-capture with fewer requests or shorter <code>max_tokens</code>.</span>
+      </div>
     </div>
 
     <div class="step">
@@ -382,9 +410,10 @@ nvidia-smi dmon -s pucm -d 1 -o DT -f gpu_monitor_w2.csv</code></pre>
   <div class="card highlight-purple">
     <h4><span class="i18n" data-en="Files to Read" data-zh="閱讀檔案">Files to Read</span></h4>
     <ul>
-      <li><span class="file-tag">vllm/engine/async_llm_engine.py</span> — <span class="i18n" data-en="AsyncLLM: the top-level async engine that manages request queues" data-zh="AsyncLLM：管理請求佇列的頂層非同步引擎">AsyncLLM: the top-level async engine that manages request queues</span></li>
-      <li><span class="file-tag">vllm/v1/engine/core.py</span> — <span class="i18n" data-en="EngineCore: the synchronous core that runs scheduling + model execution" data-zh="EngineCore：執行排程 + 模型執行的同步核心">EngineCore: the synchronous core that runs scheduling + model execution</span></li>
-      <li><span class="file-tag">vllm/worker/worker.py</span> — <span class="i18n" data-en="Worker: GPU-side model runner and KV cache management" data-zh="Worker：GPU 端模型運行器和 KV 快取管理">Worker: GPU-side model runner and KV cache management</span></li>
+      <li><span class="file-tag">vllm/v1/engine/async_llm.py</span> — <span class="i18n" data-en="AsyncLLM (v1): top-level async engine that owns the request queue and the ZMQ socket to EngineCore. Look for the generate() coroutine — that's the entry point hit by /v1/completions." data-zh="AsyncLLM（v1）：擁有請求佇列與通往 EngineCore 之 ZMQ socket 的頂層非同步引擎。關注 generate() coroutine — 那是 /v1/completions 進來的入口點。">AsyncLLM (v1): top-level async engine that owns the request queue and the ZMQ socket to EngineCore.</span></li>
+      <li><span class="file-tag">vllm/v1/engine/core.py</span> — <span class="i18n" data-en="EngineCore: the synchronous core that runs the scheduler loop and calls model execute. Look for step() — one call == one decode/prefill iteration you see as a kernel cluster in Perfetto." data-zh="EngineCore：執行排程器迴圈並呼叫模型 execute 的同步核心。關注 step() — 一次呼叫 == 你在 Perfetto 看到的一團 kernel cluster（一個 decode/prefill 迭代）。">EngineCore: the synchronous core that runs the scheduler loop and calls model execute.</span></li>
+      <li><span class="file-tag">vllm/v1/worker/gpu_worker.py</span> — <span class="i18n" data-en="GPU Worker (v1): receives ExecuteModelRequest, delegates to GPUModelRunner. Note: legacy V0 lived at vllm/worker/worker.py — do NOT read that file, it is no longer the active code path." data-zh="GPU Worker（v1）：接收 ExecuteModelRequest，委派給 GPUModelRunner。注意：舊版 V0 在 vllm/worker/worker.py — 不要讀那個檔案，那已不是現行的程式碼路徑。">GPU Worker (v1): receives ExecuteModelRequest, delegates to GPUModelRunner.</span></li>
+      <li><span class="file-tag">vllm/v1/worker/gpu_model_runner.py</span> — <span class="i18n" data-en="GPUModelRunner: the actual forward-pass driver. execute_model() is what wraps the torch.profiler region; every CUDA kernel you see in Perfetto was launched from inside this function." data-zh="GPUModelRunner：真正驅動 forward pass 的元件。execute_model() 是被 torch.profiler 區域包住的函式；你在 Perfetto 看到的每個 CUDA kernel 都是從這個 function 內 launch 的。">GPUModelRunner: the actual forward-pass driver. execute_model() is what torch.profiler wraps.</span></li>
     </ul>
   </div>
 

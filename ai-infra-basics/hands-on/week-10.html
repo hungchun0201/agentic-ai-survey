@@ -280,25 +280,32 @@ time vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
     <div class="step">
       <div class="step-num s4">4</div>
-      <h4><span class="i18n" data-en="Serving Throughput — Online Benchmark" data-zh="服務吞吐量 — 線上基準測試">Serving Throughput — Online Benchmark</span></h4>
-      <p><span class="i18n" data-en="Run the online serving benchmark at request rate inf (closed-loop) with both modes to measure total serving throughput. Unlike the latency benchmark, this includes batching and prefill." data-zh="以請求速率 inf（封閉迴路）對兩種模式執行線上服務基準測試，以測量總服務吞吐量。與延遲基準測試不同，這包括批次處理和預填充。">Run the online serving benchmark at request rate inf (closed-loop) with both modes to measure total serving throughput. Unlike the latency benchmark, this includes batching and prefill.</span></p>
+      <h4><span class="i18n" data-en="Serving Throughput — Request-Rate Sweep" data-zh="服務吞吐量 — 請求速率掃描">Serving Throughput — Request-Rate Sweep</span></h4>
+      <p><span class="i18n" data-en="Sweep request rates (1, 4, 6, inf req/s) for both modes. At low rates the server is partially idle and graph speedup mainly cuts ITL; at rate=6 the server is loaded enough to expose the graph throughput advantage; at inf the GPU is fully compute-bound and the gap shrinks again. The H200 number rr=6 → 800 tok/s in the Results table comes from this exact sweep." data-zh="對兩種模式掃描請求速率（1、4、6、inf req/s）。低速率下伺服器部分空閒，graph 加速主要降低 ITL；rr=6 時伺服器負載足以暴露 graph 的吞吐量優勢；rr=inf 時 GPU 完全 compute-bound，差距再次縮小。結果表中 H200 rr=6 → 800 tok/s 即來自此掃描。">Sweep request rates (1, 4, 6, inf req/s) for both modes. At low rates the server is partially idle and graph speedup mainly cuts ITL; at rate=6 the server is loaded enough to expose the graph throughput advantage; at inf the GPU is fully compute-bound and the gap shrinks again. The H200 number rr=6 → 800 tok/s in the Results table comes from this exact sweep.</span></p>
       <pre><code><span class="kw">for</span> mode <span class="kw">in</span> eager cudagraph; <span class="kw">do</span>
   <span class="kw">if</span> [ $mode = <span class="st">"eager"</span> ]; <span class="kw">then</span>
     vllm serve meta-llama/Llama-3.1-8B-Instruct \
-      --enforce-eager --port <span class="nr">8000</span> &amp;
+      --enforce-eager --port <span class="nr">8000</span> --disable-log-requests &amp;
   <span class="kw">else</span>
     vllm serve meta-llama/Llama-3.1-8B-Instruct \
-      --port <span class="nr">8000</span> &amp;
+      --port <span class="nr">8000</span> --disable-log-requests &amp;
   <span class="kw">fi</span>
-  sleep <span class="nr">60</span>
-  python benchmarks/benchmark_serving.py \
-    --backend vllm --port <span class="nr">8000</span> \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --dataset-name sharegpt \
-    --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
-    --num-prompts <span class="nr">200</span> --request-rate inf \
-    <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_serving_${mode}.txt
-  kill %<span class="nr">1</span>; sleep <span class="nr">10</span>
+  SERVER_PID=$!
+  <span class="cm"># Wait for the server to be ready (graph capture can take 60-120s)</span>
+  <span class="kw">until</span> curl -s http://localhost:8000/health &gt; /dev/null; <span class="kw">do</span> sleep <span class="nr">2</span>; <span class="kw">done</span>
+
+  <span class="kw">for</span> rr <span class="kw">in</span> 1 4 6 inf; <span class="kw">do</span>
+    python benchmarks/benchmark_serving.py \
+      --backend vllm --port <span class="nr">8000</span> \
+      --model meta-llama/Llama-3.1-8B-Instruct \
+      --dataset-name sharegpt \
+      --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+      --num-prompts <span class="nr">200</span> --request-rate $rr \
+      <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_serving_${mode}_rr${rr}.txt
+  <span class="kw">done</span>
+
+  <span class="cm"># Graceful shutdown — kill -9 corrupts the CUDA driver (see week-04 lab note)</span>
+  kill -SIGINT $SERVER_PID; wait $SERVER_PID <span class="nr">2</span>&gt;/dev/null; sleep <span class="nr">10</span>
 <span class="kw">done</span></code></pre>
     </div>
   </div>

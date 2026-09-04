@@ -251,27 +251,40 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
     <div class="step">
       <div class="step-num s1">1</div>
-      <h4><span class="i18n" data-en="APC On vs Off — Cold vs Warm Cache" data-zh="APC 開啟 vs 關閉 — 冷快取 vs 熱快取">APC On vs Off — Cold vs Warm Cache</span></h4>
+      <h4><span class="i18n" data-en="APC On vs Off — Cold vs Warm Cache (properly isolated)" data-zh="APC 開啟 vs 關閉 — 冷 vs 熱快取（正確隔離）">APC On vs Off — Cold vs Warm Cache (properly isolated)</span></h4>
       <p><span class="i18n"
-        data-en="Run the prefix caching benchmark against both servers. The first run populates the cache (cold); subsequent runs hit the cache (warm). Compare TTFT between the two ports."
-        data-zh="對兩個伺服器執行前綴快取基準測試。第一次執行填充快取（冷快取）；後續執行命中快取（熱快取）。比較兩個埠之間的 TTFT。">Run the prefix caching benchmark against both servers. The first run populates the cache (cold); subsequent runs hit the cache (warm). Compare TTFT between the two ports.</span></p>
-      <pre><code><span class="cm"># Cold run — APC enabled (first request computes &amp; caches the prefix)</span>
+        data-en="To get a clean cold-vs-warm comparison you MUST launch a fresh vLLM process for each phase. Running 'cold' and 'warm' against the same APC server is a trap: by request #2 the prefix is already cached, so the second batch contaminates the first. The correct setup is (a) cold = run against the no-APC server (port 8002); (b) warm = start a new APC server (port 8000), send one throwaway pre-warm request so the shared prefix is in cache, THEN run the measurement batch. See the 2026-04-11 audit callout under Results for what the broken methodology gave us."
+        data-zh="要得到乾淨的 cold-vs-warm 比較，必須為每個階段啟動全新的 vLLM process。在同一個 APC server 上跑「cold」再跑「warm」是陷阱：到第 2 個 request 時前綴已經被快取，第二批資料污染第一批。正確做法是 (a) cold = 對無 APC 的 server (port 8002) 跑；(b) warm = 啟動全新的 APC server (port 8000)，先送一個丟棄用的暖身 request 把共享前綴塞進快取，再跑測量批次。Results 段下方的 2026-04-11 audit callout 說明了錯誤方法學的後果。">To get a clean cold-vs-warm comparison you MUST launch a fresh vLLM process for each phase. Running 'cold' and 'warm' against the same APC server is a trap — by request #2 the prefix is already cached. See the 2026-04-11 audit callout under Results.</span></p>
+      <pre><code><span class="cm"># --- COLD phase: APC disabled, every request pays a fresh prefill ---</span>
+<span class="cm"># Assumes the no-APC server (Setup port 8002) is freshly started.</span>
 python benchmarks/benchmark_prefix_caching.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
-  --num-prompts <span class="nr">200</span> --port <span class="nr">8000</span> \
-  2&gt;&amp;1 | tee results_apc_on_cold.txt
+  --num-prompts <span class="nr">200</span> --port <span class="nr">8002</span> \
+  2&gt;&amp;1 | tee results_apc_off.txt
 
-<span class="cm"># Warm run — APC enabled (prefix already in cache)</span>
+<span class="cm"># --- WARM phase: kill any previous APC server, start a clean one ---</span>
+pkill -f <span class="st">"vllm serve.*--port 8000"</span> || <span class="kw">true</span>
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --enable-prefix-caching --port <span class="nr">8000</span> --disable-log-requests \
+  &gt; vllm_apc_warm.log 2&gt;&amp;1 &amp;
+<span class="cm"># Wait for the server to come up before sending traffic.</span>
+until curl -sf http://localhost:8000/health &gt;/dev/null; <span class="kw">do</span> sleep <span class="nr">2</span>; <span class="kw">done</span>
+
+<span class="cm"># Pre-warm: one throwaway run populates the shared-prefix blocks.</span>
+python benchmarks/benchmark_prefix_caching.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --num-prompts <span class="nr">5</span> --port <span class="nr">8000</span> &gt;/dev/null <span class="nr">2</span>&gt;&amp;<span class="nr">1</span>
+
+<span class="cm"># Measurement: cache is now hot, the prefix portion of every prompt hits.</span>
 python benchmarks/benchmark_prefix_caching.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --num-prompts <span class="nr">200</span> --port <span class="nr">8000</span> \
   2&gt;&amp;1 | tee results_apc_on_warm.txt
 
-<span class="cm"># Baseline — APC disabled (no caching, always cold)</span>
-python benchmarks/benchmark_prefix_caching.py \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --num-prompts <span class="nr">200</span> --port <span class="nr">8002</span> \
-  2&gt;&amp;1 | tee results_apc_off.txt</code></pre>
+<span class="cm"># NOTE: we deliberately do NOT measure "cold with APC enabled" — that</span>
+<span class="cm"># single number is just the first-request prefill cost of a fresh APC</span>
+<span class="cm"># server, which is identical to APC-off for the first request and</span>
+<span class="cm"># meaningless thereafter (subsequent requests hit the cache).</span></code></pre>
     </div>
 
     <div class="step">
@@ -383,8 +396,10 @@ print(<span class="st">f"Shared prefix ~{len(shared_doc.split())} words"</span>)
         results[key] = float(m.group(<span class="nr">1</span>)) <span class="kw">if</span> m <span class="kw">else</span> <span class="nb">None</span>
     <span class="kw">return</span> results
 
-files = [<span class="st">"results_apc_off.txt"</span>, <span class="st">"results_apc_on_cold.txt"</span>,
-         <span class="st">"results_apc_on_warm.txt"</span>, <span class="st">"results_apc_fp8.txt"</span>]
+<span class="cm"># Only the files Step 1-3 actually produce. We intentionally skip a</span>
+<span class="cm"># "cold with APC" file — Step 1 explains why that number is meaningless.</span>
+files = [<span class="st">"results_apc_off.txt"</span>, <span class="st">"results_apc_on_warm.txt"</span>,
+         <span class="st">"results_apc_fp8.txt"</span>]
 <span class="kw">for</span> f <span class="kw">in</span> files:
     print(f, parse_benchmark(f))</code></pre>
     </div>

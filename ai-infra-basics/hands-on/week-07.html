@@ -268,18 +268,49 @@ tok.pad_token = tok.eos_token
 model = AutoModelForCausalLM.from_pretrained(
     model_id, torch_dtype=torch.bfloat16, device_map=<span class="st">"auto"</span>)
 
-prompts = [<span class="st">"Explain how large language models work."</span>] * <span class="nr">16</span>
+<span class="cm"># MUST be varied prompts: identical prompts + greedy decoding produce byte-identical outputs,</span>
+<span class="cm"># which makes every sequence emit EOS at the exact same step and HIDES the HOL-blocking pathology.</span>
+prompts = [
+    <span class="st">"Hi."</span>,
+    <span class="st">"What time is it?"</span>,
+    <span class="st">"Define photosynthesis in one sentence."</span>,
+    <span class="st">"Name five mammals."</span>,
+    <span class="st">"Translate 'good morning' to Japanese."</span>,
+    <span class="st">"Write a haiku about autumn."</span>,
+    <span class="st">"List three ways to bake bread."</span>,
+    <span class="st">"Compare TCP and UDP protocols."</span>,
+    <span class="st">"Describe the water cycle."</span>,
+    <span class="st">"Explain how large language models work."</span>,
+    <span class="st">"Explain quantum entanglement step by step with examples."</span>,
+    <span class="st">"Walk through a full proof of the Pythagorean theorem."</span>,
+    <span class="st">"Discuss the impact of the printing press on European society 1450-1600."</span>,
+    <span class="st">"Explain in depth how transformer attention handles long-range dependencies."</span>,
+    <span class="st">"Write a short story about a lonely robot exploring an abandoned space station."</span>,
+    <span class="st">"Give a detailed explanation of PagedAttention, including block-table layout and copy-on-write."</span>,
+]  <span class="cm"># short→long mix; greedy decode now yields a heavy-tailed output-length distribution</span>
 
 <span class="kw">def</span> <span class="fn">bench_static</span>(max_new_tokens):
     enc = tok(prompts, return_tensors=<span class="st">"pt"</span>, padding=<span class="nb">True</span>, truncation=<span class="nb">True</span>).to(<span class="st">"cuda"</span>)
-    t0 = time.time()
-    out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=<span class="nb">False</span>)
-    elapsed = time.time() - t0
-    n_out = (out.shape[<span class="nr">1</span>] - enc[<span class="st">"input_ids"</span>].shape[<span class="nr">1</span>]) * len(prompts)
-    print(f<span class="st">"max_new_tokens={max_new_tokens}: {n_out/elapsed:.1f} tok/s, elapsed={elapsed:.1f}s"</span>)
+    torch.cuda.synchronize(); t0 = time.time()
+    out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=<span class="nb">False</span>,
+                         pad_token_id=tok.eos_token_id)
+    torch.cuda.synchronize(); elapsed = time.time() - t0
+    in_len = enc[<span class="st">"input_ids"</span>].shape[<span class="nr">1</span>]
+    gen = out[:, in_len:]
+    <span class="cm"># useful tokens = position of FIRST EOS per sequence (or max_new_tokens if no EOS).</span>
+    <span class="cm"># billed tokens = (max gen step reached by the SLOWEST seq) * batch_size — what HF actually paid for.</span>
+    eos_id = tok.eos_token_id
+    useful_per_seq = [(int((s == eos_id).nonzero()[<span class="nr">0</span>].item()) + <span class="nr">1</span>) <span class="kw">if</span> (s == eos_id).any() <span class="kw">else</span> max_new_tokens
+                       <span class="kw">for</span> s <span class="kw">in</span> gen]
+    useful = sum(useful_per_seq)
+    billed = max(useful_per_seq) * len(prompts)
+    waste_pct = <span class="nr">100</span> * (<span class="nr">1</span> - useful / billed)
+    print(f<span class="st">"max_new_tokens={max_new_tokens}: useful={useful} tok in {elapsed:.1f}s "</span>
+          f<span class="st">"-> {useful/elapsed:.1f} tok/s useful | "</span>
+          f<span class="st">"billed={billed} tok ({billed/elapsed:.1f} tok/s) | HOL waste={waste_pct:.1f}%"</span>)
 
-bench_static(<span class="nr">128</span>)   <span class="cm"># uniform-length baseline</span>
-bench_static(<span class="nr">512</span>)   <span class="cm"># all padded to 512, simulates HOL blocking</span></code></pre>
+bench_static(<span class="nr">128</span>)   <span class="cm"># short cap: most replies hit the cap, near-uniform load -> low HOL waste</span>
+bench_static(<span class="nr">512</span>)   <span class="cm"># long cap: long replies actually finish; short ones sit idle on EOS -> HOL waste shows up</span></code></pre>
     </div>
 
     <div class="step">
@@ -299,7 +330,7 @@ sleep <span class="nr">30</span>
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name sharegpt \
     --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
-    --num-prompts <span class="nr">300</span> \
+    --num-prompts <span class="nr">150</span> \
     --request-rate $rr \
     --port <span class="nr">8000</span> \
     <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_vllm_rr${rr}.txt
@@ -322,7 +353,7 @@ sleep <span class="nr">30</span>
     --model meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name sharegpt \
     --dataset-path ${dataset}.json \
-    --num-prompts <span class="nr">300</span> --request-rate <span class="nr">10</span> \
+    --num-prompts <span class="nr">150</span> --request-rate <span class="nr">10</span> \
     <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_variance_${dataset}.txt
 <span class="kw">done</span>
 
@@ -339,7 +370,7 @@ python benchmarks/benchmark_throughput.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset-name sharegpt \
   --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
-  --num-prompts <span class="nr">300</span> \
+  --num-prompts <span class="nr">150</span> \
   <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_offline_sharegpt.txt
 
 <span class="cm"># vLLM offline on sonnet (fixed-length control)</span>
@@ -348,7 +379,7 @@ python benchmarks/benchmark_throughput.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --dataset-name sharegpt \
   --dataset-path sonnet_fixed.json \
-  --num-prompts <span class="nr">300</span> \
+  --num-prompts <span class="nr">150</span> \
   <span class="nr">2</span>&gt;&amp;<span class="nr">1</span> | tee results_offline_sonnet.txt</code></pre>
     </div>
 

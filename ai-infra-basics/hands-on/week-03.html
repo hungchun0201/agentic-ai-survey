@@ -274,13 +274,21 @@ ncu --version</code></pre>
 
     <div class="step">
       <div class="step-num s5">5</div>
-      <h4><span class="i18n" data-en="Batch Size Scaling Experiment" data-zh="Batch Size 縮放實驗">Batch Size Scaling Experiment</span></h4>
-      <p><span class="i18n" data-en="Run the same model at batch sizes 1, 4, 16, 64 and observe how arithmetic intensity shifts kernels from memory-bound to compute-bound:" data-zh="以 batch size 1、4、16、64 執行相同模型並觀察算術強度如何將核心從記憶體瓶頸轉移到計算瓶頸：">Run the same model at batch sizes 1, 4, 16, 64 and observe how arithmetic intensity shifts kernels from memory-bound to compute-bound:</span></p>
-      <pre><code><span class="kw">for</span> bs <span class="kw">in</span> 1 4 16 64; <span class="kw">do</span>
+      <h4><span class="i18n" data-en="Decode Batch Sweep — Empirical Ridge Crossing" data-zh="Decode Batch 掃描 — 實證 ridge crossing">Decode Batch Sweep — Empirical Ridge Crossing</span></h4>
+      <p><span class="i18n" data-en="This is the core experiment that produces the Decode Batch Sweep results table. Sweep bs=1→512 with fixed <code>--input-len 128 --output-len 64</code> so prefill cost is small and the per-token latency is dominated by decode. Expect: flat per-token latency from bs=1→16 (memory-bound: weights are read once per step regardless of batch), an elbow around bs=64–128, and near-doubling from bs=256→512 (compute-bound: each added sequence costs real GEMM time). On A100 the bs=1→512 growth should reach ~5–6× — the cleanest empirical fingerprint of crossing the ridge \( \text{AI}^* = 161 \)." data-zh="這是產生 Decode Batch Sweep 結果表的核心實驗。固定 <code>--input-len 128 --output-len 64</code> 掃描 bs=1→512，使 prefill cost 很小，per-token latency 由 decode 主導。預期：bs=1→16 per-token latency 平坦（memory-bound：權重每步只讀一次，與 batch 無關），在 bs=64–128 出現 elbow，從 bs=256→512 近乎倍增（compute-bound：每加一個 sequence 都要付真實 GEMM 時間）。在 A100 上 bs=1→512 應成長約 5–6 倍 — 跨越 ridge \( \text{AI}^* = 161 \) 最乾淨的實證指紋。">This is the core experiment that produces the Decode Batch Sweep results table. Sweep bs=1→512 with fixed <code>--input-len 128 --output-len 64</code> so prefill cost is small and per-token latency is dominated by decode. Expect: flat from bs=1→16 (memory-bound), an elbow around bs=64–128, and near-doubling from bs=256→512 (compute-bound). On A100 the bs=1→512 growth should reach ~5–6× — the cleanest empirical fingerprint of crossing the ridge \( \text{AI}^* = 161 \).</span></p>
+      <pre><code><span class="kw">for</span> bs <span class="kw">in</span> 1 4 16 64 128 256 512; <span class="kw">do</span>
   python benchmarks/benchmark_latency.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --batch-size $bs --input-len 256 --output-len 64 \
+    --batch-size $bs --input-len <span class="nr">128</span> --output-len <span class="nr">64</span> \
+    --num-iters-warmup <span class="nr">3</span> --num-iters <span class="nr">5</span> \
     2&gt;&amp;1 | tee results_roofline_bs${bs}.txt
+<span class="kw">done</span>
+
+<span class="cm"># Extract per-token latency from each file (benchmark_latency.py prints "Avg latency: X seconds"</span>
+<span class="cm"># for the full sequence of output-len tokens; divide by output-len=64 to get ms/tok):</span>
+<span class="kw">for</span> bs <span class="kw">in</span> 1 4 16 64 128 256 512; <span class="kw">do</span>
+  lat=$(grep <span class="st">"Avg latency"</span> results_roofline_bs${bs}.txt | awk <span class="st">'{print $3}'</span>)
+  echo <span class="st">"bs=$bs  $(echo "$lat * 1000 / 64" | bc -l) ms/tok"</span>
 <span class="kw">done</span></code></pre>
     </div>
 
@@ -437,8 +445,10 @@ dram__bytes_read.sum,dram__bytes_write.sum \
   <div class="card highlight-purple">
     <h4><span class="i18n" data-en="Files to Read" data-zh="閱讀檔案">Files to Read</span></h4>
     <ul>
+      <li><span class="file-tag">vllm/benchmarks/benchmark_latency.py</span> — <span class="i18n" data-en="The harness driving every sweep in this lab. The <code>--batch-size</code> / <code>--input-len</code> / <code>--output-len</code> flags set the arithmetic intensity you measured, and the <code>Avg latency</code> line it prints is exactly what the Step 5 loop parses (divided by output-len) into ms/tok." data-zh="驅動本實驗每個 sweep 的 harness。<code>--batch-size</code> / <code>--input-len</code> / <code>--output-len</code> 旗標設定你測量的 arithmetic intensity，而它印出的 <code>Avg latency</code> 行正是 Step 5 迴圈所解析（除以 output-len）得到 ms/tok 的來源。">The harness driving every sweep in this lab. The <code>--batch-size</code> / <code>--input-len</code> / <code>--output-len</code> flags set the arithmetic intensity you measured, and the <code>Avg latency</code> line it prints is exactly what the Step 5 loop parses (divided by output-len) into ms/tok.</span></li>
       <li><span class="file-tag">vllm/model_executor/models/llama.py</span> — <span class="i18n" data-en="Trace the forward() method to see which operations map to which GPU kernels" data-zh="追蹤 forward() 方法以查看哪些操作對應哪些 GPU 核心">Trace the forward() method to see which operations map to which GPU kernels</span></li>
       <li><span class="i18n" data-en="Identify: QKV projection → FlashAttention → output projection → gate/up projection → SiLU → down projection" data-zh="識別：QKV 投影 → FlashAttention → 輸出投影 → gate/up 投影 → SiLU → down 投影">Identify: QKV projection &rarr; FlashAttention &rarr; output projection &rarr; gate/up projection &rarr; SiLU &rarr; down projection</span></li>
+      <li><span class="file-tag">vllm/v1/worker/gpu_model_runner.py</span> — <span class="i18n" data-en="<code>execute_model()</code> (≈ line 2000) is where <code>model.forward()</code> is actually launched each step. Whether bs=1 stays memory-bound or bs=512 crosses into compute-bound is decided entirely by the kernels dispatched here — see the walkthrough below." data-zh="<code>execute_model()</code>（約第 2000 行）是每步實際啟動 <code>model.forward()</code> 的地方。bs=1 是否維持 memory-bound、或 bs=512 是否跨入 compute-bound，完全由這裡 dispatch 的 kernel 決定 — 見下方導讀。"><code>execute_model()</code> (≈ line 2000) is where <code>model.forward()</code> is actually launched each step. Whether bs=1 stays memory-bound or bs=512 crosses into compute-bound is decided entirely by the kernels dispatched here — see the walkthrough below.</span></li>
     </ul>
   </div>
 
