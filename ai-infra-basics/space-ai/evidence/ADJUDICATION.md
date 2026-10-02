@@ -4,9 +4,9 @@ Audit date: 2026-10-02. Scope: satellite networking foundations, orbital AI subs
 
 ## Coverage / 收錄範圍
 
-The full-primary corpus contains 37 papers. The scoped SIGCOMM main-track census covers 2022–2026 and counts 1, 0, 0, 6 and 4 satellite-centric papers, respectively. The eleven papers use satellite service, spacecraft networking or orbital links as a central problem, design or evaluation substrate. Loon appears as an explicitly adjacent stratospheric balloon network. NSDI, MobiCom, CoNEXT, IMC and INFOCOM coverage provides a curated mechanism map. Older Hypatia, Motifs and StarPerf establish simulation and topology foundations. TACCL and TopoOpt supply terrestrial AI-fabric comparators.
+The full-primary corpus contains 60 papers. The scoped SIGCOMM main-track census covers 2022–2026 and counts 1, 0, 0, 6 and 4 satellite-centric papers, respectively. The eleven papers use satellite service, spacecraft networking or orbital links as a central problem, design or evaluation substrate. Loon and the low-altitude 5G measurement study appear as explicitly scoped aerial adjacencies. Twenty-two additional current terrestrial AI/optical references strengthen the matched-resource baseline map. NSDI, MobiCom, CoNEXT, IMC and INFOCOM coverage provides a curated mechanism map. Older Hypatia, Motifs and StarPerf establish simulation and topology foundations. TACCL and TopoOpt supply terrestrial AI-fabric comparators.
 
-37 篇納入全文證據庫。SIGCOMM 2022–2026 主會議依年度收錄 1、0、0、6、4 篇以衛星服務、太空網路或軌道鏈路為核心的論文。Loon 另列平流層氣球網路。其他會議採代表性機制整理；Hypatia、Motifs、StarPerf 建立工具與拓樸背景，TACCL、TopoOpt 提供地面 AI 網路對照。
+60 篇納入全文證據庫。SIGCOMM 2022–2026 主會議依年度收錄 1、0、0、6、4 篇以衛星服務、太空網路或軌道鏈路為核心的論文。Loon 與 low-altitude 5G measurement study 另列空中相鄰系統，另補二十二篇近期地面 AI／光學參照以強化 matched-resource baselines。其他會議採代表性機制整理；Hypatia、Motifs、StarPerf 建立工具與拓樸背景，TACCL、TopoOpt 提供地面 AI 網路對照。
 
 | Year | Satellite-centric main papers | Adjacent substrate | Official program |
 |---|---|---|---|
@@ -14,13 +14,13 @@ The full-primary corpus contains 37 papers. The scoped SIGCOMM main-track census
 | 2023 | 0 | — | [SIGCOMM 2023](https://conferences.sigcomm.org/sigcomm/2023/program.html) |
 | 2024 | 0 | — | [SIGCOMM 2024](https://conferences.sigcomm.org/sigcomm/2024/program/) |
 | 2025 | LeoCC, DeepSpace, SaTE, TinyLEO, SN², StarCDN | — | [SIGCOMM 2025](https://conferences.sigcomm.org/sigcomm/2025/program/papers-info/) |
-| 2026 | CommSAR, Planet-Scale IoT, Dissecting StarLink, CoOrbit | — | [SIGCOMM 2026](https://conferences.sigcomm.org/sigcomm/2026/program/papers/) |
+| 2026 | CommSAR, Planet-Scale IoT, Dissecting StarLink, CoOrbit | Low-altitude 5G study | [SIGCOMM 2026](https://conferences.sigcomm.org/sigcomm/2026/program/papers/) |
 
 ## Identity and evidence tiers / 身分與證據層級
 
-BIER-DC receives a programme-only pointer from the [ICNP 2026 programme](https://icnp26.cs.ucr.edu/program.html). Its technical mechanism and evaluation remain full-text review tasks. SECO receives publisher-metadata coverage in the research audit; the candidate author arXiv pointer resolves to FlocOff. The 37-paper detailed corpus uses verified full primary text. Workshop papers carry their workshop venue explicitly: connectivity and Dark Clouds at LEO-NET 2026; OrbitalBrain at NINeS 2026. Making Sense carries CoNEXT Companion 2023.
+BIER-DC receives a programme-only pointer from the [ICNP 2026 programme](https://icnp26.cs.ucr.edu/program.html). Its technical mechanism and evaluation remain full-text review tasks. SECO receives publisher-metadata coverage in the research audit; the candidate author arXiv pointer resolves to FlocOff. The 60-paper detailed corpus uses verified full primary text. Workshop papers carry their workshop venue explicitly: connectivity and Dark Clouds at LEO-NET 2026. OrbitalBrain appears at the inaugural NINeS 2026 conference in OASIcs. Making Sense carries CoNEXT Companion 2023.
 
-BIER-DC 以 ICNP 2026 programme 確認題名與會議身分，技術內容待全文審查。SECO 已確認 publisher metadata；候選 author arXiv 指向 FlocOff。37 篇詳細分析採已取得的原始全文。LEO-NET、NINeS 與 CoNEXT Companion 均保留正式 venue 層級。
+BIER-DC 以 ICNP 2026 programme 確認題名與會議身分，技術內容待全文審查。SECO 已確認 publisher metadata；候選 author arXiv 指向 FlocOff。60 篇詳細分析採已取得的原始全文。LEO-NET 屬 workshop；NINeS 2026 為 OASIcs 首屆主會議；CoNEXT Companion 保留其正式層級。
 
 ## Quantitative interpretations / 量化解讀
 
@@ -134,4 +134,4 @@ The three proposed directions concern temporal collective service, KV state cont
 
 ## Literal evidence / 原文證據
 
-Exact source-paper titles, original figure pixels and labels, mathematical identifiers, software licenses and schema-required sentinel values retain their literal spelling. Authored explanations, captions, tables and concept labels follow the affirmative-prose gate. 原始題名、原圖文字、數學符號、software license 與 schema sentinel 保留原文；作者解說、caption、表格與概念圖通過直接肯定句檢查。
+Exact source-paper titles, original figure pixels and labels, mathematical identifiers, software licenses and schema-required sentinel values retain their literal spelling. Authored explanations, captions, tables and concept labels follow the affirmative-prose gate. 原始題名、原圖文字、數學記號、software license 與 schema sentinel 保留原文；作者解說、caption、表格與概念圖通過直接肯定句檢查。
