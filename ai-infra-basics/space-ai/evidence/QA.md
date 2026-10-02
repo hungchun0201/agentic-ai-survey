@@ -99,6 +99,6 @@ corpus 紀錄的數字、首次出現未展開的縮寫、兩段內容過載，�
 
 ### Snapshot after this addendum / 增補後的 snapshot
 
-Page SHA-256: `585b8cd2cb4f3564b5b3f0a0f9b563727cf7ed7c4f6982c0ffc4b93202b12e9a`. The hash on record above belongs to the round-four snapshot and is kept for provenance.
+Page SHA-256: `06c2407d1be76777ffa9c925f49db7e0c44343a4689b8d098b4b9b4de432ee34`. The hash on record above belongs to the round-four snapshot and is kept for provenance.
 
-本增補後的頁面 SHA-256 為 `585b8cd2cb4f3564b5b3f0a0f9b563727cf7ed7c4f6982c0ffc4b93202b12e9a`；上方記錄的 hash 屬於第四輪 snapshot，保留供溯源。
+本增補後的頁面 SHA-256 為 `06c2407d1be76777ffa9c925f49db7e0c44343a4689b8d098b4b9b4de432ee34`；上方記錄的 hash 屬於第四輪 snapshot，保留供溯源。
