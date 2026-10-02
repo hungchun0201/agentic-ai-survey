@@ -135,3 +135,37 @@ The three proposed directions concern temporal collective service, KV state cont
 ## Literal evidence / 原文證據
 
 Exact source-paper titles, original figure pixels and labels, mathematical identifiers, software licenses and schema-required sentinel values retain their literal spelling. Authored explanations, captions, tables and concept labels follow the affirmative-prose gate. 原始題名、原圖文字、數學記號、software license 與 schema sentinel 保留原文；作者解說、caption、表格與概念圖通過直接肯定句檢查。
+
+## Venue-record addendum / 頂會紀錄增補（2026-10-02）
+
+The opening of the page now derives its argument from the publication record, which required two
+additional evidence decisions.
+
+First, the SIGCOMM main-track census of 1, 0, 0, 6 and 4 was re-derived from the official pages
+rather than carried forward. Each programme or accepted-paper page in the table above was fetched
+again and searched directly; the two zero years were each checked against a second independent
+official page, the [2023 accepted list](https://conferences.sigcomm.org/sigcomm/2023/list-accepted.html)
+and the [2024 programme](https://conferences.sigcomm.org/sigcomm/2024/program/), and both returned
+no satellite, LEO, orbital, Starlink, constellation, non-terrestrial or direct-to-cell match. The
+counts are therefore audited rather than asserted, and the full title-level screen behind them,
+including its classification rule, is recorded in [program-screen.json](program-screen.json).
+
+Second, the page now names papers that are not in the full-primary corpus. They enter at a lower
+and explicitly labelled tier: programme-verified, meaning the exact title string was found in an
+official programme page on the audit date, with venue and year established and the primary text not
+reviewed; or DOI-verified, meaning title, container and year were resolved through Crossref. Each
+such identity, the page that confirms it and the tier it enters at are recorded in
+[venue-record-sources.json](venue-record-sources.json). Two limits are recorded there as well: the
+ACM Digital Library returns HTTP 403 to the audit host, so per-paper DOIs for the programme-verified
+SIGCOMM entries were not resolved and are not printed; and the LEO-NET 2026 page carries a call for
+papers only, so the two LEO-NET records already in the corpus could not be re-confirmed from it.
+
+頁面開頭現以出版紀錄作為論證基礎，因而需要兩項額外的證據判讀。其一，1、0、0、6、4 的 SIGCOMM 主會議
+普查已重新從官方頁面推導，而非沿用既有數字；兩個「零」的年度各以第二個獨立官方頁面複查，均無任何
+satellite、LEO、orbital、Starlink、constellation、non-terrestrial 或 direct-to-cell 命中，完整的
+題名層級篩查與分類規則記錄於 [program-screen.json](program-screen.json)。其二，頁面現在會指名
+不在全文證據庫中的論文，它們以較低且明確標示的層級進入：programme-verified（題名字串於官方 programme
+頁面查得，會議與年度成立，primary text 未經審閱）或 DOI-verified（題名、container 與年度經 Crossref
+解析）。各筆身分、佐證頁面與層級記錄於 [venue-record-sources.json](venue-record-sources.json)，
+其中也記錄兩項限制：ACM Digital Library 對本次稽核主機回傳 HTTP 403，因此 programme-verified 項目的
+逐篇 DOI 未解析、也不印出；LEO-NET 2026 頁面僅有徵稿資訊，corpus 既有的兩筆 LEO-NET 紀錄無法由該頁複查。
